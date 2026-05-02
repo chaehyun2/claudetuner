@@ -2,9 +2,9 @@
 
 [Chrome Web Store](https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond) | [Dashboard](https://claudetuner.com/dashboard/?demo=true) | [Korean / 한국어](README-ko.md)
 
-Chrome extension that tracks your Claude AI usage in real time — monitor rate limits, predict resets, and find the right plan.
+Chrome extension that tracks your Claude usage limits in real time — across all Claude products (Chat, Code, Cowork, Design). Monitor rate limits, predict resets, and find the right plan.
 
-Trusted by thousands of Claude Pro, Max, and Team users worldwide.
+Trusted by thousands of Claude Pro, Max, Team, and Enterprise users worldwide.
 
 ## Features
 
@@ -40,11 +40,14 @@ Trusted by thousands of Claude Pro, Max, and Team users worldwide.
 - Peak hours and quiet periods
 - Weekday vs weekend comparison
 
-**Team Dashboard** (free for admins)
+**Team Dashboard** (free for all members)
 - Per-member usage analytics and rate limit tracking
 - Token usage leaderboard and cost analytics
-- Plan change requests for team members
-- Group management and domain-based auto-invite
+- Breach tracking with plan upgrade/downgrade recommendations
+- Group-based usage comparison analysis
+- Daily team reports and weekly personal reports
+- Training data policy monitoring
+- Domain-based auto-invite and group management (admin)
 - CSV / Excel export
 
 ## Supported Plans
@@ -109,7 +112,7 @@ See [API.md](API.md) for the server API specification.
 ## Privacy
 
 - **No conversation content** is ever collected — no messages, files, or prompts
-- Only usage percentages, reset timestamps, and plan information
+- Only usage metrics, reset timestamps, plan info, and organization membership
 - Self-service account deletion available anytime
 - Full privacy policy: https://claudetuner.com/privacy/
 
