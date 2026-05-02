@@ -12,13 +12,17 @@ Trusted by thousands of Claude Pro, Max, and Team users worldwide.
 - Live 5-hour and 7-day usage gauges
 - Reset countdown timers
 - Toolbar badge showing current usage level
+- 6-tier pace indicator (safe → critical)
 - Sparkline charts for usage trends
+- Multi-organization support (auto-detect or pin)
 
 **Smart Alerts & Predictions**
 - Usage prediction at reset based on consumption rate
 - Configurable threshold notifications (80%, 95%)
 - Weekly usage reports
 - Estimated token breakdown (Opus / Sonnet / Haiku)
+- Peak hours indicator (weekday 12:00–18:00 UTC)
+- Real-time 429 rate limit detection
 
 **Plan Simulation & Optimizer**
 - "What if" simulation for every plan (Pro / Max 5x / Max 20x)
@@ -47,7 +51,7 @@ Trusted by thousands of Claude Pro, Max, and Team users worldwide.
 
 - Pro (1x) / Max 5x / Max 20x
 - Team Standard / Team Premium
-- Enterprise (view-only)
+- Enterprise (seat-based and usage-based)
 
 ## Install
 
