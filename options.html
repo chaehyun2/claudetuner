@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; color: #1a1a2e; background: #fafafa; }
+
+    .header { margin-bottom: 24px; }
+    .header h1 { font-size: 18px; font-weight: 700; color: #1e1b4b; }
+    .header .sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+
+    /* 섹션 카드 */
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .card-title { font-size: 13px; font-weight: 600; color: #4f46e5; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+
+    /* 폼 */
+    .form-group { margin-bottom: 14px; }
+    .form-group:last-child { margin-bottom: 0; }
+    .form-label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    .form-hint { font-size: 11px; color: #6b7280; margin-top: 4px; padding: 6px 8px; background: #f9fafb; border-radius: 6px; line-height: 1.4; }
+    .check-label { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; cursor: pointer; }
+    .check-label input[type="checkbox"] { width: auto; margin: 0; accent-color: #4f46e5; }
+    .check-label span { font-size: 12px; color: #374151; }
+    .check-sub { font-size: 11px; color: #9ca3af; font-weight: 400; }
+    input, select {
+      width: 100%; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 13px; color: #1a1a2e; background: white; transition: border-color .15s;
+    }
+    input:focus, select:focus { outline: none; border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,0.08); }
+    input:disabled, select:disabled { background: #f3f4f6; color: #9ca3af; }
+
+    /* 라디오 그룹 (펼침형) */
+    .radio-group { display: flex; flex-direction: column; gap: 4px; }
+    .radio-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #e5e7eb; border-radius: 8px; cursor: pointer; transition: all .15s; }
+    .radio-item:hover { border-color: #a5b4fc; background: #eef2ff; }
+    .radio-item.active { border-color: #4f46e5; background: #eef2ff; }
+    .radio-item input[type="radio"] { width: auto; margin: 0; accent-color: #4f46e5; flex-shrink: 0; }
+    .radio-item .radio-label { font-size: 12px; font-weight: 600; color: #374151; flex: 1; }
+    .radio-item .radio-desc { font-size: 11px; color: #6b7280; }
+    /* 인라인 라디오 (2~3개 가로 배치) */
+    .radio-group.inline { flex-direction: row; gap: 6px; }
+    .radio-group.inline .radio-item { flex: 1; justify-content: center; padding: 8px 6px; }
+
+    /* 새로고침 버튼 */
+    .btn-refresh { padding: 3px 8px; border: 1px solid #d1d5db; border-radius: 6px; background: white; color: #6b7280; font-size: 11px; cursor: pointer; transition: all .15s; }
+    .btn-refresh:hover { border-color: #4f46e5; color: #4f46e5; }
+    .btn-refresh:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* org 체크리스트 */
+    .org-checklist { display: flex; flex-direction: column; gap: 4px; }
+    .org-checklist:empty { display: none; }
+    .org-check-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #e5e7eb; border-radius: 8px; cursor: pointer; transition: all .15s; }
+    .org-check-item:hover { border-color: #a5b4fc; background: #eef2ff; }
+    .org-check-item.checked { border-color: #4f46e5; background: #eef2ff; }
+    .org-check-item.disabled { opacity: .5; cursor: not-allowed; }
+    .org-check-item input[type="checkbox"] { width: auto; margin: 0; accent-color: #4f46e5; flex-shrink: 0; }
+    .org-check-item .org-name { font-size: 12px; font-weight: 600; color: #374151; flex: 1; }
+    .org-check-item .org-plan { font-size: 11px; color: #6b7280; }
+    .org-check-count { font-size: 11px; color: #6b7280; margin-top: 4px; }
+
+    /* 토스트 */
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 500; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 100; white-space: nowrap; }
+    .toast.show { opacity: 1; }
+    .toast.success { background: #065f46; color: white; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+    .toast.error { background: #991b1b; color: white; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+
+    /* 상태 정보 */
+    .status-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 12px; border-bottom: 1px solid #f3f4f6; }
+    .status-row:last-child { border-bottom: none; }
+    .status-label { color: #6b7280; }
+    .status-value { font-weight: 600; color: #1e1b4b; }
+
+    /* 배지 미리보기 */
+    .badge-preview-row { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 14px 0 4px; }
+    .badge-demo { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    .badge-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; height: 20px; border-radius: 3px; font-size: 11px; font-weight: 700; padding: 0 4px; letter-spacing: -0.3px; }
+    .badge-label { font-size: 10px; color: #9ca3af; white-space: nowrap; }
+    .badge-range { font-size: 9px; color: #b0b0b0; white-space: nowrap; margin-top: -1px; }
+    .badge-arrow { color: #d1d5db; font-size: 13px; margin: 0 2px; padding-bottom: 16px; }
+
+    /* 초기화 영역 */
+    .reset-area { display: flex; align-items: center; justify-content: space-between; }
+    .reset-area .reset-desc { font-size: 11px; color: #9ca3af; }
+    .btn-reset-sm { padding: 6px 12px; border: 1px solid #fca5a5; border-radius: 6px; background: white; color: #dc2626; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .btn-reset-sm:hover { background: #fef2f2; }
+
+    /* 리뷰 배너 */
+    .review-banner { display: flex; align-items: center; justify-content: space-between; background: linear-gradient(135deg, #eef2ff, #faf5ff); border: 1px solid #c7d2fe; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+    .review-banner-text { font-size: 13px; color: #4338ca; font-weight: 500; }
+    .review-banner-btn { padding: 7px 14px; background: #4f46e5; color: white; border: none; border-radius: 7px; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; transition: background .15s; }
+    .review-banner-btn:hover { background: #4338ca; }
+    .review-banner-close { background: none; border: none; color: #a5b4fc; font-size: 16px; cursor: pointer; padding: 0 0 0 8px; line-height: 1; }
+    .review-banner-close:hover { color: #6366f1; }
+
+    /* 알림 설정 */
+    .notify-list { display: flex; flex-direction: column; gap: 2px; }
+    .notify-item { display: block; padding: 10px; border-radius: 8px; cursor: pointer; transition: background .1s; }
+    .notify-item:hover { background: #f9fafb; }
+    .notify-toggle { display: flex; align-items: center; gap: 8px; }
+    .notify-toggle input[type="checkbox"] { width: auto; margin: 0; accent-color: #4f46e5; flex-shrink: 0; }
+    .notify-name { font-size: 13px; font-weight: 600; color: #1e1b4b; }
+    .notify-desc { font-size: 11px; color: #6b7280; margin-top: 3px; padding-left: 22px; }
+    .notify-example { font-size: 10px; color: #9ca3af; margin-top: 2px; padding-left: 22px; font-style: italic; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Claude Tuner</h1>
+    <div class="sub" id="version"></div>
+  </div>
+
+  <!-- 리뷰 배너 -->
+  <div class="review-banner" id="review-banner" style="display:none">
+    <span class="review-banner-text" data-i18n="review_nudge_text"></span>
+    <span style="display:flex;align-items:center;gap:4px">
+      <a class="review-banner-btn" href="https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond/reviews" target="_blank" data-i18n="review_nudge_cta"></a>
+      <button class="review-banner-close" id="review-dismiss" title="Dismiss">&times;</button>
+    </span>
+  </div>
+
+  <!-- 현재 상태 (최상단) -->
+  <div class="card">
+    <div class="card-title" data-i18n="current_status"></div>
+    <div class="status-row">
+      <span class="status-label" data-i18n="status_account"></span>
+      <span class="status-value" id="account-email">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label" data-i18n="current_plan"></span>
+      <span class="status-value" id="current-plan">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label" data-i18n="status_last_collect"></span>
+      <span class="status-value" id="last-collected">-</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label" data-i18n="status_history"></span>
+      <span class="status-value" id="history-count">-</span>
+    </div>
+  </div>
+
+  <!-- 언어 -->
+  <div class="card">
+    <div class="card-title" data-i18n="language"></div>
+    <div class="form-group">
+      <div class="radio-group inline" id="lang-group">
+        <label class="radio-item" data-val="auto"><input type="radio" name="lang" value="auto"><span class="radio-label" data-i18n="lang_auto"></span></label>
+        <label class="radio-item" data-val="ko"><input type="radio" name="lang" value="ko"><span class="radio-label" data-i18n="lang_ko"></span></label>
+        <label class="radio-item" data-val="en"><input type="radio" name="lang" value="en"><span class="radio-label" data-i18n="lang_en"></span></label>
+      </div>
+    </div>
+  </div>
+
+  <!-- 표시 방식 -->
+  <div class="card" id="display-mode-card">
+    <div class="card-title" data-i18n="display_mode"></div>
+    <div class="form-group">
+      <div class="radio-group inline" id="display-mode-group">
+        <label class="radio-item" data-val="sidepanel"><input type="radio" name="display-mode" value="sidepanel"><span class="radio-label" data-i18n="display_mode_sidepanel"></span></label>
+        <label class="radio-item" data-val="popup"><input type="radio" name="display-mode" value="popup"><span class="radio-label" data-i18n="display_mode_popup"></span></label>
+      </div>
+    </div>
+  </div>
+
+  <input type="hidden" id="server-url" value="" />
+  <input type="hidden" id="api-key" />
+
+  <!-- 수집 설정 -->
+  <div class="card">
+    <div class="card-title" data-i18n="collect_settings"></div>
+    <div class="form-group">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <label class="form-label" style="margin-bottom:0" data-i18n="org_select"></label>
+        <button class="btn-refresh" id="org-refresh" data-i18n="org_refresh" title="Refresh"></button>
+      </div>
+      <label class="check-label" style="margin-top:4px">
+        <input type="checkbox" id="org-auto-all" checked>
+        <span data-i18n="org_auto_all"></span>
+      </label>
+      <div id="org-checklist" class="org-checklist"></div>
+      <div class="form-hint" id="org-hint" data-i18n="org_select_hint"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" data-i18n="collect_interval"></label>
+      <label class="check-label">
+        <input type="checkbox" id="interval-server-default" checked>
+        <span data-i18n="interval_use_server_default"></span>
+        <span class="check-sub" id="interval-server-value"></span>
+      </label>
+      <select id="interval" disabled>
+        <option value="5">5 min</option>
+        <option value="10">10 min</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 툴바 배지 -->
+  <div class="card">
+    <div class="card-title" data-i18n="usage_display"></div>
+    <div class="form-group">
+      <div class="radio-group inline" id="usage-display-group">
+        <label class="radio-item" data-val="7d"><input type="radio" name="usage-display" value="7d"><span class="radio-label" data-i18n="display_7d"></span></label>
+        <label class="radio-item" data-val="5h"><input type="radio" name="usage-display" value="5h"><span class="radio-label" data-i18n="display_5h"></span></label>
+        <label class="radio-item" data-val="both"><input type="radio" name="usage-display" value="both"><span class="radio-label" data-i18n="display_both"></span></label>
+      </div>
+    </div>
+
+    <!-- 배지 미리보기 -->
+    <div class="form-group">
+      <label class="form-label" data-i18n="badge_preview"></label>
+      <div id="badge-preview" class="badge-preview-row">
+        <!-- JS에서 동적 생성 -->
+      </div>
+    </div>
+
+    <!-- 임계값 프리셋 -->
+    <div class="form-group">
+      <label class="form-label" data-i18n="badge_thresholds"></label>
+      <div style="display:flex;gap:8px;">
+        <div style="flex:1;">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;"></span>
+            <span style="font-size:11px;font-weight:600;color:#374151;" data-i18n="threshold_warn"></span>
+          </div>
+          <select id="threshold-warn">
+            <option value="50">50%</option>
+            <option value="55">55%</option>
+            <option value="60">60%</option>
+            <option value="65">65%</option>
+            <option value="70">70%</option>
+            <option value="75">75%</option>
+            <option value="80">80%</option>
+            <option value="85">85%</option>
+            <option value="90">90%</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;"></span>
+            <span style="font-size:11px;font-weight:600;color:#374151;" data-i18n="threshold_danger"></span>
+          </div>
+          <select id="threshold-danger">
+            <option value="60">60%</option>
+            <option value="65">65%</option>
+            <option value="70">70%</option>
+            <option value="75">75%</option>
+            <option value="80">80%</option>
+            <option value="85">85%</option>
+            <option value="90">90%</option>
+            <option value="95">95%</option>
+            <option value="100">100%</option>
+          </select>
+        </div>
+      </div>
+      <div id="threshold-error" style="display:none;font-size:11px;color:#dc2626;margin-top:6px;padding:6px 8px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;"></div>
+    </div>
+  </div>
+
+  <!-- 플랜 최적화 -->
+  <div class="card">
+    <div class="card-title" data-i18n="plan_optimization"></div>
+    <div class="form-group">
+      <div class="radio-group" id="optimization-group">
+        <label class="radio-item" data-val="notify_only">
+          <input type="radio" name="optimization" value="notify_only">
+          <div style="flex:1"><span class="radio-label" data-i18n="opt_notify_only"></span><div class="radio-desc" data-i18n="opt_desc_notify"></div></div>
+        </label>
+        <label class="radio-item" data-val="approval">
+          <input type="radio" name="optimization" value="approval">
+          <div style="flex:1"><span class="radio-label" data-i18n="opt_approval"></span><div class="radio-desc" data-i18n="opt_desc_approval"></div></div>
+        </label>
+        <label class="radio-item" data-val="auto">
+          <input type="radio" name="optimization" value="auto">
+          <div style="flex:1"><span class="radio-label" data-i18n="opt_auto"></span><div class="radio-desc" data-i18n="opt_desc_auto"></div></div>
+        </label>
+      </div>
+      <div class="form-hint" style="margin-top:4px;color:#7c3aed" data-i18n="opt_sync_note"></div>
+    </div>
+  </div>
+
+  <!-- 알림 설정 -->
+  <div class="card">
+    <div class="card-title" data-i18n="notify_settings"></div>
+    <div class="notify-list" id="notify-list">
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-reset-soon" checked>
+          <span class="notify-name" data-i18n="notify_reset_soon"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_reset_soon_desc"></div>
+        <div class="notify-example" data-i18n="notify_reset_soon_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-reset-done" checked>
+          <span class="notify-name" data-i18n="notify_reset_done"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_reset_done_desc"></div>
+        <div class="notify-example" data-i18n="notify_reset_done_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-usage-alert" checked>
+          <span class="notify-name" data-i18n="notify_usage_alert"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_usage_alert_desc"></div>
+        <div class="notify-example" data-i18n="notify_usage_alert_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-weekly-report" checked>
+          <span class="notify-name" data-i18n="notify_weekly_report"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_weekly_report_desc"></div>
+        <div class="notify-example" data-i18n="notify_weekly_report_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-plan-change" checked>
+          <span class="notify-name" data-i18n="notify_plan_change"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_plan_change_desc"></div>
+        <div class="notify-example" data-i18n="notify_plan_change_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-collect-fail" checked>
+          <span class="notify-name" data-i18n="notify_collect_fail"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_collect_fail_desc"></div>
+        <div class="notify-example" data-i18n="notify_collect_fail_ex"></div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Dashboard 바로가기 -->
+  <div class="card">
+    <a href="https://claudetuner.com/dashboard" target="_blank" style="display:flex;align-items:center;gap:8px;text-decoration:none;color:#4f46e5;font-size:13px;font-weight:600;">
+      <span data-i18n="btn_dashboard_link"></span>
+      <span style="font-size:11px;color:#9ca3af">&rarr;</span>
+    </a>
+  </div>
+
+  <!-- 자동 저장 토스트 (하단 고정) -->
+  <div id="toast" class="toast"></div>
+
+  <!-- 데이터 초기화 (하단 분리) -->
+  <div class="card" style="margin-top: 16px;">
+    <div class="reset-area">
+      <span class="reset-desc" data-i18n="data_reset_desc"></span>
+      <button class="btn-reset-sm" id="reset-btn" data-i18n="btn_reset"></button>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="analytics.js"></script>
+  <script src="i18n.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

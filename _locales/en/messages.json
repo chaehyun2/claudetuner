@@ -1,0 +1,11 @@
+{
+  "appName": {
+    "message": "Claude Tuner - AI Usage Tracker for Claude"
+  },
+  "appDescription": {
+    "message": "Claude.ai usage tracker — monitor rate limits, predict resets, simulate plans & manage team usage. Free for Pro/Max/Team."
+  },
+  "appDefaultTitle": {
+    "message": "Claude Tuner - Claude.ai Usage Tracker & Rate Limit Monitor"
+  }
+}
