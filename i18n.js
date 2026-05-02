@@ -1,9 +1,9 @@
-// i18n: 한국어/영어 번역 시스템
-// data-i18n 속성으로 HTML 요소 텍스트 자동 교체, data-i18n-placeholder로 placeholder 교체
+// i18n: Korean/English translation system
+// Auto-replaces HTML element text via data-i18n attribute, placeholder via data-i18n-placeholder
 
 const TRANSLATIONS = {
   ko: {
-    // popup
+    // Popup
     'no_data': '아직 수집된 데이터가 없습니다',
     'collect_fail': '수집 실패',
     'last_collect': '마지막 수집',
@@ -42,7 +42,7 @@ const TRANSLATIONS = {
     'opt_reason_urgent': '긴급 — 한도 초과 임박',
     'opt_data_collecting': '데이터 수집 중 ({0}/{1}일)',
     'opt_reason_moderate': '평균 피크 {0}% — 업그레이드 검토',
-    // 서버 통합 추천 text_key
+    // Unified server recommendation text_key
     'rec_no_data': '데이터 부족',
     'rec_data_growing': '데이터 수집 중...',
     'rec_upgrade_max5x': 'Max 5x 업그레이드 권장',
@@ -73,7 +73,7 @@ const TRANSLATIONS = {
     'error_banner_title': '수집 실패',
     'error_banner_hint': '에서 로그인 상태를 확인해주세요.',
     'open_claude': 'Claude.ai 열기',
-    // 상태 배너 (6-tier pace)
+    // Status banner (6-tier pace)
     'pace_comfortable': '여유 — 마음껏 사용하세요!',
     'pace_ontrack': '순조로움 — 적절한 페이스입니다',
     'pace_warming': '주의 — {0} 사용 속도가 빨라지고 있습니다',
@@ -82,7 +82,7 @@ const TRANSLATIONS = {
     'pace_runaway': '크게 초과 — {0} 한도를 크게 넘는 페이스',
     'pace_high_static': '사용량이 높습니다 ({0}%)',
     'pace_near_static': '{0} 한도에 거의 도달',
-    // options
+    // Options
     'opt_title': '설정',
     'server_connection': '서버 연결',
     'server_url': '서버 URL',
@@ -126,7 +126,7 @@ const TRANSLATIONS = {
     'ago_hour': '시간 전',
     'ago_day': '일 전',
     'in_min': '분 후',
-    // popup 하드코딩 번역
+    // Popup hardcoded translations
     'collecting': '수집중',
     'collecting_btn': '지금 수집',
     'cancelling': '취소 중...',
@@ -165,7 +165,7 @@ const TRANSLATIONS = {
     'win_7d': '7일',
     'data_days': '데이터 수집 중 ({0}일)',
     'downgrade_cancelled': '다운그레이드가 취소되었습니다',
-    // 온보딩
+    // Onboarding
     'ob_title': 'Claude Tuner에 오신 걸 환영합니다!',
     'ob_desc': 'Claude.ai 사용량을 실시간으로 모니터링하고 최적화하세요.',
     'ob_step1_title': 'Claude.ai에 로그인하세요',
@@ -186,12 +186,12 @@ const TRANSLATIONS = {
     'ob_guide_link': '설치 가이드 다시 보기 →',
     'footer_help': '❔ 가이드',
     'gauge_predict_collecting': '예측 수집 중',
-    // 핀 고정 힌트
+    // Pin hint
     'pin_hint_text_html': '위의 {pin} <b>버튼</b>을 누르면 툴바에 고정되어 바로 상태를 확인할 수 있습니다',
     'pin_hint_before': '숨겨짐',
     'pin_hint_after': '바로 접근!',
 
-    // 플랜 변경 요청
+    // Plan change request
     'plan_order_title': '플랜 변경 요청',
     'plan_order_admin': '관리자',
     'plan_order_request': '변경을 요청했습니다.',
@@ -210,7 +210,7 @@ const TRANSLATIONS = {
     'month_short': '월',
     'interval_use_server_default': '서버 기본값 사용',
     'interval_current_server': '현재: {0}분',
-    // 툴바 배지 표시 모드
+    // Toolbar badge display mode
     'usage_display': '툴바 배지',
     'display_5h': '5시간 사용률',
     'display_7d': '7일 사용률',
@@ -223,7 +223,7 @@ const TRANSLATIONS = {
     'badge_state_normal': '정상',
     'badge_state_warn': '주의',
     'badge_state_danger': '위험',
-    // 조직 선택
+    // Organization selection
     'org_select': '모니터링 조직',
     'org_select_hint': '여러 조직에 가입된 경우, 수집할 조직을 선택하세요.',
     'org_auto': '자동',
@@ -242,7 +242,7 @@ const TRANSLATIONS = {
     'org_primary_changed': '대표 조직이 변경되었습니다',
     'org_auto_on': 'Claude에서 선택한 조직을 따라갑니다 (⚡ = 활성)',
     'org_auto_off': '📌으로 고정된 조직을 사용 중',
-    // 플랜 적합도 매트릭스
+    // Plan fitness matrix
     'fm_col_plan': '플랜',
     'fm_window_24h': '최근\n24시간',
     'fm_window_7d': '최근\n7일',
@@ -269,7 +269,7 @@ const TRANSLATIONS = {
     'rec_fb_share': '경험을 공유해주세요!',
     'rec_fb_review': '⭐ 리뷰',
     'rec_fb_copy': '링크 복사',
-    // 에러 메시지 (background.js에서 키로 전달)
+    // Error messages (passed as keys from background.js)
     'account_deleted_msg': '계정 삭제됨',
     'account_deleted_detail': '이 계정은 삭제되었습니다. 데이터 수집이 중단되었습니다.',
     'account_recover_btn': '계정 복구',
@@ -286,12 +286,11 @@ const TRANSLATIONS = {
     'err_last_success': '마지막 성공',
     'err_last_attempt': '마지막 시도',
     'err_next_attempt': '다음 시도',
-    'promo_offpeak': 'Off-peak 2x 용량 적용 중',
-    'promo_offpeak_sub': '피크 외 시간 사용량 2배',
-    'promo_detail': '자세히 보기',
-    'promo_peak': 'Peak 시간대 (표준 용량)',
-    'promo_peak_sub': '8AM-2PM ET 평일 · Off-peak에 2x',
-    // 알림 설정
+    'promo_peak': 'Peak Hours — 5h 한도 빠르게 소진 중',
+    'promo_peak_sub': '평일 {0}',
+    'promo_peak_remaining': '약 {0}시간 남음',
+    'promo_peak_detail': 'Anthropic은 피크 시간(평일 {0})에 5h 세션 한도를 더 빠르게 소진시킵니다. 같은 사용량이라도 이 시간대에는 리밋에 더 빨리 도달할 수 있습니다. 7d 주간 한도에는 영향 없습니다. 주말은 항상 오프피크입니다.',
+    // Notification settings
     'notify_settings': '알림 설정',
     'notify_reset_soon': '리셋 예고',
     'notify_reset_soon_desc': '5시간/7일 한도 리셋 약 5분 전에 알림',
@@ -593,11 +592,10 @@ const TRANSLATIONS = {
     'err_last_success': 'Last success',
     'err_last_attempt': 'Last attempt',
     'err_next_attempt': 'Next attempt',
-    'promo_offpeak': 'Off-peak 2x capacity active',
-    'promo_offpeak_sub': '2x usage outside peak hours',
-    'promo_detail': 'Details',
-    'promo_peak': 'Peak hours (standard capacity)',
-    'promo_peak_sub': '8AM-2PM ET weekdays · 2x off-peak',
+    'promo_peak': 'Peak Hours — 5h limit drains faster',
+    'promo_peak_sub': 'Weekdays {0}',
+    'promo_peak_remaining': '~{0}h remaining',
+    'promo_peak_detail': 'Anthropic drains the 5h session limit faster during peak hours (weekdays {0}). You may hit the limit sooner even with the same usage. The 7d weekly limit is not affected. Weekends are always off-peak.',
     // Notification settings
     'notify_settings': 'Notifications',
     'notify_reset_soon': 'Reset Warning',

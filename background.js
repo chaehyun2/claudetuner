@@ -17,14 +17,14 @@ import {
 } from './bg/plan.js';
 import { collectAndSend, getLastActiveOrgId } from './bg/collect.js';
 
-// 도메인 이관: 기존 사용자 serverUrl 자동 마이그레이션
+// Domain migration: auto-migrate existing users' serverUrl
 chrome.storage.sync.get({ serverUrl: '' }, ({ serverUrl }) => {
   if (serverUrl === 'https://api.claudetuner.letrun.ai') {
     chrome.storage.sync.set({ serverUrl: DEFAULT_SERVER_URL });
   }
 });
 
-// 사이드패널 preference 복원 (sidePanel API 없으면 자동 팝업 모드)
+// Restore side panel preference (falls back to popup mode if sidePanel API unavailable)
 async function restoreSidePanelPreference() {
   try {
     const hasSidePanel = !!(chrome.sidePanel && chrome.sidePanel.setPanelBehavior);
@@ -37,7 +37,7 @@ async function restoreSidePanelPreference() {
   } catch (e) {}
 }
 
-// === 개발용: 버전 변경 감지 시 자동 새로고침 (unpacked 확장만) ===
+// === Dev only: auto-reload on version change (unpacked extension only) ===
 if (chrome.runtime.getManifest().update_url === undefined) {
   setInterval(async () => {
     try {
@@ -54,7 +54,7 @@ if (chrome.runtime.getManifest().update_url === undefined) {
 // === Install / Startup ===
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('[Claude Tuner] Extension installed');
-  // v1.9.x → v1.10+ 마이그레이션 (완료된 사용자는 스킵)
+  // v1.9.x → v1.10+ migration (skip if already completed)
   if (details.reason === 'update') {
     const { intervalExplicitlySet } = await chrome.storage.sync.get({ intervalExplicitlySet: undefined });
     if (intervalExplicitlySet === undefined) {
@@ -62,7 +62,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       console.log('[Claude Tuner] Migration: intervalExplicitlySet initialized to false');
     }
   }
-  // 신규 설치 시 welcome 페이지 오픈 (ref_source 캡처)
+  // Open welcome page on fresh install (captures ref_source)
   if (details.reason === 'install') {
     chrome.tabs.create({ url: `${SITE_URL}/welcome/` });
   }
@@ -71,12 +71,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await restoreSidePanelPreference();
 });
 
-// 외부 connect 리스너 (service worker wake-up용)
+// External connect listener (used to wake up the service worker)
 chrome.runtime.onConnectExternal.addListener((port) => {
-  // connect → disconnect로 service worker를 깨우는 용도, 별도 처리 불필요
+  // Used to wake up the service worker via connect → disconnect, no further handling needed
 });
 
-// welcome 페이지 + 대시보드 로그인 메시지 수신
+// Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'set_ref_source' && message.ref_source) {
     chrome.storage.local.set({ ref_source: message.ref_source });
@@ -85,13 +85,13 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return;
   }
 
-  // 확장 프로그램 정보 조회
+  // Get extension info
   if (message && message.type === 'GET_INFO') {
     sendResponse({ version: chrome.runtime.getManifest().version });
     return;
   }
 
-  // 수집 상태 조회 (welcome 페이지 온보딩 체크리스트용)
+  // Get collection status (for welcome page onboarding checklist)
   if (message && message.type === 'get_status') {
     (async () => {
       const status = await getLastStatus();
@@ -100,7 +100,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true; // async sendResponse
   }
 
-  // 즉시 수집 트리거 (Welcome 페이지 온보딩용)
+  // Trigger immediate collection (for welcome page onboarding)
   if (message && message.type === 'force_collect') {
     (async () => {
       try {
@@ -113,7 +113,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true;
   }
 
-  // welcome 페이지에서 사이드패널 열기 요청
+  // Open side panel request from welcome page
   if (message && message.type === 'OPEN_SIDE_PANEL') {
     (async () => {
       try {
@@ -132,11 +132,11 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true; // async sendResponse
   }
 
-  // Claude 계정으로 대시보드 로그인
+  // Dashboard login via Claude account
   if (message && message.type === 'GET_CLAUDE_LOGIN') {
     (async () => {
       try {
-        // 1. 이메일 가져오기: 캐시 우선, 없으면 Claude.ai API 호출
+        // 1. Get email: use cache first, fall back to Claude.ai API
         let email = null;
         let userName = '';
         const cached = await chrome.storage.local.get(['accountCache']);
@@ -159,7 +159,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
           return;
         }
 
-        // 2. 서버에 로그인 토큰 요청
+        // 2. Request login token from server
         const config = await getConfig();
         const resp = await fetch(`${config.serverUrl}/api/auth/ext-login`, {
           method: 'POST',
@@ -203,11 +203,11 @@ async function setupAlarm() {
   });
   console.log(`[Claude Tuner] Alarm set: every ${intervalMinutes} minutes`);
 
-  // 주간 리포트 예약
+  // Schedule weekly report
   await scheduleWeeklyReport();
 }
 
-// === 신규 설치 후 Claude.ai 첫 방문 시 사이드패널 자동 오픈 ===
+// === Auto-open side panel on first Claude.ai visit after fresh install ===
 async function tryAutoOpenSidePanel(tabId) {
   try {
     const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: false });
@@ -222,25 +222,25 @@ async function tryAutoOpenSidePanel(tabId) {
   }
 }
 
-// === 탭 이벤트: claude.ai 접속/복귀 시 자동 수집 ===
+// === Tab events: auto-collect on claude.ai visit/return ===
 let _lastTabCollect = 0;
-const TAB_COLLECT_THROTTLE_MS = 60 * 1000; // 1분 쓰로틀
+const TAB_COLLECT_THROTTLE_MS = 60 * 1000; // 1-minute throttle
 
-// SW 재시작 시 storage에서 복원 (메모리 변수는 리셋되므로)
+// Restore from storage on SW restart (in-memory variables are reset)
 chrome.storage.local.get({ _lastTabCollect: 0 }, (r) => { _lastTabCollect = r._lastTabCollect; });
 
 async function tryTabCollect(reason) {
   const now = Date.now();
-  // 이전 수집이 에러 상태면 쓰로틀 무시 (로그인/탭 복귀 시 즉시 재시도)
+  // Skip throttle if previous collection was an error (retry immediately on login/tab return)
   const prevStatus = await getLastStatus();
   const wasError = prevStatus && !prevStatus.success && prevStatus.error;
-  // cookie-org-changed는 org 전환이므로 throttle 면제
+  // cookie-org-changed is an org switch, exempt from throttle
   if (reason !== 'cookie-org-changed' && !wasError && now - _lastTabCollect < TAB_COLLECT_THROTTLE_MS) return;
   _lastTabCollect = now;
   chrome.storage.local.set({ _lastTabCollect: now });
 
-  // Adaptive polling: 탭 전환 시 모든 secondary org를 ACTIVE로 리셋
-  // (사용자가 다른 org으로 전환했을 수 있으므로 즉시 전체 수집)
+  // Adaptive polling: reset all secondary orgs to ACTIVE on tab switch
+  // (user may have switched orgs, so collect all immediately)
   try {
     const { orgPollState } = await chrome.storage.local.get({ orgPollState: {} });
     if (orgPollState && Object.keys(orgPollState).length > 0) {
@@ -257,7 +257,7 @@ async function tryTabCollect(reason) {
         console.log(`[Claude Tuner] Adaptive poll: ${resetCount} org(s) reset to active (${reason})`);
       }
     }
-  } catch (_) { /* poll state reset 실패 무시 */ }
+  } catch (_) { /* ignore poll state reset failure */ }
 
   console.log(`[Claude Tuner] Tab collect triggered: ${reason}${wasError ? ' (retry after error)' : ''}`);
   const result = await collectAndSend();
@@ -266,7 +266,7 @@ async function tryTabCollect(reason) {
   }
 }
 
-// URL 변경 감지 (로그인 완료, 페이지 이동 등)
+// Detect URL changes (login complete, page navigation, etc.)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.startsWith('https://claude.ai')) {
     tryTabCollect('tab-updated');
@@ -274,30 +274,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// 탭 활성화 감지 (claude.ai 탭으로 돌아올 때)
+// Detect tab activation (when returning to a claude.ai tab)
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     if (tab.url?.startsWith('https://claude.ai')) {
       tryTabCollect('tab-activated');
     }
-  } catch (_) { /* 탭 조회 실패 무시 */ }
+  } catch (_) { /* ignore tab query failure */ }
 });
 
-// lastActiveOrg 쿠키 변경 감지 → org 전환 시 즉시 수집 + adaptive poll 리셋
+// Detect lastActiveOrg cookie change → collect immediately on org switch + reset adaptive poll
 chrome.cookies.onChanged.addListener((info) => {
   if (info.cookie.name === 'lastActiveOrg' && info.cookie.domain?.includes('claude.ai') && !info.removed) {
     console.log(`[Claude Tuner] lastActiveOrg cookie changed → ${info.cookie.value}`);
-    // popup/side panel에 즉시 알림 (수집 완료 전 칩 전환용)
+    // Notify popup/side panel immediately (for chip switch before collection completes)
     chrome.runtime.sendMessage({ type: 'ORG_COOKIE_CHANGED', orgId: info.cookie.value }).catch(() => {});
     tryTabCollect('cookie-org-changed');
   }
 });
 
-// === webRequest: Claude.ai completion 429 감지 → 즉시 수집 ===
-// 메시지 전송/재시도 시 rate limit(429)이 발생하면 즉시 usage 데이터 갱신
+// === webRequest: detect Claude.ai completion 429 → collect immediately ===
+// Refresh usage data immediately when a rate limit (429) occurs on message send/retry
 let _last429Collect = 0;
-const RATELIMIT_COLLECT_THROTTLE_MS = 30 * 1000; // 30초 쓰로틀 (연속 429 방지)
+const RATELIMIT_COLLECT_THROTTLE_MS = 30 * 1000; // 30-second throttle (prevent consecutive 429s)
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
@@ -319,13 +319,13 @@ chrome.webRequest.onCompleted.addListener(
   }
 );
 
-// === Adaptive Boost: 사용량 급증 시 로컬 수집 빈도 2배 ===
+// === Adaptive Boost: double local collection frequency on usage surge ===
 async function evaluateBoost(snapshot) {
   if (snapshot?.five_hour?.utilization == null) return;
   const util5h = snapshot.five_hour.utilization;
   const { usageHistory = [] } = await chrome.storage.local.get({ usageHistory: [] });
 
-  // 최근 2개 포인트로 상승 여부 판단
+  // Determine if usage is rising based on the last 2 data points
   const recent = usageHistory.filter(p => p.h5 != null).slice(-2);
   const isRising = recent.length >= 2 && recent[1].h5 > recent[0].h5;
 
@@ -348,29 +348,29 @@ async function evaluateBoost(snapshot) {
 // === Alarm Handler ===
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_BOOST) {
-    // 부스트 수집: 로컬 저장만, 서버 전송 안 함
+    // Boost collection: local save only, no server upload
     const result = await collectAndSend({ skipServer: true });
     if (result.success) await evaluateBoost(result.snapshot);
     return;
   }
   if (alarm.name === ALARM_NAME) {
     const result = await collectAndSend();
-    // 수집 성공 시 expire 시간 기반 추가 알람 예약
+    // On successful collection, schedule additional alarms based on expire times
     if (result.success) {
       await scheduleExpireAlarms(result.snapshot);
       await evaluateBoost(result.snapshot);
     }
   }
-  // 주간 리포트
+  // Weekly report
   if (alarm.name === ALARM_WEEKLY_REPORT) {
     await sendWeeklyReport();
     return;
   }
-  // expire 알람 처리 (5분전 알림, 2분전/1분전/정각 수집, 리셋 직후 알림)
+  // Handle expire alarms (5min-before notification, 2min/1min/at-reset collection, post-reset notification)
   if (alarm.name.startsWith(ALARM_EXPIRE_PREFIX)) {
     console.log(`[Claude Tuner] Expire alarm fired: ${alarm.name}`);
 
-    // 리셋 5분 전 알림
+    // Notification 5 minutes before reset
     if (alarm.name.includes('-notify5')) {
       const { notifyResetSoon = true } = await chrome.storage.sync.get({ notifyResetSoon: true });
       if (notifyResetSoon) {
@@ -386,7 +386,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       return;
     }
 
-    // 리셋 직후 알림
+    // Notification right after reset
     if (alarm.name.includes('-after')) {
       const { notifyResetDone = true } = await chrome.storage.sync.get({ notifyResetDone: true });
       if (notifyResetDone) {
@@ -405,12 +405,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-// expire 시간 기준 추가 수집 알람 예약
-// resets_at 2분전, 1분전, 정각에 수집
+// Schedule additional collection alarms based on expire times
+// Collect at 2min before, 1min before, and at resets_at
 async function scheduleExpireAlarms(snapshot) {
   if (!snapshot) return;
 
-  // 기존 expire 알람 모두 정리
+  // Clear all existing expire alarms
   const allAlarms = await chrome.alarms.getAll();
   for (const a of allAlarms) {
     if (a.name.startsWith(ALARM_EXPIRE_PREFIX)) {
@@ -426,11 +426,11 @@ async function scheduleExpireAlarms(snapshot) {
 
   const now = Date.now();
   const offsets = [
-    { suffix: 'notify5', minutes: -5 }, // 5분 전 알림
-    { suffix: 'pre2', minutes: -2 },    // 2분 전 수집
-    { suffix: 'pre1', minutes: -1 },    // 1분 전 수집
-    { suffix: 'at', minutes: 0 },       // 정각 수집
-    { suffix: 'after', minutes: 2 },    // 리셋 2분 후 수집 + 알림
+    { suffix: 'notify5', minutes: -5 }, // Notification 5min before
+    { suffix: 'pre2', minutes: -2 },    // Collect 2min before
+    { suffix: 'pre1', minutes: -1 },    // Collect 1min before
+    { suffix: 'at', minutes: 0 },       // Collect at reset
+    { suffix: 'after', minutes: 2 },    // Collect + notify 2min after reset
   ];
 
   let scheduled = 0;
@@ -442,7 +442,7 @@ async function scheduleExpireAlarms(snapshot) {
       const triggerMs = expireMs + minutes * 60 * 1000;
       const delayMs = triggerMs - now;
 
-      // 미래 시점이고 30초 이상 남은 경우만 예약
+      // Only schedule if in the future and more than 30 seconds away
       if (delayMs > 30000) {
         const delayMinutes = delayMs / 60000;
         const alarmName = `${ALARM_EXPIRE_PREFIX}${key}-${suffix}`;
@@ -457,7 +457,7 @@ async function scheduleExpireAlarms(snapshot) {
   }
 }
 
-// === Message Handler (popup에서 수동 수집 요청) ===
+// === Message Handler (manual collection request from popup) ===
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'MANUAL_COLLECT') {
     collectAndSend({ force: true }).then((result) => sendResponse(result));
@@ -528,7 +528,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       } else {
         await reportPlanOrderResult(config, po.order_id, userEmail, 'rejected');
         await chrome.storage.local.set({ pendingPlanOrder: null });
-        // 배지를 사용률 표시로 복원
+        // Restore badge to show utilization
         const lastStatus = await getLastStatus();
         if (lastStatus?.snapshot) {
           await updateBadge(lastStatus.snapshot.seven_day?.utilization, lastStatus.snapshot.five_hour?.utilization);
@@ -541,7 +541,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'CANCEL_DOWNGRADE') {
     cancelDowngrade().then(async (result) => {
       if (result?.success) {
-        // completedPlanOrder가 있으면 revert 보고
+        // Report revert if completedPlanOrder exists
         const { completedPlanOrder: cpo } = await chrome.storage.local.get('completedPlanOrder');
         if (cpo?.order_id) {
           const config = await getConfig();
@@ -575,7 +575,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_ORGANIZATIONS') {
     fetchClaudeApi('/api/organizations').then(orgList => {
       if (!Array.isArray(orgList)) { sendResponse({ success: false, error: 'Invalid response' }); return; }
-      // API만 제외 (Enterprise 포함)
+      // Exclude API only (Enterprise included)
       const orgs = orgList
         .map(o => ({ uuid: o.uuid, name: o.name || o.display_name || 'Unknown', plan: detectPlan(o) }))
         .filter(o => o.plan !== 'API');
@@ -587,15 +587,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
-// === Notification 클릭 핸들러 ===
+// === Notification click handler ===
 chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
-  // 수집 실패 알림 → Claude.ai 열기
+  // Collection failure notification → open Claude.ai
   if (notifId.startsWith('collect-fail-') && btnIdx === 0) {
     chrome.tabs.create({ url: 'https://claude.ai' });
     chrome.notifications.clear(notifId);
     return;
   }
-  // 플랜 변경 오더 알림
+  // Plan change order notification
   if (notifId.startsWith('plan-order-')) {
     const orderId = parseInt(notifId.replace('plan-order-', ''));
     const { pendingPlanOrder: po } = await chrome.storage.local.get('pendingPlanOrder');
@@ -604,21 +604,21 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
     const status = await getLastStatus();
     const userEmail = status?.snapshot?.user_email;
     if (btnIdx === 0) {
-      // 수락 → 플랜 변경 실행
+      // Accept → execute plan change
       try {
         await acceptPlanOrder(config, po, userEmail);
       } catch (e) {
         await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted', 'failed', e.message);
       }
     } else {
-      // 거절
+      // Reject
       await reportPlanOrderResult(config, po.order_id, userEmail, 'rejected');
       await chrome.storage.local.set({ pendingPlanOrder: null });
     }
     chrome.notifications.clear(notifId);
     return;
   }
-  // 기존 추천 알림
+  // Existing recommendation notification
   if (notifId === NOTIF_ID_OPTIMIZE && btnIdx === 0) {
     const status = await getLastStatus();
     const rec = status?.recommendation;
@@ -630,5 +630,5 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   }
 });
 
-// bg/collect.js ↔ bg/plan.js 순환 의존 해결: setter 주입
+// Resolve circular dependency between bg/collect.js ↔ bg/plan.js: inject via setter
 setCollectAndSendRef(collectAndSend);

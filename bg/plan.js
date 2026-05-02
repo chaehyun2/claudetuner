@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus } from './storage.js';
 
-// === 순환 의존 해결: collectAndSend 참조 주입 ===
+// === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
 export function setCollectAndSendRef(fn) { _collectAndSendFn = fn; }
 function forceCollect(context) {
@@ -27,17 +27,17 @@ async function notifyPlanChange(title, message, priority = 1) {
 async function getSelectedOrg(config) {
   const orgList = await fetchClaudeApi('/api/organizations');
   if (!Array.isArray(orgList) || orgList.length === 0) {
-    throw new Error('조직 정보 확인 실패');
+    throw new Error('Failed to verify organization info');
   }
   return config.selectedOrgId
     ? (orgList.find(o => o.uuid === config.selectedOrgId) || orgList[0])
     : orgList[0];
 }
 
-// === 구독 정보 가져오기 (개인 org 전용) ===
+// === Fetch subscription info (personal org only) ===
 export async function fetchSubscriptionInfo(orgUuid) {
   const info = {};
-  // 두 API를 병렬 호출 (각각 실패해도 독립적)
+  // Call both APIs in parallel (each can fail independently)
   const [subResult, pausedResult] = await Promise.allSettled([
     fetchClaudeApi(`/api/organizations/${orgUuid}/subscription_details`, { quiet: true }),
     fetchClaudeApi(`/api/organizations/${orgUuid}/paused_subscription_details`, { quiet: true }),
@@ -71,7 +71,7 @@ export async function fetchSubscriptionInfo(orgUuid) {
   return info;
 }
 
-// === 플랜 감지 ===
+// === Plan detection ===
 export function detectPlan(org) {
   const capabilities = org.capabilities || [];
   const tier = org.rate_limit_tier;
@@ -80,7 +80,7 @@ export function detectPlan(org) {
   let plan = 'unknown';
   if (capabilities.includes('claude_max') || capsStr.includes('max')) {
     const tierStr = (tier || '').toLowerCase();
-    // tier에서 max_20x / max_5x 정확 매칭
+    // Exact match max_20x / max_5x from tier
     if (tierStr.includes('max_20x')) plan = 'Max 20x';
     else if (tierStr.includes('max_5x')) plan = 'Max 5x';
     else plan = 'Max';
@@ -96,7 +96,7 @@ export function detectPlan(org) {
     plan = 'API';
   }
 
-  // tier 기반 fallback
+  // Tier-based fallback
   if (plan === 'unknown' && tier) {
     const t = tier.toLowerCase();
     if (t.includes('max')) plan = 'Max';
@@ -107,7 +107,7 @@ export function detectPlan(org) {
     else if (t === 'default_claude_ai') plan = 'Pro';
   }
 
-  // 최종 fallback: capabilities에 유료 플랜 키워드가 전혀 없으면 Free
+  // Final fallback: if no paid plan keywords in capabilities, assume Free
   if (plan === 'unknown' && capabilities.includes('chat') &&
       !capsStr.includes('pro') && !capsStr.includes('max') &&
       !capsStr.includes('raven') && !capsStr.includes('enterprise')) {
@@ -121,7 +121,7 @@ export function detectPlan(org) {
   return plan;
 }
 
-// Team plan 세분화: allSeatTiers 캐시에서 seat_tier 조회
+// Team plan refinement: look up seat_tier from allSeatTiers cache
 export async function refineTeamPlan(plan, orgUuid) {
   if (plan !== 'Team' || !orgUuid) return plan;
   const { accountCache } = await chrome.storage.local.get({ accountCache: null });
@@ -129,7 +129,7 @@ export async function refineTeamPlan(plan, orgUuid) {
   return st ? (SEAT_TIER_MAP[st] || 'Team Standard') : plan;
 }
 
-// === 플랜 변경 오더 결과 보고 ===
+// === Report plan change order result ===
 export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason) {
   try {
     await fetch(`${config.serverUrl}/api/snapshots/plan-order-response`, {
@@ -160,7 +160,7 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
   return changeResult;
 }
 
-// === 서버 추천 무시 → 서버에 전송 ===
+// === Dismiss recommendation → send to server ===
 export async function dismissRecommendationServer({ permanent = false } = {}) {
   const config = await getConfig();
   const status = await getLastStatus();
@@ -180,13 +180,13 @@ export async function dismissRecommendationServer({ permanent = false } = {}) {
 
 export const muteRecommendationServer = () => dismissRecommendationServer({ permanent: true });
 
-// === 플랜 변경 실행 (서버 추천 기반) ===
+// === Execute plan change (based on server recommendation) ===
 export async function executePlanChange(recommendation) {
   const fromPlan = recommendation.from_plan || recommendation.fromPlan;
   const toPlan = recommendation.to_plan || recommendation.toPlan;
 
   try {
-    // 실행 전 현재 플랜 재확인
+    // Re-verify current plan before executing
     const config = await getConfig();
     const verifyOrg = await getSelectedOrg(config);
     const orgId = verifyOrg.uuid;
@@ -222,13 +222,13 @@ export async function executePlanChange(recommendation) {
       });
     }
 
-    // 성공
+    // Success
     chrome.action.setBadgeText({ text: '' });
     await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', fromPlan, toPlan), 2);
 
     console.log(`[Claude Tuner] Plan change successful: ${fromPlan} → ${toPlan}`);
 
-    // 상태 변경 즉시 기록 (중복 체크 건너뜀, 서버에서 last_plan_change_at 자동 업데이트)
+    // Record state change immediately (skip dedup; server auto-updates last_plan_change_at)
     forceCollect('plan change');
 
     return { success: true };
@@ -240,16 +240,16 @@ export async function executePlanChange(recommendation) {
   }
 }
 
-// === 다운그레이드 취소 (원래 플랜 유지) ===
+// === Cancel downgrade (keep current plan) ===
 export async function cancelDowngrade() {
   try {
     const config = await getConfig();
     const orgId = (await getSelectedOrg(config)).uuid;
 
-    // 현재 예약 상태 확인
+    // Check current scheduled status
     const subDetails = await fetchClaudeApi(`/api/organizations/${orgId}/subscription_details`);
     if (!subDetails?.scheduled_downgrade) {
-      return { success: false, error: '예약된 다운그레이드가 없습니다' };
+      return { success: false, error: 'No scheduled downgrade found' };
     }
 
     const fromPlan = subDetails.scheduled_downgrade.plan_type;
@@ -262,7 +262,7 @@ export async function cancelDowngrade() {
     console.log(`[Claude Tuner] Downgrade cancelled (was → ${fromPlan})`);
     await notifyPlanChange(await bt('opt_cancel_title'), await bt('opt_cancel_msg', fromPlan), 2);
 
-    // 상태 변경 즉시 기록 (중복 체크 건너뜀)
+    // Record state change immediately (skip dedup)
     forceCollect('cancel');
 
     return { success: true, cancelledPlan: fromPlan };
@@ -273,11 +273,11 @@ export async function cancelDowngrade() {
   }
 }
 
-// === 직접 다운그레이드 실행 ===
+// === Execute direct downgrade ===
 export async function downgradeTo(targetPlanApi) {
   try {
     if (!PLAN_API_MAP || !Object.values(PLAN_API_MAP).includes(targetPlanApi)) {
-      return { success: false, error: `알 수 없는 플랜: ${targetPlanApi}` };
+      return { success: false, error: `Unknown plan: ${targetPlanApi}` };
     }
 
     const config = await getConfig();
@@ -285,7 +285,7 @@ export async function downgradeTo(targetPlanApi) {
     const orgId = targetOrg.uuid;
     const currentPlan = detectPlan(targetOrg);
 
-    // 현재 플랜보다 낮은 플랜으로만 다운그레이드
+    // Only downgrade to a plan lower than current
     const targetLabel = Object.entries(PLAN_API_MAP).find(([, v]) => v === targetPlanApi)?.[0] || targetPlanApi;
 
     console.log(`[Claude Tuner] Direct downgrade: ${currentPlan} → ${targetLabel} (${targetPlanApi})`);
@@ -296,7 +296,7 @@ export async function downgradeTo(targetPlanApi) {
       headers: { 'Content-Type': 'application/json', ...ANTHROPIC_HEADERS },
     });
 
-    // 상태 변경 즉시 기록
+    // Record state change immediately
     forceCollect('downgrade');
 
     return { success: true, from: currentPlan, to: targetLabel };

@@ -22,6 +22,6 @@ export async function sendGAEvent(name, params = {}) {
       }),
     });
   } catch (_) {
-    // GA 실패는 무시
+    // Silently ignore GA failures
   }
 }

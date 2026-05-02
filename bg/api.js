@@ -1,8 +1,8 @@
 import { CLAUDE_API_BASE } from './constants.js';
 
-// === resets_at 정규화 (분 단위 반올림) ===
-// Claude API가 59.xxx초 / 00.xxx초를 랜덤하게 반환하므로 같은 윈도우 비교가 깨짐
-// 30초 이상이면 다음 분으로 올림, 서브초 제거
+// === Normalize resets_at (round to minute) ===
+// Claude API returns random 59.xxx / 00.xxx seconds, breaking same-window comparison
+// Round up to next minute if seconds >= 30, strip sub-seconds
 export function normalizeResetTime(t) {
   if (!t) return null;
   const d = new Date(t);
@@ -12,11 +12,11 @@ export function normalizeResetTime(t) {
   return d.toISOString().slice(0, 19) + '+00:00';
 }
 
-// === Claude.ai API 호출 헬퍼 (하이브리드: 탭 우선 → 쿠키 폴백) ===
+// === Claude.ai API call helper (hybrid: tab-first, cookie fallback) ===
 export async function fetchClaudeApi(path, options = {}) {
   const fullUrl = `${CLAUDE_API_BASE}${path}`;
 
-  // 1차: 탭 기반 (가장 안정적 — Cloudflare 우회됨)
+  // Primary: tab-based (most reliable — bypasses Cloudflare)
   const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
   let tabErrorMsg = '';
 
@@ -28,11 +28,11 @@ export async function fetchClaudeApi(path, options = {}) {
       console.warn('[Claude Tuner] Tab fetch failed, trying cookie fallback:', tabErrorMsg);
     }
   } else {
-    tabErrorMsg = 'claude.ai 탭 없음';
+    tabErrorMsg = 'No claude.ai tab';
     console.log('[Claude Tuner] No Claude.ai tab, using cookie fallback');
   }
 
-  // 2차: 쿠키 기반 직접 호출
+  // Fallback: cookie-based direct call
   try {
     const data = await fetchWithCookies(fullUrl, options);
     console.log(`[Claude Tuner] Cookie fallback succeeded for ${path}`);
@@ -42,7 +42,7 @@ export async function fetchClaudeApi(path, options = {}) {
     if (isRateLimit) {
       throw new Error('err_rate_limit');
     }
-    // 쿠키 에러가 i18n 키이면 그대로 전파
+    // Propagate cookie errors that are i18n keys as-is
     if (cookieError.message.startsWith('err_')) {
       throw cookieError;
     }
@@ -50,7 +50,7 @@ export async function fetchClaudeApi(path, options = {}) {
   }
 }
 
-// --- 탭 기반 호출 (executeScript 직접 실행 — content script 중계 불필요) ---
+// --- Tab-based call (direct executeScript — no content script relay needed) ---
 export async function fetchViaTab(tabId, fullUrl, options) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
@@ -107,7 +107,7 @@ export async function fetchViaTab(tabId, fullUrl, options) {
   return result.data;
 }
 
-// --- 쿠키 기반 직접 호출 (탭 없을 때 폴백) ---
+// --- Cookie-based direct call (fallback when no tab available) ---
 export async function fetchWithCookies(url, options = {}) {
   const cookies = await chrome.cookies.getAll({ url: 'https://claude.ai' });
   if (!cookies.length) {

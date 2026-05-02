@@ -1,8 +1,8 @@
-// === 배지 업데이트 (사용량 표시 모드 기반) ===
+// === Badge update (based on usage display mode) ===
 export async function updateBadge(util7d, util5h) {
-  resetIcon(); // 에러 아이콘이었으면 정상 복원
+  resetIcon(); // Restore normal icon if it was showing error
 
-  // 대기 중인 오더가 있으면 오더 아이콘 + 배지 우선 표시
+  // If there's a pending order, show order icon + badge first
   const { pendingPlanOrder } = await chrome.storage.local.get('pendingPlanOrder');
   if (pendingPlanOrder) {
     chrome.action.setIcon({ path: { 16: 'icons/icon16-order.png', 48: 'icons/icon48-order.png', 128: 'icons/icon128-order.png' } });
@@ -16,7 +16,7 @@ export async function updateBadge(util7d, util5h) {
   if (usageDisplayMode === '5h') {
     util = util5h;
   } else if (usageDisplayMode === 'both') {
-    // 둘 다일 때 높은 쪽 표시
+    // When showing both, display the higher value
     if (util5h != null && util7d != null) util = Math.max(util5h, util7d);
     else util = util7d ?? util5h;
   } else {
@@ -31,17 +31,17 @@ export async function updateBadge(util7d, util5h) {
   chrome.action.setBadgeText({ text: pct + '%' });
 
   if (util >= thresholdDanger) {
-    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' }); // 빨강 (위험)
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' }); // Red (danger)
   } else if (util >= thresholdWarn) {
-    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' }); // 주황 (주의)
+    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' }); // Orange (warning)
   } else {
-    // 정상 범위: 5h=청록, 7d=보라로 구분
+    // Normal range: 5h=cyan, 7d=purple to distinguish
     const showing5h = usageDisplayMode === '5h' || (usageDisplayMode === 'both' && util5h != null && util7d != null && util5h >= util7d);
     chrome.action.setBadgeBackgroundColor({ color: showing5h ? '#06b6d4' : '#7c3aed' });
   }
 }
 
-// 수집 실패 시 에러 아이콘 + 배지
+// Error icon + badge on collection failure
 export function updateBadgeError() {
   chrome.action.setBadgeText({ text: '!' });
   chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
@@ -50,7 +50,7 @@ export function updateBadgeError() {
   });
 }
 
-// 정상 아이콘 복원
+// Restore normal icon
 export function resetIcon() {
   chrome.action.setIcon({
     path: { 16: 'icons/icon16.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' },

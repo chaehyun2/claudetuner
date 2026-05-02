@@ -3,7 +3,7 @@ import { BG_I18N } from './constants.js';
 export async function bgLang() {
   const { lang } = await chrome.storage.sync.get({ lang: 'auto' });
   if (lang !== 'auto') return lang;
-  // 서비스 워커에서는 navigator.language가 불안정 → chrome.i18n.getUILanguage() 사용
+  // navigator.language is unreliable in service workers → use chrome.i18n.getUILanguage()
   try {
     const ui = (chrome.i18n && chrome.i18n.getUILanguage && chrome.i18n.getUILanguage()) || 'en';
     return ui.toLowerCase().startsWith('ko') ? 'ko' : 'en';

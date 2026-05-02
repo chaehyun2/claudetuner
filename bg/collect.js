@@ -126,7 +126,7 @@ async function showRecommendationBadge(snapshot, recType) {
   chrome.action.setBadgeBackgroundColor({ color: recType === 'upgrade' ? '#d97706' : '#059669' });
 }
 
-// === lastActiveOrg cookie 기반 org 감지 ===
+// === Org detection based on lastActiveOrg cookie ===
 export async function getLastActiveOrgId() {
   try {
     const cookie = await chrome.cookies.get({ name: 'lastActiveOrg', url: 'https://claude.ai' });
@@ -141,7 +141,7 @@ export async function getLastActiveOrgId() {
 export async function collectAndSend({ force = false, skipServer = false } = {}) {
   const _t0 = performance.now();
   const _timings = {};
-  // 삭제된 계정이면 수집 중단
+  // Skip collection if account is deleted
   const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
   if (account_deleted) {
     console.log('[Claude Tuner] Account deleted. Skipping collection.');
@@ -157,7 +157,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
   }
 
   try {
-    // 1. 조직 정보 가져오기 (쿠키 인증, org-scoped 엔드포인트)
+    // 1. Fetch organization info (cookie auth, org-scoped endpoint)
     let _ts = performance.now();
     const orgList = await fetchClaudeApi('/api/organizations');
     _timings['1_organizations'] = Math.round(performance.now() - _ts);
@@ -166,18 +166,18 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       throw new Error('err_no_orgs');
     }
 
-    // 각 org에서 플랜 감지 (API만 무시)
+    // Detect plan for each org (skip API-only orgs)
     const orgPlans = orgList.map(o => { const p = detectPlan(o); return `${o.name}(${p})${p === 'API' ? '[skip]' : ''}`; });
     console.log(`[Claude Tuner] ${orgList.length} orgs:`, orgPlans.join(' | '));
     const planScoreMap = { 'Max 20x': 7, 'Team Premium': 6, 'Max 5x': 5, 'Team Standard': 4, 'Max': 3.5, 'Enterprise': 3, 'Team': 2.5, 'Team Tier 2': 2.5, 'Pro': 2, 'Free': 1 };
 
-    // === Primary org 선택: 수동 > 쿠키 > 플랜 점수 fallback ===
+    // === Primary org selection: manual > cookie > plan score fallback ===
     let bestOrg = null;
     let bestPlan = 'unknown';
     let selectionMethod = '';
     const cookieOrgId = await getLastActiveOrgId();
 
-    // 1) 수동 선택 (selectedOrgId)
+    // 1) Manual selection (selectedOrgId)
     if (config.selectedOrgId) {
       bestOrg = orgList.find(o => o.uuid === config.selectedOrgId);
       if (bestOrg) {
@@ -189,7 +189,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
     }
 
-    // 2) lastActiveOrg 쿠키 (Claude.ai가 org 전환 시 자동 설정)
+    // 2) lastActiveOrg cookie (automatically set by Claude.ai on org switch)
     if (!bestOrg) {
       if (cookieOrgId) {
         const cookieOrg = orgList.find(o => o.uuid === cookieOrgId && detectPlan(o) !== 'API');
@@ -205,7 +205,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
     }
 
-    // 3) 플랜 점수 기반 fallback (쿠키 없거나 매칭 실패 시)
+    // 3) Plan score-based fallback (when cookie is missing or match fails)
     if (!bestOrg) {
       const nonApiOrgs = orgList.filter(o => detectPlan(o) !== 'API');
       const isMultiOrg = nonApiOrgs.length > 1;
@@ -224,12 +224,12 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     }
 
     console.log(`[Claude Tuner] Primary org: ${bestOrg?.name} (${bestPlan}) [${selectionMethod}]`);
-    // 옵션 페이지 표시용: 자동 선택된 조직 정보 저장
+    // Save auto-selected org info for options page display
     if (bestOrg && selectionMethod !== 'manual') {
       await chrome.storage.local.set({ autoSelectedOrg: { name: bestOrg.name, plan: bestPlan, uuid: bestOrg.uuid } });
     }
 
-    // 이메일 추출: email_address가 있는 org 우선, 없으면 org.name에서 추출
+    // Extract email: prefer org with email_address, fallback to parsing from org.name
     let userEmail = 'unknown';
     for (const o of orgList) {
       const e = o.email_address || o.owner?.email_address;
@@ -243,14 +243,14 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
     }
-    // /api/account에서 이메일 + seat_tier 가져오기 (캐시 8시간)
-    // grove_enabled는 별도 캐시 (30분) — 더 자주 변경될 수 있음
+    // Fetch email + seat_tier from /api/account (cached 8 hours)
+    // grove_enabled has separate cache (30 min) — may change more frequently
     let seatTier = null;
     let groveEnabled = null;
-    let groveDetected = false; // API에서 grove_enabled를 성공적으로 읽었는지 여부
+    let groveDetected = false; // Whether grove_enabled was successfully read from the API
     {
-      const ACCOUNT_CACHE_TTL = 8 * 60 * 60 * 1000; // 8시간
-      const GROVE_CACHE_TTL = 30 * 60 * 1000; // 30분
+      const ACCOUNT_CACHE_TTL = 8 * 60 * 60 * 1000; // 8 hours
+      const GROVE_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
       const cached = await chrome.storage.local.get(['accountCache', 'groveCache']);
       const cache = cached.accountCache;
       const groveC = cached.groveCache;
@@ -274,7 +274,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           ) || memberships[0];
           seatTier = membership?.seat_tier || null;
           if (acctEmail) userEmail = acctEmail;
-          // 모든 org의 seat_tier 저장 (extra org plan 세분화용)
+          // Save all orgs' seat_tier (for extra org plan refinement)
           const allSeatTiers = {};
           for (const m of memberships) {
             const mOrgUuid = m.organization_uuid || m.organization?.uuid;
@@ -283,7 +283,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           const acctName = acct?.full_name || acct?.display_name || '';
           await chrome.storage.local.set({ accountCache: { email: acctEmail, name: acctName, seatTier, orgUuid: bestOrgUuid, allSeatTiers, ts: Date.now() } });
           console.log('[Claude Tuner] Account API:', acctEmail, 'seat:', seatTier, 'org:', bestOrgUuid);
-          // grove_enabled도 같은 응답에서 파싱 (추가 API 호출 불필요)
+          // Parse grove_enabled from the same response (no extra API call needed)
           const groveNeedsFresh = force || !groveC || (Date.now() - groveC.ts) >= GROVE_CACHE_TTL;
           if (groveNeedsFresh && acct?.settings != null && typeof acct.settings === 'object' && 'grove_enabled' in acct.settings) {
             groveEnabled = acct.settings.grove_enabled === true ? true : acct.settings.grove_enabled === false ? false : null;
@@ -300,14 +300,14 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // --- grove_enabled (별도 캐시 30분) ---
+      // --- grove_enabled (separate cache, 30 min) ---
       const groveCacheValid = !force && groveC && (Date.now() - groveC.ts) < GROVE_CACHE_TTL;
       if (groveCacheValid) {
         groveEnabled = groveC.value ?? null;
         groveDetected = groveC.detected ?? false;
         console.log('[Claude Tuner] grove (cached):', groveEnabled, 'detected:', groveDetected);
       } else if (!groveDetected) {
-        // account API에서 이미 파싱된 경우 스킵
+        // Skip if already parsed from account API above
         try {
           _ts = performance.now();
           const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
@@ -323,7 +323,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
                   const t = await r.text();
                   const m = t.match(/"grove_enabled"\s*:\s*(true|false|null)/);
                   if (m) return { value: m[1] === 'true' ? true : m[1] === 'false' ? false : null, debug: null };
-                  // 파싱 실패 — 디버그 정보 수집
+                  // Parse failed — collect debug info
                   let hasSettings = false, settingsKeys = 0, hasGroveKey = false, groveContext = null;
                   try {
                     const j = JSON.parse(t);
@@ -342,17 +342,17 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             });
             const gr = groveResult?.[0]?.result;
             if (gr && !gr.debug) {
-              // regex 매칭 성공 (true/false/null 모두 포함) → 명시적 감지
+              // Regex match success (includes true/false/null) — explicit detection
               groveEnabled = gr.value;
               groveDetected = true;
             } else if (gr) {
-              // 파싱 실패 — debug 정보 있음
+              // Parse failed — debug info available
               if (gr.value != null) groveEnabled = gr.value;
             }
             saveGroveCache(groveEnabled, groveDetected);
             console.log('[Claude Tuner] grove API:', groveEnabled, 'detected:', groveDetected);
           } else {
-            // 탭 없음 → 쿠키 폴백
+            // No tabs available — cookie fallback
             const acctNo = await fetchWithCookies('https://claude.ai/api/account');
             const parsed = parseGroveFromText(acctNo);
             if (parsed !== null) {
@@ -364,7 +364,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           }
         } catch (ge) {
           console.warn('[Claude Tuner] grove executeScript failed, trying cookie fallback:', ge.message);
-          // 쿠키 기반 폴백: executeScript 실패 시 (권한 부족 등)
+          // Cookie-based fallback: when executeScript fails (insufficient permissions, etc.)
           try {
             const acct = await fetchWithCookies('https://claude.ai/api/account');
             const parsed = parseGroveFromText(acct);
@@ -386,7 +386,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
     }
 
-    // 시트 타입에 따라 플랜 세분화
+    // Refine plan based on seat tier
     if (bestPlan === 'Team' && seatTier) {
       bestPlan = SEAT_TIER_MAP[seatTier] || 'Team Standard';
       console.log(`[Claude Tuner] Team seat_tier: ${seatTier} → ${bestPlan}`);
@@ -394,7 +394,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       console.log(`[Claude Tuner] Enterprise seat_tier: ${seatTier}`);
     }
 
-    // 모니터링 불가 조직 체크 (API만 해당)
+    // Check for non-monitorable orgs (API-only)
     if (!bestOrg || bestPlan === 'API') {
       const hasAPI = orgList.some(o => detectPlan(o) === 'API');
       if (hasAPI) {
@@ -404,7 +404,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
     }
 
-    // Free plan → 폴링 주기 60분으로 강제 / 업그레이드 시 복원
+    // Free plan: force poll interval to 60 min / restore on upgrade
     {
       const { intervalExplicitlySet } = await chrome.storage.sync.get({ intervalExplicitlySet: false });
       if (!intervalExplicitlySet) {
@@ -422,7 +422,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
     }
 
-    // usage 데이터: 선택된 primary org에서 가져오기
+    // Fetch usage data from the selected primary org
     let org = bestOrg;
     let orgId = bestOrg?.uuid;
     let usageData = null;
@@ -443,13 +443,13 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     const plan = bestPlan;
     console.log(`[Claude Tuner] User: ${userEmail}, Plan: ${plan}, UsageOrg: ${org.name} (${orgId})`);
 
-    // 2-1. 구독 정보 가져오기 (갱신일, 예정 플랜 변경)
-    // Team/Enterprise는 subscription_details 접근 불가 (403) → 개인 org에서만 시도
+    // 2-1. Fetch subscription info (renewal date, pending plan changes)
+    // Team/Enterprise can't access subscription_details (403) — only try personal orgs
     let subscriptionInfo = {};
     const isPersonalPlan = !NON_PERSONAL_PLANS.some(t => bestPlan.startsWith(t));
     if (isPersonalPlan) {
       _ts = performance.now();
-      // 구독 정보를 가져올 org 탐색 (개인 org만 — Team/Enterprise/API 제외)
+      // Find org to fetch subscription info from (personal orgs only — excludes Team/Enterprise/API)
       const subOrgId = await (async () => {
         const personalOrgs = (selectionMethod === 'manual' && bestOrg) ? [bestOrg] : orgList.filter(o => {
           const p = detectPlan(o);
@@ -467,7 +467,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       _timings['5_subscription'] = Math.round(performance.now() - _ts);
     }
 
-    // 3. 스냅샷 빌드 (resets_at는 분 단위로 정규화)
+    // 3. Build snapshot (resets_at normalized to minute precision)
     const extVersion = chrome.runtime.getManifest().version;
     const snapshot = {
       user_email: userEmail,
@@ -486,14 +486,14 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       last_active_org_uuid: cookieOrgId || null,
     };
 
-    // ref_source 포함 (첫 전송 후 삭제)
+    // Include ref_source (removed after first send)
     const { ref_source } = await chrome.storage.local.get('ref_source');
     if (ref_source) {
       snapshot.ref_source = ref_source;
       await chrome.storage.local.remove('ref_source');
     }
 
-    // 4. 서버로 전송 (skipServer 시 로컬 저장만)
+    // 4. Send to server (local save only when skipServer is true)
     if (skipServer) {
       console.log('[Claude Tuner] Local-only collection (boost mode)');
       await setStatus({
@@ -509,15 +509,15 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       return { success: true, snapshot, localOnly: true };
     }
 
-    // 로컬 히스토리에 최근 6h 데이터가 부족하면 서버에 스냅샷 요청
+    // Request server snapshots if local history lacks recent 6h data
     const { usageHistory: _histCheck = [], historyEmptyUntil = 0 } = await chrome.storage.local.get({ usageHistory: [], historyEmptyUntil: 0 });
     const sixHoursAgo = Date.now() - 6 * 3600000;
     const recent6h = _histCheck.filter(p => p.t > sixHoursAgo);
     const needHistory = recent6h.length < 30 && Date.now() > historyEmptyUntil;
     const body = { ...snapshot, ...(force ? { force: true } : {}), ...(needHistory ? { need_history: true } : {}) };
 
-    // === 서버 POST: fire-and-forget (응답을 기다리지 않음) ===
-    // 서버 저장은 백그라운드로 보내고, 로컬 UI 업데이트를 먼저 진행
+    // === Server POST: fire-and-forget (don't wait for response) ===
+    // Send server save in background, proceed with local UI update first
     fetch(`${config.serverUrl}/api/snapshots`, {
       method: 'POST',
       headers: {
@@ -544,7 +544,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       const result = await response.json();
       console.log(`[Claude Tuner] Snapshot sent: ${result.success ? 'ok' : 'fail'}${result.skipped ? ' (skipped)' : ''}`);
 
-      // 서버 제공 poll_interval 반영
+      // Apply server-provided poll_interval
       if (result.poll_interval_minutes && result.poll_interval_minutes > 0) {
         const serverInterval = result.poll_interval_minutes;
         await chrome.storage.local.set({ serverPollInterval: serverInterval });
@@ -559,16 +559,16 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // 리뷰 넛지 상태 저장
+      // Save review nudge state
       if (result.review_nudge) {
         await chrome.storage.local.set({ ct_review_nudge: result.review_nudge });
       }
-      // 자동승인 설정 저장
+      // Save auto-approve setting
       if (result.admin_order_auto_approve !== undefined) {
         await chrome.storage.local.set({ ct_admin_order_auto_approve: result.admin_order_auto_approve });
       }
 
-      // 플랜 변경 오더 처리
+      // Handle plan change order
       if (result.plan_order) {
         const po = result.plan_order;
         console.log(`[Claude Tuner] Plan order received: #${po.order_id} ${po.from_plan} → ${po.to_plan} (auto_approve=${po.auto_approve})`);
@@ -598,7 +598,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // 서버 recommendation으로 lastStatus 업데이트 (배지도 갱신)
+      // Update lastStatus with server recommendation (also refreshes badge)
       if (!result.skipped && result.recommendation) {
         const curStatus = await getLastStatus();
         if (curStatus) {
@@ -611,7 +611,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // 서버 최근 스냅샷 병합 (히스토리 백필)
+      // Merge server recent snapshots (history backfill)
       if (needHistory) {
         if (result.recent_snapshots && result.recent_snapshots.length > 0) {
           await mergeServerSnapshots(result.recent_snapshots, plan, snapshot.claude_org_uuid);
@@ -639,11 +639,11 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
     });
 
-    // === 로컬 UI 업데이트 (서버 응답을 기다리지 않음) ===
+    // === Local UI update (don't wait for server response) ===
     const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
     const fetchMode = claudeTabs.length > 0 ? 'tab' : 'cookie';
 
-    // 이전 recommendation 유지 (서버 응답 도착 시 비동기 갱신됨)
+    // Keep previous recommendation (will be async-updated when server response arrives)
     const prevStatus = await getLastStatus();
     const recommendation = prevStatus?.recommendation || null;
 
@@ -662,7 +662,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       if (!r.ct_install_date) u.ct_install_date = Date.now();
       chrome.storage.local.set(u);
 
-      // Uninstall tracking URL 갱신
+      // Update uninstall tracking URL
       const daysUsed = r.ct_install_date ? Math.floor((Date.now() - r.ct_install_date) / 86400000) : 0;
       const params = new URLSearchParams({
         email: snapshot.user_email || '',
@@ -674,27 +674,27 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       chrome.runtime.setUninstallURL(`${DEFAULT_SERVER_URL}/api/uninstall?${params}`);
     });
 
-    // 4-1. 로컬 사용률 히스토리 저장 (최근 7일, 스파크라인+예측용)
+    // 4-1. Save local usage history (last 7 days, for sparkline + prediction)
     await appendUsageHistory(buildHistoryPoint(snapshot, plan));
 
-    // 4-2. 배지 업데이트 (이전 recommendation 기반, 서버 응답 시 비동기 갱신)
+    // 4-2. Update badge (based on previous recommendation, async-updated on server response)
     if (recommendation?.type === 'upgrade' || recommendation?.type === 'downgrade') {
       await showRecommendationBadge(snapshot, recommendation.type);
     } else {
       await updateBadge(snapshot.seven_day.utilization, snapshot.five_hour.utilization);
     }
 
-    // 4-3. 사용률 임계값 알림
+    // 4-3. Usage threshold alerts
     await checkUsageAlerts(snapshot);
 
     sendGAEvent('collect_success', { plan: snapshot.plan, fetch_mode: fetchMode });
-    // 성공 시 heartbeat 타이머 리셋 + 에러 코드 클리어 + 수집 실패 상태 리셋
+    // On success: reset heartbeat timer + clear error code + reset collect fail state
     chrome.storage.local.remove(['lastHeartbeatAt', 'collectFailState']);
 
-    // === 멀티 org 수집: primary org 외 추가 org 스냅샷 전송 (최대 3개 org 총) ===
+    // === Multi-org collection: send additional org snapshots beyond primary (up to 3 orgs total) ===
     if (!skipServer) {
       const MAX_ORGS = 3;
-      // 수집 대상 org 결정: API 제외 + 멀티 org이면 Free도 제외
+      // Determine target orgs: exclude API + exclude Free if multi-org
       const isMultiOrg = orgList.filter(o => detectPlan(o) !== 'API').length > 1;
       const monitorableOrgs = orgList.filter(o => {
         const p = detectPlan(o);
@@ -707,10 +707,10 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       const { orgAutoAll, selectedOrgIds } = await chrome.storage.sync.get({ orgAutoAll: true, selectedOrgIds: null });
 
       if (orgAutoAll) {
-        // 전체 자동 수집: 모든 org (MAX_ORGS 제한 적용)
+        // Auto collect all: all orgs (MAX_ORGS limit applied)
         targetOrgs = monitorableOrgs.slice(0, MAX_ORGS);
       } else if (monitorableOrgs.length > MAX_ORGS) {
-        // 수동 선택 모드 + 4개 이상
+        // Manual selection mode + 4 or more orgs
         if (selectedOrgIds && Array.isArray(selectedOrgIds) && selectedOrgIds.length > 0) {
           targetOrgs = monitorableOrgs.filter(o => selectedOrgIds.includes(o.uuid));
           if (targetOrgs.length === 0) targetOrgs = monitorableOrgs.slice(0, MAX_ORGS);
@@ -723,23 +723,23 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // primary org 외 추가 org 수집 (개별 org 실패 시 다른 org 수집 계속)
-      // === Adaptive polling: secondary org는 사용량 변화에 따라 폴링 주기 조절 ===
+      // Collect additional orgs beyond primary (continue collecting other orgs on individual failure)
+      // === Adaptive polling: secondary orgs adjust poll interval based on usage changes ===
       _ts = performance.now();
       const additionalOrgs = targetOrgs.filter(o => o.uuid !== bestOrg?.uuid);
-      const successOrgs = [bestOrg?.uuid]; // primary는 이미 성공
-      const orgUsageMap = {}; // org별 사용률 저장 (popup 칩 표시용)
+      const successOrgs = [bestOrg?.uuid]; // primary already succeeded
+      const orgUsageMap = {}; // Per-org usage storage (for popup chip display)
       orgUsageMap[bestOrg?.uuid] = {
         h5: snapshot.five_hour.utilization, d7: snapshot.seven_day.utilization,
         spendUsed: snapshot.extra_usage?.used_credits ?? null,
         spendLimit: snapshot.extra_usage?.monthly_limit ?? null,
-        plan: plan, // bestPlan (seat_tier 세분화 완료)
+        plan: plan, // bestPlan (seat_tier refinement done)
         resetsAt5h: snapshot.five_hour?.resets_at || null,
         resetsAt7d: snapshot.seven_day?.resets_at || null,
         extraUsage: snapshot.extra_usage || null,
       };
       const failedOrgs = [];
-      const skippedOrgs = []; // adaptive polling으로 스킵된 org
+      const skippedOrgs = []; // Orgs skipped by adaptive polling
 
       // Load adaptive poll state
       const { orgPollState: _pollState } = await chrome.storage.local.get({ orgPollState: {} });
@@ -780,7 +780,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           }
 
           let extraPlan = await refineTeamPlan(detectPlan(extraOrg), extraOrg.uuid);
-          // allSeatTiers에서 해당 org의 seat_tier 조회 (서버 전송용)
+          // Look up this org's seat_tier from allSeatTiers (for server submission)
           const acctCache = await chrome.storage.local.get({ accountCache: null });
           const extraSeatTier = acctCache.accountCache?.allSeatTiers?.[extraOrg.uuid] || null;
 
@@ -814,7 +814,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             is_heartbeat: !usageChanged,
           };
 
-          // usage API 성공 → orgUsageMap/successOrgs 즉시 채움 (서버 POST 결과 무관)
+          // Usage API success — populate orgUsageMap/successOrgs immediately (regardless of server POST result)
           successOrgs.push(extraOrg.uuid);
           orgUsageMap[extraOrg.uuid] = {
             h5: extraUsage.five_hour?.utilization ?? null, d7: extraUsage.seven_day?.utilization ?? null,
@@ -824,12 +824,12 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             resetsAt7d: normalizeResetTime(extraUsage.seven_day?.resets_at) || null,
             extraUsage: normalizeExtraUsage(extraUsage.extra_usage),
           };
-          // extra org 히스토리도 저장 (org별 뷰용)
+          // Save extra org history too (for per-org view)
           await appendUsageHistory(buildHistoryPoint(extraSnapshot, extraPlan));
           const tierTag = orgPollState[extraOrg.uuid].tier !== 'active' ? ` [${orgPollState[extraOrg.uuid].tier}]` : '';
           console.log(`[Claude Tuner] Extra org snapshot: ${extraOrg.name} (${extraPlan})${tierTag}${usageChanged ? '' : ' [heartbeat]'}`);
 
-          // 서버 POST: fire-and-forget
+          // Server POST: fire-and-forget
           fetch(`${config.serverUrl}/api/snapshots`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
@@ -840,7 +840,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
           });
         } catch (e) {
-          // 403/401 = org에서 제거됨, 429 = 레이트리밋 등 — 다른 org 수집은 계속
+          // 403/401 = removed from org, 429 = rate limited, etc. — continue collecting other orgs
           failedOrgs.push({ uuid: extraOrg.uuid, name: extraOrg.name, reason: e.message });
           console.warn(`[Claude Tuner] Extra org ${extraOrg.name} failed:`, e.message);
         }
@@ -861,7 +861,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           failedOrgs.map(f => `${f.name}(${f.reason})`).join(', '));
       }
 
-      // 수집된 org 목록 저장 (성공한 org만 popup에 표시, 사용률 포함)
+      // Save collected org list (only successful orgs shown in popup, with usage data)
       const collectedOrgsRaw = targetOrgs.filter(o => successOrgs.includes(o.uuid));
       const collectedOrgs = [];
       for (const o of collectedOrgsRaw) {
@@ -896,13 +896,13 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         || (prevStatus?.success ? prevStatus?.timestamp : null),
     });
 
-    // 수집 실패 시 에러 배지 표시 + 수집 중단 알림 체크
+    // On collection failure: show error badge + check collect-fail notification
     updateBadgeError();
     await checkCollectFailNotification(errorMsg);
 
     sendGAEvent('collect_fail', { error: errorMsg.slice(0, 100) });
 
-    // 6시간 간격으로 heartbeat 전송 (연결 실패 상태 서버에 알림)
+    // Send heartbeat every 6 hours (notify server of connection failure state)
     try {
       const { lastHeartbeatAt } = await chrome.storage.local.get('lastHeartbeatAt');
       if (!lastHeartbeatAt || (Date.now() - lastHeartbeatAt) >= HEARTBEAT_INTERVAL_MS) {

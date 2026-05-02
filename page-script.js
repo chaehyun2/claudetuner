@@ -1,5 +1,5 @@
-// 페이지의 MAIN world에서 실행 (document_start)
-// window.fetch를 통해 호출하여 페이지의 인증 인터셉터를 거침
+// Runs in the page's MAIN world (document_start)
+// Uses window.fetch to go through the page's auth interceptors
 if (!window.__claudeTunerBridge) {
   window.__claudeTunerBridge = true;
 
@@ -25,7 +25,7 @@ if (!window.__claudeTunerBridge) {
         return;
       }
 
-      // JSON 아닌 응답 처리 (예: 204 No Content)
+      // Handle non-JSON responses (e.g., 204 No Content)
       const contentType = resp.headers.get('content-type') || '';
       let data;
       if (contentType.includes('application/json')) {

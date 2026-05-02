@@ -2,12 +2,12 @@ import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT } from './consta
 import { bt } from './i18n.js';
 import { getLastStatus } from './storage.js';
 
-// === 수집 실패 알림 (3단계 에스컬레이션) ===
+// === Collection failure notification (3-stage escalation) ===
 export async function checkCollectFailNotification(errorMsg) {
   const { notifyCollectFail = true } = await chrome.storage.sync.get({ notifyCollectFail: true });
   if (!notifyCollectFail) return;
 
-  // rate limit은 알림 대상 아님 (사용 중인 상태)
+  // Rate limit is not a notification target (user is actively using)
   if (errorMsg.includes('err_rate_limit')) return;
 
   const { collectFailState = {} } = await chrome.storage.local.get({ collectFailState: {} });
@@ -16,10 +16,10 @@ export async function checkCollectFailNotification(errorMsg) {
     ? (status?.lastSuccessTimestamp || null)
     : null;
 
-  // 비활성 유저 (7일 이상 수집 없음) → 알림 안 함
+  // Inactive user (no collection for 7+ days) → skip notification
   if (lastSuccess && (Date.now() - lastSuccess) > 7 * 24 * 60 * 60 * 1000) return;
 
-  // 첫 실패 기록
+  // Record first failure
   if (!collectFailState.firstFailAt) {
     await chrome.storage.local.set({
       collectFailState: {
@@ -32,7 +32,7 @@ export async function checkCollectFailNotification(errorMsg) {
     return;
   }
 
-  // === 최초 수집 미성공 (firstrun): 한 번도 성공한 적 없는 경우 ===
+  // === First-run: never collected successfully before ===
   if (!lastSuccess && !status?.lastSuccessTimestamp) {
     const failDurationFirstrun = Date.now() - collectFailState.firstFailAt;
     if (failDurationFirstrun >= 10 * 60 * 1000 && collectFailState.stage !== 'first-run') {
@@ -51,7 +51,7 @@ export async function checkCollectFailNotification(errorMsg) {
     return;
   }
 
-  // 에피소드 중 액션 필요 에러 발생 여부 업데이트
+  // Update whether an actionable error occurred during this episode
   const isActionable = collectFailState.hasActionableError || ACTIONABLE_ERRORS.some(e => errorMsg.includes(e));
   if (isActionable !== collectFailState.hasActionableError) {
     collectFailState.hasActionableError = isActionable;
@@ -61,10 +61,10 @@ export async function checkCollectFailNotification(errorMsg) {
   const failDuration = Date.now() - collectFailState.firstFailAt;
   const currentStage = collectFailState.stage || 'none';
 
-  // 단계 결정
-  const FIRST_DELAY = isActionable ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000; // 30분 / 2시간
-  const REMINDER_DELAY = 4 * 60 * 60 * 1000;  // 4시간
-  const FINAL_DELAY = 24 * 60 * 60 * 1000;    // 24시간
+  // Determine stage
+  const FIRST_DELAY = isActionable ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000; // 30min / 2h
+  const REMINDER_DELAY = 4 * 60 * 60 * 1000;  // 4 hours
+  const FINAL_DELAY = 24 * 60 * 60 * 1000;    // 24 hours
 
   let targetStage = 'none';
   if (failDuration >= FINAL_DELAY) targetStage = 'final';
@@ -74,7 +74,7 @@ export async function checkCollectFailNotification(errorMsg) {
   const STAGE_ORDER = { none: 0, first: 1, reminder: 2, final: 3 };
   if (STAGE_ORDER[targetStage] <= STAGE_ORDER[currentStage]) return;
 
-  // 알림 발송
+  // Send notification
   const hours = Math.round(failDuration / (60 * 60 * 1000));
   let title, message, notifId;
 
@@ -100,8 +100,8 @@ export async function checkCollectFailNotification(errorMsg) {
     priority: targetStage === 'first' ? 1 : 2,
   };
   if (isActionable && targetStage !== 'final') {
-    // final 단계에서는 버튼 불필요 (이미 안내 완료)
-    // transient에서는 버튼 불필요 (자동 재시도)
+    // No button needed at final stage (already informed)
+    // No button needed for transient errors (auto-retry)
   }
   if (isActionable) {
     opts.buttons = [{ title: await bt('cf_btn_open') }];
@@ -115,7 +115,7 @@ export async function checkCollectFailNotification(errorMsg) {
   await chrome.storage.local.set({ collectFailState });
 }
 
-// === 사용률 임계값 알림 ===
+// === Usage threshold alerts ===
 export async function checkUsageAlerts(snapshot) {
   const { thresholdWarn = 80, thresholdDanger = 95, notifyUsageAlert = true } = await chrome.storage.sync.get({ thresholdWarn: 80, thresholdDanger: 95, notifyUsageAlert: true });
   if (!notifyUsageAlert) return;
@@ -125,7 +125,7 @@ export async function checkUsageAlerts(snapshot) {
     chrome.storage.local.get({ usageAlertState: {} }, resolve)
   );
 
-  // 5h, 7d 각각 체크
+  // Check 5h and 7d separately
   const checks = [
     { key: '5h', util: snapshot.five_hour.utilization, i18nKey: 'alert_5h' },
     { key: '7d', util: snapshot.seven_day.utilization, i18nKey: 'alert_7d' },
@@ -156,19 +156,19 @@ export async function checkUsageAlerts(snapshot) {
   await chrome.storage.local.set({ usageAlertState });
 }
 
-// === 주간 사용 리포트 ===
-// 매주 월요일 09:00에 알람 예약
+// === Weekly usage report ===
+// Schedule alarm for every Monday at 09:00
 export async function scheduleWeeklyReport() {
   const existing = await chrome.alarms.get(ALARM_WEEKLY_REPORT);
-  if (existing) return; // 이미 예약됨
+  if (existing) return; // Already scheduled
 
-  // 다음 월요일 09:00 계산
+  // Calculate next Monday 09:00
   const now = new Date();
-  const dayOfWeek = now.getDay(); // 0=일, 1=월, ...
-  // 월요일 09:00 전이면 오늘, 아니면 다음 월요일
+  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon, ...
+  // If before Monday 09:00, use today; otherwise next Monday
   let daysUntilMonday;
   if (dayOfWeek === 1 && now.getHours() < 9) {
-    daysUntilMonday = 0; // 오늘 월요일, 아직 09:00 전
+    daysUntilMonday = 0; // Today is Monday, still before 09:00
   } else {
     daysUntilMonday = dayOfWeek === 0 ? 1 : dayOfWeek === 1 ? 7 : (8 - dayOfWeek);
   }
@@ -179,7 +179,7 @@ export async function scheduleWeeklyReport() {
   const delayMs = nextMonday.getTime() - Date.now();
   chrome.alarms.create(ALARM_WEEKLY_REPORT, {
     delayInMinutes: delayMs / 60000,
-    periodInMinutes: 7 * 24 * 60, // 매주 반복
+    periodInMinutes: 7 * 24 * 60, // Repeat weekly
   });
   console.log(`[Claude Tuner] Weekly report scheduled for ${nextMonday.toISOString()}`);
 }

@@ -28,13 +28,13 @@ export async function getLastStatus() {
   });
 }
 
-// 사용률 히스토리 (최근 30일 보관, 스파크라인은 24시간만 표시)
+// Usage history (kept for 30 days; sparkline only shows 24h)
 export async function appendUsageHistory(point) {
   return new Promise((resolve) => {
     chrome.storage.local.get({ usageHistory: [] }, (result) => {
       const history = result.usageHistory;
       history.push(point);
-      // 보관 기간 이전 데이터 제거
+      // Remove data older than retention period
       const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
       const trimmed = history.filter((p) => p.t > cutoff);
       chrome.storage.local.set({ usageHistory: trimmed }, resolve);
@@ -42,12 +42,12 @@ export async function appendUsageHistory(point) {
   });
 }
 
-// 서버 스냅샷을 로컬 히스토리에 병합 (r7 데이터 부트스트랩)
+// Merge server snapshots into local history (r7 data bootstrap)
 export async function mergeServerSnapshots(serverSnaps, currentPlan, orgUuid) {
   return new Promise((resolve) => {
     chrome.storage.local.get({ usageHistory: [] }, (result) => {
       const history = result.usageHistory;
-      const existingTimes = new Set(history.map(p => Math.round(p.t / 60000))); // 분 단위 중복 체크
+      const existingTimes = new Set(history.map(p => Math.round(p.t / 60000))); // Deduplicate at minute granularity
       let added = 0;
       for (const s of serverSnaps) {
         const t = new Date(s.collected_at).getTime();

@@ -2,23 +2,23 @@ let _currentPlan = null;
 let _usageHistory = [];
 let _currentSnapshot = null;
 let _orgList = null; // cached org list
-let _selectedOrgId = null; // 선택된 org UUID (multi-org 뷰)
-let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOrg 등)
-let _isAutoOrg = true; // auto 모드 (selectedOrgId가 null이면 auto)
-let _autoFollowing = true; // auto 모드에서 쿠키 변경 시 뷰도 따라가는지 (다른 칩 클릭 시 false)
-let _lastRecommendation = null; // cached recommendation (primary org 복귀 시 복원용)
+let _selectedOrgId = null; // selected org UUID (multi-org view)
+let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOrg, etc.)
+let _isAutoOrg = true; // auto mode (auto when selectedOrgId is null)
+let _autoFollowing = true; // whether view follows cookie changes in auto mode (false when another chip is clicked)
+let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
 
-// 선택된 org에 해당하는 히스토리만 반환
+// Return only history matching the selected org
 function _filteredHistory() {
   if (!_selectedOrgId) return _usageHistory;
-  // primary org 선택 시 legacy(org 필드 없는) 히스토리도 포함
+  // Include legacy history (without org field) when primary org is selected
   const isPrimarySelected = _collectedOrgs.find(o => o.uuid === _selectedOrgId)?.isPrimary;
   return _usageHistory.filter(p =>
     p.org === _selectedOrgId || (!p.org && isPrimarySelected)
   );
 }
 
-// === 공지사항 ===
+// === Announcements ===
 const ANNOUNCEMENT_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/announcements';
 
 function _compareVersions(a, b) {
@@ -36,7 +36,7 @@ function _compareVersions(a, b) {
 function _sanitizeNoticeHtml(html) {
   if (!html) return '';
   const SITE = 'https://claudetuner.com';
-  // DOM 기반 sanitizer: a, br 태그만 허용, 나머지 제거
+  // DOM-based sanitizer: allow only a, br tags, remove the rest
   const doc = new DOMParser().parseFromString(html, 'text/html');
   function walk(node) {
     let out = '';
@@ -84,14 +84,14 @@ async function loadPopupAnnouncements() {
     const extVer = chrome.runtime.getManifest().version;
     const userLang = getLang(); // 'ko' or 'en'
     _popupNoticeList = list.filter(n => {
-      // min_version이 있으면 현재 확장 프로그램 버전이 그 이상인 경우만 표시
+      // Only show if current extension version meets min_version requirement
       if (n.min_version && !_compareVersions(extVer, n.min_version)) return false;
-      // lang이 지정된 공지는 해당 언어 사용자에게만 표시
+      // Only show lang-specific announcements to matching language users
       if (n.lang && n.lang !== userLang) return false;
       return true;
     });
     renderPopupNotices();
-  } catch(e) {} // 공지 실패 무시
+  } catch(e) {} // Silently ignore announcement fetch failures
 }
 
 function renderPopupNotices() {
@@ -104,7 +104,7 @@ function renderPopupNotices() {
     const dismissed = result.ct_dismissed_notices || [];
     const active = _popupNoticeList.filter(n => !dismissed.includes(n.id));
 
-    // 헤더 아이콘 + 뱃지
+    // Header icon + badge
     if (toggleBtn) {
       if (_popupNoticeList.length > 0) {
         toggleBtn.style.display = '';
@@ -117,7 +117,7 @@ function renderPopupNotices() {
       }
     }
 
-    // 최신순
+    // Sort by newest first
     active.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
     let html = '';
@@ -139,7 +139,7 @@ function renderPopupNotices() {
     }
     container.innerHTML = html;
 
-    // 헤더 클릭 → URL 있으면 Notion 페이지 열기, 없으면 body 토글
+    // Header click: open Notion page if URL exists, otherwise toggle body
     container.querySelectorAll('.notice-header').forEach(hdr => {
       hdr.addEventListener('click', (e) => {
         if (e.target.closest('.notice-close')) return;
@@ -159,7 +159,7 @@ function renderPopupNotices() {
       });
     });
 
-    // 닫기 버튼 이벤트
+    // Close button event
     container.querySelectorAll('.notice-close').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -172,25 +172,25 @@ function renderPopupNotices() {
       });
     });
 
-    // 공지 0건이면 패널 자동 닫기
+    // Auto-close panel if no active announcements
     if (active.length === 0) {
       container.style.display = 'none';
     }
   });
 }
 
-// === 조직 선택 ===
+// === Organization Selection ===
 function loadOrgSelector() {
   chrome.runtime.sendMessage({ type: 'GET_ORGANIZATIONS' }, (res) => {
     if (chrome.runtime.lastError || !res?.success) return;
     const orgs = res.orgs;
     _orgList = orgs;
-    if (orgs.length < 2) return; // 조직이 1개면 선택 불필요
+    if (orgs.length < 2) return; // No selector needed for single org
 
     const container = document.getElementById('org-selector');
     if (!container) return;
 
-    // 멀티 org: collectedOrgs가 있으면 수집 중인 org 배지 표시
+    // Multi-org: show collected org badges if collectedOrgs exists
     chrome.storage.local.get({ collectedOrgs: null }, (local) => {
       _collectedOrgs = local.collectedOrgs || [];
       if (local.collectedOrgs && local.collectedOrgs.length > 0) {
@@ -198,7 +198,7 @@ function loadOrgSelector() {
         return;
       }
 
-      // 하위 호환: 기존 selectedOrgId 처리
+      // Backward compatibility: handle existing selectedOrgId
       chrome.storage.sync.get({ selectedOrgId: null }, (config) => {
         if (config.selectedOrgId) {
           showOrgBadge(orgs, config.selectedOrgId);
@@ -240,7 +240,7 @@ function selectOrg(orgId, container) {
 
   _selectedOrgId = orgId;
 
-  // collectedOrgs에서 선택된 org 데이터 조회
+  // Look up selected org data from collectedOrgs
   chrome.storage.local.get({ collectedOrgs: [] }, (local) => {
     _collectedOrgs = local.collectedOrgs || [];
     const orgData = _collectedOrgs.find(o => o.uuid === orgId);
@@ -250,20 +250,20 @@ function selectOrg(orgId, container) {
     const isEnterprise = /Enterprise/i.test(orgData.plan);
     const isUsageBased = isEnterprise && orgData.h5 == null && orgData.d7 == null;
 
-    // resets_at: collectedOrgs에서 우선, primary fallback
+    // resets_at: prefer collectedOrgs, fallback to primary
     const resetsAt5h = orgData.resetsAt5h || (isPrimary ? _currentSnapshot?.five_hour?.resets_at : null);
     const resetsAt7d = orgData.resetsAt7d || (isPrimary ? _currentSnapshot?.seven_day?.resets_at : null);
 
-    // === 1. 플랜 표시 ===
+    // === 1. Display plan ===
     const planEl = document.getElementById('plan');
     if (planEl) planEl.textContent = orgData.plan || '';
 
-    // === 2. 게이지 갱신 ===
+    // === 2. Update gauges ===
     const gaugeSection = document.getElementById('gauge-section');
     const renewalGroup = document.getElementById('renewal-group');
 
     if (isUsageBased) {
-      // Usage-based Enterprise: spending cap 게이지
+      // Usage-based Enterprise: spending cap gauge
       if (renewalGroup) renewalGroup.style.display = 'none';
       if (orgData.spendLimit) {
         const usedDollars = Math.round((orgData.spendUsed || 0) / 100);
@@ -283,7 +283,7 @@ function selectOrg(orgId, container) {
           + '</div>';
       }
     } else {
-      // 5h/7d 게이지 (Pro/Max/Team/Enterprise seat-based 공통)
+      // 5h/7d gauge (common for Pro/Max/Team/Enterprise seat-based)
       if (isEnterprise || !isPrimary) {
         if (renewalGroup) renewalGroup.style.display = 'none';
       } else if (isPrimary && _currentSnapshot?.subscription?.renewal_date && renewalGroup) {
@@ -306,7 +306,7 @@ function selectOrg(orgId, container) {
         document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
         renderGaugePrediction('7d', hist, 'd7', util7d, resetsAt7d);
       } else {
-        // 7d 데이터 없는 플랜
+        // Plan without 7d data
         const g7dVal = document.getElementById('gauge-7d-value');
         if (g7dVal) {
           g7dVal.textContent = 'N/A';
@@ -315,7 +315,7 @@ function selectOrg(orgId, container) {
         const g7dFill = document.getElementById('gauge-7d-fill');
         if (g7dFill) g7dFill.style.width = '0';
       }
-      // 리셋 시간 표시
+      // Display reset time
       if (resetsAt5h) {
         const r5h = document.getElementById('gauge-5h-reset');
         if (r5h) r5h.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>`;
@@ -326,7 +326,7 @@ function selectOrg(orgId, container) {
       }
     }
 
-    // === 3. Extra usage 섹션 ===
+    // === 3. Extra usage section ===
     const extraSection = document.getElementById('extra-usage-section');
     if (extraSection) {
       const eu = orgData.extraUsage;
@@ -358,7 +358,7 @@ function selectOrg(orgId, container) {
     const pendingRow = document.getElementById('pending-row');
     const cancelDowngradeBtn = document.getElementById('cancel-downgrade-btn');
     if (isPrimary) {
-      // primary: _currentSnapshot에서 subscription 복원
+      // primary: restore subscription from _currentSnapshot
       if (_currentSnapshot?.subscription?.pending_plan) {
         if (pendingRow) {
           pendingRow.classList.remove('hidden');
@@ -372,7 +372,7 @@ function selectOrg(orgId, container) {
         if (cancelDowngradeBtn) cancelDowngradeBtn.classList.add('hidden');
       }
     } else {
-      // non-primary: subscription 정보 없음
+      // non-primary: no subscription info available
       if (renewalGroup) renewalGroup.style.display = 'none';
       if (pendingRow) pendingRow.classList.add('hidden');
       if (cancelDowngradeBtn) cancelDowngradeBtn.classList.add('hidden');
@@ -382,11 +382,11 @@ function selectOrg(orgId, container) {
     const recRow = document.getElementById('recommendation-row');
     const recDetail = document.getElementById('smart-rec-detail');
     if (isPrimary && _lastRecommendation) {
-      // primary: 캐시된 recommendation 복원
+      // primary: restore cached recommendation
       if (recRow) recRow.classList.remove('hidden');
       _renderRecommendation(_lastRecommendation);
     } else {
-      // non-primary: recommendation 없음
+      // non-primary: no recommendation available
       if (recRow) recRow.classList.add('hidden');
       if (recDetail) recDetail.classList.add('hidden');
     }
@@ -404,8 +404,8 @@ function selectOrg(orgId, container) {
     if (!isPrimary || isEnterprise) {
       if (fitnessSection) fitnessSection.classList.add('hidden');
     } else {
-      // primary + non-Enterprise: 이미 캐시된 데이터 있으면 표시 (loadFitnessMatrix가 관리)
-      // 숨겨진 상태였다면 다시 표시 시도
+      // primary + non-Enterprise: show if cached data exists (managed by loadFitnessMatrix)
+      // Try to re-show if it was hidden
       chrome.storage.local.get({ fitnessCache: null }, (fc) => {
         if (fc.fitnessCache?.data && fitnessSection) {
           fitnessSection.classList.remove('hidden');
@@ -413,7 +413,7 @@ function selectOrg(orgId, container) {
       });
     }
 
-    // === 8. 차트 갱신 — clean snapshot ===
+    // === 8. Update charts — clean snapshot ===
     const orgPlan = orgData.plan || _currentPlan;
     const orgSnapshot = {
       plan: orgPlan,
@@ -421,7 +421,7 @@ function selectOrg(orgId, container) {
       seven_day: { utilization: orgData.d7, resets_at: resetsAt7d },
       extra_usage: orgData.extraUsage || (orgData.spendLimit ? { used_credits: orgData.spendUsed, monthly_limit: orgData.spendLimit } : null),
     };
-    // Enterprise usage-based: 5h/7d 탭 롤링 불필요 → 멈춤. 다른 org 전환 시 복원
+    // Enterprise usage-based: no 5h/7d tab rolling needed, stop it. Restored on org switch
     if (isUsageBased) {
       _stopChartAutoRoll();
     } else if (_chartAutoRoll && !_chartRollIntervalId) {
@@ -431,33 +431,36 @@ function selectOrg(orgId, container) {
       drawCharts(hist, orgPlan, orgSnapshot);
     }
 
-    // === 9. 상태 배너 ===
+    // === 9. Status banner ===
     if (isUsageBased) {
-      // Enterprise usage-based: 5h/7d 없으므로 배너 숨김
+      // Enterprise usage-based: hide banner since no 5h/7d data
       const banner = document.getElementById('status-banner');
       if (banner) banner.classList.add('hidden');
     } else if (hist.length >= 3) {
       renderStatusBanner(orgData.h5 ?? null, orgData.d7 ?? null, hist, resetsAt5h, resetsAt7d);
     }
+
+    // Peak hours banner
+    renderPeakBanner();
   });
 
   if (container) {
     setTimeout(() => container.classList.add('hidden'), 300);
   }
 
-  // org 칩 활성 상태 업데이트
+  // Update org chip active state
   document.querySelectorAll('.org-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset?.orgId === orgId);
   });
 }
 
 function showMultiOrgBadges(collectedOrgs) {
-  if (collectedOrgs.length < 2) return; // 2개 이상일 때만 표시
+  if (collectedOrgs.length < 2) return; // Only show when 2 or more orgs
 
   const userInfo = document.getElementById('user-info');
   if (!userInfo) return;
 
-  // 기존 표시 제거
+  // Remove existing display
   const existing = document.getElementById('org-chips');
   if (existing) existing.remove();
   const existingBadge = document.getElementById('org-badge');
@@ -467,7 +470,7 @@ function showMultiOrgBadges(collectedOrgs) {
   wrapper.id = 'org-chips';
   wrapper.className = 'org-chips';
 
-  // Auto 토글 행 + 설명
+  // Auto toggle row + description
   const autoRow = document.createElement('div');
   autoRow.className = 'org-auto-row';
   const autoLabel = document.createElement('label');
@@ -487,12 +490,12 @@ function showMultiOrgBadges(collectedOrgs) {
 
   autoCheckbox.addEventListener('change', () => {
     _isAutoOrg = autoCheckbox.checked;
-    _autoFollowing = _isAutoOrg; // Auto ON → 따라가기 복귀
+    _autoFollowing = _isAutoOrg; // Auto ON: resume following
     autoDesc.textContent = _isAutoOrg ? t('org_auto_on') : t('org_auto_off');
     if (_isAutoOrg) {
-      // Auto ON: selectedOrgId 리셋, 쿠키에서 현재 활성 org 읽어서 즉시 전환
+      // Auto ON: reset selectedOrgId, read current active org from cookie and switch immediately
       chrome.storage.sync.set({ selectedOrgId: null });
-      // 쿠키에서 직접 읽기 (background 메시지 대신 — side panel 호환)
+      // Read directly from cookie (instead of background message — side panel compatible)
       chrome.cookies.get({ name: 'lastActiveOrg', url: 'https://claude.ai' }, (cookie) => {
         const cookieOrgId = cookie?.value || null;
         const target = (cookieOrgId && _collectedOrgs.find(o => o.uuid === cookieOrgId))
@@ -510,7 +513,7 @@ function showMultiOrgBadges(collectedOrgs) {
     }
   });
 
-  // 정렬: 개인 → 팀 → Enterprise
+  // Sort: Personal > Team > Enterprise
   const planOrder = (plan) => {
     if (/Enterprise/i.test(plan)) return 3;
     if (/Team/i.test(plan)) return 2;
@@ -518,7 +521,7 @@ function showMultiOrgBadges(collectedOrgs) {
   };
   const sorted = [...collectedOrgs].sort((a, b) => planOrder(a.plan) - planOrder(b.plan));
 
-  // 핀 SVGs
+  // Pin SVGs
   const pinSvgFilled = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5a.5.5 0 0 1-1 0V10h-4A.5.5 0 0 1 3 9.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/></svg>';
   const pinSvgOutline = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5a.5.5 0 0 1-1 0V10h-4A.5.5 0 0 1 3 9.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354m1.58 1.408l-.002-.001zm-.002-.001.002.001A.5.5 0 0 0 6 2v5a.5.5 0 0 1-.276.447h-.002l-.012.007-.054.03a5 5 0 0 0-.827.58c-.318.278-.585.596-.725.936h7.792c-.14-.34-.407-.658-.725-.936a5 5 0 0 0-.881-.61l-.012-.006h-.002A.5.5 0 0 1 10 7V2a.5.5 0 0 0 .295-.458 1.8 1.8 0 0 0 .351-.271q.088-.088.143-.173H5.211q.055.085.143.173c.12.12.27.227.35.271"/></svg>';
 
@@ -540,7 +543,7 @@ function showMultiOrgBadges(collectedOrgs) {
       usageText = org.d7 != null ? Math.round(org.d7) + '%' : '-';
     }
 
-    // Auto 모드: primary org에 ⚡ 뱃지 (뷰 selected와 별도로 활성 org 표시)
+    // Auto mode: show lightning badge on primary org (indicates active org, separate from view selection)
     var activeBadge = (_isAutoOrg && org.isPrimary) ? '<span class="org-chip-active" title="Active org">\u26A1</span>' : '';
 
     chip.innerHTML =
@@ -549,7 +552,7 @@ function showMultiOrgBadges(collectedOrgs) {
       activeBadge +
       '<span class="org-chip-usage">' + usageText + '</span>';
 
-    // 핀 아이콘: 항상 표시. 클릭 시 Auto OFF + 해당 org 고정
+    // Pin icon: always visible. Click to turn Auto OFF and pin to this org
     const pin = document.createElement('span');
     const isPinned = !_isAutoOrg && org.isPrimary;
     pin.className = 'org-chip-pin' + (isPinned ? ' active' : '');
@@ -557,13 +560,13 @@ function showMultiOrgBadges(collectedOrgs) {
     pin.title = t('org_set_primary');
     pin.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (isPinned) return; // 이미 고정된 org
-      // Auto OFF + 해당 org 고정
+      if (isPinned) return; // Already pinned to this org
+      // Auto OFF + pin to this org
       _isAutoOrg = false;
       _collectedOrgs.forEach(o => { o.isPrimary = (o.uuid === org.uuid); });
       chrome.storage.local.set({ collectedOrgs: _collectedOrgs });
       chrome.storage.sync.set({ selectedOrgId: org.uuid });
-      // 서버에 즉시 반영
+      // Sync to server immediately
       chrome.storage.sync.get({ serverUrl: '', apiKey: '' }, (cfg) => {
         if (!cfg.serverUrl || !cfg.apiKey) return;
         chrome.storage.local.get({ lastStatus: null }, (local) => {
@@ -579,7 +582,7 @@ function showMultiOrgBadges(collectedOrgs) {
       _selectedOrgId = org.uuid;
       selectOrg(org.uuid, null);
       showMultiOrgBadges(_collectedOrgs);
-      // 토스트
+      // Toast notification
       const toast = document.createElement('div');
       toast.textContent = t('org_primary_changed');
       toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1b4b;color:white;padding:8px 16px;border-radius:8px;font-size:11px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
@@ -589,7 +592,7 @@ function showMultiOrgBadges(collectedOrgs) {
     chip.appendChild(pin);
 
     chip.addEventListener('click', () => {
-      // Auto 모드: primary 칩 클릭 = 따라가기 복귀, 다른 칩 = 따라가기 해제
+      // Auto mode: clicking primary chip resumes following, other chips stop following
       if (_isAutoOrg) _autoFollowing = org.isPrimary;
       selectOrg(org.uuid, null);
     });
@@ -618,14 +621,14 @@ function showOrgBadge(orgs, selectedId) {
   userInfo.parentNode.insertBefore(badge, userInfo);
 }
 
-// === 차트 탭 상태 ===
+// === Chart tab state ===
 let _activeChartTab = '5h';
 let _chartRollIntervalId = null;
-let _chartAutoRoll = true; // 기본: 자동 롤링
+let _chartAutoRoll = true; // Default: auto-rolling enabled
 
 function _switchChartTab(target) {
   if (target === _activeChartTab) return;
-  // Enterprise spending 차트가 표시 중이면 5h/7d 전환하지 않음
+  // Don't switch 5h/7d when Enterprise spending chart is displayed
   const spendPane = document.getElementById('chart-pane-spend');
   if (spendPane && spendPane.style.display !== 'none') return;
   _activeChartTab = target;
@@ -659,7 +662,7 @@ function _toggleChartAutoRoll() {
   chrome.storage.local.set({ ct_chart_autoroll: _chartAutoRoll });
 }
 
-// 저장된 설정 로드 (명시적으로 false 설정한 경우만 끔)
+// Load saved settings (only disable if explicitly set to false)
 chrome.storage.local.get('ct_chart_autoroll', (r) => {
   if (r.ct_chart_autoroll === false) {
     _chartAutoRoll = false;
@@ -671,12 +674,12 @@ chrome.storage.local.get('ct_chart_autoroll', (r) => {
   }
 });
 
-// 팝업 언로드 시 타이머 정리
+// Clean up timers on popup unload
 window.addEventListener('unload', () => {
   _stopChartAutoRoll();
 });
 
-// === 플랜 적합도 매트릭스 ===
+// === Plan Fitness Matrix ===
 const FM_CACHE_TTL = 8 * 3600000; // 8h
 const FM_WINDOWS = ['24h', '7d', '14d'];
 
@@ -733,7 +736,7 @@ function renderFitnessMatrix(data) {
       let title = t(m.label);
       if (cell.projected != null) title += ' (' + Math.round(cell.projected) + '%)';
       if (cell.partial) title += ' *';
-      // 현재 플랜 + exceeded/tight 셀에 대기 시간 표시
+      // Show wait time for exceeded/tight cells on current plan
       if (plan.name === data.current_plan && data.wait_total && data.wait_total.total > 0 && (cell.level === 'exceeded' || cell.level === 'tight')) {
         const wt = data.wait_total;
         const _fmW = (m) => { const h = Math.floor(m/60); const mm = m%60; return h > 0 ? h + 'h ' + mm + 'm' : mm + 'm'; };
@@ -744,7 +747,7 @@ function renderFitnessMatrix(data) {
     html += '</tr>';
   }
   html += '</tbody></table>';
-  // 범례 + 사유보기
+  // Legend + view reasons
   const legend = [
     { cls: 'fm-exceeded', icon: '\u2715', label: t('fm_lv_exceeded') },
     { cls: 'fm-tight',    icon: '\u2713', label: t('fm_lv_tight') },
@@ -817,7 +820,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
   sendGAEvent('popup_open');
 
-  // 삭제된 계정 확인
+  // Check for deleted account
   const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
   if (account_deleted) {
     document.getElementById('status-indicator').className = 'status-dot red';
@@ -828,7 +831,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       + '<br><a id="recover-link" href="#" style="display:inline-block;margin-top:8px;padding:6px 14px;background:#7c3aed;color:#fff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">'
       + (t('account_recover_btn') || 'Recover Account') + '</a>';
     errorBanner.classList.remove('hidden');
-    // 힌트 영역 숨김
+    // Hide hint area
     const hintEl = errorBanner.querySelector('.error-hint');
     if (hintEl) hintEl.style.display = 'none';
     document.getElementById('recover-link').addEventListener('click', (e) => {
@@ -843,7 +846,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadOrgSelector();
   loadFitnessMatrix();
 
-  // 적합도 테이블 클릭 → 대시보드 (링크 클릭은 제외)
+  // Fitness table click opens dashboard (except link clicks)
   const fmSection = document.getElementById('fitness-section');
   if (fmSection) {
     fmSection.title = 'Dashboard';
@@ -853,7 +856,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // 공지 토글 버튼
+  // Announcement toggle button
   const noticeToggle = document.getElementById('notice-toggle-btn');
   const noticePanel = document.getElementById('ct-popup-notices');
   if (noticeToggle && noticePanel) {
@@ -872,15 +875,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       drawCharts(hist, _currentPlan, _currentSnapshot);
       if (_chartAutoRoll && !isUsageBasedEnt) _startChartAutoRoll();
     }
-    // 히스토리 로드 후 배너 갱신 (rate 기반 예측 반영)
+    // Refresh banner after history load (reflects rate-based prediction)
     if (hist.length >= 3 && _currentSnapshot) {
       const s = _currentSnapshot;
       renderStatusBanner(s.five_hour?.utilization ?? null, s.seven_day?.utilization ?? null, hist, s.five_hour?.resets_at, s.seven_day?.resets_at);
     }
   }
 
-  // 현재 상태 + 히스토리를 chrome.storage 에서 직접 로드
-  // selectedOrgId(sync)로 Auto/Manual + 선택 org 복원
+  // Load current status + history directly from chrome.storage
+  // Restore Auto/Manual + selected org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
     _isAutoOrg = !syncCfg.selectedOrgId;
 
@@ -888,17 +891,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       _usageHistory = result.usageHistory || [];
       _historyReady = true;
 
-      // 멀티 org: Manual이면 저장된 org, Auto면 primary org으로 초기화
+      // Multi-org: initialize with saved org for Manual, primary org for Auto
       const cOrgs = result.collectedOrgs || [];
       if (cOrgs.length >= 2) {
         _collectedOrgs = cOrgs;
         if (!_isAutoOrg && syncCfg.selectedOrgId) {
-          // Manual 모드: 사용자가 고정한 org 복원
+          // Manual mode: restore user-pinned org
           const manualOrg = cOrgs.find(o => o.uuid === syncCfg.selectedOrgId);
           if (manualOrg) _selectedOrgId = manualOrg.uuid;
           else _selectedOrgId = cOrgs.find(o => o.isPrimary)?.uuid || null;
         } else {
-          // Auto 모드: primary org
+          // Auto mode: primary org
           const primary = cOrgs.find(o => o.isPrimary);
           if (primary) _selectedOrgId = primary.uuid;
         }
@@ -918,15 +921,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 옵션에서 언어 변경 시 팝업 즉시 재렌더링
+  // Re-render popup immediately when language is changed in options
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.lang) {
       setLang(changes.lang.newValue);
-      // 동적 생성 텍스트를 포함한 전체 UI 재렌더링
+      // Full UI re-render including dynamically generated text
       chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
         if (r.lastStatus) {
-          // primary org uuid로 리셋 (null로 하면 멀티 org 히스토리 섞임)
+          // Reset to primary org uuid (null would mix multi-org histories)
           const cOrgs = r.collectedOrgs || [];
           _collectedOrgs = cOrgs.length >= 2 ? cOrgs : _collectedOrgs;
           const primary = _collectedOrgs.find(o => o.isPrimary);
@@ -940,17 +943,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             renderStatusBanner(_currentSnapshot.five_hour?.utilization ?? null, _currentSnapshot.seven_day?.utilization ?? null, hist, _currentSnapshot.five_hour?.resets_at, _currentSnapshot.seven_day?.resets_at);
           }
         }
-        // org 칩도 재렌더링 (플랜명 등 번역 반영)
+        // Re-render org chips too (reflects plan name translations, etc.)
         if (_collectedOrgs.length >= 2) showMultiOrgBadges(_collectedOrgs);
         loadFitnessMatrix();
       });
     }
   });
 
-  // 쿠키 org 변경 즉시 반영
+  // Immediately reflect cookie org changes
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type !== 'ORG_COOKIE_CHANGED' || !_isAutoOrg || !msg.orgId) return;
-    // ⚡ 뱃지 이동
+    // Move lightning badge
     document.querySelectorAll('#org-chips .org-chip-active').forEach(el => el.remove());
     const targetChip = document.querySelector('#org-chips .org-chip[data-org-id="' + msg.orgId + '"]');
     if (targetChip) {
@@ -962,7 +965,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (usageEl) targetChip.insertBefore(badge, usageEl);
       else targetChip.appendChild(badge);
     }
-    // 따라가기 모드면 뷰도 전환
+    // Switch view if in following mode
     if (_autoFollowing && _selectedOrgId !== msg.orgId) {
       _selectedOrgId = msg.orgId;
       document.querySelectorAll('#org-chips .org-chip').forEach(c => {
@@ -972,16 +975,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 백그라운드 수집 성공 시 자동 갱신 (사이드패널/팝업 열린 상태에서)
+  // Auto-refresh on background collection success (while side panel/popup is open)
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
 
-    // collectedOrgs 변경 시 org 칩 즉시 갱신
+    // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {
       _collectedOrgs = changes.collectedOrgs.newValue || [];
       if (_collectedOrgs.length >= 2) {
         showMultiOrgBadges(_collectedOrgs);
-        // 선택 중인 org 데이터 갱신 (뷰 전환 없이)
+        // Refresh selected org data (without switching view)
         if (_selectedOrgId) {
           selectOrg(_selectedOrgId, null);
         }
@@ -991,12 +994,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!changes.lastStatus) return;
     const status = changes.lastStatus.newValue;
     if (status) {
-      _usageHistory = []; // 히스토리는 별도 갱신
+      _usageHistory = []; // History is refreshed separately
       chrome.storage.local.get({ usageHistory: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
         updateUI(status);
-        // updateUI가 non-primary org 선택 시 early return하므로
-        // 아래 차트/배너는 primary 표시 중일 때만 실행
+        // Since updateUI early returns when non-primary org is selected,
+        // charts/banners below only execute when primary is displayed
         const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
         if (_selectedOrgId && selOrg && !selOrg.isPrimary) return;
         _currentPlan = status?.snapshot?.plan || null;
@@ -1010,7 +1013,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 수동 수집 버튼
+  // Manual collection button
   document.getElementById('collect-btn').addEventListener('click', () => {
     const btn = document.getElementById('collect-btn');
     btn.disabled = true;
@@ -1021,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       btn.disabled = false;
       btn.classList.remove('loading');
       btn.textContent = t('btn_collect');
-      // 온보딩 CTA 리셋
+      // Reset onboarding CTA
       const obBtn = document.getElementById('ob-collect-btn');
       if (obBtn) { obBtn.disabled = false; obBtn.textContent = t('ob_cta'); }
 
@@ -1030,9 +1033,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      // 성공/실패 모두 저장된 lastStatus로 UI 갱신 (error banner 포함)
+      // Update UI with saved lastStatus for both success/failure (including error banner)
       chrome.storage.local.get({ lastStatus: null, usageHistory: [] }, (r) => {
-        // 히스토리를 먼저 할당해야 updateUI → renderGaugePrediction에서 참조 가능
+        // Must assign history first so updateUI -> renderGaugePrediction can reference it
         _usageHistory = r.usageHistory || [];
         const s = r.lastStatus;
         if (s) {
@@ -1040,7 +1043,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           _currentPlan = s?.snapshot?.plan || null;
           _currentSnapshot = s?.snapshot || null;
         }
-        // non-primary org 선택 중이면 차트/배너는 selectOrg가 처리
+        // If non-primary org is selected, charts/banners are handled by selectOrg
         const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
         if (_selectedOrgId && selOrg && !selOrg.isPrimary) return;
         const hist2 = _filteredHistory();
@@ -1050,22 +1053,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
       if (result && result.success) {
-        // 첫 수집 성공 후 org selector 재확인 (미표시 상태였으면 표시)
+        // Re-check org selector after first successful collection (show if previously hidden)
         if (!_orgList) loadOrgSelector();
-        // org 칩 사용률 갱신
+        // Refresh org chip usage rates
         chrome.storage.local.get({ collectedOrgs: null }, (local) => {
           _collectedOrgs = local.collectedOrgs || [];
           if (local.collectedOrgs && local.collectedOrgs.length >= 2) {
             showMultiOrgBadges(local.collectedOrgs);
           }
         });
-        // 적합도 캐시 무효화 → 재로드
+        // Invalidate fitness cache and reload
         chrome.storage.local.remove('fitnessCache', () => loadFitnessMatrix());
       }
     });
   });
 
-  // 온보딩 CTA 버튼 → 수집 시작
+  // Onboarding CTA button -> start collection
   document.getElementById('ob-collect-btn').addEventListener('click', () => {
     document.getElementById('collect-btn').click();
     const obBtn = document.getElementById('ob-collect-btn');
@@ -1073,10 +1076,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     obBtn.textContent = t('ob_collecting');
   });
 
-  // 사이드패널 / 팝업 모드 전환
+  // Side panel / popup mode switch
   const openTabBtn = document.getElementById('open-tab-btn');
 
-  // 사이드패널 핀 안내 (1회성)
+  // Side panel pin hint (one-time)
   chrome.storage.local.get({ pinHintDismissed: false, preferSidePanel: true, lastStatus: null }, (ph) => {
     if (ph.preferSidePanel && !ph.pinHintDismissed) {
       const pinHint = document.getElementById('pin-hint');
@@ -1084,7 +1087,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (pinHint && pinText) {
         const pinSvg = '<svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-3px"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" fill="none" stroke="#5b21b6" stroke-width="1.5"/></svg>';
         pinText.innerHTML = t('pin_hint_text_html').replace('{pin}', pinSvg);
-        // 실제 사용률로 배지 표시
+        // Show badge with actual utilization
         const snap = ph.lastStatus?.snapshot;
         const badgeEl = document.getElementById('pin-hint-badge');
         if (badgeEl && snap) {
@@ -1104,16 +1107,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // preferSidePanel 기반으로 모드 결정
+  // Determine mode based on preferSidePanel
   chrome.storage.local.get({ preferSidePanel: true }, (r) => {
     if (r.preferSidePanel) {
-      // 사이드패널 모드: "팝업으로 돌아가기" 버튼
+      // Side panel mode: "Switch to popup" button
       openTabBtn.title = t('btn_back_popup') || 'Switch to popup';
       openTabBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm10 0v12h3V4h-3zM4 4v12h7V4H4z" clip-rule="evenodd"/></svg>';
       openTabBtn.addEventListener('click', async () => {
         await chrome.storage.local.set({ preferSidePanel: false });
         chrome.runtime.sendMessage({ type: 'SET_SIDE_PANEL_MODE', enabled: false });
-        // 토스트 표시 후 페이드아웃 → 닫기
+        // Show toast, fade out, then close
         const toast = document.createElement('div');
         toast.textContent = t('toast_popup_next') || 'Next time it will open as a popup';
         toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1b4b;color:white;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
@@ -1122,7 +1125,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         setTimeout(() => { window.close(); }, 1800);
       });
     } else {
-      // 팝업 모드: sidePanel API 없으면 전환 버튼 숨김 (Arc 등)
+      // Popup mode: hide switch button if sidePanel API is unavailable (e.g. Arc)
       if (!(chrome.sidePanel && chrome.sidePanel.open)) {
         openTabBtn.style.display = 'none';
       } else {
@@ -1141,25 +1144,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 설정 페이지 열기
+  // Open settings page
   document.getElementById('options-btn').addEventListener('click', () => {
     chrome.runtime.openOptionsPage();
   });
 
-  // 차트 탭 전환
+  // Chart tab switching
   document.querySelectorAll('.chart-tab').forEach(tab => {
     if (tab.id === 'chart-autoroll-btn') {
-      // ▶/⏸ 토글 버튼
+      // Play/Pause toggle button
       tab.addEventListener('click', (e) => {
         e.stopPropagation();
         _toggleChartAutoRoll();
       });
     } else {
-      // 5h/7d 탭 수동 클릭
+      // 5h/7d tab manual click
       tab.addEventListener('click', (e) => {
         e.stopPropagation();
         _switchChartTab(tab.dataset.tab);
-        // 수동 클릭 시 자동 롤링 중이면 타이머 리셋
+        // Reset timer if auto-rolling on manual click
         if (_chartAutoRoll && _chartRollIntervalId) {
           _stopChartAutoRoll();
           _startChartAutoRoll();
@@ -1167,12 +1170,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     }
   });
-  // 차트 카드 클릭 → 대시보드
+  // Chart card click opens dashboard
   document.getElementById('chart-section').addEventListener('click', () => {
     chrome.tabs.create({ url: 'https://claudetuner.com/dashboard' });
   });
 
-  // 스마트 추천 무시 버튼
+  // Smart recommendation dismiss button
   document.getElementById('smart-rec-dismiss').addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'DISMISS_RECOMMENDATION' }, () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
@@ -1186,7 +1189,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 스마트 추천 영구 중지 버튼
+  // Smart recommendation permanent mute button
   document.getElementById('smart-rec-mute').addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'MUTE_RECOMMENDATION' }, () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
@@ -1196,7 +1199,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 스마트 추천 실행 버튼
+  // Smart recommendation execute button
   document.getElementById('smart-rec-btn').addEventListener('click', () => {
     const btn = document.getElementById('smart-rec-btn');
     btn.disabled = true;
@@ -1221,7 +1224,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 플랜 변경 오더 배너 렌더링
+  // Render plan change order banner
   chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null }, (store) => {
     const po = store.pendingPlanOrder;
     const completed = store.completedPlanOrder;
@@ -1244,7 +1247,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const diffStr = diff > 0 ? `+$${diff}` : `-$${Math.abs(diff)}`;
       document.getElementById('plan-order-cost').textContent = `$${fromCost}/${t('month_short')} → $${toCost}/${t('month_short')} (${diffStr})`;
     } else if (completed && Date.now() - completed.completedAt < 3600000) {
-      // 최근 1시간 내 완료된 오더 — 성공 안내
+      // Order completed within the last hour — success notice
       const HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
       const isUp = HIERARCHY.indexOf(completed.to_plan) > HIERARCHY.indexOf(completed.from_plan);
       let dDesc = t('plan_downgrade_desc');
@@ -1263,19 +1266,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 플랜 변경 오더 수락/거절 버튼
+  // Plan change order accept/reject buttons
   document.getElementById('plan-order-accept').addEventListener('click', () => {
     const btn = document.getElementById('plan-order-accept');
     btn.disabled = true;
     btn.textContent = t('changing') || '변경 중...';
-    // 오더 정보 저장 (응답 후 참조)
+    // Save order info (referenced after response)
     const _po = (() => { try { return JSON.parse(document.getElementById('plan-order-banner').dataset.po || '{}'); } catch { return {}; } })();
     chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'accept' }, (res) => {
       if (res?.success) {
         const HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
         const isUpgrade = HIERARCHY.indexOf(_po.to_plan) > HIERARCHY.indexOf(_po.from_plan);
         const banner = document.getElementById('plan-order-banner');
-        // 배너를 성공 안내로 전환
+        // Switch banner to success notice
         banner.style.background = '#f0fdf4';
         banner.style.borderColor = '#bbf7d0';
         const body = document.getElementById('plan-order-body');
@@ -1287,14 +1290,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         body.innerHTML = `<div style="font-size:13px;font-weight:600;color:#166534;margin-bottom:4px">✅ ${_po.to_plan || ''}${isUpgrade ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
           `<div style="font-size:11px;color:#374151;margin-bottom:6px">${isUpgrade ? t('plan_upgrade_desc') : downgradeDesc}</div>` +
           `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:#7c3aed;text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
-        // 버튼 숨기기
+        // Hide buttons
         document.getElementById('plan-order-accept').style.display = 'none';
         document.getElementById('plan-order-reject').style.display = 'none';
         const reasonEl = document.getElementById('plan-order-reason');
         if (reasonEl) reasonEl.style.display = 'none';
         const costEl = document.getElementById('plan-order-cost');
         if (costEl) costEl.style.display = 'none';
-        // 10초 후 배너 닫기
+        // Close banner after 10 seconds
         setTimeout(() => banner.classList.add('hidden'), 10000);
       } else {
         btn.disabled = false;
@@ -1308,7 +1311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'reject' });
   });
 
-  // 다운그레이드 취소 버튼
+  // Cancel downgrade button
   document.getElementById('cancel-downgrade-btn').addEventListener('click', () => {
     const btn = document.getElementById('cancel-downgrade-btn');
     btn.disabled = true;
@@ -1334,7 +1337,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 다운그레이드 테스트 버튼
+  // Downgrade test button
   function setupDowngradeBtn(btnId, targetPlan) {
     document.getElementById(btnId).addEventListener('click', () => {
       const btn = document.getElementById(btnId);
@@ -1479,7 +1482,7 @@ function showRecFeedback(recType) {
   });
 }
 
-// === Recommendation 렌더링 헬퍼 (updateUI + selectOrg에서 공용) ===
+// === Recommendation rendering helper (shared by updateUI + selectOrg) ===
 function _renderRecommendation(rec) {
   if (!rec) return;
   const recEl = document.getElementById('recommendation');
@@ -1550,9 +1553,9 @@ function _renderRecommendation(rec) {
   }
 }
 
-// === UI 업데이트 ===
+// === UI Update ===
 function updateUI(status) {
-  // 버전은 항상 표시
+  // Always show version
   const userInfoEl = document.getElementById('user-info');
   if (userInfoEl && !userInfoEl.textContent.includes('v')) {
     userInfoEl.textContent = 'v' + chrome.runtime.getManifest().version;
@@ -1562,7 +1565,7 @@ function updateUI(status) {
   const errorBanner = document.getElementById('error-banner');
   const errorMsg = document.getElementById('error-msg');
 
-  // 에러 배너 기본 숨김
+  // Hide error banner by default
   errorBanner.classList.add('hidden');
 
   const onboarding = document.getElementById('onboarding');
@@ -1577,7 +1580,7 @@ function updateUI(status) {
   if (status.error) {
     indicator.className = 'status-dot red';
     statusText.textContent = t('collect_fail');
-    // i18n 키 번역: "err_auth_failed:401" → t('err_auth_failed', '401')
+    // Translate i18n key: "err_auth_failed:401" -> t('err_auth_failed', '401')
     const errKey = status.error;
     const colonIdx = errKey.indexOf(':');
     const translated = colonIdx > 0 && errKey.startsWith('err_')
@@ -1585,13 +1588,13 @@ function updateUI(status) {
       : t(errKey);
     errorMsg.textContent = translated;
     errorBanner.classList.remove('hidden');
-    // Rate Limit/재시도 에러 시 "Claude.ai 열기" 힌트 숨김 (로그인 문제가 아님)
+    // Hide "Open Claude.ai" hint for Rate Limit/retry errors (not a login issue)
     const errorHint = errorBanner.querySelector('.error-hint');
     const hideHint = errKey === 'err_rate_limit' || errKey.includes('Rate Limit');
     if (errorHint) {
       errorHint.style.display = hideHint ? 'none' : '';
     }
-    // 타이밍 정보 표시
+    // Display timing info
     const timingEl = document.getElementById('error-timing');
     if (timingEl) {
       const lines = [];
@@ -1612,11 +1615,11 @@ function updateUI(status) {
         timingEl.innerHTML = lines.join('<br>');
       });
     }
-    // 에러 시에도 온보딩 유지 (첫 수집 시도 실패 케이스)
+    // Keep onboarding visible on error (first collection attempt failure case)
     return;
   }
 
-  // 수집 성공 → 타이밍 영역 초기화, 온보딩 숨김
+  // Collection success: reset timing area, hide onboarding
   const timingEl = document.getElementById('error-timing');
   if (timingEl) timingEl.innerHTML = '';
   if (onboarding) onboarding.classList.add('hidden');
@@ -1625,7 +1628,7 @@ function updateUI(status) {
     indicator.className = 'status-dot green';
     const modeLabel = status.fetchMode === 'cookie' ? ` (${t('cookie_mode')})` : '';
     statusText.textContent = `✓ ${formatTimeAgo(status.timestamp)}${modeLabel}`;
-    // 다음 수집 예정 + 부스트 상태 표시
+    // Show next collection schedule + boost status
     chrome.alarms.get('claude-usage-poll', (alarm) => {
       if (alarm && alarm.scheduledTime) {
         const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
@@ -1638,16 +1641,16 @@ function updateUI(status) {
 
     const s = status.snapshot;
 
-    // 항상 최신 primary snapshot/recommendation 캐시 갱신
+    // Always refresh latest primary snapshot/recommendation cache
     _currentPlan = s.plan || null;
     _currentSnapshot = s;
     if (status.recommendation) _lastRecommendation = status.recommendation;
 
-    // 비-primary org가 선택 중이면 → status indicator만 갱신, 나머지는 selectOrg에 위임
+    // If non-primary org is selected, only update status indicator; delegate rest to selectOrg
     if (_selectedOrgId) {
       const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
       if (selOrg && !selOrg.isPrimary) {
-        // org 칩 갱신 후 선택된 org 뷰 재적용
+        // Re-apply selected org view after refreshing org chips
         chrome.storage.local.get({ collectedOrgs: [] }, (local) => {
           _collectedOrgs = local.collectedOrgs || [];
           if (_collectedOrgs.length >= 2) showMultiOrgBadges(_collectedOrgs);
@@ -1655,21 +1658,21 @@ function updateUI(status) {
         });
         return;
       }
-      // primary 선택 중이면 아래로 fall through (정상 updateUI 실행)
+      // If primary is selected, fall through below (normal updateUI execution)
     }
 
     const isEnterprise = (s.plan || '').includes('Enterprise');
 
 
 
-    // === 게이지 바 ===
+    // === Gauge bars ===
     const gaugeSection = document.getElementById('gauge-section');
     gaugeSection.classList.remove('hidden');
 
     let util5h = null, util7d = null;
 
     if (isEnterprise && s.five_hour?.utilization == null && s.seven_day?.utilization == null) {
-      // Usage-based Enterprise: spending cap 게이지 표시
+      // Usage-based Enterprise: show spending cap gauge
       const eu = s.extra_usage;
       if (eu && eu.monthly_limit) {
         const usedDollars = Math.round((eu.used_credits || 0) / 100);
@@ -1689,7 +1692,7 @@ function updateUI(status) {
           + '</div>';
       }
     } else if (isEnterprise) {
-      // Seat-based Enterprise: 5h/7d 게이지 표시 (아래 else와 동일 처리)
+      // Seat-based Enterprise: show 5h/7d gauge (same handling as else below)
       util5h = s.five_hour?.utilization ?? null;
       util7d = s.seven_day?.utilization ?? null;
       _restoreGaugeHTML(gaugeSection);
@@ -1714,9 +1717,9 @@ function updateUI(status) {
         renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
       }
     } else {
-      // org 전환으로 게이지 DOM이 파괴되었을 수 있으므로 복원
+      // Restore gauge DOM that may have been destroyed by org switching
       _restoreGaugeHTML(gaugeSection);
-      // 5h 게이지
+      // 5h gauge
       util5h = s.five_hour?.utilization ?? null;
       if (util5h !== null) {
         document.getElementById('gauge-5h-value').textContent = `${Math.round(util5h)}%`;
@@ -1729,7 +1732,7 @@ function updateUI(status) {
       }
       renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
 
-      // 7d 게이지
+      // 7d gauge
       util7d = s.seven_day?.utilization ?? null;
       if (util7d !== null) {
         document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
@@ -1741,7 +1744,7 @@ function updateUI(status) {
         }
         renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
       } else {
-        // 7d 데이터 없는 플랜 (Free, Team 등)
+        // Plan without 7d data (Free, Team, etc.)
         document.getElementById('gauge-7d-value').textContent = 'N/A';
         document.getElementById('gauge-7d-value').style.color = '#9ca3af';
         document.getElementById('gauge-7d-fill').style.width = '0';
@@ -1750,13 +1753,13 @@ function updateUI(status) {
       }
     }
 
-    // === 추가 사용량 (접이식) ===
+    // === Extra usage (collapsible) ===
     const extraSection = document.getElementById('extra-usage-section');
     const extraTooltip = document.getElementById('extra-usage-tooltip');
     const extraSummary = document.getElementById('extra-usage-summary');
     const extraPanel = document.getElementById('extra-usage-detail-panel');
     const extraToggle = document.getElementById('extra-usage-toggle');
-    // 클릭 이벤트 위임 (1회만 바인딩) — ? 클릭은 도움말, 그 외는 게이지 토글
+    // Click event delegation (bound once) — ? click shows help, others toggle gauge
     if (extraSummary && !extraSummary._bound) {
       extraSummary._bound = true;
       extraSummary.addEventListener('click', (e) => {
@@ -1784,17 +1787,17 @@ function updateUI(status) {
       const used = (usedCents / 100).toFixed(2);
       const limit = (limitCents / 100).toFixed(0);
       const color = util >= 90 ? '#ef4444' : util >= 70 ? '#f59e0b' : '#22c55e';
-      // 한 줄 요약
+      // One-line summary
       const summaryText = document.getElementById('extra-usage-summary-text');
       summaryText.innerHTML = `${t('extra_usage_label')} <span id="extra-usage-help" style="cursor:pointer;color:#9ca3af;font-size:10px">(?)</span> <b style="color:${color}">$${used}/$${limit} (${util}%)</b>`;
-      // 게이지 상세
+      // Gauge detail
       document.getElementById('extra-usage-fill').style.width = `${Math.min(util, 100)}%`;
       document.getElementById('extra-usage-fill').style.background = color;
       const now = new Date();
       const nextMonth1st = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       const dayNames = _currentLang === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
       document.getElementById('extra-usage-detail').textContent = `$${used} / $${limit} · ${nextMonth1st.getMonth() + 1}/1(${dayNames[nextMonth1st.getDay()]}) ${_currentLang === 'ko' ? '리셋' : 'reset'}`;
-      // 증가 중이면 자동 펼침
+      // Auto-expand if usage is increasing
       chrome.storage.local.get({ ct_prev_extra_used: 0 }, (prev) => {
         const increasing = usedCents > (prev.ct_prev_extra_used || 0);
         if (increasing && extraPanel.style.display === 'none') {
@@ -1807,12 +1810,12 @@ function updateUI(status) {
       extraSection.style.display = 'none';
     }
 
-    // === 플랜 & 구독 정보 ===
+    // === Plan & subscription info ===
     const infoSection = document.getElementById('info-section');
     infoSection.classList.remove('hidden');
     document.getElementById('plan').textContent = s.plan || 'unknown';
 
-    // Privacy (grove_enabled) 표시
+    // Display Privacy (grove_enabled)
     const privacyRow = document.getElementById('privacy-row');
     const privacyVal = document.getElementById('privacy-value');
     if (s.grove_enabled === true) {
@@ -1847,7 +1850,7 @@ function updateUI(status) {
       }
     }
 
-    // 서버 추천 (통합 추천 시스템)
+    // Server recommendation (unified recommendation system)
     if (status.recommendation) {
       _lastRecommendation = status.recommendation;
       const recRow = document.getElementById('recommendation-row');
@@ -1855,12 +1858,15 @@ function updateUI(status) {
       _renderRecommendation(status.recommendation);
     }
 
-    // === "지금 써도 될까?" 상태 (Enterprise 제외) ===
+    // === "Is it OK to use now?" status (excluding Enterprise) ===
     if (!isEnterprise) {
       renderStatusBanner(util5h, util7d, _filteredHistory(), s.five_hour?.resets_at, s.seven_day?.resets_at);
     }
 
-    // 사용자 정보 + 버전 (Last 수집 시간은 푸터 공간 절약을 위해 제거)
+    // Peak hours banner
+    renderPeakBanner();
+
+    // User info + version (last collection time removed to save footer space)
     const parts = [];
     if (s.user_email !== 'unknown') parts.push(s.user_email);
     parts.push('v' + chrome.runtime.getManifest().version);
@@ -1868,9 +1874,9 @@ function updateUI(status) {
   }
 }
 
-// === 게이지 예측 마커 ===
-// === 공통 예측 함수: 리셋 시점 예상 사용률 ===
-// 게이지 예측 + 배너 판정 모두 이 함수를 사용
+// === Gauge prediction markers ===
+// === Common prediction function: projected utilization at reset ===
+// Used by both gauge prediction and banner evaluation
 function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
   if (!resetsAt || currentUtil === null || !history || history.length < 3) return null;
 
@@ -1882,8 +1888,8 @@ function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
   let rate, hoursDiff;
 
   if (key === 'd7') {
-    // 7d: 로컬 히스토리의 r7(resets_at) 기반 — 대시보드 동일 로직
-    // 같은 resets_at 윈도우 내 양의 증분만 합산
+    // 7d: based on local history r7(resets_at) — same logic as dashboard
+    // Sum only positive increments within the same resets_at window
     const sixHoursAgo = now - 6 * 3600000;
     const recent = history.filter(p => p.d7 != null && p.r7 && p.t > sixHoursAgo);
     if (recent.length >= 2) {
@@ -1899,7 +1905,7 @@ function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
         hoursDiff = timeDiffH;
       }
     }
-    // r7 데이터 부족 시 fallback: resets_at 기반 윈도우 경과 시간
+    // Fallback when r7 data is insufficient: elapsed time based on resets_at window
     if (rate == null) {
       const windowH = 7 * 24;
       const elapsed = windowH - hoursToReset;
@@ -1908,7 +1914,7 @@ function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
       hoursDiff = elapsed;
     }
   } else {
-    // 5h: 로컬 히스토리 기반 rate
+    // 5h: rate based on local history
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
     let valid = [];
     for (const lb of lookbacks) {
@@ -1951,16 +1957,16 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     }
   };
 
-  // 리셋 시간 없거나 사용률 null이면 완전 숨김
+  // Fully hide if no reset time or utilization is null
   if (!resetsAt || currentUtil === null) { hide(); return; }
 
-  // 히스토리 부족 → 수집 중 표시
+  // Insufficient history: show collecting indicator
   if (!history || history.length < 3) {
     showCollecting();
     return;
   }
 
-  // 공통 예측 함수 사용
+  // Use common prediction function
   const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
   if (!pred) {
     showCollecting();
@@ -1971,7 +1977,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const clampedPos = Math.min(predicted, 100);
   console.log(`[GaugePred:${id}] rate=${rate.toFixed(3)}/h, hoursDiff=${hoursDiff.toFixed(2)}h, predicted=${predicted.toFixed(1)}%`);
 
-  // 변화가 미미하거나 감소 추세 → "안정" 표시
+  // Minimal change or decreasing trend: show "stable"
   if (rate <= 0 || predicted - currentUtil < 3) {
     hide();
     if (inlineEl) {
@@ -1985,11 +1991,11 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     return;
   }
 
-  // 색상
+  // Colors
   const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
   const predictText = predicted >= 100 ? '100%+' : `${Math.round(predicted)}%`;
 
-  // 100% 도달 예상 시각 계산
+  // Calculate estimated time to reach 100%
   let limitTimeStr = '';
   if (predicted >= 100 && rate > 0 && currentUtil < 100) {
     const hoursTo100 = (100 - currentUtil) / rate;
@@ -2003,7 +2009,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
       : `${mo}/${da}(${dayStr}) ${hh % 12 || 12}${hh >= 12 ? 'PM' : 'AM'}`;
   }
 
-  // (A) 헤더 인라인 예측값: "▸ 78%" 또는 "▸ 4/12 오후 2시" 뱃지
+  // (A) Header inline prediction: "▸ 78%" or "▸ 4/12 2PM" badge
   if (inlineEl) {
     inlineEl.style.display = 'inline';
     inlineEl.style.color = predicted >= 80 ? '#fff' : color;
@@ -2016,7 +2022,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     inlineEl.style.cursor = 'help';
   }
 
-  // (B) 게이지 바 예측 구간 채우기
+  // (B) Fill predicted range on gauge bar
   if (fillEl) {
     const barColor = id === '5h' ? '#06b6d4' : '#7c3aed';
     fillEl.style.display = 'block';
@@ -2025,19 +2031,19 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     fillEl.style.color = barColor;
   }
 
-  // 마커 + 라벨 (기존)
+  // Marker + label (existing)
   if (marker) {
     marker.style.display = 'block';
     marker.style.left = `${clampedPos}%`;
     marker.style.background = color;
   }
-  // 라벨(숫자)은 글자와 겹치므로 표시하지 않음 — 마커+바+인라인 배지로 충분
+  // Label (number) omitted to avoid text overlap — marker+bar+inline badge is sufficient
   if (label) {
     label.style.display = 'none';
   }
 }
 
-// === 상태 배너 (6-tier pace) ===
+// === Status banner (6-tier pace) ===
 function calcPaceTier(currentUtil, resetsAt, windowSeconds) {
   if (currentUtil == null || !resetsAt || !windowSeconds) return null;
   if (currentUtil === 0) return { id: 'comfortable', css: 'green' };
@@ -2099,13 +2105,55 @@ function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) {
   banner.classList.remove('hidden');
 }
 
+// === Peak hours banner (Anthropic official: weekdays 12:00-18:00 UTC, shown only during peak) ===
+function renderPeakBanner() {
+  const el = document.getElementById('offpeak-banner');
+  if (!el) return;
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  const utcDay = now.getUTCDay(); // 0=Sun, 6=Sat
+  const isWeekday = utcDay >= 1 && utcDay <= 5;
+  const isPeak = isWeekday && utcHour >= 12 && utcHour < 18;
 
+  if (!isPeak) {
+    el.classList.add('hidden');
+    return;
+  }
 
+  const remaining = 18 - utcHour;
+  // Convert UTC 12:00-18:00 to user's local time
+  const today = new Date();
+  const peakStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12));
+  const peakEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 18));
+  const fmt = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  const localRange = `${fmt(peakStart)}–${fmt(peakEnd)}`;
+  el.className = 'offpeak-banner is-peak';
+  const detailText = t('promo_peak_detail', localRange);
+  el.innerHTML = `<span class="op-icon">🔥</span><span class="op-text">${t('promo_peak')}<br><span class="op-sub">${t('promo_peak_sub', localRange)} · ${t('promo_peak_remaining', remaining)}</span></span><span class="op-help" title="${detailText}">?</span>`;
+  el.classList.remove('hidden');
 
-// === 헬퍼 함수 ===
-// Enterprise → 일반 전환 시 게이지 HTML 복원
+  // Toggle detail description on ? click
+  const helpBtn = el.querySelector('.op-help');
+  if (helpBtn) {
+    helpBtn.onclick = (e) => {
+      e.stopPropagation();
+      let tooltip = el.querySelector('.op-tooltip');
+      if (tooltip) {
+        tooltip.remove();
+      } else {
+        tooltip = document.createElement('div');
+        tooltip.className = 'op-tooltip';
+        tooltip.textContent = detailText;
+        el.appendChild(tooltip);
+      }
+    };
+  }
+}
+
+// === Helper functions ===
+// Restore gauge HTML when switching from Enterprise to regular plan
 function _restoreGaugeHTML(gaugeSection) {
-  // gauge-5h-value가 없으면 innerHTML이 Enterprise로 교체된 것
+  // If gauge-5h-value is missing, innerHTML was replaced with Enterprise layout
   if (document.getElementById('gauge-5h-value')) return;
   gaugeSection.innerHTML =
     '<div class="gauge-row" id="gauge-row-5h"><div class="gauge-header">' +
@@ -2176,7 +2224,7 @@ function initRunner() {
 
   let pos = 0, dir = 1, paused = false, pausedTimer = 0, speed = 0;
 
-  // 속도 계산: usageHistory 기반 5h 변화율
+  // Speed calculation: 5h change rate based on usageHistory
   function calcSpeed() {
     const recent = (_filteredHistory() || []).filter(p => p.h5 != null).slice(-3);
     if (recent.length < 2) return 0;
@@ -2184,13 +2232,13 @@ function initRunner() {
     const hoursDiff = (last.t - first.t) / 3600000;
     if (hoursDiff < 0.05) return 0;
     const rate = (last.h5 - first.h5) / hoursDiff; // %/hour
-    // rate를 0~100 속도로 매핑: 0%/h=0, 20%/h+=100
+    // Map rate to 0-100 speed: 0%/h=0, 20%/h+=100
     const util5h = last.h5 || 0;
-    if (rate <= 0) return Math.min(util5h * 0.3, 20); // 하락/정체: 낮은 속도
+    if (rate <= 0) return Math.min(util5h * 0.3, 20); // Declining/stagnant: low speed
     return Math.min(rate * 5 + util5h * 0.3, 100);
   }
 
-  // 일시정지 상태 로드
+  // Load paused state
   chrome.storage.local.get({ runnerPaused: false }, (r) => {
     paused = r.runnerPaused;
     pauseBtn.textContent = paused ? '▶' : '⏸';
@@ -2219,14 +2267,14 @@ function initRunner() {
     }
 
     if (state.rest) {
-      // 쉬는 상태: 중앙에 고정 + 호흡 애니메이션
+      // Resting state: fixed at center + breathing animation
       char.textContent = state.emoji;
       char.style.left = (trackWidth / 2 - 8) + 'px';
       char.style.top = '0px';
       const breathe = 1 + Math.sin(Date.now() / 600) * 0.04;
       char.style.transform = `scale(${breathe})`;
     } else {
-      // 이동 상태
+      // Moving state
       const moveSpeed = 0.3 + (speed / 100) * 2.5;
       pos += moveSpeed * dir;
       if (pos >= trackWidth) { pos = trackWidth; dir = -1; }
@@ -2236,7 +2284,7 @@ function initRunner() {
       char.style.left = pos + 'px';
       char.style.transform = dir === 1 ? 'scaleX(-1)' : 'scaleX(1)';
 
-      // 고속: 상하 바운스
+      // High speed: vertical bounce
       if (speed > 70) {
         char.style.top = (Math.sin(Date.now() / 80) * 2) + 'px';
       } else {
@@ -2247,7 +2295,7 @@ function initRunner() {
     requestAnimationFrame(animate);
   }
 
-  // 표시 + 시작
+  // Show + start
   track.style.display = '';
   pauseBtn.style.display = '';
   animate();
@@ -2278,7 +2326,7 @@ function planToMultiplier(plan) {
   const p = plan.toLowerCase();
   if (p.includes('20')) return 20;
   if (p.includes('5x') || (p.includes('max') && p.includes('5'))) return 5;
-  if (p.includes('max')) return 5; // "Max" 단독은 5x 기본
+  if (p.includes('max')) return 5; // "Max" alone defaults to 5x
   if (p.includes('team') && p.includes('premium')) return 6.25;
   if (p.includes('team')) return 1.25; // Team Standard
   if (p.includes('enterprise')) return 1; // Enterprise: usage-based, no multiplier
@@ -2297,7 +2345,7 @@ function formatTimeAgo(timestamp) {
 
 function showError(msg) {
   document.getElementById('status-indicator').className = 'status-dot red';
-  // i18n 키면 번역, 아니면 그대로 표시
+  // Translate if i18n key, otherwise display as-is
   const translated = msg && msg.startsWith('err_') ? t(msg) : msg;
   document.getElementById('status-text').textContent = translated;
 }
@@ -2307,9 +2355,9 @@ function showSuccess(msg) {
   document.getElementById('status-text').textContent = msg;
 }
 
-// === 차트 (5h / 7d 분리 + 예측선) ===
+// === Charts (5h / 7d split + prediction line) ===
 function drawCharts(history, plan, snapshot) {
-  // Enterprise usage-based: 5h/7d 차트 대신 spending 요약
+  // Enterprise usage-based: spending summary instead of 5h/7d charts
   const isEnterprise = (plan || '').includes('Enterprise');
   const isUsageBasedEnt = isEnterprise && snapshot?.five_hour?.utilization == null && snapshot?.seven_day?.utilization == null;
   const chartSection = document.getElementById('chart-section');
@@ -2324,15 +2372,15 @@ function drawCharts(history, plan, snapshot) {
     if (pane7d) pane7d.style.display = 'none';
     if (tabsRow) tabsRow.style.display = 'none';
 
-    // spending 히스토리 필터 (eu 필드가 있는 포인트만)
+    // Filter spending history (only points with eu field)
     const spendHistory = history.filter(p => p.eu != null).sort((a, b) => a.t - b.t);
 
     if (spendHistory.length >= 2) {
-      // spending 차트 표시
+      // Show spending chart
       if (placeholder) { placeholder.style.display = 'none'; placeholder.style.height = ''; }
       if (paneSpend) {
         paneSpend.style.display = '';
-        // 강제 reflow
+        // Force reflow
         void chartSection.offsetHeight;
       }
 
@@ -2350,12 +2398,12 @@ function drawCharts(history, plan, snapshot) {
         monthEnd,
       });
 
-      // 활성 info 동기화
+      // Sync active info
       const srcInfo = document.getElementById('chart-spend-info');
       const dstInfo = document.getElementById('chart-active-info');
       if (srcInfo && dstInfo) dstInfo.innerHTML = srcInfo.innerHTML;
     } else {
-      // spending 데이터 부족 → 정적 텍스트 fallback
+      // Insufficient spending data: static text fallback
       if (paneSpend) paneSpend.style.display = 'none';
       if (placeholder) {
         const eu = snapshot?.extra_usage;
@@ -2382,7 +2430,7 @@ function drawCharts(history, plan, snapshot) {
     return;
   }
 
-  // 일반/seat-based Enterprise: 기존 5h/7d 차트
+  // Regular/seat-based Enterprise: existing 5h/7d charts
   const paneSpendHide = document.getElementById('chart-pane-spend');
   if (paneSpendHide) paneSpendHide.style.display = 'none';
   if (tabsRow) tabsRow.style.display = '';
@@ -2391,8 +2439,8 @@ function drawCharts(history, plan, snapshot) {
   const now = Date.now();
   const currentMult = planToMultiplier(plan);
 
-  // 과거 데이터를 현재 플랜 스케일로 정규화
-  // (Pro 80% → Max 5x 전환 시 → 16%로 변환)
+  // Normalize past data to current plan scale
+  // (e.g. Pro 80% -> Max 5x switch -> converted to 16%)
   const sorted = history.slice().sort((a, b) => a.t - b.t).map((pt) => {
     const entryMult = planToMultiplier(pt.p || plan);
     if (entryMult === currentMult) return pt;
@@ -2400,8 +2448,8 @@ function drawCharts(history, plan, snapshot) {
     return { t: pt.t, h5: pt.h5 != null ? pt.h5 * scale : null, d7: pt.d7 != null ? pt.d7 * scale : null, p: pt.p, r7: pt.r7 };
   });
 
-  // 변화율 계산 (정규화된 값 기준)
-  // 5h: 최근 2시간 (빠르게 변함)
+  // Rate of change calculation (based on normalized values)
+  // 5h: last 2 hours (changes quickly)
   let rate5h = 0;
   const recent2h = sorted.filter((p) => p.t > now - 2 * 3600000);
   if (recent2h.length >= 2) {
@@ -2411,7 +2459,7 @@ function drawCharts(history, plan, snapshot) {
       rate5h = Math.max((rl.h5 - rf.h5) / hDiff, 0);
     }
   }
-  // 7d: 로컬 히스토리 r7(resets_at) 기반 rate (대시보드 동일 로직)
+  // 7d: rate based on local history r7(resets_at) (same logic as dashboard)
   const reset5h = snapshot?.five_hour?.resets_at ? new Date(snapshot.five_hour.resets_at).getTime() : null;
   const reset7d = snapshot?.seven_day?.resets_at ? new Date(snapshot.seven_day.resets_at).getTime() : null;
   let rate7d = 0;
@@ -2430,7 +2478,7 @@ function drawCharts(history, plan, snapshot) {
     }
   }
   if (rate7d === 0) {
-    // fallback: resets_at 기반 윈도우 경과 시간
+    // fallback: elapsed time based on resets_at window
     const last7dVal = sorted[sorted.length - 1].d7;
     if (reset7d && last7dVal != null && last7dVal > 0) {
       const hoursToReset7d = Math.max((reset7d - now) / 3600000, 0);
@@ -2441,7 +2489,7 @@ function drawCharts(history, plan, snapshot) {
   const last5h = sorted[sorted.length - 1].h5;
   const last7d = sorted[sorted.length - 1].d7;
 
-  // 플랜 한도선 (현재 플랜 기준 %, 100%=현재 플랜 한도와 겹치는 건 제외)
+  // Plan limit lines (% relative to current plan, excluding 100% which overlaps current plan limit)
   const isTeamPlan = currentMult === 1.25 || currentMult === 6.25;
   const allLimits = isTeamPlan
     ? [
@@ -2455,23 +2503,23 @@ function drawCharts(history, plan, snapshot) {
       ];
   const limitLines = allLimits
     .map((l) => ({ value: (l.mult / currentMult) * 100, label: l.label, color: l.color }))
-    .filter((l) => Math.abs(l.value - 100) > 1); // 100%와 겹치는 현재 플랜 제외
+    .filter((l) => Math.abs(l.value - 100) > 1); // Exclude current plan overlapping with 100%
 
-  // placeholder 숨기고 양쪽 pane 모두 표시 (canvas 사이즈 정상 계산용)
+  // Hide placeholder and show both panes (for correct canvas size calculation)
   const pane5h = document.getElementById('chart-pane-5h');
   const pane7d = document.getElementById('chart-pane-7d');
   const placeholder = document.getElementById('chart-placeholder');
   if (placeholder) { placeholder.style.display = 'none'; placeholder.style.height = ''; }
   if (pane5h) pane5h.style.display = '';
   if (pane7d) pane7d.style.display = '';
-  // 강제 reflow — display 변경 후 canvas.clientWidth가 정상 반환되도록
+  // Force reflow — ensure canvas.clientWidth returns correctly after display change
   void chartSection.offsetHeight;
 
-  // pace tier 계산 (배너와 동일 로직으로 차트 info 통일)
+  // Calculate pace tier (unified chart info using same logic as banner)
   const chartPace5h = calcPaceTier(last5h, reset5h, 5 * 3600);
   const chartPace7d = calcPaceTier(last7d, reset7d, 7 * 24 * 3600);
 
-  // 5h 차트 (최근 3윈도우 = 15시간)
+  // 5h chart (last 3 windows = 15 hours)
   const cutoff5h = now - 15 * 3600000;
   const sorted5h = sorted.filter((p) => p.t > cutoff5h);
   drawSingleChart({
@@ -2481,7 +2529,7 @@ function drawCharts(history, plan, snapshot) {
     limitLines, now, paceTier: chartPace5h,
   });
 
-  // 7d 차트
+  // 7d chart
   drawSingleChart({
     canvasId: 'chart-7d', infoId: 'chart-7d-info',
     sorted, key: 'd7', color: '#7c3aed',
@@ -2489,7 +2537,7 @@ function drawCharts(history, plan, snapshot) {
     limitLines, now, paceTier: chartPace7d,
   });
 
-  // 비활성 pane 숨기기
+  // Hide inactive pane
   if (pane5h) pane5h.style.display = _activeChartTab === '5h' ? '' : 'none';
   if (pane7d) pane7d.style.display = _activeChartTab === '7d' ? '' : 'none';
   _syncChartInfo();
@@ -2509,13 +2557,13 @@ function drawSingleChart(opts) {
   const vals = sorted.map((p) => p[key]).filter((v) => v !== null);
   if (vals.length < 2) return;
 
-  // Budget pace line fallback interval (첫 구간에 이전 리셋이 없을 때 사용)
+  // Budget pace line fallback interval (used when no previous reset in first segment)
   const budgetInterval = key === 'h5' ? 5 * 3600000 : 7 * 86400000;
 
   const oldest = sorted[0].t;
   const spanMs = now - oldest;
 
-  // 예측
+  // Prediction
   const futureEnd = (resetTime && resetTime > now + 60000) ? resetTime : now;
   const hasFuture = futureEnd > now + 60000;
   const totalSpan = futureEnd - oldest;
@@ -2526,14 +2574,14 @@ function drawSingleChart(opts) {
     predict = { x: (resetTime - oldest) / totalSpan, v: Math.min(Math.max(lastVal + rate * hToReset, 0), 100) };
   }
 
-  // 정보 라벨 (hidden span에 저장, _syncChartInfo로 활성 탭에 복사)
-  // paceTier(배너와 동일 calcPaceTier) + rate 병행 표시
+  // Info label (stored in hidden span, copied to active tab via _syncChartInfo)
+  // Show paceTier (same calcPaceTier as banner) + rate side by side
   const infoEl = document.getElementById(infoId);
   const paceColors = { green: '#22c55e', yellow: '#f59e0b', orange: '#f97316', red: '#ef4444', darkred: '#dc2626' };
   const paceCss = paceTier ? paceColors[paceTier.css] : '#9ca3af';
   const paceLabel = paceTier ? t('chart_pace_' + paceTier.id) : t('chart_stable');
 
-  // rate 부분: 상승/하락/정체
+  // Rate portion: rising/falling/stagnant
   let ratePart = '';
   if (rate > 0.1) {
     const rateStr = rate >= 10 ? Math.round(rate) : rate.toFixed(1);
@@ -2545,17 +2593,17 @@ function drawSingleChart(opts) {
 
   infoEl.innerHTML = `<span style="color:${paceCss}">${paceLabel}</span>${ratePart}`;
 
-  // 데이터 (정규화) — 타임스탬프도 보존 (갭 감지용)
+  // Data (normalized) — timestamps preserved for gap detection
   const data = sorted.map((p) => ({ x: (p.t - oldest) / totalSpan, v: p[key], t: p.t }));
   const nowX = (now - oldest) / totalSpan;
 
-  // Y축 — 데이터 기반 동적 스케일 (budget/limit이 y축을 끌어올리지 않도록)
+  // Y-axis — dynamic scale based on data (prevent budget/limit from inflating y-axis)
   const allVals = vals.slice();
   if (predict) allVals.push(predict.v);
   const dataMax = Math.max(...allVals, 10);
-  // 한도선 필터: maxY 범위 내에서만 표시 (그리기 단계에서 재필터)
+  // Limit line filter: only show within maxY range (re-filtered at draw stage)
   const visibleLimits = limitLines.filter((l) => l.value <= dataMax * 3 && l.value >= dataMax * 0.25);
-  // maxY는 데이터 기반으로만 — budget/limit이 잘려도 OK (canvas clip 사용)
+  // maxY based on data only — OK if budget/limit is clipped (uses canvas clip)
   const maxY = dataMax * 1.15;
 
   // Canvas
@@ -2574,13 +2622,13 @@ function drawSingleChart(opts) {
   function toX(xN) { return pad.left + xN * cw; }
   function toY(v) { return pad.top + ch - (v / maxY) * ch; }
 
-  // 미래 구간 배경
+  // Future range background
   if (hasFuture) {
     ctx.fillStyle = 'rgba(0,0,0,.03)';
     ctx.fillRect(toX(nowX), pad.top, toX(1) - toX(nowX), ch);
   }
 
-  // 그리드 — 동적 간격 (y축 스케일에 맞춤)
+  // Grid — dynamic interval (matched to y-axis scale)
   ctx.strokeStyle = '#f0f0f0'; ctx.lineWidth = 0.5;
   const gridStep = maxY <= 15 ? 5 : maxY <= 30 ? 10 : maxY <= 60 ? 15 : 25;
   for (let gpct = gridStep; gpct < maxY; gpct += gridStep) {
@@ -2590,14 +2638,14 @@ function drawSingleChart(opts) {
     ctx.fillText(gpct + '%', w - pad.right - 2, gy - 2);
   }
 
-  // 차트 영역 클리핑 (budget/limit이 y축 밖으로 나갈 수 있으므로)
+  // Chart area clipping (budget/limit may exceed y-axis bounds)
   ctx.save();
   ctx.beginPath();
   ctx.rect(pad.left, pad.top, cw, ch);
   ctx.clip();
 
-  // Reset vertical lines + Budget pace line (균등 소비 기준)
-  // 실제 리셋 포인트 감지: 사용률이 급격히 떨어지는 지점 (대시보드 findObservedResets 방식)
+  // Reset vertical lines + Budget pace line (based on even consumption)
+  // Detect actual reset points: where utilization drops sharply (same as dashboard findObservedResets)
   const observedResets = [];
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1][key], cur = sorted[i][key];
@@ -2605,12 +2653,12 @@ function drawSingleChart(opts) {
       observedResets.push(sorted[i].t);
     }
   }
-  // 모든 리셋 포인트 (세로선 표시용)
+  // All reset points (for vertical line display)
   const allResetPoints = [...observedResets];
   if (resetTime && resetTime > now) allResetPoints.push(resetTime);
 
   if (allResetPoints.length > 0) {
-    // Draw reset vertical lines (회색 세로선 — 과거+미래 모두)
+    // Draw reset vertical lines (gray — both past and future)
     ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([3, 3]);
     for (const rpt of allResetPoints) {
       if (rpt >= oldest && rpt <= futureEnd) {
@@ -2620,7 +2668,7 @@ function drawSingleChart(opts) {
     }
     ctx.setLineDash([]);
 
-    // Budget pace line — 현재 윈도우만 표시 (마지막 리셋 ~ 다음 리셋)
+    // Budget pace line — only show current window (last reset to next reset)
     if (resetTime && resetTime > now) {
       const lastObserved = observedResets.length > 0 ? observedResets[observedResets.length - 1] : null;
       const wEnd = resetTime;
@@ -2642,14 +2690,14 @@ function drawSingleChart(opts) {
     }
   }
 
-  // 클리핑 해제
+  // Release clipping
   ctx.restore();
 
-  // 실선 (과거 데이터) — 수집 공백 구간은 선을 끊음
+  // Solid line (past data) — break line at collection gap intervals
   const valid = data.filter((d) => d.v !== null);
-  const GAP_MS = 25 * 60000; // 25분 이상 간격 = 갭 (수집 주기 10분 × 2.5)
+  const GAP_MS = 25 * 60000; // Gap if interval >= 25 min (collection cycle 10min x 2.5)
   if (valid.length >= 2) {
-    // 연속 구간(segment)으로 분할
+    // Split into continuous segments
     const segments = [];
     let seg = [valid[0]];
     for (let i = 1; i < valid.length; i++) {
@@ -2663,20 +2711,20 @@ function drawSingleChart(opts) {
 
     const alphaColor = color === '#06b6d4' ? 'rgba(6,182,212,.08)' : 'rgba(124,58,237,.08)';
 
-    // 각 구간별로 선 + 영역 그리기
+    // Draw line + area for each segment
     for (const seg of segments) {
       if (seg.length < 2) continue;
-      // 선
+      // Line
       ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
       seg.forEach((d, i) => { i === 0 ? ctx.moveTo(toX(d.x), toY(d.v)) : ctx.lineTo(toX(d.x), toY(d.v)); });
       ctx.stroke();
-      // 영역
+      // Area
       ctx.lineTo(toX(seg[seg.length - 1].x), pad.top + ch);
       ctx.lineTo(toX(seg[0].x), pad.top + ch);
       ctx.closePath(); ctx.fillStyle = alphaColor; ctx.fill();
     }
 
-    // 갭 구간 표시 (점선)
+    // Show gap intervals (dashed line)
     if (segments.length > 1) {
       ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
       for (let i = 0; i < segments.length - 1; i++) {
@@ -2690,18 +2738,18 @@ function drawSingleChart(opts) {
       ctx.setLineDash([]);
     }
 
-    // 현재 dot
+    // Current dot
     const lastV = valid[valid.length - 1];
     ctx.beginPath(); ctx.arc(toX(lastV.x), toY(lastV.v), 2.5, 0, Math.PI * 2);
     ctx.fillStyle = color; ctx.fill();
   }
 
-  // 예측 점선
+  // Prediction dashed line
   if (predict && lastVal !== null) {
     ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
     ctx.moveTo(toX(nowX), toY(lastVal)); ctx.lineTo(toX(predict.x), toY(predict.v));
     ctx.stroke(); ctx.setLineDash([]);
-    // 예측 끝 dot + 라벨
+    // Prediction end dot + label
     const pColor = predict.v >= 80 ? '#ef4444' : color;
     ctx.beginPath(); ctx.arc(toX(predict.x), toY(predict.v), 2.5, 0, Math.PI * 2);
     ctx.fillStyle = pColor; ctx.fill();
@@ -2709,14 +2757,14 @@ function drawSingleChart(opts) {
     ctx.fillText(`${Math.round(predict.v)}%`, toX(predict.x), toY(predict.v) - 4);
   }
 
-  // "현재" 세로선
+  // "Now" vertical line
   if (hasFuture) {
     ctx.beginPath(); ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
     ctx.moveTo(toX(nowX), pad.top); ctx.lineTo(toX(nowX), pad.top + ch);
     ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // X축 라벨 (절대 시각 + 중간 눈금)
+  // X-axis labels (absolute time + intermediate ticks)
   ctx.font = '7px sans-serif';
   var fmtTime = function(ts) {
     var d = new Date(ts);
@@ -2724,11 +2772,11 @@ function drawSingleChart(opts) {
     return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
   };
 
-  // 라벨 후보 수집: { xN, label, priority, color }
-  // priority: 0=리셋, 1=now, 2=시작/끝, 3=중간눈금
+  // Collect label candidates: { xN, label, priority, color }
+  // priority: 0=reset, 1=now, 2=start/end, 3=intermediate tick
   var xLabels = [];
 
-  // 시작점
+  // Start point
   xLabels.push({ xN: 0, label: fmtTime(oldest), priority: 2, color: '#9ca3af' });
 
   // now
@@ -2736,7 +2784,7 @@ function drawSingleChart(opts) {
     xLabels.push({ xN: nowX, label: t('chart_now'), priority: 1, color: '#6b7280' });
   }
 
-  // 리셋 시점 라벨 (실제 감지된 리셋 포인트 사용)
+  // Reset point labels (using actually detected reset points)
   for (var _ri = 0; _ri < allResetPoints.length; _ri++) {
     var _rp = allResetPoints[_ri];
     if (_rp >= oldest && _rp <= futureEnd) {
@@ -2745,17 +2793,17 @@ function drawSingleChart(opts) {
     }
   }
 
-  // 끝점 (예측 있으면 리셋 시각, 없으면 now)
+  // End point (reset time if prediction exists, otherwise now)
   if (hasFuture) {
     xLabels.push({ xN: 1, label: fmtTime(futureEnd), priority: 2, color: color });
   } else {
     xLabels.push({ xN: 1, label: t('chart_now'), priority: 2, color: '#9ca3af' });
   }
 
-  // 중간 눈금: 7d는 날짜 단위, 5h는 시간 단위
+  // Intermediate ticks: date-based for 7d, hour-based for 5h
   var totalH = totalSpan / 3600000;
   if (totalH > 24) {
-    // 7d: 날짜(M/D) 눈금 — 매일 자정 기준
+    // 7d: date (M/D) ticks — based on daily midnight
     var fmtDate = function(ts) { var d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate(); };
     var dayStart = new Date(oldest);
     dayStart.setHours(0, 0, 0, 0);
@@ -2766,7 +2814,7 @@ function drawSingleChart(opts) {
       xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: '#c9c9c9' });
     }
   } else {
-    // 5h: 시간(HH:MM) 눈금
+    // 5h: time (HH:MM) ticks
     var tickInterval = totalH <= 6 ? 1 : totalH <= 12 ? 2 : 3;
     var firstTick = new Date(oldest);
     firstTick.setMinutes(0, 0, 0);
@@ -2778,7 +2826,7 @@ function drawSingleChart(opts) {
     }
   }
 
-  // 겹침 제거: priority 낮은 것 우선, 픽셀 거리 20px 이하면 높은 priority 제거
+  // Remove overlaps: lower priority first, remove higher priority if pixel distance <= 20px
   xLabels.sort(function(a, b) { return a.priority - b.priority || a.xN - b.xN; });
   var placed = [];
   for (var li = 0; li < xLabels.length; li++) {
@@ -2796,7 +2844,7 @@ function drawSingleChart(opts) {
     }
   }
 
-  // 플랜 한도선 + 배지 (맨 위에 — 차트 라인보다 위)
+  // Plan limit lines + badges (on top — above chart lines)
   const badgeFont = 'bold 9px sans-serif';
   const badgeH = 13, badgePadX = 4, badgeR = 2, arrowW = 4;
   const badgePositions = [];
@@ -2814,11 +2862,11 @@ function drawSingleChart(opts) {
     }
     by = Math.max(pad.top, by);
     badgePositions.push(by);
-    // 점선 (배지 우측부터)
+    // Dashed line (from badge right edge)
     ctx.beginPath(); ctx.strokeStyle = line.color; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.moveTo(bx + bw + arrowW + 1, ly); ctx.lineTo(w - pad.right, ly);
     ctx.stroke(); ctx.setLineDash([]);
-    // 배지 + 우측 화살표
+    // Badge + right arrow
     ctx.fillStyle = line.color;
     ctx.beginPath();
     ctx.moveTo(bx + badgeR, by);
@@ -2832,7 +2880,7 @@ function drawSingleChart(opts) {
     ctx.lineTo(bx + bw, by);
     ctx.closePath();
     ctx.fill();
-    // 흰색 텍스트
+    // White text
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
     ctx.fillText(line.label, bx + bw / 2, by + badgeH - 3.5);
   }
@@ -2844,7 +2892,7 @@ function drawSpendingChart(opts) {
   const canvas = document.getElementById(canvasId);
   if (!canvas || sorted.length < 2) return;
 
-  // 달러 변환 + 정규화
+  // Dollar conversion + normalization
   const totalSpan = monthEnd - monthStart;
   const data = sorted.map(p => ({
     x: (p.t - monthStart) / totalSpan,
@@ -2856,7 +2904,7 @@ function drawSpendingChart(opts) {
   const currentSpend = data[data.length - 1].v;
   const currentCap = data[data.length - 1].cap;
 
-  // Cap 변경 감지 (스텝 함수용)
+  // Detect cap changes (for step function)
   const capChanges = [];
   for (let i = 1; i < data.length; i++) {
     if (data[i].cap !== data[i - 1].cap && data[i - 1].cap > 0) {
@@ -2864,7 +2912,7 @@ function drawSpendingChart(opts) {
     }
   }
 
-  // 예측: 최근 24h 소비율
+  // Prediction: spending rate over last 24h
   const recent24h = sorted.filter(p => p.t > now - 24 * 3600000 && p.eu != null);
   let spendRate = 0; // dollars per hour
   if (recent24h.length >= 2) {
@@ -2878,7 +2926,7 @@ function drawSpendingChart(opts) {
   const predictedSpend = currentSpend + spendRate * hoursToEnd;
   const hasFuture = monthEnd > now + 60000;
 
-  // 정보 라벨
+  // Info label
   const infoEl = document.getElementById(infoId);
   if (infoEl) {
     if (spendRate > 0.01 && hasFuture) {
@@ -2889,7 +2937,7 @@ function drawSpendingChart(opts) {
     }
   }
 
-  // Y축 범위 — 데이터 기반 (cap은 제외, 화면 밖이면 라벨로 표시)
+  // Y-axis range — data-based (cap excluded, shown as label if out of view)
   const allVals = data.map(d => d.v);
   if (predictedSpend > 0) allVals.push(predictedSpend);
   const dataMax = Math.max(...allVals, 10);
@@ -2912,13 +2960,13 @@ function drawSpendingChart(opts) {
   function toX(xN) { return pad.left + xN * cw; }
   function toY(v) { return pad.top + ch - (v / maxY) * ch; }
 
-  // 미래 구간 배경
+  // Future range background
   if (hasFuture) {
     ctx.fillStyle = 'rgba(0,0,0,.03)';
     ctx.fillRect(toX(nowX), pad.top, toX(1) - toX(nowX), ch);
   }
 
-  // 그리드 — 달러 단위
+  // Grid — dollar units
   ctx.strokeStyle = '#f0f0f0'; ctx.lineWidth = 0.5;
   const gridStep = maxY <= 20 ? 5 : maxY <= 50 ? 10 : maxY <= 100 ? 25 : maxY <= 250 ? 50 : maxY <= 600 ? 100 : 250;
   for (let gv = gridStep; gv < maxY; gv += gridStep) {
@@ -2928,21 +2976,21 @@ function drawSpendingChart(opts) {
     ctx.fillText('$' + gv, w - pad.right - 2, gy - 2);
   }
 
-  // 클리핑
+  // Clipping
   ctx.save();
   ctx.beginPath();
   ctx.rect(pad.left, pad.top, cw, ch);
   ctx.clip();
 
-  // Cap 라인 (빨간 점선, 스텝 함수)
+  // Cap line (red dashed, step function)
   if (currentCap > 0) {
     ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     if (capChanges.length === 0) {
-      // 단일 cap — 전체 수평선
+      // Single cap — full horizontal line
       const cy = toY(currentCap);
       ctx.beginPath(); ctx.moveTo(pad.left, cy); ctx.lineTo(w - pad.right, cy); ctx.stroke();
     } else {
-      // 스텝 함수: 각 구간별 수평선
+      // Step function: horizontal line per segment
       ctx.beginPath();
       let prevCap = data[0].cap;
       let prevX = 0;
@@ -2950,13 +2998,13 @@ function drawSpendingChart(opts) {
         if (prevCap > 0) {
           ctx.moveTo(toX(prevX), toY(prevCap));
           ctx.lineTo(toX(change.x), toY(prevCap));
-          // 수직 연결
+          // Vertical connection
           ctx.lineTo(toX(change.x), toY(change.newCap));
         }
         prevCap = change.newCap;
         prevX = change.x;
       }
-      // 마지막 구간
+      // Last segment
       ctx.moveTo(toX(prevX), toY(currentCap));
       ctx.lineTo(w - pad.right, toY(currentCap));
       ctx.stroke();
@@ -2964,13 +3012,13 @@ function drawSpendingChart(opts) {
     ctx.setLineDash([]);
   }
 
-  // Budget Pace 라인 (보라 점선: 월초 $0 → 월말 $cap)
+  // Budget Pace line (purple dashed: $0 at month start -> $cap at month end)
   if (currentCap > 0 && hasFuture) {
     ctx.strokeStyle = '#c4b5fd'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
-    // cap 변경이 있으면 마지막 변경 시점부터 계산
+    // If cap changed, calculate from the last change point
     if (capChanges.length > 0) {
       const lastChange = capChanges[capChanges.length - 1];
-      // 변경 시점의 실제 사용량 찾기
+      // Find actual usage at the change point
       const changeIdx = data.findIndex(d => d.t >= lastChange.t);
       const changeSpend = changeIdx >= 0 ? data[changeIdx].v : 0;
       ctx.beginPath();
@@ -2986,17 +3034,17 @@ function drawSpendingChart(opts) {
     ctx.setLineDash([]);
   }
 
-  // 클리핑 해제
+  // Release clipping
   ctx.restore();
 
-  // Cap이 Y축 밖이면 상단에 ▲ 라벨 표시
+  // Show triangle label at top if cap is outside Y-axis
   if (capOutOfView) {
     ctx.font = 'bold 7px sans-serif'; ctx.textAlign = 'right';
     ctx.fillStyle = '#ef4444';
     ctx.fillText('▲ Cap $' + Math.round(currentCap), w - pad.right - 2, pad.top + 8);
   }
 
-  // 실선 (spending 데이터) — 갭 감지 포함
+  // Solid line (spending data) — includes gap detection
   const valid = data.filter(d => d.v !== null && d.v !== undefined);
   const GAP_MS = 25 * 60000;
   if (valid.length >= 2) {
@@ -3024,7 +3072,7 @@ function drawSpendingChart(opts) {
       ctx.closePath(); ctx.fillStyle = alphaColor; ctx.fill();
     }
 
-    // 갭 표시
+    // Show gaps
     if (segments.length > 1) {
       ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
       for (let i = 0; i < segments.length - 1; i++) {
@@ -3038,36 +3086,36 @@ function drawSpendingChart(opts) {
       ctx.setLineDash([]);
     }
 
-    // 현재 dot
+    // Current dot
     const lastV = valid[valid.length - 1];
     ctx.beginPath(); ctx.arc(toX(lastV.x), toY(lastV.v), 2.5, 0, Math.PI * 2);
     ctx.fillStyle = spendColor; ctx.fill();
   }
 
-  // 예측 점선
+  // Prediction dashed line
   if (hasFuture && spendRate > 0.01 && currentSpend > 0) {
-    const predX = 1; // 월말
+    const predX = 1; // End of month
     const predV = Math.min(predictedSpend, maxY);
     const pColor = currentCap > 0 && predictedSpend >= currentCap * 0.8 ? '#ef4444' : '#f59e0b';
     ctx.beginPath(); ctx.strokeStyle = pColor; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
     ctx.moveTo(toX(nowX), toY(currentSpend));
     ctx.lineTo(toX(predX), toY(predV));
     ctx.stroke(); ctx.setLineDash([]);
-    // 예측 끝 dot + 라벨
+    // Prediction end dot + label
     ctx.beginPath(); ctx.arc(toX(predX), toY(predV), 2.5, 0, Math.PI * 2);
     ctx.fillStyle = pColor; ctx.fill();
     ctx.font = 'bold 7px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText('$' + Math.round(predictedSpend), toX(predX), toY(predV) - 4);
   }
 
-  // "현재" 세로선
+  // "Now" vertical line
   if (hasFuture) {
     ctx.beginPath(); ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
     ctx.moveTo(toX(nowX), pad.top); ctx.lineTo(toX(nowX), pad.top + ch);
     ctx.stroke(); ctx.setLineDash([]);
   }
 
-  // X축 라벨: 월초, now, 월말
+  // X-axis labels: month start, now, month end
   ctx.font = '7px sans-serif';
   const fmtDate = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate(); };
   const xLabels = [];
@@ -3076,7 +3124,7 @@ function drawSpendingChart(opts) {
     xLabels.push({ xN: nowX, label: t('chart_now'), priority: 1, color: '#6b7280' });
   }
   xLabels.push({ xN: 1, label: fmtDate(monthEnd), priority: 0, color: '#f59e0b' });
-  // 중간 날짜 눈금
+  // Intermediate date ticks
   let dayStart = new Date(monthStart);
   dayStart.setHours(0, 0, 0, 0);
   dayStart = dayStart.getTime() + 86400000;
@@ -3088,7 +3136,7 @@ function drawSpendingChart(opts) {
     xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: '#c9c9c9' });
   }
 
-  // 겹침 제거
+  // Remove overlaps
   xLabels.sort((a, b) => a.priority - b.priority || a.xN - b.xN);
   const placed = [];
   for (const lbl of xLabels) {
@@ -3100,7 +3148,7 @@ function drawSpendingChart(opts) {
     ctx.fillText(lbl.label, px, h - 2);
   }
 
-  // Cap 배지 (좌측)
+  // Cap badge (left side)
   if (currentCap > 0) {
     const badgeFont = 'bold 9px sans-serif';
     const badgeH = 13, badgePadX = 4, badgeR = 2, arrowW = 4;
@@ -3111,7 +3159,7 @@ function drawSpendingChart(opts) {
     const bx = pad.left;
     const ly = toY(currentCap);
     let by = Math.max(pad.top, Math.min(ly - badgeH / 2, pad.top + ch - badgeH));
-    // 배지 배경
+    // Badge background
     ctx.fillStyle = '#ef4444';
     ctx.beginPath();
     ctx.moveTo(bx + badgeR, by);
@@ -3125,7 +3173,7 @@ function drawSpendingChart(opts) {
     ctx.lineTo(bx + bw, by);
     ctx.closePath();
     ctx.fill();
-    // 흰색 텍스트
+    // White text
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
     ctx.fillText(capLabel, bx + bw / 2, by + badgeH - 3.5);
   }

@@ -1,10 +1,10 @@
-// Content Script (ISOLATED world): background.js ↔ page-script.js 메시지 중계
-// page-script.js는 manifest에서 world: MAIN으로 직접 주입됨
+// Content Script (ISOLATED world): relays messages between background.js and page-script.js
+// page-script.js is injected directly via manifest with world: MAIN
 
 let reqId = 0;
 const pending = new Map();
 
-// page-script.js로부터 응답 수신
+// Receive responses from page-script.js
 window.addEventListener('__claude_tuner_res__', (event) => {
   const { id, ...result } = event.detail;
   const resolve = pending.get(id);
@@ -14,7 +14,7 @@ window.addEventListener('__claude_tuner_res__', (event) => {
   }
 });
 
-// background.js로부터 요청 수신 → page-script.js로 전달
+// Receive requests from background.js and forward to page-script.js
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'FETCH_CLAUDE_API') {
     const id = ++reqId;

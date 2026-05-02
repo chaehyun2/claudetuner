@@ -1,7 +1,7 @@
 let _prevSelectedOrgIds = [];
 let _saveTimer = null;
 
-// === 라디오 그룹 헬퍼 ===
+// === Radio group helper ===
 function initRadioGroup(groupId, value, onChange) {
   const group = document.getElementById(groupId);
   if (!group) return;
@@ -25,7 +25,7 @@ function getRadioValue(groupId) {
   return checked ? checked.value : null;
 }
 
-// === 자동 저장 (디바운스 800ms) ===
+// === Auto-save (debounced 800ms) ===
 function autoSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(doSave, 800);
@@ -41,7 +41,7 @@ function doSave() {
   const thresholdWarn = parseInt(document.getElementById('threshold-warn').value, 10) || 80;
   const thresholdDanger = parseInt(document.getElementById('threshold-danger').value, 10) || 95;
 
-  if (thresholdDanger <= thresholdWarn) return; // 유효성 실패 시 저장 안 함
+  if (thresholdDanger <= thresholdWarn) return; // Skip save on validation failure
 
   const selectedOrgIds = _selectedOrgIds.length > 0 ? [..._selectedOrgIds] : null;
   const selectedOrgId = selectedOrgIds ? selectedOrgIds[0] : null;
@@ -58,7 +58,7 @@ function doSave() {
   const orgAutoAll = document.getElementById('org-auto-all')?.checked ?? true;
   const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, notifyResetSoon, notifyResetDone, notifyUsageAlert, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
-  // 플랜 변경 요청 설정을 서버에 동기화
+  // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
   chrome.storage.local.get({ lastStatus: null }, (status) => {
     const email = status.lastStatus?.snapshot?.user_email;
@@ -94,17 +94,17 @@ function doSave() {
   });
 }
 
-// === 초기화 ===
+// === Initialization ===
 document.addEventListener('DOMContentLoaded', async () => {
   const manifest = chrome.runtime.getManifest();
   document.getElementById('version').textContent = `v${manifest.version}`;
 
-  // i18n 초기화
+  // Initialize i18n
   const { lang } = await chrome.storage.sync.get({ lang: 'auto' });
   initRadioGroup('lang-group', lang, (newLang) => {
     chrome.storage.sync.set({ lang: newLang });
     setLang(newLang);
-    // i18n 변경 후 라디오 desc 등 재번역
+    // Re-translate radio descriptions etc. after i18n change
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.getAttribute('data-i18n');
       if (key) el.textContent = t(key);
@@ -114,10 +114,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   await initI18n();
 
-  // 조직 목록 로드
+  // Load organization list
   loadOrgOptions();
 
-  // 표시 방식 (sidePanel API 없으면 숨김)
+  // Display mode (hide if sidePanel API not available)
   const hasSidePanel = !!(chrome.sidePanel && chrome.sidePanel.setPanelBehavior);
   if (!hasSidePanel) {
     document.getElementById('display-mode-card')?.style.setProperty('display', 'none');
@@ -131,7 +131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // 저장된 설정 로드
+  // Load saved settings
   chrome.storage.sync.get(
     { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 5, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, notifyResetSoon: true, notifyResetDone: true, notifyUsageAlert: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
@@ -140,7 +140,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ensureIntervalOption(config.intervalMinutes);
       document.getElementById('interval').value = String(config.intervalMinutes);
 
-      // 최적화 모드
+      // Optimization mode
       chrome.storage.local.get({ ct_admin_order_auto_approve: false }, (local) => {
         let optMode;
         if (local.ct_admin_order_auto_approve) optMode = 'auto';
@@ -153,7 +153,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('interval-server-default').checked = useServerDefault;
       document.getElementById('interval').disabled = useServerDefault;
 
-      // 배지 표시 모드
+      // Badge display mode
       initRadioGroup('usage-display-group', config.usageDisplayMode || '7d', () => {
         updateBadgePreview();
         autoSave();
@@ -171,7 +171,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   );
 
-  // 서버 기본 주기 표시
+  // Display server default interval
   chrome.storage.local.get({ serverPollInterval: null }, (data) => {
     const el = document.getElementById('interval-server-value');
     if (data.serverPollInterval) {
@@ -179,27 +179,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // === 자동 저장 이벤트 바인딩 ===
-  // 수집 주기
+  // === Auto-save event bindings ===
+  // Collection interval
   document.getElementById('interval-server-default').addEventListener('change', (e) => {
     document.getElementById('interval').disabled = e.target.checked;
     autoSave();
   });
   document.getElementById('interval').addEventListener('change', autoSave);
 
-  // 임계값
+  // Thresholds
   document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
   document.getElementById('threshold-danger').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
 
-  // 알림 체크박스
+  // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', autoSave);
   });
 
-  // 현재 상태 표시
+  // Show current status
   loadStatus();
 
-  // 리뷰 배너
+  // Review banner
   chrome.storage.local.get({ ct_review_nudge: null }, (store) => {
     const rn = store.ct_review_nudge;
     if (!rn) return;
@@ -222,7 +222,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof sendGAEvent === 'function') sendGAEvent('review_nudge_dismissed', { source: 'options' });
   });
 
-  // 데이터 초기화 버튼
+  // Data reset button
   document.getElementById('reset-btn').addEventListener('click', () => {
     if (!confirm(t('reset_confirm'))) return;
     chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState'], () => {
@@ -312,7 +312,7 @@ function showToast(message, isError) {
   toast._timer = setTimeout(() => { toast.className = 'toast'; }, 2000);
 }
 
-// === Org 체크리스트 ===
+// === Org checklist ===
 const MAX_ORGS = 3;
 let _selectedOrgIds = [];
 
@@ -325,10 +325,10 @@ function loadOrgOptions() {
     refreshBtn._bound = true;
     refreshBtn.addEventListener('click', () => {
       refreshBtn.disabled = true;
-      // 캐시 클리어 후 재로드
+      // Clear cache and reload
       chrome.storage.local.remove(['accountCache', 'autoSelectedOrg', 'collectedOrgs'], () => {
         loadOrgOptions();
-        // 강제 재수집도 트리거
+        // Also trigger a forced re-collection
         chrome.runtime.sendMessage({ type: 'COLLECT_NOW', force: true });
         showToast(t('org_refreshed'));
         setTimeout(() => { refreshBtn.disabled = false; }, 3000);
@@ -343,7 +343,7 @@ function loadOrgOptions() {
 
     chrome.storage.sync.get({ selectedOrgIds: null, selectedOrgId: null, orgAutoAll: true }, (config) => {
       const autoAllCb = document.getElementById('org-auto-all');
-      const isAutoAll = config.orgAutoAll !== false; // 기본 true
+      const isAutoAll = config.orgAutoAll !== false; // Default true
 
       if (isAutoAll) {
         _selectedOrgIds = orgs.map(o => o.uuid);
@@ -360,7 +360,7 @@ function loadOrgOptions() {
       renderOrgChecklist(container, orgs);
       updateOrgHint();
 
-      // "전체 조직 자동 수집" 체크박스 (중복 등록 방지)
+      // "Collect all organizations automatically" checkbox (prevent duplicate listeners)
       if (!autoAllCb._bound) {
       autoAllCb._bound = true;
       autoAllCb.addEventListener('change', () => {
@@ -390,7 +390,7 @@ function renderOrgChecklist(container, orgs) {
     cb.checked = _selectedOrgIds.includes(org.uuid);
 
     if (isAutoAll) {
-      // 전체 자동 모드: 모든 항목 체크 + 비활성화
+      // Auto-all mode: check all items + disable
       cb.checked = true;
       cb.disabled = true;
       item.classList.add('checked');
@@ -432,7 +432,7 @@ function renderOrgChecklist(container, orgs) {
     countEl.className = 'org-check-count';
     container.after(countEl);
   }
-  // 전체 자동 또는 전체 선택이면 카운트 숨김
+  // Hide count if auto-all or all selected
   if (isAutoAll || _selectedOrgIds.length === orgs.length) {
     countEl.textContent = '';
   } else {

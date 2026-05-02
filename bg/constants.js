@@ -12,8 +12,8 @@ export const ALARM_WEEKLY_REPORT = 'weekly-report';
 export const DEFAULT_INTERVAL_MINUTES = 5;
 export const FREE_PLAN_INTERVAL_MINUTES = 60;
 export const CLAUDE_API_BASE = 'https://claude.ai';
-export const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6시간
-export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30일 (Enterprise spending 월간 차트용)
+export const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (for Enterprise spending monthly chart)
 
 export const PLAN_HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
 
@@ -25,10 +25,10 @@ export const PLAN_API_MAP = {
 
 export const SEAT_TIER_MAP = { 'team_standard': 'Team Standard', 'team_tier_1': 'Team Premium', 'team_tier_2': 'Team Tier 2' };
 
-// Claude.ai API 요청 시 필요한 클라이언트 헤더
+// Client headers required for Claude.ai API requests
 export const ANTHROPIC_HEADERS = { 'anthropic-client-platform': 'web_claude_ai', 'anthropic-client-version': '1.0.0' };
 
-// Plans that are NOT personal (subscription API 접근 불가)
+// Plans that are NOT personal (no subscription API access)
 export const NON_PERSONAL_PLANS = ['Enterprise', 'Team', 'Team Standard', 'Team Premium', 'Team Tier 2', 'API'];
 
 export const NOTIF_ID_OPTIMIZE = 'claude-plan-optimize';
@@ -46,7 +46,7 @@ export const ORG_POLL_CHANGE_THRESHOLD = 0.1; // utilization pp change to consid
 // === Error classification ===
 export const ACTIONABLE_ERRORS = ['err_session_expired', 'err_no_cookies', 'err_auth_failed'];
 
-// === i18n (서비스 워커용 경량 번역) ===
+// === i18n (lightweight translations for service worker) ===
 export const BG_I18N = {
   ko: {
     reset_soon_title: '{0} 한도 곧 리셋',
