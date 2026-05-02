@@ -1,0 +1,240 @@
+/* Claude Tuner — Sidebar Usage Panel
+   Uses Claude.ai's own Tailwind CSS variables for automatic dark/light mode support */
+
+/* Container */
+.ct-sidebar-usage {
+  padding: 8px 10px 4px;
+  margin-bottom: 4px;
+  user-select: none;
+}
+
+/* Header row */
+.ct-sb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 6px;
+}
+
+.ct-sb-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ct-sb-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.ct-sb-actions a,
+.ct-sb-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  padding: 0;
+  text-decoration: none;
+}
+
+.ct-sb-actions a:hover,
+.ct-sb-actions button:hover {
+  opacity: 1;
+}
+
+.ct-sb-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Limit row */
+.ct-sb-limit {
+  padding: 3px 0;
+}
+
+.ct-sb-limit + .ct-sb-limit {
+  margin-top: 2px;
+}
+
+/* Label line: "Session (5h)  53%→97%  2h19m" */
+.ct-sb-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 3px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ct-sb-label-left {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ct-sb-name {
+  flex-shrink: 0;
+}
+
+.ct-sb-pct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ct-sb-arrow {
+  opacity: 0.4;
+  font-size: 10px;
+  margin: 0 1px;
+}
+
+.ct-sb-pred {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.ct-sb-reset {
+  font-size: 10px;
+  opacity: 0.5;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Progress bar — stretch to full container width */
+.ct-sb-bar {
+  position: relative;
+  width: calc(100% + 20px);
+  margin-left: -10px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: visible;
+}
+
+.ct-sb-bar-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ct-sb-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background-color 0.3s ease;
+  min-width: 0;
+}
+
+.ct-sb-bar-pred-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  opacity: 0.25;
+  transition: left 0.4s ease, width 0.4s ease;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 2px,
+    currentColor 2px,
+    currentColor 4px
+  );
+}
+
+.ct-sb-bar-marker {
+  position: absolute;
+  top: -1px;
+  width: 2px;
+  height: 8px;
+  border-radius: 1px;
+  transition: left 0.4s ease;
+  z-index: 1;
+}
+
+/* Extra Usage dollar row */
+.ct-sb-extra-amount {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 1px;
+  padding-left: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Footer row: plan + peak */
+.ct-sb-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 0;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.ct-sb-plan {
+  opacity: 0.5;
+  font-weight: 500;
+}
+
+.ct-sb-peak {
+  color: #ef4444;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+/* Collecting / no-data message */
+.ct-sb-message {
+  font-size: 11px;
+  opacity: 0.5;
+  padding: 8px 4px;
+  text-align: center;
+}
+
+/* Tooltip on hover */
+.ct-sb-tooltip {
+  position: fixed;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0;
+  pointer-events: none;
+  white-space: pre-line;
+  z-index: 99999;
+  transition: opacity 0.15s;
+  max-width: 240px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.ct-sb-tooltip.visible {
+  opacity: 1;
+}
+
+.ct-sb-tip-brand {
+  display: block;
+  margin-top: 4px;
+  font-size: 9px;
+  opacity: 0.45;
+  text-align: right;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* Hoverable rows */
+.ct-sb-limit {
+  cursor: default;
+}
+
+.ct-sb-plan,
+.ct-sb-peak {
+  cursor: default;
+}

@@ -44,6 +44,12 @@
       "https://claudetuner.com/*"
     ]
   },
+  "content_scripts": [{
+    "matches": ["https://claude.ai/*"],
+    "css": ["sidebar-usage.css"],
+    "js": ["sidebar-usage.js"],
+    "run_at": "document_idle"
+  }],
   "web_accessible_resources": [{
     "resources": ["icons/icon48.png"],
     "matches": [

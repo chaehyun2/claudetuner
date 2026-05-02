@@ -572,6 +572,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     getLastActiveOrgId().then(orgId => sendResponse({ orgId })).catch(() => sendResponse({ orgId: null }));
     return true;
   }
+  if (message.type === 'OPEN_OPTIONS') {
+    chrome.runtime.openOptionsPage();
+    return false;
+  }
+  if (message.type === 'GET_SIDEBAR_USAGE') {
+    buildSidebarUsageData(message.orgId).then(data => sendResponse(data));
+    return true;
+  }
   if (message.type === 'GET_ORGANIZATIONS') {
     fetchClaudeApi('/api/organizations').then(orgList => {
       if (!Array.isArray(orgList)) { sendResponse({ success: false, error: 'Invalid response' }); return; }
@@ -627,6 +635,126 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
     }
   } else if (notifId === NOTIF_ID_OPTIMIZE && btnIdx === 1) {
     await dismissRecommendationServer();
+  }
+});
+
+// === Sidebar Usage: build data for content script ===
+async function buildSidebarUsageData(reqOrgId) {
+  const [status, history, local] = await Promise.all([
+    getLastStatus(),
+    getUsageHistory(),
+    new Promise(r => chrome.storage.local.get({ collectedOrgs: [], sidebarLang: null }, r)),
+  ]);
+
+  const collectedOrgs = local.collectedOrgs || [];
+  const snapshot = status?.snapshot;
+  if (!snapshot && collectedOrgs.length === 0) return null;
+
+  // Determine which org to show — respect the requested org strictly
+  let orgData = null;
+  if (reqOrgId && collectedOrgs.length > 0) {
+    orgData = collectedOrgs.find(o => o.uuid === reqOrgId);
+    // Requested org not collected: return null (don't fall back to another org)
+    if (!orgData) return null;
+  }
+  if (!orgData && collectedOrgs.length > 0) {
+    orgData = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
+  }
+
+  const h5 = orgData?.h5 ?? snapshot?.five_hour?.utilization ?? null;
+  const d7 = orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null;
+  const r5 = orgData?.resetsAt5h ?? snapshot?.five_hour?.resets_at ?? null;
+  const r7 = orgData?.resetsAt7d ?? snapshot?.seven_day?.resets_at ?? null;
+  const plan = orgData?.plan || snapshot?.current_plan || null;
+
+  // Extra usage
+  const eu = orgData?.extraUsage;
+  const euEnabled = !!(eu && eu.is_enabled);
+  const euUsed = eu?.used_credits ?? null;
+  const euLimit = eu?.monthly_limit ?? null;
+
+  // Prediction calculation (reuse popup logic)
+  const pred5h = calcSidebarPrediction(history, 'h5', h5, r5, reqOrgId || orgData?.uuid);
+  const pred7d = calcSidebarPrediction(history, 'd7', d7, r7, reqOrgId || orgData?.uuid);
+
+  // Language detection
+  const lang = local.sidebarLang || (snapshot?.user_lang) || 'en';
+
+  return { plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang };
+}
+
+// Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)
+function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid) {
+  if (!resetsAt || currentUtil == null || !history || history.length < 3) return null;
+
+  const now = Date.now();
+  const hoursToReset = (new Date(resetsAt).getTime() - now) / 3600000;
+  if (hoursToReset <= 0) return null;
+
+  // Filter history for matching org
+  const orgHistory = orgUuid
+    ? history.filter(p => p.org === orgUuid || !p.org)
+    : history;
+
+  let rate = null;
+  let hoursDiff = 0;
+
+  if (key === 'd7') {
+    const sixHoursAgo = now - 6 * 3600000;
+    const recent = orgHistory.filter(p => p.d7 != null && p.r7 && p.t > sixHoursAgo);
+    if (recent.length >= 2) {
+      let totalDelta = 0;
+      for (let i = 1; i < recent.length; i++) {
+        if (recent[i - 1].r7 === recent[i].r7) {
+          totalDelta += Math.max(0, recent[i].d7 - recent[i - 1].d7);
+        }
+      }
+      const timeDiffH = (recent[recent.length - 1].t - recent[0].t) / 3600000;
+      if (timeDiffH > 0) { rate = totalDelta / timeDiffH; hoursDiff = timeDiffH; }
+    }
+    if (rate == null) {
+      const elapsed = 7 * 24 - hoursToReset;
+      if (elapsed < 1) return null;
+      rate = currentUtil / elapsed;
+      hoursDiff = elapsed;
+    }
+  } else {
+    const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
+    let valid = [];
+    for (const lb of lookbacks) {
+      valid = orgHistory.filter(p => p[key] != null && (lb === Infinity || p.t > now - lb));
+      if (valid.length >= 2) break;
+    }
+    if (valid.length < 2) return null;
+    const first = valid[0], last = valid[valid.length - 1];
+    hoursDiff = (last.t - first.t) / 3600000;
+    if (hoursDiff < 0.5) return null;
+    rate = (last[key] - first[key]) / hoursDiff;
+  }
+
+  if (rate == null) return null;
+  const predicted = currentUtil + (rate * hoursToReset);
+  if (rate <= 0 || predicted - currentUtil < 3) return null;
+  return Math.round(predicted);
+}
+
+// Notify sidebar content scripts to re-fetch with their own orgId
+async function pushSidebarUsage() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    if (tabs.length === 0) return;
+    for (const tab of tabs) {
+      chrome.tabs.sendMessage(tab.id, { type: 'SIDEBAR_USAGE_REFRESH' }).catch(() => {});
+    }
+  } catch (e) {
+    // Content script may not be ready; ignore
+  }
+}
+
+// Hook into storage changes to push sidebar updates after collection
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && (changes.lastStatus || changes.collectedOrgs)) {
+    pushSidebarUsage();
   }
 });
 

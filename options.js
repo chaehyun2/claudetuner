@@ -48,6 +48,8 @@ function doSave() {
   const prevIds = JSON.stringify(_prevSelectedOrgIds || []);
   const orgChanged = JSON.stringify(selectedOrgIds || []) !== prevIds;
 
+  const sidebarUsageEnabled = document.getElementById('sidebar-usage-enabled').checked;
+
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
   const notifyUsageAlert = document.getElementById('notify-usage-alert').checked;
@@ -56,7 +58,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
   const orgAutoAll = document.getElementById('org-auto-all')?.checked ?? true;
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, notifyResetSoon, notifyResetDone, notifyUsageAlert, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageAlert, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -133,7 +135,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 5, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, notifyResetSoon: true, notifyResetDone: true, notifyUsageAlert: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 5, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageAlert: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -161,6 +163,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       document.getElementById('threshold-warn').value = String(config.thresholdWarn || 80);
       document.getElementById('threshold-danger').value = String(config.thresholdDanger || 95);
+      document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
       document.getElementById('notify-usage-alert').checked = config.notifyUsageAlert !== false;
@@ -190,6 +193,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Thresholds
   document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
   document.getElementById('threshold-danger').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
+
+  // Sidebar usage toggle
+  document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {
