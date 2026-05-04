@@ -426,32 +426,22 @@
     } catch { return; } // extension context truly dead — nothing to do
 
     const orgId = getActiveOrgId();
-    const applyData = (res) => {
-      _data = res;
-      renderStrip();
-      if (_dataRetryTimer) { clearInterval(_dataRetryTimer); _dataRetryTimer = null; }
-    };
     const onFail = () => {
-      if (!_dataRetryTimer) {
-        let retries = 0;
-        _dataRetryTimer = setInterval(() => {
-          if (++retries > 10 || _data) { clearInterval(_dataRetryTimer); _dataRetryTimer = null; return; }
-          requestUsageData();
-        }, 2000);
-      }
+      // Only retry when no data at all (initial load)
+      if (_data || _dataRetryTimer) return;
+      let retries = 0;
+      _dataRetryTimer = setInterval(() => {
+        if (++retries > 10 || _data) { clearInterval(_dataRetryTimer); _dataRetryTimer = null; return; }
+        requestUsageData();
+      }, 2000);
     };
     try {
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId }, (res) => {
         if (chrome.runtime.lastError) { onFail(); return; }
-        if ((!res || (res.h5 == null)) && orgId) {
-          chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: null }, (fb) => {
-            if (chrome.runtime.lastError || !fb) { onFail(); return; }
-            applyData(fb);
-          });
-          return;
-        }
-        if (res) applyData(res);
-        else onFail();
+        if (!res) { onFail(); return; } // keep previous _data if available
+        _data = res;
+        renderStrip();
+        if (_dataRetryTimer) { clearInterval(_dataRetryTimer); _dataRetryTimer = null; }
       });
     } catch { /* context dead */ }
   }
