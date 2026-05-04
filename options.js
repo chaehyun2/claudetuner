@@ -139,10 +139,10 @@ function doSave() {
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail,
         };
-        _authedFetch(config, `${serverUrl}/api/me/settings`, {
+        _authedFetch(config, `${serverUrl}/api/snapshots/settings`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'x-user-email': userEmail },
-          body: JSON.stringify({ ext_settings: extSettings }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_email: userEmail, ext_settings: extSettings }),
         }).catch(() => {});
       }
     });
