@@ -9,8 +9,14 @@ export const ALARM_EXPIRE_PREFIX = 'claude-expire-';
 export const ALARM_BOOST = 'claude-boost-poll';
 export const ALARM_WEEKLY_REPORT = 'weekly-report';
 
-export const DEFAULT_INTERVAL_MINUTES = 5;
+export const DEFAULT_INTERVAL_MINUTES = 10;
 export const FREE_PLAN_INTERVAL_MINUTES = 60;
+
+// Activity-aware local polling intervals (server POST gated separately)
+export const LOCAL_ACTIVE_INTERVAL_MINUTES = 2;
+export const LOCAL_BACKGROUND_INTERVAL_MINUTES = 5;
+export const VISIBILITY_THROTTLE_MS = 30_000;
+export const POPUP_COLLECT_THROTTLE_MS = 60_000;
 export const CLAUDE_API_BASE = 'https://claude.ai';
 export const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (for Enterprise spending monthly chart)
@@ -80,6 +86,8 @@ export const BG_I18N = {
     cf_btn_open: 'Claude.ai 열기',
     cf_firstrun_title: 'Claude.ai 로그인 필요',
     cf_firstrun_msg: 'Claude.ai에 로그인해야 사용량 데이터를 수집할 수 있습니다.',
+    notif_settings_hint: '확장 설정에서 알림을 관리할 수 있습니다.',
+    notif_settings_btn: '설정',
   },
   en: {
     reset_soon_title: '{0} limit resetting soon',
@@ -113,5 +121,7 @@ export const BG_I18N = {
     cf_btn_open: 'Open Claude.ai',
     cf_firstrun_title: 'Claude.ai sign-in required',
     cf_firstrun_msg: 'Please sign in to Claude.ai so the extension can collect your usage data.',
+    notif_settings_hint: 'Manage alerts in extension settings.',
+    notif_settings_btn: 'Settings',
   },
 };

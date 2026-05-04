@@ -8,6 +8,38 @@ let _isAutoOrg = true; // auto mode (auto when selectedOrgId is null)
 let _autoFollowing = true; // whether view follows cookie changes in auto mode (false when another chip is clicked)
 let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
 
+// Build auth headers for server requests (ext_token > API key fallback).
+// Keep in sync with bg/storage.js#getAuthHeaders.
+async function _getAuthHeaders(cfg) {
+  const { extToken } = await chrome.storage.local.get('extToken');
+  if (extToken) return { 'Authorization': `Bearer ${extToken}` };
+  return { 'X-API-Key': cfg.apiKey || CT_CONFIG.DEFAULT_API_KEY };
+}
+
+// fetch wrapper that injects auth headers and clears stale ext_token on 401.
+// Guarded against late-401 race (only clears if stored token still matches the
+// one we sent) and API_KEY fallback (no Bearer → never clear).
+// Keep in sync with bg/storage.js#authedFetch.
+async function _authedFetch(cfg, url, options = {}) {
+  const auth = await _getAuthHeaders(cfg);
+  const sentToken = auth.Authorization?.startsWith('Bearer ')
+    ? auth.Authorization.slice(7)
+    : null;
+  const headers = { ...(options.headers || {}), ...auth };
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401 && sentToken) {
+    const { extToken: currentToken } = await chrome.storage.local.get('extToken');
+    if (currentToken === sentToken) {
+      await chrome.storage.local.remove('extToken');
+      try {
+        const path = new URL(url).pathname;
+        console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
+      } catch { /* ignore */ }
+    }
+  }
+  return response;
+}
+
 // Return only history matching the selected org
 function _filteredHistory() {
   if (!_selectedOrgId) return _usageHistory;
@@ -568,13 +600,13 @@ function showMultiOrgBadges(collectedOrgs) {
       chrome.storage.sync.set({ selectedOrgId: org.uuid });
       // Sync to server immediately
       chrome.storage.sync.get({ serverUrl: '', apiKey: '' }, (cfg) => {
-        if (!cfg.serverUrl || !cfg.apiKey) return;
-        chrome.storage.local.get({ lastStatus: null }, (local) => {
+        if (!cfg.serverUrl) return;
+        chrome.storage.local.get({ lastStatus: null }, async (local) => {
           const email = local.lastStatus?.snapshot?.user_email;
           if (!email) return;
-          fetch(`${cfg.serverUrl}/api/snapshots/primary-org`, {
+          _authedFetch(cfg, `${cfg.serverUrl}/api/snapshots/primary-org`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user_email: email, primary_org_uuid: org.uuid }),
           }).catch(() => {});
         });
@@ -617,7 +649,7 @@ function showOrgBadge(orgs, selectedId) {
   badge.className = 'org-badge';
   badge.title = t('org_select');
   badge.textContent = org.name + ' (' + org.plan + ')';
-  badge.addEventListener('click', () => chrome.runtime.openOptionsPage());
+  badge.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options.html#collect-settings') }));
   userInfo.parentNode.insertBefore(badge, userInfo);
 }
 
@@ -791,14 +823,12 @@ async function loadFitnessMatrix() {
 
   // Fetch from server
   try {
-    const { serverUrl, apiKey } = await new Promise(r =>
+    const cfg = await new Promise(r =>
       chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
     );
-    if (!serverUrl || !apiKey) return;
+    if (!cfg.serverUrl) return;
 
-    const res = await fetch(serverUrl + '/api/snapshots/fitness?user_email=' + encodeURIComponent(email), {
-      headers: { 'X-API-Key': apiKey },
-    });
+    const res = await _authedFetch(cfg, cfg.serverUrl + '/api/snapshots/fitness?user_email=' + encodeURIComponent(email));
     if (!res.ok) return;
     const data = await res.json();
     if (!data || !data.plans) return;
@@ -819,6 +849,9 @@ function escHtml(s) {
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
   sendGAEvent('popup_open');
+
+  // Request immediate local-only refresh if data is stale (>1 min)
+  chrome.runtime.sendMessage({ type: 'POPUP_OPENED' }).catch(() => {});
 
   // Check for deleted account
   const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
@@ -893,16 +926,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Multi-org: initialize with saved org for Manual, primary org for Auto
       const cOrgs = result.collectedOrgs || [];
-      if (cOrgs.length >= 2) {
+      if (cOrgs.length >= 1) {
         _collectedOrgs = cOrgs;
         if (!_isAutoOrg && syncCfg.selectedOrgId) {
           // Manual mode: restore user-pinned org
           const manualOrg = cOrgs.find(o => o.uuid === syncCfg.selectedOrgId);
           if (manualOrg) _selectedOrgId = manualOrg.uuid;
-          else _selectedOrgId = cOrgs.find(o => o.isPrimary)?.uuid || null;
+          else _selectedOrgId = cOrgs.find(o => o.isPrimary)?.uuid || cOrgs[0]?.uuid || null;
         } else {
-          // Auto mode: primary org
-          const primary = cOrgs.find(o => o.isPrimary);
+          // Auto mode: primary org (fallback to first org if no primary)
+          const primary = cOrgs.find(o => o.isPrimary) || cOrgs[0];
           if (primary) _selectedOrgId = primary.uuid;
         }
       }
@@ -931,8 +964,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (r.lastStatus) {
           // Reset to primary org uuid (null would mix multi-org histories)
           const cOrgs = r.collectedOrgs || [];
-          _collectedOrgs = cOrgs.length >= 2 ? cOrgs : _collectedOrgs;
-          const primary = _collectedOrgs.find(o => o.isPrimary);
+          if (cOrgs.length >= 1) _collectedOrgs = cOrgs;
+          const primary = _collectedOrgs.find(o => o.isPrimary) || _collectedOrgs[0];
           _selectedOrgId = primary ? primary.uuid : null;
           updateUI(r.lastStatus);
           _currentPlan = r.lastStatus?.snapshot?.plan || null;
@@ -1418,13 +1451,13 @@ async function sendReviewNudgeAction(action) {
     const status = await new Promise(r => chrome.storage.local.get({ lastStatus: null }, r));
     const email = status.lastStatus?.snapshot?.user_email;
     if (!email) return;
-    const { serverUrl, apiKey } = await new Promise(r =>
+    const cfg = await new Promise(r =>
       chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
     );
-    if (!serverUrl || !apiKey) return;
-    fetch(serverUrl + '/api/snapshots/review-nudge', {
+    if (!cfg.serverUrl) return;
+    _authedFetch(cfg, cfg.serverUrl + '/api/snapshots/review-nudge', {
       method: 'PATCH',
-      headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_email: email, action }),
     });
   } catch (e) { /* silent */ }
@@ -2050,7 +2083,7 @@ function calcPaceTier(currentUtil, resetsAt, windowSeconds) {
   const remaining = Math.max((new Date(resetsAt).getTime() - Date.now()) / 1000, 0);
   const elapsed = windowSeconds - remaining;
   const fraction = elapsed / windowSeconds;
-  if (fraction < 0.03 || fraction >= 1.0) return null;
+  if (fraction < 0.10 || fraction >= 1.0) return null;
   const projected = (currentUtil / 100) / fraction;
   if (projected < 0.50) return { id: 'comfortable', css: 'green' };
   if (projected < 0.75) return { id: 'ontrack',     css: 'green' };
@@ -2125,7 +2158,8 @@ function renderPeakBanner() {
   const today = new Date();
   const peakStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12));
   const peakEnd = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 18));
-  const fmt = (d) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  const locale = getLang() === 'ko' ? 'ko-KR' : 'en-US';
+  const fmt = (d) => d.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit', hour12: true });
   const localRange = `${fmt(peakStart)}–${fmt(peakEnd)}`;
   el.className = 'offpeak-banner is-peak';
   const detailText = t('promo_peak_detail', localRange);

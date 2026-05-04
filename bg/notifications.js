@@ -2,6 +2,21 @@ import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT } from './consta
 import { bt } from './i18n.js';
 import { getLastStatus } from './storage.js';
 
+const NOTIF_LOG_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Log a notification event for analytics (used to understand blocking reasons).
+ * Stores {category, ts} entries in chrome.storage.local, pruned to 30 days.
+ */
+export async function logNotification(category) {
+  const { _notifLog = [] } = await chrome.storage.local.get({ _notifLog: [] });
+  const now = Date.now();
+  const cutoff = now - NOTIF_LOG_MAX_AGE_MS;
+  const pruned = _notifLog.filter(e => e.ts > cutoff);
+  pruned.push({ c: category, ts: now });
+  await chrome.storage.local.set({ _notifLog: pruned });
+}
+
 // === Collection failure notification (3-stage escalation) ===
 export async function checkCollectFailNotification(errorMsg) {
   const { notifyCollectFail = true } = await chrome.storage.sync.get({ notifyCollectFail: true });
@@ -44,6 +59,7 @@ export async function checkCollectFailNotification(errorMsg) {
         priority: 2,
         buttons: [{ title: await bt('cf_btn_open') }],
       });
+      logNotification('collect-fail');
       collectFailState.stage = 'first-run';
       collectFailState.lastErrorCode = errorMsg;
       await chrome.storage.local.set({ collectFailState });
@@ -108,6 +124,7 @@ export async function checkCollectFailNotification(errorMsg) {
   }
 
   chrome.notifications.create(notifId, opts);
+  logNotification('collect-fail');
 
   collectFailState.stage = targetStage;
   collectFailState.lastErrorCode = errorMsg;
@@ -117,9 +134,12 @@ export async function checkCollectFailNotification(errorMsg) {
 
 // === Usage threshold alerts ===
 export async function checkUsageAlerts(snapshot) {
-  const { thresholdWarn = 80, thresholdDanger = 95, notifyUsageAlert = true } = await chrome.storage.sync.get({ thresholdWarn: 80, thresholdDanger: 95, notifyUsageAlert: true });
-  if (!notifyUsageAlert) return;
-  const alertThresholds = [thresholdDanger, thresholdWarn];
+  const { thresholdWarn = 80, thresholdDanger = 95, notifyUsageWarn = false, notifyUsageDanger = true } = await chrome.storage.sync.get({ thresholdWarn: 80, thresholdDanger: 95, notifyUsageWarn: true, notifyUsageDanger: true });
+  if (!notifyUsageWarn && !notifyUsageDanger) return;
+
+  const alertThresholds = [];
+  if (notifyUsageDanger) alertThresholds.push(thresholdDanger);
+  if (notifyUsageWarn) alertThresholds.push(thresholdWarn);
 
   const { usageAlertState = {} } = await new Promise((resolve) =>
     chrome.storage.local.get({ usageAlertState: {} }, resolve)
@@ -143,9 +163,11 @@ export async function checkUsageAlerts(snapshot) {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('alert_title', threshold),
-          message: await bt(i18nKey, util.toFixed(1)),
+          message: await bt(i18nKey, util.toFixed(1)) + '\n' + await bt('notif_settings_hint'),
+          buttons: [{ title: await bt('notif_settings_btn') }],
           priority: threshold >= thresholdDanger ? 2 : 1,
         });
+        logNotification(threshold >= thresholdDanger ? 'usage-danger' : 'usage-warn');
         usageAlertState[stateKey] = true;
       } else if (util < threshold - 10 && alreadyNotified) {
         usageAlertState[stateKey] = false;
@@ -210,7 +232,9 @@ export async function sendWeeklyReport() {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
     title: await bt('weekly_title'),
-    message: `7d avg ${avg7d.toFixed(1)}% (peak ${peak7d.toFixed(0)}%) · 5h avg ${avg5h.toFixed(1)}% (peak ${peak5h.toFixed(0)}%)`,
+    message: `7d avg ${avg7d.toFixed(1)}% (peak ${peak7d.toFixed(0)}%) · 5h avg ${avg5h.toFixed(1)}% (peak ${peak5h.toFixed(0)}%)\n${await bt('notif_settings_hint')}`,
+    buttons: [{ title: await bt('notif_settings_btn') }],
     priority: 0,
   });
+  logNotification('weekly-report');
 }

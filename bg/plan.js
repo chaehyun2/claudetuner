@@ -1,7 +1,8 @@
 import { PLAN_HIERARCHY, PLAN_API_MAP, SEAT_TIER_MAP, NOTIF_ID_OPTIMIZE, ANTHROPIC_HEADERS } from './constants.js';
 import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
-import { getConfig, getLastStatus } from './storage.js';
+import { getConfig, getLastStatus, authedFetch } from './storage.js';
+import { logNotification } from './notifications.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -20,6 +21,7 @@ async function notifyPlanChange(title, message, priority = 1) {
     chrome.notifications.create(NOTIF_ID_OPTIMIZE, {
       type: 'basic', iconUrl: 'icons/icon128.png', title, message, priority,
     });
+    logNotification('plan-change');
   }
 }
 
@@ -132,9 +134,9 @@ export async function refineTeamPlan(plan, orgUuid) {
 // === Report plan change order result ===
 export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason) {
   try {
-    await fetch(`${config.serverUrl}/api/snapshots/plan-order-response`, {
+    await authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-response`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: orderId, user_email: userEmail, action, result, failure_reason: failureReason }),
     });
   } catch (e) {
@@ -165,12 +167,12 @@ export async function dismissRecommendationServer({ permanent = false } = {}) {
   const config = await getConfig();
   const status = await getLastStatus();
   const email = status?.snapshot?.user_email;
-  if (email && config.serverUrl && config.apiKey) {
+  if (email && config.serverUrl) {
     const payload = { user_email: email };
     if (permanent) payload.permanent = true;
-    fetch(`${config.serverUrl}/api/snapshots/dismiss`, {
+    authedFetch(config, `${config.serverUrl}/api/snapshots/dismiss`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).catch(() => {});
   }

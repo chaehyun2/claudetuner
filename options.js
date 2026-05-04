@@ -1,5 +1,37 @@
 let _prevSelectedOrgIds = [];
 let _saveTimer = null;
+let _lastInteractedCard = null;
+
+// Build auth headers for server requests (ext_token > API key fallback).
+// Keep in sync with bg/storage.js#getAuthHeaders.
+async function _getAuthHeaders(cfg) {
+  const { extToken } = await chrome.storage.local.get('extToken');
+  if (extToken) return { 'Authorization': `Bearer ${extToken}` };
+  return { 'X-API-Key': cfg.apiKey || (typeof CT_CONFIG !== 'undefined' ? CT_CONFIG.DEFAULT_API_KEY : '') };
+}
+
+// fetch wrapper that injects auth headers and clears stale ext_token on 401.
+// Race-safe: only clears if stored token still matches the one we sent.
+// Keep in sync with bg/storage.js#authedFetch.
+async function _authedFetch(cfg, url, options = {}) {
+  const auth = await _getAuthHeaders(cfg);
+  const sentToken = auth.Authorization?.startsWith('Bearer ')
+    ? auth.Authorization.slice(7)
+    : null;
+  const headers = { ...(options.headers || {}), ...auth };
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401 && sentToken) {
+    const { extToken: currentToken } = await chrome.storage.local.get('extToken');
+    if (currentToken === sentToken) {
+      await chrome.storage.local.remove('extToken');
+      try {
+        const path = new URL(url).pathname;
+        console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
+      } catch { /* ignore */ }
+    }
+  }
+  return response;
+}
 
 // === Radio group helper ===
 function initRadioGroup(groupId, value, onChange) {
@@ -23,6 +55,16 @@ function initRadioGroup(groupId, value, onChange) {
 function getRadioValue(groupId) {
   const checked = document.querySelector(`#${groupId} input[type="radio"]:checked`);
   return checked ? checked.value : null;
+}
+
+// === Update notification example text with current thresholds ===
+function updateNotifyExamples() {
+  const warn = document.getElementById('threshold-warn').value;
+  const danger = document.getElementById('threshold-danger').value;
+  const warnEl = document.querySelector('[data-i18n="notify_usage_warn_ex"]');
+  const dangerEl = document.querySelector('[data-i18n="notify_usage_danger_ex"]');
+  if (warnEl) warnEl.textContent = t('notify_usage_warn_ex', warn);
+  if (dangerEl) dangerEl.textContent = t('notify_usage_danger_ex', danger);
 }
 
 // === Auto-save (debounced 800ms) ===
@@ -49,25 +91,27 @@ function doSave() {
   const orgChanged = JSON.stringify(selectedOrgIds || []) !== prevIds;
 
   const sidebarUsageEnabled = document.getElementById('sidebar-usage-enabled').checked;
+  const inputUsageEnabled = document.getElementById('input-usage-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
-  const notifyUsageAlert = document.getElementById('notify-usage-alert').checked;
+  const notifyUsageWarn = document.getElementById('notify-usage-warn').checked;
+  const notifyUsageDanger = document.getElementById('notify-usage-danger').checked;
   const notifyWeeklyReport = document.getElementById('notify-weekly-report').checked;
   const notifyPlanChange = document.getElementById('notify-plan-change').checked;
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
   const orgAutoAll = document.getElementById('org-auto-all')?.checked ?? true;
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageAlert, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
   chrome.storage.local.get({ lastStatus: null }, (status) => {
     const email = status.lastStatus?.snapshot?.user_email;
     if (email) {
-      fetch(`${serverUrl}/api/snapshots/admin-order-setting`, {
+      _authedFetch(config, `${serverUrl}/api/snapshots/admin-order-setting`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_email: email, auto_approve: autoApproveVal }),
       }).then(res => {
         if (res.ok) chrome.storage.local.set({ ct_admin_order_auto_approve: autoApproveVal });
@@ -85,13 +129,31 @@ function doSave() {
 
     chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' });
 
+    // Sync settings to server for analytics (fire-and-forget)
+    chrome.storage.local.get({ lastStatus: null }, (st) => {
+      const userEmail = st.lastStatus?.snapshot?.user_email;
+      if (userEmail) {
+        const extSettings = {
+          intervalMinutes, usageDisplayMode, thresholdWarn, thresholdDanger,
+          sidebarUsageEnabled, inputUsageEnabled, optimizationMode, orgAutoAll,
+          notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
+          notifyWeeklyReport, notifyPlanChange, notifyCollectFail,
+        };
+        _authedFetch(config, `${serverUrl}/api/me/settings`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'x-user-email': userEmail },
+          body: JSON.stringify({ ext_settings: extSettings }),
+        }).catch(() => {});
+      }
+    });
+
     if (orgChanged) {
       chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'usageAlertState', 'accountCache', 'needsOrgSelection'], () => {
         _prevSelectedOrgIds = selectedOrgIds ? [...selectedOrgIds] : [];
         showToast(t('org_changed'));
       });
     } else {
-      showToast(t('auto_saved'));
+      showToast(_lastInteractedCard ? `${_lastInteractedCard} ${t('auto_saved')}` : t('auto_saved'));
     }
   });
 }
@@ -129,13 +191,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isSidePanel = val === 'sidepanel';
       chrome.storage.local.set({ preferSidePanel: isSidePanel });
       chrome.runtime.sendMessage({ type: 'SET_SIDE_PANEL_MODE', enabled: isSidePanel });
-      showToast(t('auto_saved'));
+      showToast(`${t('display_mode')} ${t('auto_saved')}`);
     });
   }
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 5, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageAlert: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -164,13 +226,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('threshold-warn').value = String(config.thresholdWarn || 80);
       document.getElementById('threshold-danger').value = String(config.thresholdDanger || 95);
       document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
+      document.getElementById('input-usage-enabled').checked = config.inputUsageEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
-      document.getElementById('notify-usage-alert').checked = config.notifyUsageAlert !== false;
+      document.getElementById('notify-usage-warn').checked = config.notifyUsageWarn !== false;
+      document.getElementById('notify-usage-danger').checked = config.notifyUsageDanger !== false;
       document.getElementById('notify-weekly-report').checked = config.notifyWeeklyReport !== false;
       document.getElementById('notify-plan-change').checked = config.notifyPlanChange !== false;
       document.getElementById('notify-collect-fail').checked = config.notifyCollectFail !== false;
       updateBadgePreview();
+      updateNotifyExamples();
     }
   );
 
@@ -191,15 +256,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('interval').addEventListener('change', autoSave);
 
   // Thresholds
-  document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
-  document.getElementById('threshold-danger').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); autoSave(); });
+  document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); updateNotifyExamples(); autoSave(); });
+  document.getElementById('threshold-danger').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); updateNotifyExamples(); autoSave(); });
 
-  // Sidebar usage toggle
+  // Page usage toggles (sidebar + input area)
   document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('input-usage-enabled').addEventListener('change', autoSave);
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', autoSave);
+  });
+
+  // Track last interacted card for contextual save toast
+  document.addEventListener('change', (e) => {
+    const card = e.target.closest('.card');
+    if (card) {
+      const title = card.querySelector('.card-title');
+      if (title) _lastInteractedCard = title.textContent;
+    }
   });
 
   // Show current status
@@ -237,6 +312,25 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('last-collected').textContent = '-';
     });
   });
+
+  // Check system notification permission
+  chrome.notifications.getPermissionLevel((level) => {
+    if (level === 'denied') {
+      document.getElementById('notify-blocked-banner').style.display = 'block';
+    }
+  });
+
+  // Scroll to section and highlight if hash is present (e.g. #notifications, #page-usage)
+  if (location.hash) {
+    setTimeout(() => {
+      const el = document.querySelector(location.hash);
+      if (el) {
+        const card = el.closest('.card') || el;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('card--highlight');
+      }
+    }, 300);
+  }
 });
 
 async function sendReviewNudgeAction(action) {
@@ -244,13 +338,13 @@ async function sendReviewNudgeAction(action) {
     const status = await new Promise(r => chrome.storage.local.get({ lastStatus: null }, r));
     const email = status.lastStatus?.snapshot?.user_email;
     if (!email) return;
-    const { serverUrl, apiKey } = await new Promise(r =>
+    const cfg = await new Promise(r =>
       chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
     );
-    if (!serverUrl || !apiKey) return;
-    fetch(serverUrl + '/api/snapshots/review-nudge', {
+    if (!cfg.serverUrl) return;
+    _authedFetch(cfg, cfg.serverUrl + '/api/snapshots/review-nudge', {
       method: 'PATCH',
-      headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_email: email, action }),
     });
   } catch (e) { /* silent */ }
@@ -335,7 +429,7 @@ function loadOrgOptions() {
       chrome.storage.local.remove(['accountCache', 'autoSelectedOrg', 'collectedOrgs'], () => {
         loadOrgOptions();
         // Also trigger a forced re-collection
-        chrome.runtime.sendMessage({ type: 'COLLECT_NOW', force: true });
+        chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' });
         showToast(t('org_refreshed'));
         setTimeout(() => { refreshBtn.disabled = false; }, 3000);
       });

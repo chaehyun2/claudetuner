@@ -60,6 +60,7 @@ export async function fetchViaTab(tabId, fullUrl, options) {
         const opts = {
           method: method || 'GET',
           credentials: 'include',
+          cache: 'no-store',
           headers: { 'Accept': 'application/json', ...(headers || {}) },
         };
         if (body && method && method !== 'GET') {

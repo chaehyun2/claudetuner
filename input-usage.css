@@ -1,0 +1,234 @@
+/* Claude Tuner — Input Area Usage Strip
+   Compact 1-line usage display inside Claude.ai's chat input area.
+   Uses Claude.ai's Tailwind CSS variables for automatic dark/light mode. */
+
+/* Container */
+.ct-input-usage {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 6px 6px 2px;
+  font-size: 11px;
+  user-select: none;
+  overflow: hidden;
+}
+
+.ct-input-usage-portal {
+  position: fixed;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  pointer-events: auto;
+  border-radius: 8px;
+  color: var(--text-300, #6b7280);
+  background: color-mix(in srgb, var(--bg-100, #ffffff) 94%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-300, #6b7280) 12%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10);
+  backdrop-filter: blur(8px);
+}
+
+/* CT logo link */
+.ct-iu-logo-link {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 6px;
+  text-decoration: none;
+}
+
+.ct-iu-logo {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  opacity: 0.45;
+  transition: opacity 0.15s;
+}
+
+.ct-iu-logo-link:hover .ct-iu-logo {
+  opacity: 0.8;
+}
+
+/* Each info segment */
+.ct-iu-seg {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.ct-iu-seg-label {
+  opacity: 0.55;
+  white-space: nowrap;
+}
+
+.ct-iu-seg-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Dot separator — shrinks spacing when tight */
+.ct-iu-dot {
+  margin: 0 8px;
+  opacity: 0.3;
+  font-size: 8px;
+  flex-shrink: 1;
+  min-width: 4px;
+  overflow: hidden;
+}
+
+/* 5h progress bar — shrinks when space is tight */
+.ct-iu-bar {
+  width: 100px;
+  min-width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  position: relative;
+  margin-left: 8px;
+  flex-shrink: 1;
+  overflow: visible;
+}
+
+.ct-iu-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+  min-width: 0;
+}
+
+.ct-iu-bar-pred {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  opacity: 0.25;
+  background-image: repeating-linear-gradient(
+    -45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px
+  );
+  transition: left 0.4s ease, width 0.4s ease;
+}
+
+.ct-iu-bar-marker {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 8px;
+  border-radius: 1px;
+  transition: left 0.4s ease;
+}
+
+/* Extra usage bar */
+.ct-iu-extra-bar {
+  width: 40px;
+  min-width: 20px;
+  height: 4px;
+  border-radius: 2px;
+  position: relative;
+  margin-left: 6px;
+  flex-shrink: 1;
+}
+
+.ct-iu-extra-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+/* Right-aligned items */
+.ct-iu-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Settings button */
+.ct-iu-settings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  opacity: 0.3;
+  transition: opacity 0.15s;
+  padding: 0;
+}
+
+.ct-iu-settings:hover {
+  opacity: 0.7;
+}
+
+.ct-iu-settings svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Reset time — hoverable with absolute date tooltip */
+.ct-iu-reset-wrap {
+  position: relative;
+  cursor: default;
+}
+
+.ct-iu-reset-wrap:hover > .ct-iu-tooltip {
+  opacity: 1;
+}
+
+/* PEAK badge — hoverable with tooltip */
+.ct-iu-peak {
+  color: #ef4444;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  position: relative;
+  cursor: default;
+}
+
+/* Tooltip */
+.ct-iu-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  width: max-content;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 9999;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.ct-iu-peak:hover .ct-iu-tooltip {
+  opacity: 1;
+}
+
+.ct-iu-tooltip-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+  display: block;
+  color: #fca5a5;
+}
+
+.ct-iu-tooltip-body {
+  opacity: 0.85;
+}
+
+.ct-iu-tooltip-brand {
+  display: block;
+  margin-top: 6px;
+  font-size: 9px;
+  opacity: 0.4;
+  text-align: right;
+  font-weight: 500;
+}

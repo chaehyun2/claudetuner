@@ -11,8 +11,10 @@
     .header .sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
 
     /* 섹션 카드 */
-    .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; transition: box-shadow .4s ease; }
     .card-title { font-size: 13px; font-weight: 600; color: #4f46e5; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+    .card--highlight { animation: card-glow 3s ease-out forwards; background: #f5f3ff; }
+    @keyframes card-glow { 0%,40% { box-shadow: 0 0 0 3px rgba(79,70,229,.45); } 100% { box-shadow: none; } }
 
     /* 폼 */
     .form-group { margin-bottom: 14px; }
@@ -166,9 +168,9 @@
   <input type="hidden" id="server-url" value="" />
   <input type="hidden" id="api-key" />
 
-  <!-- Claude.ai 사이드바 사용량 표시 -->
-  <div class="card">
-    <div class="card-title" data-i18n="sidebar_usage_title"></div>
+  <!-- Claude.ai page usage (sidebar + input) -->
+  <div class="card" id="page-usage">
+    <div class="card-title" data-i18n="page_usage_title"></div>
     <div class="form-group">
       <label class="check-label">
         <input type="checkbox" id="sidebar-usage-enabled" checked>
@@ -176,10 +178,17 @@
       </label>
       <div class="form-hint" data-i18n="sidebar_usage_hint"></div>
     </div>
+    <div class="form-group">
+      <label class="check-label">
+        <input type="checkbox" id="input-usage-enabled" checked>
+        <span data-i18n="input_usage_desc"></span>
+      </label>
+      <div class="form-hint" data-i18n="input_usage_hint"></div>
+    </div>
   </div>
 
   <!-- 수집 설정 -->
-  <div class="card">
+  <div class="card" id="collect-settings">
     <div class="card-title" data-i18n="collect_settings"></div>
     <div class="form-group">
       <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -295,8 +304,11 @@
   </div>
 
   <!-- 알림 설정 -->
-  <div class="card">
+  <div class="card" id="notifications">
     <div class="card-title" data-i18n="notify_settings"></div>
+    <div id="notify-blocked-banner" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:12px;color:#991b1b;">
+      <span data-i18n="notify_blocked"></span>
+    </div>
     <div class="notify-list" id="notify-list">
       <label class="notify-item">
         <div class="notify-toggle">
@@ -316,11 +328,19 @@
       </label>
       <label class="notify-item">
         <div class="notify-toggle">
-          <input type="checkbox" id="notify-usage-alert" checked>
-          <span class="notify-name" data-i18n="notify_usage_alert"></span>
+          <input type="checkbox" id="notify-usage-warn">
+          <span class="notify-name" data-i18n="notify_usage_warn"></span>
         </div>
-        <div class="notify-desc" data-i18n="notify_usage_alert_desc"></div>
-        <div class="notify-example" data-i18n="notify_usage_alert_ex"></div>
+        <div class="notify-desc" data-i18n="notify_usage_warn_desc"></div>
+        <div class="notify-example" data-i18n="notify_usage_warn_ex"></div>
+      </label>
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-usage-danger" checked>
+          <span class="notify-name" data-i18n="notify_usage_danger"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_usage_danger_desc"></div>
+        <div class="notify-example" data-i18n="notify_usage_danger_ex"></div>
       </label>
       <label class="notify-item">
         <div class="notify-toggle">

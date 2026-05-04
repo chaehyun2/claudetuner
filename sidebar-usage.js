@@ -10,12 +10,17 @@
   const MOUNT_INTERVAL_MS = 1000;
   const COUNTDOWN_INTERVAL_MS = 1000;
 
+  const ANNOUNCE_URL = 'https://api.claudetuner.com/api/announcements';
+  const NOTICE_BASE = 'https://notice.claudetuner.com/';
+
   // ── State ──
-  let _enabled = true;    // controlled by options
+  let _enabled = null;    // null until storage read; controlled by options
   let _mounted = false;
   let _data = null;       // { plan, h5, d7, r5, r7, eu, el, euEnabled, pred5h, pred7d }
   let _lang = 'en';
   let _countdownTimer = null;
+  let _notices = [];      // active announcements from server
+  let _lastSeenId = null; // last seen notice ID (persisted)
 
   // ── i18n (minimal, sidebar only) ──
   const I18N = {
@@ -36,6 +41,7 @@
       tip_peak: '피크 시간대 (평일 12-18 UTC).\n5h 한도가 빠르게 소진됩니다.',
       tip_plan: '현재 활성 플랜.',
       tip_brand: 'Claude Tuner',
+      notices: '공지사항',
     },
     en: {
       session: 'Session (5h)',
@@ -54,6 +60,7 @@
       tip_peak: 'Peak hours (weekdays 12-18 UTC).\n5h limit drains faster.',
       tip_plan: 'Your current active plan.',
       tip_brand: 'Claude Tuner',
+      notices: 'Notices',
     },
   };
 
@@ -80,6 +87,26 @@
     return `⏱ ${h}h ${m}m`;
   }
 
+  function formatResetAbsolute(resetAt) {
+    if (!resetAt) return '';
+    const d = new Date(resetAt);
+    const tz = d.toLocaleTimeString(_lang === 'ko' ? 'ko-KR' : 'en-US', { timeZoneName: 'short' })
+      .replace(/.*\s/, ''); // extract timezone abbreviation
+    if (_lang === 'ko') {
+      const days = ['\uc77c', '\uc6d4', '\ud654', '\uc218', '\ubaa9', '\uae08', '\ud1a0'];
+      const ampm = d.getHours() < 12 ? '\uc624\uc804' : '\uc624\ud6c4';
+      const h12 = d.getHours() % 12 || 12;
+      const min = String(d.getMinutes()).padStart(2, '0');
+      return `${d.getMonth() + 1}/${d.getDate()}(${days[d.getDay()]}) ${ampm} ${h12}\uc2dc ${min}\ubd84 (${tz}) \ub9ac\uc14b`;
+    }
+    const h12 = d.getHours() % 12 || 12;
+    const ampm = d.getHours() < 12 ? 'AM' : 'PM';
+    const min = String(d.getMinutes()).padStart(2, '0');
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `Resets ${months[d.getMonth()]} ${d.getDate()} (${days[d.getDay()]}) ${h12}:${min} ${ampm} (${tz})`;
+  }
+
   function isPeakNow() {
     const now = new Date();
     const day = now.getUTCDay();
@@ -99,9 +126,9 @@
     return _tooltipEl;
   }
 
-  function showTooltip(target, tipKey) {
+  function showTooltip(target, tipKeyOrText, raw) {
     const tip = ensureTooltip();
-    const text = t(tipKey);
+    const text = raw ? tipKeyOrText : t(tipKeyOrText);
     tip.innerHTML = text + `<span class="ct-sb-tip-brand">${t('tip_brand')}</span>`;
     // Position below the target element
     const rect = target.getBoundingClientRect();
@@ -114,12 +141,115 @@
     if (_tooltipEl) _tooltipEl.classList.remove('visible');
   }
 
-  function attachTip(el, tipKey, stopProp) {
+  function attachTip(el, tipKey, stopProp, raw) {
     el.addEventListener('mouseenter', (e) => {
       if (stopProp) e.stopPropagation();
-      showTooltip(el, tipKey);
+      showTooltip(el, typeof tipKey === 'function' ? tipKey() : tipKey, raw);
     });
     el.addEventListener('mouseleave', hideTooltip);
+  }
+
+  // ── Announcements ──
+  async function fetchNotices() {
+    try {
+      const cacheBuster = Math.floor(Date.now() / 3600000);
+      const res = await fetch(ANNOUNCE_URL + '?t=' + cacheBuster);
+      const list = await res.json();
+      if (!Array.isArray(list)) return;
+      const extVer = chrome.runtime.getManifest().version;
+      _notices = list.filter(n => {
+        if (n.min_version && !compareVersions(extVer, n.min_version)) return false;
+        if (n.lang && n.lang !== _lang) return false;
+        return true;
+      });
+      updateBellBadge();
+      renderInlineNotice();
+    } catch (e) { /* silent */ }
+  }
+
+  function compareVersions(a, b) {
+    const pa = (a || '0').split('.').map(Number);
+    const pb = (b || '0').split('.').map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const va = pa[i] || 0, vb = pb[i] || 0;
+      if (va > vb) return true;
+      if (va < vb) return false;
+    }
+    return true;
+  }
+
+  function getUnseenCount() {
+    if (!_lastSeenId || _notices.length === 0) return _notices.length;
+    // Notices are assumed sorted newest first by ID or date
+    let count = 0;
+    for (const n of _notices) {
+      if (n.id === _lastSeenId) break;
+      count++;
+    }
+    return count;
+  }
+
+  function updateBellBadge() {
+    const badge = document.getElementById('ct-sb-bell-badge');
+    if (!badge) return;
+    const unseen = getUnseenCount();
+    if (unseen > 0) {
+      badge.textContent = unseen;
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function renderInlineNotice() {
+    const container = document.getElementById('ct-sb-notice');
+    if (!container) return;
+
+    chrome.storage.local.get({ ct_dismissed_notices: [] }, (result) => {
+      const dismissed = result.ct_dismissed_notices || [];
+      const active = _notices.filter(n => !dismissed.includes(n.id));
+
+      if (active.length === 0) {
+        container.innerHTML = '';
+        container.style.display = 'none';
+        return;
+      }
+
+      // Show only the latest one
+      const latest = active[0];
+      container.style.display = '';
+      container.innerHTML = `
+        <span class="ct-sb-notice-icon">\uD83D\uDCE2</span>
+        <span class="ct-sb-notice-text text-text-300" data-url="${escapeHtml(latest.url || '')}">${escapeHtml(latest.title || '')}</span>
+        <button class="ct-sb-notice-close text-text-500" data-nid="${escapeHtml(latest.id || '')}">\u00D7</button>
+      `;
+
+      // Click notice text → open URL or dashboard
+      container.querySelector('.ct-sb-notice-text').addEventListener('click', () => {
+        // Reject non-http(s) schemes (e.g. javascript:) before navigating.
+        let url = latest.url || '';
+        try {
+          const u = new URL(url);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') url = '';
+        } catch { url = ''; }
+        if (!url) url = NOTICE_BASE + _lang;
+        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=sidebar', '_blank');
+      });
+
+      // Dismiss button
+      container.querySelector('.ct-sb-notice-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        chrome.storage.local.get({ ct_dismissed_notices: [] }, (r) => {
+          const arr = r.ct_dismissed_notices || [];
+          if (!arr.includes(latest.id)) arr.push(latest.id);
+          chrome.storage.local.set({ ct_dismissed_notices: arr }, () => renderInlineNotice());
+        });
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   function getActiveOrgId() {
@@ -165,29 +295,13 @@
     // Header
     const header = document.createElement('div');
     header.className = 'ct-sb-header';
+    const logoUrl = chrome.runtime.getURL('icons/icon16.png');
     header.innerHTML = `
+      <a href="${SITE_URL}/dashboard/?utm_source=sidebar" target="_blank" rel="noopener" class="ct-sb-logo-link" title="Claude Tuner Dashboard">
+        <img src="${logoUrl}" class="ct-sb-logo" alt="CT">
+      </a>
       <span class="ct-sb-title text-text-500">Usage</span>
-      <span class="ct-sb-actions">
-        <a href="${SITE_URL}/dashboard/" target="_blank" rel="noopener" title="${t('dashboard')}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-500">
-            <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
-            <polyline points="15 3 21 3 21 9"/>
-            <line x1="10" y1="14" x2="21" y2="3"/>
-          </svg>
-        </a>
-        <button class="ct-sb-settings-btn" title="${t('settings')}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-500">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
-          </svg>
-        </button>
-      </span>
     `;
-
-    // Settings button opens extension options page
-    header.querySelector('.ct-sb-settings-btn').addEventListener('click', () => {
-      chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS' });
-    });
     panel.appendChild(header);
 
     // Content container
@@ -195,6 +309,13 @@
     content.className = 'ct-sb-content';
     content.id = 'ct-sb-content';
     panel.appendChild(content);
+
+    // Inline notice container (below content)
+    const notice = document.createElement('div');
+    notice.className = 'ct-sb-notice';
+    notice.id = 'ct-sb-notice';
+    notice.style.display = 'none';
+    panel.appendChild(notice);
 
     return panel;
   }
@@ -257,6 +378,12 @@
     const predSpan = row.querySelector('.ct-sb-pred');
     if (predSpan) attachTip(predSpan, 'tip_pred', true);
 
+    // Reset time tooltip (dynamic — recalculated on hover)
+    const resetSpan = row.querySelector('.ct-sb-reset');
+    if (resetAt && resetSpan) {
+      attachTip(resetSpan, () => formatResetAbsolute(resetAt), true, true);
+    }
+
     return row;
   }
 
@@ -318,29 +445,75 @@
       frag.appendChild(buildExtraUsageRow(_data.eu, _data.el));
     }
 
-    // Footer: plan + peak
+    // Footer: plan + peak + action buttons
     const footer = document.createElement('div');
     footer.className = 'ct-sb-footer text-text-500';
+
+    const footerLeft = document.createElement('span');
+    footerLeft.className = 'ct-sb-footer-left';
     if (_data.plan) {
       const planSpan = document.createElement('span');
       planSpan.className = 'ct-sb-plan';
       planSpan.textContent = _data.plan;
       attachTip(planSpan, 'tip_plan');
-      footer.appendChild(planSpan);
+      footerLeft.appendChild(planSpan);
     }
     if (isPeakNow()) {
       const peakSpan = document.createElement('span');
       peakSpan.className = 'ct-sb-peak';
       peakSpan.textContent = `🔥 ${t('peak')}`;
       attachTip(peakSpan, 'tip_peak');
-      footer.appendChild(peakSpan);
+      footerLeft.appendChild(peakSpan);
     }
-    if (footer.childNodes.length > 0) {
-      frag.appendChild(footer);
-    }
+    footer.appendChild(footerLeft);
+
+    // Action buttons (bell, dashboard, settings)
+    const actions = document.createElement('span');
+    actions.className = 'ct-sb-actions';
+    actions.innerHTML = `
+      <button class="ct-sb-bell-btn" title="${t('notices')}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-500">
+          <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 01-3.46 0"/>
+        </svg>
+        <span class="ct-sb-bell-badge" id="ct-sb-bell-badge" style="display:none"></span>
+      </button>
+      <a href="${SITE_URL}/dashboard/" target="_blank" rel="noopener" title="${t('dashboard')}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-500">
+          <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
+          <polyline points="15 3 21 3 21 9"/>
+          <line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+      </a>
+      <button class="ct-sb-settings-btn" title="${t('settings')}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-text-500">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
+    `;
+
+    // Bell click → open notice page + save last seen ID
+    actions.querySelector('.ct-sb-bell-btn').addEventListener('click', () => {
+      window.open(NOTICE_BASE + _lang + '?utm_source=sidebar', '_blank');
+      if (_notices.length > 0) {
+        _lastSeenId = _notices[0].id;
+        chrome.storage.local.set({ ct_last_seen_notice_id: _lastSeenId });
+        updateBellBadge();
+      }
+    });
+
+    // Settings button opens extension options page
+    actions.querySelector('.ct-sb-settings-btn').addEventListener('click', () => {
+      try { chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS', hash: 'page-usage' }); } catch { /* context dead */ }
+    });
+
+    footer.appendChild(actions);
+    frag.appendChild(footer);
 
     content.innerHTML = '';
     content.appendChild(frag);
+    updateBellBadge();
   }
 
   // ── Countdown update (every second) ──
@@ -388,7 +561,9 @@
       unmount();
       return;
     }
-    // Re-mount if panel was removed (SPA navigation, sidebar re-render)
+    // Stale instance (extension reloaded) — don't touch DOM, let new instance handle it
+    if (!isContextValid()) return;
+
     if (!document.getElementById(CT_PANEL_ID)) {
       _mounted = false;
     }
@@ -400,12 +575,14 @@
 
   // ── Data communication with background ──
   function requestUsageData() {
-    chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: getActiveOrgId() }, (res) => {
-      if (chrome.runtime.lastError || !res) return;
-      _data = res;
-      _lang = res.lang || _lang;
-      renderContent();
-    });
+    if (!isContextValid()) return; // skip silently, panel stays with last data
+    try {
+      chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: getActiveOrgId() }, (res) => {
+        if (chrome.runtime.lastError || !res) return;
+        _data = res;
+        renderContent();
+      });
+    } catch { /* context dead, skip silently */ }
   }
 
   // Listen for refresh signal from background (re-fetch with current orgId)
@@ -426,48 +603,103 @@
     }
   }
 
+  // ── Context guard ──
+  function isContextValid() {
+    try { return !!chrome.runtime?.id; } catch { return false; }
+  }
+
+  let _intervals = [];
+
   // ── Main loop ──
   let _lastMountCheck = 0;
 
   function tick() {
-    const now = Date.now();
-    if (now - _lastMountCheck >= MOUNT_INTERVAL_MS) {
-      _lastMountCheck = now;
-      ensureMounted();
-      checkOrgChange();
-    }
+    try {
+      const now = Date.now();
+      if (now - _lastMountCheck >= MOUNT_INTERVAL_MS) {
+        _lastMountCheck = now;
+        ensureMounted();
+        checkOrgChange();
+      }
+    } catch { /* never kill the loop */ }
     requestAnimationFrame(tick);
   }
 
-  // ── Init ──
-  function init() {
-    // Detect language from page
-    const htmlLang = document.documentElement.lang;
-    _lang = htmlLang?.startsWith('ko') ? 'ko' : 'en';
+  // ── MutationObserver: re-mount immediately when sidebar DOM changes ──
+  let _observer = null;
 
-    // Load enabled setting (default: true)
-    chrome.storage.sync.get({ sidebarUsageEnabled: true }, (cfg) => {
+  function startObserver() {
+    if (_observer) return;
+    _observer = new MutationObserver(() => {
+      if (!_enabled || !isContextValid()) return;
+      if (!document.getElementById(CT_PANEL_ID)) {
+        _mounted = false;
+        mount();
+        if (_mounted) renderContent();
+      }
+    });
+    _observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ── Init ──
+  function detectLang() {
+    const browserLang = (navigator.language || 'en').slice(0, 2).toLowerCase();
+    return browserLang === 'ko' ? 'ko' : 'en';
+  }
+
+  function init() {
+    // Load language + enabled setting + last seen notice ID
+    chrome.storage.local.get({ ct_last_seen_notice_id: null }, (local) => {
+      _lastSeenId = local.ct_last_seen_notice_id;
+    });
+    chrome.storage.sync.get({ lang: 'auto', sidebarUsageEnabled: true }, (cfg) => {
+      _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
       _enabled = cfg.sidebarUsageEnabled !== false;
-      if (_enabled) requestUsageData();
+      if (_enabled) {
+        requestUsageData();
+        fetchNotices();
+      }
     });
 
     // React to setting changes in real-time
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync' && changes.sidebarUsageEnabled) {
-        _enabled = changes.sidebarUsageEnabled.newValue !== false;
-        if (!_enabled) unmount();
-        else requestUsageData();
+      if (area === 'sync') {
+        if (changes.sidebarUsageEnabled) {
+          _enabled = changes.sidebarUsageEnabled.newValue !== false;
+          if (!_enabled) unmount();
+          else requestUsageData();
+        }
+        if (changes.lang) {
+          const v = changes.lang.newValue;
+          _lang = v === 'auto' ? detectLang() : v;
+          renderContent();
+          fetchNotices();
+        }
       }
     });
 
     requestAnimationFrame(tick);
+    startObserver();
 
     // Countdown timer
     _countdownTimer = setInterval(updateCountdowns, COUNTDOWN_INTERVAL_MS);
+    _intervals.push(_countdownTimer);
 
     // Refresh data periodically (every 60s)
-    setInterval(requestUsageData, 60000);
+    _intervals.push(setInterval(requestUsageData, 60000));
+
+    // Refresh notices periodically (every 30min)
+    _intervals.push(setInterval(fetchNotices, 30 * 60 * 1000));
   }
+
+  // Report tab visibility changes to background for activity-aware polling
+  document.addEventListener('visibilitychange', () => {
+    try {
+      chrome.runtime.sendMessage({
+        type: document.visibilityState === 'visible' ? 'TAB_VISIBLE' : 'TAB_HIDDEN',
+      }).catch(() => {});
+    } catch { /* context invalidated */ }
+  });
 
   // Wait for DOM ready
   if (document.readyState === 'loading') {

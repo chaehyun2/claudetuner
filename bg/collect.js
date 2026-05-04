@@ -8,12 +8,12 @@ import {
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeError, resetIcon } from './badge.js';
-import { checkCollectFailNotification, checkUsageAlerts } from './notifications.js';
+import { checkCollectFailNotification, checkUsageAlerts, logNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders } from './storage.js';
 
 // === Adaptive Polling helpers ===
 export function getOrgPollDefault() {
@@ -37,6 +37,12 @@ export function hasOrgUsageChanged(prev, current) {
 export function updateOrgPollState(state, currentValues, changed) {
   if (changed) {
     return { ...state, tier: 'active', unchangedCount: 0, lastValues: currentValues, lastPollAt: Date.now() };
+  }
+  // Zombie org: no active 5h window (h5=0/null, r5=null) → fast-track to dormant
+  const isZombie = (currentValues.h5 == null || currentValues.h5 === 0) && !currentValues.resetsAt5h;
+  if (isZombie && state.tier !== 'dormant') {
+    console.log(`[Claude Tuner] Org poll zombie detected (h5=0, r5=null): ${state.tier} → dormant`);
+    return { ...state, tier: 'dormant', unchangedCount: 0, lastValues: currentValues, lastPollAt: Date.now() };
   }
   const newCount = state.unchangedCount + 1;
   const tierInfo = ORG_POLL_TIERS[state.tier];
@@ -98,9 +104,9 @@ async function buildUsageFields(usageData, config) {
       utilization: usageData.seven_day?.utilization ?? null,
       resets_at: normalizeResetTime(usageData.seven_day?.resets_at),
     },
-    seven_day_opus: {
-      utilization: usageData.seven_day_opus?.utilization ?? null,
-      resets_at: normalizeResetTime(usageData.seven_day_opus?.resets_at),
+    seven_day_omelette: {
+      utilization: usageData.seven_day_omelette?.utilization ?? null,
+      resets_at: normalizeResetTime(usageData.seven_day_omelette?.resets_at),
     },
     seven_day_sonnet: {
       utilization: usageData.seven_day_sonnet?.utilization ?? null,
@@ -112,6 +118,76 @@ async function buildUsageFields(usageData, config) {
     poll_interval: config.intervalMinutes || DEFAULT_INTERVAL_MINUTES,
     poll_interval_explicit: !!config.intervalExplicitlySet,
   };
+}
+
+/** Sync notification permission to server (fire-and-forget, on change only) */
+function syncNotificationPermission(config, userEmail) {
+  chrome.notifications.getPermissionLevel((level) => {
+    const blocked = level === 'denied';
+    chrome.storage.local.get({ _lastNotifBlocked: null }, (r) => {
+      if (r._lastNotifBlocked === blocked) return; // no change
+      chrome.storage.local.set({ _lastNotifBlocked: blocked });
+
+      const payload = { user_email: userEmail, notifications_blocked: blocked };
+
+      // When newly blocked, include notification stats for analysis
+      if (blocked) {
+        chrome.storage.local.get({ _notifLog: [] }, ({ _notifLog }) => {
+          if (_notifLog.length > 0) {
+            const now = Date.now();
+            const d7 = now - 7 * 24 * 60 * 60 * 1000;
+            const recent = _notifLog.filter(e => e.ts > d7);
+            // Per-category counts (last 7 days)
+            const counts = {};
+            for (const e of recent) counts[e.c] = (counts[e.c] || 0) + 1;
+            // Last notification before block
+            const last = _notifLog[_notifLog.length - 1];
+            // Days with at least one notification (for daily avg)
+            const days = new Set(recent.map(e => new Date(e.ts).toDateString())).size || 1;
+            payload.notification_stats = JSON.stringify({
+              last_category: last.c,
+              last_ts: last.ts,
+              seven_day_counts: counts,
+              seven_day_total: recent.length,
+              daily_avg: +(recent.length / days).toFixed(1),
+            });
+          }
+          authedFetch(config, `${config.serverUrl}/api/users/preferences`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).catch(() => {});
+        });
+      } else {
+        authedFetch(config, `${config.serverUrl}/api/users/preferences`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).catch(() => {});
+      }
+    });
+  });
+}
+
+/** Sync notification toggle preferences to server (fire-and-forget, on change only) */
+function syncNotificationPrefs(config, userEmail) {
+  const defaults = {
+    notifyUsageWarn: false, notifyUsageDanger: true,
+    notifyResetSoon: true, notifyResetDone: true,
+    notifyWeeklyReport: true, notifyCollectFail: true, notifyPlanChange: true,
+  };
+  chrome.storage.sync.get(defaults, (prefs) => {
+    const json = JSON.stringify(prefs);
+    chrome.storage.local.get({ _lastNotifPrefs: null }, (r) => {
+      if (r._lastNotifPrefs === json) return; // no change
+      chrome.storage.local.set({ _lastNotifPrefs: json });
+      authedFetch(config, `${config.serverUrl}/api/users/preferences`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_email: userEmail, notification_prefs: json }),
+      }).catch(() => {});
+    });
+  });
 }
 
 /** Show recommendation badge (⚠) with display-mode-aware utilization */
@@ -504,6 +580,18 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         recommendation: (await getLastStatus())?.recommendation || null,
         fetchMode: (await chrome.tabs.query({ url: 'https://claude.ai/*' })).length > 0 ? 'tab' : 'cookie',
       });
+      // Update collectedOrgs for boost mode so sidebar/input get fresh data
+      // (storage.onChanged on collectedOrgs triggers pushSidebarUsage)
+      const { collectedOrgs: prevOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+      const updatedOrgs = prevOrgs.map(o => o.uuid === bestOrg?.uuid ? {
+        ...o,
+        h5: snapshot.five_hour?.utilization ?? o.h5,
+        d7: snapshot.seven_day?.utilization ?? o.d7,
+        resetsAt5h: snapshot.five_hour?.resets_at ?? o.resetsAt5h,
+        resetsAt7d: snapshot.seven_day?.resets_at ?? o.resetsAt7d,
+        extraUsage: snapshot.extra_usage ?? o.extraUsage,
+      } : o);
+      await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
       updateBadge(snapshot.seven_day?.utilization, snapshot.five_hour?.utilization);
       return { success: true, snapshot, localOnly: true };
@@ -518,14 +606,27 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
 
     // === Server POST: fire-and-forget (don't wait for response) ===
     // Send server save in background, proceed with local UI update first
+    const authHeaders = await getAuthHeaders(config);
+    const sentToken = bearerFromAuthHeaders(authHeaders);
     fetch(`${config.serverUrl}/api/snapshots`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': config.apiKey,
+        ...authHeaders,
       },
       body: JSON.stringify(body),
     }).then(async (response) => {
+      if (response.status === 401 || response.status === 403) {
+        // ext_token invalid (401) or email mismatch after account switch (403) —
+        // clear and fall back to API key on next cycle to re-issue a fresh token.
+        // Race-safe: only clear if the token we sent is still the stored one
+        // (a concurrent request may have already rotated the token).
+        const cleared = await clearExtTokenIfMatches(sentToken);
+        if (cleared) {
+          console.log(`[Claude Tuner] ext_token cleared (${response.status}). Will re-auth on next cycle.`);
+        }
+        return;
+      }
       if (response.status === 410) {
         const errData = await response.json().catch(() => ({}));
         if (errData.account_deleted) {
@@ -543,6 +644,11 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
       const result = await response.json();
       console.log(`[Claude Tuner] Snapshot sent: ${result.success ? 'ok' : 'fail'}${result.skipped ? ' (skipped)' : ''}`);
+
+      // Store ext_token from server (TOFU issuance or refresh)
+      if (result.ext_token) {
+        await setExtToken(result.ext_token);
+      }
 
       // Apply server-provided poll_interval
       if (result.poll_interval_minutes && result.poll_interval_minutes > 0) {
@@ -595,6 +701,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             ],
             requireInteraction: true,
           });
+          logNotification('plan-order');
         }
       }
 
@@ -618,8 +725,8 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         } else {
           try {
             const orgParam = snapshot.claude_org_uuid ? `?org=${encodeURIComponent(snapshot.claude_org_uuid)}` : '';
-            const meResp = await fetch(`${config.serverUrl}/api/me${orgParam}`, {
-              headers: { 'X-API-Key': config.apiKey, 'X-User-Email': snapshot.user_email },
+            const meResp = await authedFetch(config, `${config.serverUrl}/api/me${orgParam}`, {
+              headers: { 'X-User-Email': snapshot.user_email },
             });
             if (meResp.ok) {
               const meData = await meResp.json();
@@ -673,6 +780,10 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       });
       chrome.runtime.setUninstallURL(`${DEFAULT_SERVER_URL}/api/uninstall?${params}`);
     });
+
+    // 4-0.5 Sync notification permission & preferences to server (fire-and-forget, on change only)
+    syncNotificationPermission(config, snapshot.user_email);
+    syncNotificationPrefs(config, snapshot.user_email);
 
     // 4-1. Save local usage history (last 7 days, for sparkline + prediction)
     await appendUsageHistory(buildHistoryPoint(snapshot, plan));
@@ -830,12 +941,12 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           console.log(`[Claude Tuner] Extra org snapshot: ${extraOrg.name} (${extraPlan})${tierTag}${usageChanged ? '' : ' [heartbeat]'}`);
 
           // Server POST: fire-and-forget
-          fetch(`${config.serverUrl}/api/snapshots`, {
+          authedFetch(config, `${config.serverUrl}/api/snapshots`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(force ? { ...extraSnapshot, force: true } : extraSnapshot),
           }).then(r => {
-            if (!r.ok) console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
+            if (r && !r.ok) console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
           }).catch(e => {
             console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
           });
@@ -912,9 +1023,9 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           const { accountCache } = await chrome.storage.local.get('accountCache');
           const hbEmail = accountCache?.email;
           if (hbEmail) {
-            fetch(`${cfg.serverUrl}/api/heartbeat`, {
+            authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-API-Key': cfg.apiKey },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email: hbEmail, error_code: errorMsg.split(':')[0].slice(0, 50), ext_version: ver }),
             }).catch(() => {});
           }

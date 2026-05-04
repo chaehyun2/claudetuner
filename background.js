@@ -2,14 +2,18 @@
 import { sendGAEvent } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, ALARM_BOOST, ALARM_WEEKLY_REPORT,
-  DEFAULT_INTERVAL_MINUTES, NOTIF_ID_OPTIMIZE,
+  DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
+  LOCAL_ACTIVE_INTERVAL_MINUTES, LOCAL_BACKGROUND_INTERVAL_MINUTES,
+  VISIBILITY_THROTTLE_MS, POPUP_COLLECT_THROTTLE_MS,
+  NOTIF_ID_OPTIMIZE, NOTIF_ID_ALERT,
   DEFAULT_SERVER_URL, SITE_URL,
 } from './bg/constants.js';
+import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
-import { getConfig, getLastStatus, getUsageHistory } from './bg/storage.js';
+import { getConfig, getLastStatus, getUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge } from './bg/badge.js';
-import { scheduleWeeklyReport, sendWeeklyReport } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -65,10 +69,33 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Open welcome page on fresh install (captures ref_source)
   if (details.reason === 'install') {
     chrome.tabs.create({ url: `${SITE_URL}/welcome/` });
+    // Allow auto-open side panel on first Claude.ai visit (fresh install only)
+    await chrome.storage.local.set({ sidePanelAutoOpened: false });
+  } else if (details.reason === 'update') {
+    // Existing users: skip auto-open (they already know the extension)
+    const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: undefined });
+    if (sidePanelAutoOpened === undefined) {
+      await chrome.storage.local.set({ sidePanelAutoOpened: true });
+    }
   }
   await setupAlarm();
   sendGAEvent('extension_installed', { reason: details.reason });
   await restoreSidePanelPreference();
+
+  // Re-inject content scripts into existing Claude.ai tabs (dev reload / extension update)
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    for (const tab of tabs) {
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['sidebar-usage.js', 'input-usage.js'],
+      }).catch(() => {});
+      chrome.scripting.insertCSS({
+        target: { tabId: tab.id },
+        files: ['sidebar-usage.css', 'input-usage.css'],
+      }).catch(() => {});
+    }
+  } catch { /* tabs API may fail in some contexts */ }
 });
 
 // External connect listener (used to wake up the service worker)
@@ -161,12 +188,9 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 
         // 2. Request login token from server
         const config = await getConfig();
-        const resp = await fetch(`${config.serverUrl}/api/auth/ext-login`, {
+        const resp = await authedFetch(config, `${config.serverUrl}/api/auth/ext-login`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': config.apiKey,
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email }),
         });
 
@@ -194,31 +218,51 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 async function setupAlarm() {
-  const config = await getConfig();
-  const intervalMinutes = config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
-
-  chrome.alarms.create(ALARM_NAME, {
-    delayInMinutes: 1,
-    periodInMinutes: intervalMinutes,
-  });
-  console.log(`[Claude Tuner] Alarm set: every ${intervalMinutes} minutes`);
-
-  // Schedule weekly report
+  await updatePollAlarm();
   await scheduleWeeklyReport();
 }
 
+// Adaptive poll alarm: adjusts interval based on activity state.
+// Server POST is gated separately inside the alarm handler.
+async function updatePollAlarm() {
+  const config = await getConfig();
+  const baseInterval = config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+
+  // Free plan: fixed 60min, ignore activity
+  if (baseInterval === FREE_PLAN_INTERVAL_MINUTES) {
+    chrome.alarms.create(ALARM_NAME, { delayInMinutes: FREE_PLAN_INTERVAL_MINUTES, periodInMinutes: FREE_PLAN_INTERVAL_MINUTES });
+    return;
+  }
+
+  const state = getActivityState();
+  let interval;
+  switch (state) {
+    case ACTIVITY_STATES.ACTIVE:     interval = LOCAL_ACTIVE_INTERVAL_MINUTES; break;     // 2min
+    case ACTIVITY_STATES.BACKGROUND: interval = LOCAL_BACKGROUND_INTERVAL_MINUTES; break; // 5min
+    default:                         interval = baseInterval; break;                       // 10min (server default)
+  }
+
+  const existing = await chrome.alarms.get(ALARM_NAME);
+  if (existing && Math.abs(existing.periodInMinutes - interval) < 0.5) return; // no change needed
+
+  chrome.alarms.create(ALARM_NAME, { delayInMinutes: interval, periodInMinutes: interval });
+  console.log(`[Claude Tuner] Poll alarm: ${interval}m (activity=${state})`);
+}
+
 // === Auto-open side panel on first Claude.ai visit after fresh install ===
+// Only attempts once (marks as done even on failure to prevent repeated errors)
 async function tryAutoOpenSidePanel(tabId) {
   try {
-    const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: false });
+    const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: true });
     if (sidePanelAutoOpened) return;
+    // Mark as done first to prevent retries on failure
+    await chrome.storage.local.set({ sidePanelAutoOpened: true });
     if (chrome.sidePanel && chrome.sidePanel.open) {
       await chrome.sidePanel.open({ tabId });
-      await chrome.storage.local.set({ sidePanelAutoOpened: true });
       console.log('[Claude Tuner] Side panel auto-opened on first Claude.ai visit');
     }
   } catch (e) {
-    console.log('[Claude Tuner] Side panel auto-open failed:', e.message);
+    console.log('[Claude Tuner] Side panel auto-open skipped:', e.message);
   }
 }
 
@@ -260,15 +304,30 @@ async function tryTabCollect(reason) {
   } catch (_) { /* ignore poll state reset failure */ }
 
   console.log(`[Claude Tuner] Tab collect triggered: ${reason}${wasError ? ' (retry after error)' : ''}`);
-  const result = await collectAndSend();
+
+  // Apply server POST gate (same logic as alarm handler)
+  const config = await getConfig();
+  const serverInterval = (await chrome.storage.local.get('serverPollInterval')).serverPollInterval
+    || config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+  const { _lastServerPost = 0 } = await chrome.storage.local.get('_lastServerPost');
+  const shouldPost = (Date.now() - _lastServerPost) >= (serverInterval * 60_000 - 30_000);
+
+  const result = await collectAndSend({ skipServer: !shouldPost });
   if (result.success) {
+    if (!result.localOnly) await chrome.storage.local.set({ _lastServerPost: Date.now() });
     await scheduleExpireAlarms(result.snapshot);
   }
 }
 
 // Detect URL changes (login complete, page navigation, etc.)
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url?.startsWith('https://claude.ai')) {
+    // At least background state when a claude.ai tab is ready
+    const prev = getActivityState();
+    if (prev === ACTIVITY_STATES.IDLE) {
+      await setActivityState(ACTIVITY_STATES.BACKGROUND);
+      await updatePollAlarm();
+    }
     tryTabCollect('tab-updated');
     tryAutoOpenSidePanel(tabId);
   }
@@ -279,9 +338,25 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     if (tab.url?.startsWith('https://claude.ai')) {
+      if (await setActivityState(ACTIVITY_STATES.ACTIVE)) await updatePollAlarm();
       tryTabCollect('tab-activated');
+    } else {
+      // Switched away from claude.ai — check if any claude.ai tabs remain
+      const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+      const newState = claudeTabs.length > 0 ? ACTIVITY_STATES.BACKGROUND : ACTIVITY_STATES.IDLE;
+      if (await setActivityState(newState)) await updatePollAlarm();
     }
   } catch (_) { /* ignore tab query failure */ }
+});
+
+// Detect tab close — transition to idle if no claude.ai tabs remain
+chrome.tabs.onRemoved.addListener(async () => {
+  try {
+    const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    if (claudeTabs.length === 0) {
+      if (await setActivityState(ACTIVITY_STATES.IDLE)) await updatePollAlarm();
+    }
+  } catch (_) { /* ignore */ }
 });
 
 // Detect lastActiveOrg cookie change → collect immediately on org switch + reset adaptive poll
@@ -333,7 +408,7 @@ async function evaluateBoost(snapshot) {
   const existing = await chrome.alarms.get(ALARM_BOOST);
 
   if (shouldBoost && !existing) {
-    const { intervalMinutes = 5 } = await chrome.storage.sync.get({ intervalMinutes: 5 });
+    const { intervalMinutes = DEFAULT_INTERVAL_MINUTES } = await chrome.storage.sync.get({ intervalMinutes: DEFAULT_INTERVAL_MINUTES });
     const boostInterval = Math.max(intervalMinutes / 2, 1);
     chrome.alarms.create(ALARM_BOOST, { delayInMinutes: boostInterval, periodInMinutes: boostInterval });
     await chrome.storage.local.set({ boostActive: true });
@@ -354,9 +429,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
   if (alarm.name === ALARM_NAME) {
-    const result = await collectAndSend();
-    // On successful collection, schedule additional alarms based on expire times
+    // Server POST gate: only send to server if enough time has passed
+    const config = await getConfig();
+    const serverInterval = (await chrome.storage.local.get('serverPollInterval')).serverPollInterval
+      || config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+    const { _lastServerPost = 0 } = await chrome.storage.local.get('_lastServerPost');
+    const shouldPost = (Date.now() - _lastServerPost) >= (serverInterval * 60_000 - 30_000); // 30s tolerance
+
+    const result = await collectAndSend({ skipServer: !shouldPost });
     if (result.success) {
+      if (!result.localOnly) await chrome.storage.local.set({ _lastServerPost: Date.now() });
       await scheduleExpireAlarms(result.snapshot);
       await evaluateBoost(result.snapshot);
     }
@@ -379,9 +461,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('reset_soon_title', win),
-          message: await bt('reset_soon_msg', win),
+          message: await bt('reset_soon_msg', win) + '\n' + await bt('notif_settings_hint'),
+          buttons: [{ title: await bt('notif_settings_btn') }],
           priority: 1,
         });
+        logNotification('reset-soon');
       }
       return;
     }
@@ -395,9 +479,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('reset_done_title', win),
-          message: await bt('reset_done_msg', win),
+          message: await bt('reset_done_msg', win) + '\n' + await bt('notif_settings_hint'),
+          buttons: [{ title: await bt('notif_settings_btn') }],
           priority: 1,
         });
+        logNotification('reset-done');
       }
     }
 
@@ -421,7 +507,7 @@ async function scheduleExpireAlarms(snapshot) {
   const resetTimes = [];
   if (snapshot.five_hour?.resets_at) resetTimes.push({ key: '5h', time: snapshot.five_hour.resets_at });
   if (snapshot.seven_day?.resets_at) resetTimes.push({ key: '7d', time: snapshot.seven_day.resets_at });
-  if (snapshot.seven_day_opus?.resets_at) resetTimes.push({ key: 'opus', time: snapshot.seven_day_opus.resets_at });
+  if (snapshot.seven_day_omelette?.resets_at) resetTimes.push({ key: 'design', time: snapshot.seven_day_omelette.resets_at });
   if (snapshot.seven_day_sonnet?.resets_at) resetTimes.push({ key: 'sonnet', time: snapshot.seven_day_sonnet.resets_at });
 
   const now = Date.now();
@@ -457,8 +543,38 @@ async function scheduleExpireAlarms(snapshot) {
   }
 }
 
+// === Visibility + Popup/Panel open handlers ===
+let _lastVisibilityChange = 0;
+let _lastPopupCollect = 0;
+
+// Restore from storage on SW restart
+chrome.storage.local.get({ _lastPopupCollect: 0 }, (r) => { _lastPopupCollect = r._lastPopupCollect; });
+
 // === Message Handler (manual collection request from popup) ===
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // Tab visibility change from content script (sidebar-usage.js)
+  if (message.type === 'TAB_VISIBLE' || message.type === 'TAB_HIDDEN') {
+    const now = Date.now();
+    if (now - _lastVisibilityChange < VISIBILITY_THROTTLE_MS) return false;
+    _lastVisibilityChange = now;
+    (async () => {
+      const newState = message.type === 'TAB_VISIBLE' ? ACTIVITY_STATES.ACTIVE : ACTIVITY_STATES.BACKGROUND;
+      if (await setActivityState(newState)) await updatePollAlarm();
+    })();
+    return false;
+  }
+  // Popup or side panel opened — quick local-only refresh if data is stale
+  if (message.type === 'POPUP_OPENED') {
+    const now = Date.now();
+    if (now - _lastPopupCollect < POPUP_COLLECT_THROTTLE_MS) {
+      sendResponse({ skipped: true });
+      return false;
+    }
+    _lastPopupCollect = now;
+    chrome.storage.local.set({ _lastPopupCollect: now });
+    collectAndSend({ skipServer: true }).then((result) => sendResponse(result));
+    return true;
+  }
   if (message.type === 'MANUAL_COLLECT') {
     collectAndSend({ force: true }).then((result) => sendResponse(result));
     return true;
@@ -549,9 +665,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const email = status?.snapshot?.user_email;
           if (email) {
             try {
-              await fetch(`${config.serverUrl}/api/snapshots/plan-order-revert`, {
+              await authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-revert`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ order_id: cpo.order_id, user_email: email }),
               });
             } catch (e) { console.error('[Claude Tuner] Failed to report revert:', e.message); }
@@ -573,7 +689,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'OPEN_OPTIONS') {
-    chrome.runtime.openOptionsPage();
+    if (message.hash) {
+      chrome.tabs.create({ url: chrome.runtime.getURL(`options.html#${message.hash}`) });
+    } else {
+      chrome.runtime.openOptionsPage();
+    }
     return false;
   }
   if (message.type === 'GET_SIDEBAR_USAGE') {
@@ -636,6 +756,16 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   } else if (notifId === NOTIF_ID_OPTIMIZE && btnIdx === 1) {
     await dismissRecommendationServer();
   }
+  // Settings button on recurring notifications (usage alert, reset, weekly report)
+  if (btnIdx === 0 && (notifId.startsWith(NOTIF_ID_ALERT) || notifId.startsWith('reset-soon-') || notifId.startsWith('reset-done-') || notifId.startsWith('weekly-report-'))) {
+    let hash = 'notifications';
+    if (notifId.startsWith(NOTIF_ID_ALERT)) hash = 'notify-usage-warn';
+    else if (notifId.startsWith('reset-soon-')) hash = 'notify-reset-soon';
+    else if (notifId.startsWith('reset-done-')) hash = 'notify-reset-done';
+    else if (notifId.startsWith('weekly-report-')) hash = 'notify-weekly-report';
+    chrome.tabs.create({ url: chrome.runtime.getURL(`options.html#${hash}`) });
+    chrome.notifications.clear(notifId);
+  }
 });
 
 // === Sidebar Usage: build data for content script ===
@@ -665,7 +795,7 @@ async function buildSidebarUsageData(reqOrgId) {
   const d7 = orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null;
   const r5 = orgData?.resetsAt5h ?? snapshot?.five_hour?.resets_at ?? null;
   const r7 = orgData?.resetsAt7d ?? snapshot?.seven_day?.resets_at ?? null;
-  const plan = orgData?.plan || snapshot?.current_plan || null;
+  const plan = orgData?.plan || snapshot?.plan || null;
 
   // Extra usage
   const eu = orgData?.extraUsage;
@@ -751,9 +881,13 @@ async function pushSidebarUsage() {
   }
 }
 
-// Hook into storage changes to push sidebar updates after collection
+// Hook into storage changes to push sidebar updates after collection.
+// Only trigger on collectedOrgs change — it is written AFTER lastStatus,
+// so all data (including snapshot) is guaranteed fresh at this point.
+// For skipServer/boost mode (no collectedOrgs write), pushSidebarUsage()
+// is called explicitly in collect.js.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && (changes.lastStatus || changes.collectedOrgs)) {
+  if (area === 'local' && changes.collectedOrgs) {
     pushSidebarUsage();
   }
 });
