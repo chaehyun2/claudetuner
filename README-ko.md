@@ -21,12 +21,9 @@
 
 ---
 
-<!-- TODO: 실제 스크린샷으로 교체 -->
-<!-- <p align="center"> -->
-<!--   <img src="docs/screenshots/popup.png" alt="팝업" width="280" /> -->
-<!--   &nbsp;&nbsp;&nbsp;&nbsp; -->
-<!--   <img src="docs/screenshots/dashboard.png" alt="대시보드" width="480" /> -->
-<!-- </p> -->
+<p align="center">
+  <img src="https://claudetuner.com/screenshots/dashboard-top.png" alt="대시보드 — 사용률 게이지, 플랜 적합도, 주간 트렌드" width="720" />
+</p>
 
 ## 왜 Claude Tuner?
 
@@ -39,19 +36,13 @@ Claude의 사용량 한도는 불투명합니다 — 얼마나 썼는지, 언제
 
 ## 스크린샷
 
-<!-- TODO: 실제 스크린샷 추가. 추천 이미지: -->
-<!-- 1. 사용량 게이지가 보이는 확장 팝업 -->
-<!-- 2. 차트가 있는 대시보드 개요 -->
-<!-- 3. 멤버 목록이 있는 팀 대시보드 -->
-<!-- 4. 플랜 시뮬레이션 / 추천 -->
-
-| 확장 팝업 | 웹 대시보드 |
+| 사용량 트렌드 | 팀 대시보드 |
 |:-:|:-:|
-| *스크린샷 준비 중* | *스크린샷 준비 중* |
+| ![5h/7d 사용량 트렌드 차트](https://claudetuner.com/screenshots/dashboard-charts.png) | ![팀 개요 — 레이스 및 통계](https://claudetuner.com/screenshots/team-overview.png) |
 
-| 플랜 시뮬레이터 | 팀 대시보드 |
+| 인사이트 | 멤버 분석 |
 |:-:|:-:|
-| *스크린샷 준비 중* | *스크린샷 준비 중* |
+| ![전체 인사이트 — 플랜 및 사용률 분포](https://claudetuner.com/screenshots/insights.png) | ![멤버별 사용량 분석](https://claudetuner.com/screenshots/members.png) |
 
 ## 주요 기능
 

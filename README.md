@@ -21,14 +21,9 @@
 
 ---
 
-<!-- TODO: Replace with actual screenshots -->
-<!-- Recommended: 1 popup screenshot + 1 dashboard screenshot, side by side -->
-<!-- Example: -->
-<!-- <p align="center"> -->
-<!--   <img src="docs/screenshots/popup.png" alt="Popup" width="280" /> -->
-<!--   &nbsp;&nbsp;&nbsp;&nbsp; -->
-<!--   <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="480" /> -->
-<!-- </p> -->
+<p align="center">
+  <img src="https://claudetuner.com/screenshots/dashboard-top.png" alt="Dashboard — usage gauges, plan fitness, and weekly trend" width="720" />
+</p>
 
 ## Why Claude Tuner?
 
@@ -41,19 +36,13 @@ Claude's rate limits are opaque — you don't know how much you've used, when it
 
 ## Screenshots
 
-<!-- TODO: Add actual screenshots. Suggested images: -->
-<!-- 1. Extension popup showing usage gauges -->
-<!-- 2. Dashboard overview with charts -->
-<!-- 3. Team dashboard with member list -->
-<!-- 4. Plan simulation / recommendation -->
-
-| Extension Popup | Web Dashboard |
+| Usage Trends | Team Dashboard |
 |:-:|:-:|
-| *screenshot coming soon* | *screenshot coming soon* |
+| ![5h/7d usage trend charts](https://claudetuner.com/screenshots/dashboard-charts.png) | ![Team overview with race and stats](https://claudetuner.com/screenshots/team-overview.png) |
 
-| Plan Simulator | Team Dashboard |
+| Insights | Members |
 |:-:|:-:|
-| *screenshot coming soon* | *screenshot coming soon* |
+| ![Global insights — plan & utilization distribution](https://claudetuner.com/screenshots/insights.png) | ![Per-member analytics](https://claudetuner.com/screenshots/members.png) |
 
 ## Features
 
