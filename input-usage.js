@@ -419,6 +419,7 @@
 
   // ── Data communication ──
   let _dataRetryTimer = null;
+  let _reqSeq = 0; // sequence number to discard stale responses from concurrent calls
 
   function requestUsageData() {
     try {
@@ -426,6 +427,7 @@
     } catch { return; } // extension context truly dead — nothing to do
 
     const orgId = getActiveOrgId();
+    const seq = ++_reqSeq;
     const onFail = () => {
       // Only retry when no data at all (initial load)
       if (_data || _dataRetryTimer) return;
@@ -437,6 +439,7 @@
     };
     try {
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId }, (res) => {
+        if (seq !== _reqSeq) return; // stale response from an older concurrent call — discard
         if (chrome.runtime.lastError) { onFail(); return; }
         if (!res) { onFail(); return; } // keep previous _data if available
         _data = res;

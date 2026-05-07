@@ -19,7 +19,14 @@ import {
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
-import { collectAndSend, getLastActiveOrgId } from './bg/collect.js';
+import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/collect.js';
+
+// Wrap collectAndSend to suppress spurious cookie-change events during collection
+async function collectAndSend(opts) {
+  _collecting = true;
+  try { return await _collectAndSend(opts); }
+  finally { _collecting = false; }
+}
 
 // Domain migration: auto-migrate existing users' serverUrl
 chrome.storage.sync.get({ serverUrl: '' }, ({ serverUrl }) => {
@@ -217,6 +224,19 @@ chrome.runtime.onStartup.addListener(async () => {
   await restoreSidePanelPreference();
 });
 
+// Wake from sleep/lock: collect immediately when the system becomes active.
+// chrome.idle fires "active" after sleep, lock screen, or prolonged idle.
+let _lastIdleCollect = 0;
+const IDLE_COLLECT_THROTTLE_MS = 30 * 1000; // 30s throttle to avoid duplicate triggers
+chrome.idle.onStateChanged.addListener(async (newState) => {
+  if (newState !== 'active') return;
+  const now = Date.now();
+  if (now - _lastIdleCollect < IDLE_COLLECT_THROTTLE_MS) return;
+  _lastIdleCollect = now;
+  console.log('[Claude Tuner] System became active (wake/unlock), collecting now');
+  collectAndSend().catch(() => {});
+});
+
 async function setupAlarm() {
   await updatePollAlarm();
   await scheduleWeeklyReport();
@@ -268,6 +288,7 @@ async function tryAutoOpenSidePanel(tabId) {
 
 // === Tab events: auto-collect on claude.ai visit/return ===
 let _lastTabCollect = 0;
+let _collecting = false; // suppress cookie-change events during collection
 const TAB_COLLECT_THROTTLE_MS = 60 * 1000; // 1-minute throttle
 
 // Restore from storage on SW restart (in-memory variables are reset)
@@ -360,8 +381,13 @@ chrome.tabs.onRemoved.addListener(async () => {
 });
 
 // Detect lastActiveOrg cookie change → collect immediately on org switch + reset adaptive poll
+// Suppress during collection: fetchViaTab for extra orgs may trigger spurious cookie changes
 chrome.cookies.onChanged.addListener((info) => {
   if (info.cookie.name === 'lastActiveOrg' && info.cookie.domain?.includes('claude.ai') && !info.removed) {
+    if (_collecting) {
+      console.log(`[Claude Tuner] lastActiveOrg cookie changed → ${info.cookie.value} (suppressed: collecting)`);
+      return;
+    }
     console.log(`[Claude Tuner] lastActiveOrg cookie changed → ${info.cookie.value}`);
     // Notify popup/side panel immediately (for chip switch before collection completes)
     chrome.runtime.sendMessage({ type: 'ORG_COOKIE_CHANGED', orgId: info.cookie.value }).catch(() => {});
@@ -791,10 +817,21 @@ async function buildSidebarUsageData(reqOrgId) {
     orgData = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
   }
 
-  const h5 = orgData?.h5 ?? snapshot?.five_hour?.utilization ?? null;
-  const d7 = orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null;
-  const r5 = orgData?.resetsAt5h ?? snapshot?.five_hour?.resets_at ?? null;
-  const r7 = orgData?.resetsAt7d ?? snapshot?.seven_day?.resets_at ?? null;
+  // Prefer snapshot over collectedOrgs when snapshot is for the same org and is newer.
+  // Between setStatus (updates snapshot) and collectedOrgs write (happens after multi-org
+  // polling), collectedOrgs can be stale — causing the input bar to show old values while
+  // the badge (which reads snapshot directly) shows the correct value.
+  const snapshotOrgMatch = snapshot && orgData &&
+    snapshot.claude_org_uuid === orgData.uuid &&
+    status?.timestamp && snapshot.collected_at;
+  const useSnapshot = snapshotOrgMatch && orgData.h5 != null &&
+    snapshot.five_hour?.utilization != null &&
+    snapshot.five_hour.utilization !== orgData.h5;
+
+  const h5 = useSnapshot ? snapshot.five_hour.utilization : (orgData?.h5 ?? snapshot?.five_hour?.utilization ?? null);
+  const d7 = useSnapshot ? (snapshot.seven_day?.utilization ?? orgData?.d7 ?? null) : (orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null);
+  const r5 = useSnapshot ? (snapshot.five_hour?.resets_at ?? orgData?.resetsAt5h ?? null) : (orgData?.resetsAt5h ?? snapshot?.five_hour?.resets_at ?? null);
+  const r7 = useSnapshot ? (snapshot.seven_day?.resets_at ?? orgData?.resetsAt7d ?? null) : (orgData?.resetsAt7d ?? snapshot?.seven_day?.resets_at ?? null);
   const plan = orgData?.plan || snapshot?.plan || null;
 
   // Extra usage

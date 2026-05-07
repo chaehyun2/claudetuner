@@ -574,10 +574,13 @@
   }
 
   // ── Data communication with background ──
+  let _reqSeq = 0; // sequence number to discard stale responses from concurrent calls
   function requestUsageData() {
     if (!isContextValid()) return; // skip silently, panel stays with last data
+    const seq = ++_reqSeq;
     try {
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: getActiveOrgId() }, (res) => {
+        if (seq !== _reqSeq) return; // stale response — discard
         if (chrome.runtime.lastError || !res) return;
         _data = res;
         renderContent();
