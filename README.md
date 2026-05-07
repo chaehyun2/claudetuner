@@ -22,7 +22,7 @@
 ---
 
 <p align="center">
-  <img src="https://claudetuner.com/screenshots/dashboard-top.png" alt="Dashboard — usage gauges, plan fitness, and weekly trend" width="720" />
+  <img src="docs/screenshots/dashboard-top.png" alt="Dashboard — usage gauges, plan fitness, and weekly trend" width="720" />
 </p>
 
 ## Why Claude Tuner?
@@ -38,11 +38,11 @@ Claude's rate limits are opaque — you don't know how much you've used, when it
 
 | Usage Trends | Team Dashboard |
 |:-:|:-:|
-| ![5h/7d usage trend charts](https://claudetuner.com/screenshots/dashboard-charts.png) | ![Team overview with race and stats](https://claudetuner.com/screenshots/team-overview.png) |
+| ![5h/7d usage trend charts](docs/screenshots/dashboard-charts.png) | ![Team overview with race and stats](docs/screenshots/team-overview.png) |
 
 | Insights | Members |
 |:-:|:-:|
-| ![Global insights — plan & utilization distribution](https://claudetuner.com/screenshots/insights.png) | ![Per-member analytics](https://claudetuner.com/screenshots/members.png) |
+| ![Global insights — plan & utilization distribution](docs/screenshots/insights.png) | ![Per-member analytics](docs/screenshots/members.png) |
 
 ## Features
 

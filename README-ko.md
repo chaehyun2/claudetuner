@@ -22,7 +22,7 @@
 ---
 
 <p align="center">
-  <img src="https://claudetuner.com/screenshots/dashboard-top.png" alt="대시보드 — 사용률 게이지, 플랜 적합도, 주간 트렌드" width="720" />
+  <img src="docs/screenshots/dashboard-top.png" alt="대시보드 — 사용률 게이지, 플랜 적합도, 주간 트렌드" width="720" />
 </p>
 
 ## 왜 Claude Tuner?
@@ -38,11 +38,11 @@ Claude의 사용량 한도는 불투명합니다 — 얼마나 썼는지, 언제
 
 | 사용량 트렌드 | 팀 대시보드 |
 |:-:|:-:|
-| ![5h/7d 사용량 트렌드 차트](https://claudetuner.com/screenshots/dashboard-charts.png) | ![팀 개요 — 레이스 및 통계](https://claudetuner.com/screenshots/team-overview.png) |
+| ![5h/7d 사용량 트렌드 차트](docs/screenshots/dashboard-charts.png) | ![팀 개요 — 레이스 및 통계](docs/screenshots/team-overview.png) |
 
 | 인사이트 | 멤버 분석 |
 |:-:|:-:|
-| ![전체 인사이트 — 플랜 및 사용률 분포](https://claudetuner.com/screenshots/insights.png) | ![멤버별 사용량 분석](https://claudetuner.com/screenshots/members.png) |
+| ![전체 인사이트 — 플랜 및 사용률 분포](docs/screenshots/insights.png) | ![멤버별 사용량 분석](docs/screenshots/members.png) |
 
 ## 주요 기능
 
