@@ -190,6 +190,7 @@ const TRANSLATIONS = {
     'ob_collecting': '수집 중...',
     'ob_guide_link': '설치 가이드 다시 보기 →',
     'footer_help': '❔ 가이드',
+    'footer_settings': '설정',
     'gauge_predict_collecting': '예측 수집 중',
     // Pin hint
     'pin_hint_text_html': '위의 {pin} <b>버튼</b>을 누르면 툴바에 고정되어 바로 상태를 확인할 수 있습니다',
@@ -506,6 +507,7 @@ const TRANSLATIONS = {
     'ob_collecting': 'Collecting...',
     'ob_guide_link': 'See setup guide →',
     'footer_help': '❔ Guide',
+    'footer_settings': 'Settings',
     'gauge_predict_collecting': 'Estimating...',
     // Pin hint
     'pin_hint_text_html': 'Click the {pin} <b>button</b> above to pin Claude Tuner to your toolbar for quick access',
@@ -679,6 +681,9 @@ function applyI18n() {
   });
   document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
     el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+    el.title = t(el.getAttribute('data-i18n-title'));
   });
   document.querySelectorAll('a[href*="claudetuner.com/welcome"]').forEach((el) => {
     const u = new URL(el.href);

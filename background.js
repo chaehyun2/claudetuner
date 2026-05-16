@@ -226,15 +226,33 @@ chrome.runtime.onStartup.addListener(async () => {
 
 // Wake from sleep/lock: collect immediately when the system becomes active.
 // chrome.idle fires "active" after sleep, lock screen, or prolonged idle.
+// On failure (network not ready after wake), retry at 10s/30s/60s intervals.
 let _lastIdleCollect = 0;
 const IDLE_COLLECT_THROTTLE_MS = 30 * 1000; // 30s throttle to avoid duplicate triggers
+const WAKE_RETRY_ALARM = 'wake-retry';
+const WAKE_RETRY_DELAYS_MS = [10_000, 30_000, 60_000]; // 10s, 30s, 60s
+
+function clearWakeRetries() {
+  WAKE_RETRY_DELAYS_MS.forEach((_, i) => chrome.alarms.clear(`${WAKE_RETRY_ALARM}-${i}`));
+}
+
 chrome.idle.onStateChanged.addListener(async (newState) => {
   if (newState !== 'active') return;
   const now = Date.now();
   if (now - _lastIdleCollect < IDLE_COLLECT_THROTTLE_MS) return;
   _lastIdleCollect = now;
   console.log('[Claude Tuner] System became active (wake/unlock), collecting now');
-  collectAndSend().catch(() => {});
+  const result = await collectAndSend().catch(() => null);
+  if (result?.success) return;
+  // First collect failed (likely network not ready after wake) — schedule retries
+  console.log('[Claude Tuner] Wake collect failed, scheduling retries (10s/30s/60s)');
+  // 10s: setTimeout (safe — service worker just activated by idle event)
+  setTimeout(() => {
+    collectAndSend().then(r => { if (r?.success) clearWakeRetries(); }).catch(() => {});
+  }, WAKE_RETRY_DELAYS_MS[0]);
+  // 30s & 60s: chrome.alarms (survives potential worker termination)
+  chrome.alarms.create(`${WAKE_RETRY_ALARM}-1`, { delayInMinutes: WAKE_RETRY_DELAYS_MS[1] / 60_000 });
+  chrome.alarms.create(`${WAKE_RETRY_ALARM}-2`, { delayInMinutes: WAKE_RETRY_DELAYS_MS[2] / 60_000 });
 });
 
 async function setupAlarm() {
@@ -448,6 +466,13 @@ async function evaluateBoost(snapshot) {
 
 // === Alarm Handler ===
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  // Wake-from-sleep retries (30s / 60s alarms)
+  if (alarm.name.startsWith(WAKE_RETRY_ALARM)) {
+    console.log(`[Claude Tuner] Wake retry alarm: ${alarm.name}`);
+    const result = await collectAndSend().catch(() => null);
+    if (result?.success) clearWakeRetries();
+    return;
+  }
   if (alarm.name === ALARM_BOOST) {
     // Boost collection: local save only, no server upload
     const result = await collectAndSend({ skipServer: true });

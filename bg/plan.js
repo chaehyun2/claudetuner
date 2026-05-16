@@ -106,7 +106,7 @@ export function detectPlan(org) {
     else if (t.includes('enterprise')) plan = 'Enterprise';
     else if (t.includes('team') || t.includes('raven')) plan = 'Team';
     else if (t.includes('prepaid') || t.includes('api')) plan = 'API';
-    else if (t === 'default_claude_ai') plan = 'Pro';
+    // default_claude_ai is shared by both Free and Pro — rely on capabilities instead
   }
 
   // Final fallback: if no paid plan keywords in capabilities, assume Free
