@@ -2,6 +2,36 @@ let _prevSelectedOrgIds = [];
 let _saveTimer = null;
 let _lastInteractedCard = null;
 
+// === Theme ===
+function initOptionsTheme() {
+  chrome.storage.local.get({ 'ct-theme': 'system' }, (r) => {
+    const pref = r['ct-theme'];
+    const resolved = pref === 'system'
+      ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : pref;
+    document.documentElement.setAttribute('data-theme', resolved);
+    updateThemeButtons(pref);
+  });
+  // Bind theme buttons (inline onclick blocked by MV3 CSP)
+  document.getElementById('opt-theme-light')?.addEventListener('click', () => setOptTheme('light'));
+  document.getElementById('opt-theme-dark')?.addEventListener('click', () => setOptTheme('dark'));
+  document.getElementById('opt-theme-system')?.addEventListener('click', () => setOptTheme('system'));
+}
+function setOptTheme(mode) {
+  const resolved = mode === 'system'
+    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : mode;
+  chrome.storage.local.set({ 'ct-theme': mode });
+  document.documentElement.setAttribute('data-theme', resolved);
+  updateThemeButtons(mode);
+}
+function updateThemeButtons(mode) {
+  ['light', 'dark', 'system'].forEach(m => {
+    const btn = document.getElementById('opt-theme-' + m);
+    if (btn) btn.classList.toggle('active', m === mode);
+  });
+}
+
 // Build auth headers for server requests (ext_token > API key fallback).
 // Keep in sync with bg/storage.js#getAuthHeaders.
 async function _getAuthHeaders(cfg) {
@@ -160,6 +190,7 @@ function doSave() {
 
 // === Initialization ===
 document.addEventListener('DOMContentLoaded', async () => {
+  initOptionsTheme();
   const manifest = chrome.runtime.getManifest();
   document.getElementById('version').textContent = `v${manifest.version}`;
 

@@ -2,26 +2,77 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script src="theme-init.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { width: 340px; min-height: 600px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: #fafafa; }
+    :root { --bg-body: #fafafa; --bg-card: #ffffff; --bg-hover: #f3f4f6; --border: #e5e7eb; --text-primary: #1e1b4b; --text-secondary: #6b7280; --text-muted: #9ca3af; --accent: #4f46e5; --accent-hover: #4338ca; --accent-light: #eef2ff; }
+    [data-theme="dark"] { --bg-body: #0f1419; --bg-card: #1a1f2e; --bg-hover: #252d3d; --border: #2d3748; --text-primary: #F0F0F0; --text-secondary: #A0AEC0; --text-muted: #718096; --accent: #818CF8; --accent-hover: #6366F1; --accent-light: #1e1b4b; }
+    [data-theme="dark"] .fm-table td { border-bottom-color: var(--border); }
+    [data-theme="dark"] .fm-table td:first-child { color: var(--text-primary); }
+    [data-theme="dark"] .fm-exceeded { background: #450a0a; color: #f87171; }
+    [data-theme="dark"] .fm-tight { background: #422006; color: #fbbf24; }
+    [data-theme="dark"] .fm-fit { background: #052e16; color: #4ade80; }
+    [data-theme="dark"] .fm-overspend { background: #1e1b4b; color: #a5b4fc; }
+    [data-theme="dark"] .fm-unknown { background: var(--bg-hover); color: var(--text-muted); }
+    [data-theme="dark"] .fm-badge-current { background: #1e3a5f; color: #93c5fd; }
+    [data-theme="dark"] .fm-badge-rec { background: #052e16; color: #86efac; }
+    [data-theme="dark"] .fm-skeleton { color: var(--text-muted); }
+    [data-theme="dark"] .fm-legend { color: var(--text-muted); border-top-color: var(--border); }
+    [data-theme="dark"] .fm-legend a { color: var(--text-muted); }
+    [data-theme="dark"] .fm-legend a:hover { color: var(--accent); }
+    [data-theme="dark"] .runner-pause { color: var(--text-muted); }
+    [data-theme="dark"] .runner-pause:hover { color: var(--text-secondary); }
+    [data-theme="dark"] .info-row:not(:last-child) { border-bottom-color: var(--border); }
+    [data-theme="dark"] .offpeak-banner.is-offpeak { background: #052e16; border-color: #166534; color: #86efac; }
+    [data-theme="dark"] .offpeak-banner.is-peak { background: #1a1500; border-color: #854d0e; color: #fde68a; }
+    [data-theme="dark"] .offpeak-banner .op-tooltip { background: #1a1000; color: var(--text-secondary); }
+    [data-theme="dark"] .notice-banner.nb-info { background: #0c1a33; border-color: #1e40af; }
+    [data-theme="dark"] .notice-banner.nb-warning { background: #1a1500; border-color: #854d0e; }
+    [data-theme="dark"] .notice-banner.nb-critical { background: #2a0a0a; border-color: #991b1b; }
+    [data-theme="dark"] .error-banner { background: #2a0a0a; border-color: #991b1b; }
+    [data-theme="dark"] .error-banner .error-title { color: #f87171; }
+    [data-theme="dark"] .error-banner .error-msg { color: #fca5a5; }
+    [data-theme="dark"] .error-banner .error-hint { color: var(--text-muted); }
+    [data-theme="dark"] .error-banner .error-timing { color: var(--text-muted); }
+    [data-theme="dark"] .error-banner a { color: var(--accent); }
+    [data-theme="dark"] .btn-primary:disabled { background: #3730a3; color: #818cf8; }
+    [data-theme="dark"] #privacy-row { background: #1a1500; }
+    [data-theme="dark"] #privacy-row .label { color: #fde68a; }
+    [data-theme="dark"] #privacy-row svg { fill: #fbbf24; }
+    [data-theme="dark"] #privacy-value { color: #fbbf24; }
+    [data-theme="dark"] .po-title { color: #c4b5fd !important; }
+    [data-theme="dark"] .po-body { color: #a5b4fc !important; }
+    [data-theme="dark"] .po-reason { background: var(--bg-hover) !important; color: var(--accent) !important; }
+    [data-theme="dark"] .po-cost { color: var(--accent) !important; }
+    [data-theme="dark"] #plan-order-completed { background: #052e16 !important; border-color: #166534 !important; }
+    [data-theme="dark"] #plan-order-completed-body { color: #86efac !important; }
+    [data-theme="dark"] #plan-order-completed-body a { color: var(--accent) !important; }
+    [data-theme="dark"] #rft-yes { background: #052e16 !important; color: #4ade80 !important; border-color: #166534 !important; }
+    [data-theme="dark"] #plan-actions .info-row { background: #2a0a0a !important; }
+    [data-theme="dark"] #downgrade-5x-btn { background: #1c0f00 !important; color: #fdba74 !important; border-color: #9a3412 !important; }
+    [data-theme="dark"] #downgrade-pro-btn { background: #2a0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
+    [data-theme="dark"] .hdr-btn-link:hover { background: var(--accent-light); }
+    [data-theme="dark"] .hdr-btn-primary:disabled { background: #3730a3; color: #c7d2fe; }
+    [data-theme="dark"] .org-chip.primary .org-chip-plan { color: var(--accent); }
+    [data-theme="dark"] .org-chip-pin.active, [data-theme="dark"] .org-chip-pin:hover { color: var(--accent); }
+    body { width: 340px; min-height: 600px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: var(--bg-body); }
     .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-    .header h1 { font-size: 14px; font-weight: 600; color: #1e1b4b; }
+    .header h1 { font-size: 14px; font-weight: 600; color: var(--text-primary); }
     .header-actions { display: flex; align-items: center; gap: 2px; }
     .hdr-btn { flex: none; padding: 4px 6px; border: none; border-radius: 5px; font-size: 11px; cursor: pointer; font-weight: 500; line-height: 1.2; }
-    .hdr-btn-primary { background: #4f46e5; color: white; }
-    .hdr-btn-primary:hover { background: #4338ca; }
+    .hdr-btn-primary { background: var(--accent); color: white; }
+    .hdr-btn-primary:hover { background: var(--accent-hover); }
     .hdr-btn-primary:disabled { background: #a5b4fc; cursor: not-allowed; font-size: 10px; }
     .hdr-btn-primary.loading { display: inline-flex; align-items: center; gap: 4px; }
     .hdr-btn-primary.loading::before { content: ''; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: btn-spin .6s linear infinite; }
     @keyframes btn-spin { to { transform: rotate(360deg); } }
-    .hdr-btn-link { text-decoration: none; color: #4f46e5; background: #eef2ff; display: inline-block; }
-    .hdr-btn-link:hover { background: #e0e7ff; }
-    .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: #9ca3af; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
-    .hdr-btn-icon:hover { color: #374151; background: #f3f4f6; }
+    .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); display: inline-block; }
+    .hdr-btn-link:hover { background: var(--accent-light); }
+    .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
+    .hdr-btn-icon:hover { color: var(--text-primary); background: var(--bg-hover); }
 
     /* 상태 표시 */
-    .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 8px 10px; background: white; border-radius: 8px; border: 1px solid #e5e7eb; }
+    .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 8px 10px; background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border); }
     .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .status-dot.green { background: #22c55e; }
     .status-dot.red { background: #ef4444; }
@@ -30,33 +81,33 @@
     .runner-char { position: absolute; top: 2px; font-size: 13px; white-space: nowrap; line-height: 18px; }
     .runner-pause { background: none; border: none; cursor: pointer; font-size: 11px; color: #d1d5db; padding: 0 2px; flex: none; line-height: 1; }
     .runner-pause:hover { color: #9ca3af; }
-    .status-text { font-size: 11px; color: #6b7280; flex: 1; min-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-text { font-size: 11px; color: var(--text-secondary); flex: 1; min-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* 사용률 게이지 카드 */
-    .gauge-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin-bottom: 10px; display: flex; gap: 10px; }
+    .gauge-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; display: flex; gap: 10px; }
     .gauge-row { flex: 1; min-width: 0; }
     .gauge-header { display: flex; align-items: baseline; margin-bottom: 4px; gap: 3px; flex-wrap: nowrap; }
-    .gauge-label { font-size: 10px; font-weight: 600; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .gauge-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     .gauge-value { font-size: 16px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
     .gauge-predict-inline { font-size: 11px; font-weight: 700; margin-left: 1px; padding: 0 3px; border-radius: 3px; white-space: nowrap; flex-shrink: 0; }
-    .gauge-sub { font-size: 10px; color: #9ca3af; margin-top: 3px; }
-    .gauge-bar { height: 8px; background: #f3f4f6; border-radius: 4px; position: relative; overflow: visible; margin-top: 1px; }
+    .gauge-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    .gauge-bar { height: 8px; background: var(--bg-hover); border-radius: 4px; position: relative; overflow: visible; margin-top: 1px; }
     .gauge-fill { height: 100%; border-radius: 4px; transition: width 0.3s ease; overflow: hidden; }
     .gauge-predict-fill { position: absolute; top: 0; height: 100%; border-radius: 0 4px 4px 0; opacity: 0.25; background: repeating-linear-gradient(90deg, transparent, transparent 2px, currentColor 2px, currentColor 4px); }
     .gauge-predict { position: absolute; top: -2px; width: 2px; height: 12px; border-radius: 1px; transform: translateX(-1px); }
     .gauge-predict-label { position: absolute; top: -13px; font-size: 8px; font-weight: 600; transform: translateX(-50%); white-space: nowrap; }
 
     /* 정보 카드 */
-    .info-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 10px; }
+    .info-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; }
     .info-row { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 12px; flex-wrap: nowrap; }
-    .info-row:not(:last-child) { border-bottom: 1px solid #f3f4f6; }
-    .info-row .label { color: #6b7280; white-space: nowrap; font-size: 10px; }
-    .info-row .value { font-weight: 600; color: #1e1b4b; white-space: nowrap; }
+    .info-row:not(:last-child) { border-bottom: 1px solid var(--border); }
+    .info-row .label { color: var(--text-secondary); white-space: nowrap; font-size: 10px; }
+    .info-row .value { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
 
     /* 스파크라인 */
-    .chart-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px 6px; margin-bottom: 10px; }
+    .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px 6px; margin-bottom: 10px; }
     .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-    .chart-meta { font-size: 10px; color: #9ca3af; }
+    .chart-meta { font-size: 10px; color: var(--text-muted); }
     .chart-legend { display: flex; gap: 12px; justify-content: center; margin-top: 3px; font-size: 9px; }
 
     /* Off-peak 프로모션 배너 */
@@ -77,23 +128,28 @@
     .sb-red { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
     .sb-orange { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; }
     .sb-darkred { background: #fef2f2; border: 1px solid #f87171; color: #7f1d1d; }
+    [data-theme="dark"] .sb-green { background: #052e16; border-color: #166534; color: #86efac; }
+    [data-theme="dark"] .sb-yellow { background: #1a1500; border-color: #854d0e; color: #fde68a; }
+    [data-theme="dark"] .sb-orange { background: #1c0f00; border-color: #9a3412; color: #fdba74; }
+    [data-theme="dark"] .sb-red { background: #2a0a0a; border-color: #991b1b; color: #fca5a5; }
+    [data-theme="dark"] .sb-darkred { background: #350a0a; border-color: #b91c1c; color: #f87171; }
 
     /* 차트 탭 */
     .chart-tabs { display: flex; gap: 0; }
-    .chart-tab { background: none; border: none; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: #9ca3af; }
+    .chart-tab { background: none; border: none; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
     .chart-tab.active { border-bottom-color: currentColor; }
     .chart-tab:not(.active) { opacity: 0.5; }
 
     /* 버튼 */
     button { padding: 8px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
-    .btn-primary { background: #4f46e5; color: white; }
-    .btn-primary:hover { background: #4338ca; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { background: var(--accent-hover); }
     .btn-primary:disabled { background: #a5b4fc; cursor: not-allowed; }
-    .btn-secondary { background: white; color: #374151; border: 1px solid #d1d5db; }
-    .btn-secondary:hover { background: #f9fafb; }
+    .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--bg-hover); }
     .btn-cancel { background: #dc2626; color: white; font-size: 11px; border-radius: 6px; margin-bottom: 10px; }
 
-    .user-info { font-size: 11px; color: #9ca3af; margin-top: 10px; text-align: center; }
+    .user-info { font-size: 11px; color: var(--text-muted); margin-top: 10px; text-align: center; }
 
     /* 공지사항 배너 */
     .notice-banner { border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; position: relative; }
@@ -103,13 +159,19 @@
     .notice-header { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; }
     .notice-icon { font-size: 12px; flex-shrink: 0; line-height: 16px; }
     .notice-title { font-size: 11px; font-weight: 600; flex: 1; line-height: 16px; }
-    .notice-chevron { font-size: 10px; color: #9ca3af; transition: transform .2s; flex-shrink: 0; line-height: 16px; }
+    .nt-info { color: #1E40AF; }
+    .nt-warning { color: #92400E; }
+    .nt-critical { color: #991B1B; }
+    [data-theme="dark"] .nt-info { color: #93c5fd; }
+    [data-theme="dark"] .nt-warning { color: #fde68a; }
+    [data-theme="dark"] .nt-critical { color: #fca5a5; }
+    .notice-chevron { font-size: 10px; color: var(--text-muted); transition: transform .2s; flex-shrink: 0; line-height: 16px; }
     .notice-chevron.open { transform: rotate(90deg); }
-    .notice-close { background: none; border: none; font-size: 14px; color: #9ca3af; cursor: pointer; padding: 0; line-height: 1; }
-    .notice-body { font-size: 10px; color: #4b5563; margin-top: 3px; margin-left: 18px; line-height: 15px; display: none; }
-    .notice-body a { color: #4f46e5; text-decoration: underline; }
+    .notice-close { background: none; border: none; font-size: 14px; color: var(--text-muted); cursor: pointer; padding: 0; line-height: 1; }
+    .notice-body { font-size: 10px; color: var(--text-secondary); margin-top: 3px; margin-left: 18px; line-height: 15px; display: none; }
+    .notice-body a { color: var(--accent); text-decoration: underline; }
     .notice-footer { text-align: center; margin-top: 6px; }
-    .notice-footer a { font-size: 10px; color: #6b7280; text-decoration: none; }
+    .notice-footer a { font-size: 10px; color: var(--text-secondary); text-decoration: none; }
 
     /* 에러 배너 */
     .error-banner { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
@@ -120,58 +182,58 @@
     .error-banner a { color: #4f46e5; text-decoration: underline; cursor: pointer; }
 
     /* 온보딩 가이드 */
-    .onboarding { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; }
+    .onboarding { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
     .ob-hero { text-align: center; margin-bottom: 14px; }
     .ob-icon { font-size: 28px; margin-bottom: 4px; }
-    .ob-hero h2 { font-size: 15px; font-weight: 700; color: #1e1b4b; margin-bottom: 4px; }
-    .ob-hero p { font-size: 11px; color: #6b7280; line-height: 1.5; }
+    .ob-hero h2 { font-size: 15px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
+    .ob-hero p { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
     .ob-steps { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-    .ob-step { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; background: #faf5ff; border-radius: 8px; }
-    .ob-step.active { background: #eef2ff; border: 1px solid #c7d2fe; }
+    .ob-step { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; background: var(--bg-hover); border-radius: 8px; }
+    .ob-step.active { background: var(--accent-light); border: 1px solid var(--border); }
     .ob-num { width: 20px; height: 20px; border-radius: 50%; background: #7c3aed; color: white; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
     .ob-step.active .ob-num { background: #4f46e5; }
-    .ob-content { font-size: 11px; color: #374151; line-height: 1.4; }
+    .ob-content { font-size: 11px; color: var(--text-primary); line-height: 1.4; }
     .ob-content strong { display: block; margin-bottom: 1px; }
-    .ob-content span { color: #6b7280; }
-    .ob-features { background: #f8fafc; border-radius: 8px; padding: 10px; margin-bottom: 12px; }
-    .ob-feat-title { font-size: 11px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    .ob-content span { color: var(--text-secondary); }
+    .ob-features { background: var(--bg-hover); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+    .ob-feat-title { font-size: 11px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
     .ob-feat-list { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-    .ob-feat { font-size: 10px; color: #6b7280; }
+    .ob-feat { font-size: 10px; color: var(--text-secondary); }
     .ob-cta { width: 100%; padding: 10px; background: #4f46e5; color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
     .ob-cta:hover { background: #4338ca; }
     .ob-cta:disabled { background: #a5b4fc; cursor: not-allowed; }
-    .ob-link { display: block; text-align: center; margin-top: 8px; font-size: 11px; color: #6b7280; }
-    .ob-link a { color: #4f46e5; text-decoration: none; }
+    .ob-link { display: block; text-align: center; margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
+    .ob-link a { color: var(--accent); text-decoration: none; }
     .ob-link a:hover { text-decoration: underline; }
 
     /* 조직 선택 카드 */
-    .org-selector { background: white; border: 1px solid #c7d2fe; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
-    .org-selector-title { font-size: 12px; font-weight: 600; color: #4f46e5; margin-bottom: 6px; }
-    .org-selector-desc { font-size: 10px; color: #6b7280; margin-bottom: 8px; line-height: 1.4; }
-    .org-option { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; cursor: pointer; border: 1px solid #e5e7eb; margin-bottom: 4px; transition: all .15s; }
+    .org-selector { background: var(--bg-card); border: 1px solid #c7d2fe; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+    .org-selector-title { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 6px; }
+    .org-selector-desc { font-size: 10px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4; }
+    .org-option { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); margin-bottom: 4px; transition: all .15s; }
     .org-option:last-child { margin-bottom: 0; }
-    .org-option:hover { border-color: #a5b4fc; background: #eef2ff; }
-    .org-option.selected { border-color: #4f46e5; background: #eef2ff; }
-    .org-option .org-name { font-size: 11px; font-weight: 600; color: #374151; flex: 1; }
-    .org-option .org-plan { font-size: 10px; color: #6b7280; }
+    .org-option:hover { border-color: var(--accent); background: var(--accent-light); }
+    .org-option.selected { border-color: var(--accent); background: var(--accent-light); }
+    .org-option .org-name { font-size: 11px; font-weight: 600; color: var(--text-primary); flex: 1; }
+    .org-option .org-plan { font-size: 10px; color: var(--text-secondary); }
     .org-option .org-check { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #d1d5db; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     .org-option.selected .org-check { border-color: #4f46e5; background: #4f46e5; }
     .org-option.selected .org-check::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: white; }
     /* 조직 칩 표시 */
-    .org-chips { background: white; border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 8px; width: 100%; overflow: hidden; }
+    .org-chips { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; width: 100%; overflow: hidden; }
     /* Auto 토글 행 */
-    .org-auto-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid #e5e7eb; background: #fafafa; }
-    .org-auto-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #1e1b4b; cursor: pointer; user-select: none; }
+    .org-auto-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-body); }
+    .org-auto-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--text-primary); cursor: pointer; user-select: none; }
     .org-auto-cb { width: 13px; height: 13px; accent-color: #4f46e5; cursor: pointer; margin: 0; }
-    .org-auto-desc { font-size: 10px; color: #6b7280; }
+    .org-auto-desc { font-size: 10px; color: var(--text-secondary); }
     .org-chip { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer; transition: background .15s; }
-    .org-chip:not(:last-child) { border-bottom: 1px solid #f3f4f6; }
-    .org-chip:hover { background: #f9fafb; }
-    .org-chip.selected { background: #eef2ff; }
-    .org-chip-plan { font-weight: 600; color: #1e1b4b; font-size: 10px; }
+    .org-chip:not(:last-child) { border-bottom: 1px solid var(--border); }
+    .org-chip:hover { background: var(--bg-hover); }
+    .org-chip.selected { background: var(--accent-light); }
+    .org-chip-plan { font-weight: 600; color: var(--text-primary); font-size: 10px; }
     .org-chip.primary .org-chip-plan { color: #4f46e5; }
-    .org-chip-name { color: #9ca3af; font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .org-chip-usage { font-size: 11px; font-weight: 700; color: #1e1b4b; flex-shrink: 0; }
+    .org-chip-name { color: var(--text-muted); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .org-chip-usage { font-size: 11px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; }
     .org-chip-active { font-size: 10px; flex-shrink: 0; }
     /* 핀 아이콘 (클릭 시 Auto OFF + org 고정) */
     .org-chip-pin { flex-shrink: 0; width: 20px; height: 20px; padding: 4px; cursor: pointer; opacity: 0.25; transition: opacity .15s, color .15s; color: #9ca3af; display: flex; align-items: center; justify-content: center; border-radius: 4px; margin: -2px -2px -2px 0; }
@@ -179,16 +241,16 @@
     .org-chip-pin.active { opacity: 1; color: #4f46e5; }
     .org-chip-pin:hover { opacity: 1; color: #4f46e5; }
     /* 하위 호환: 단일 org 배지 */
-    .org-badge { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 10px; color: #6b7280; background: #f3f4f6; padding: 2px 8px; border-radius: 10px; cursor: pointer; margin-top: 8px; }
-    .org-badge:hover { background: #e5e7eb; }
+    .org-badge { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 10px; color: var(--text-secondary); background: var(--bg-hover); padding: 2px 8px; border-radius: 10px; cursor: pointer; margin-top: 8px; }
+    .org-badge:hover { background: var(--border); }
 
     /* 플랜 적합도 매트릭스 */
-    .fm-card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 10px; overflow: hidden; cursor: pointer; }
+    .fm-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; cursor: pointer; }
     .fm-table { width: 100%; border-collapse: collapse; font-size: 10px; }
-    .fm-table th { padding: 2px 6px; text-align: center; font-weight: 600; color: #6b7280; background: #f9fafb; border-bottom: 1px solid #e5e7eb; line-height: 1.2; }
+    .fm-table th { padding: 2px 6px; text-align: center; font-weight: 600; color: var(--text-secondary); background: var(--bg-hover); border-bottom: 1px solid var(--border); line-height: 1.2; }
     .fm-table th:first-child { text-align: left; }
-    .fm-table td { padding: 3px 6px; text-align: center; border-bottom: 1px solid #f3f4f6; }
-    .fm-table td:first-child { text-align: left; font-weight: 500; color: #374151; }
+    .fm-table td { padding: 3px 6px; text-align: center; border-bottom: 1px solid var(--border); }
+    .fm-table td:first-child { text-align: left; font-weight: 500; color: var(--text-primary); }
     .fm-table tr:last-child td { border-bottom: none; }
     .fm-table tr.fm-ref td { opacity: 0.45; }
     .fm-table tr.fm-ref td:first-child { font-style: italic; }
@@ -201,13 +263,13 @@
     .fm-badge { display: inline-block; font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; margin-left: 3px; vertical-align: middle; }
     .fm-badge-current { background: #e0e7ff; color: #4338ca; }
     .fm-badge-rec { background: #dcfce7; color: #166534; }
-    .fm-skeleton { padding: 0px 6px; text-align: center; font-size: 10px; color: #9ca3af; }
-    .fm-legend { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px; font-size: 9px; color: #9ca3af; border-top: 1px solid #f3f4f6; }
+    .fm-skeleton { padding: 0px 6px; text-align: center; font-size: 10px; color: var(--text-muted); }
+    .fm-legend { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px; font-size: 9px; color: var(--text-muted); border-top: 1px solid var(--border); }
     .fm-legend-items { display: flex; gap: 6px; align-items: center; }
     .fm-legend-item { display: flex; align-items: center; gap: 2px; }
     .fm-legend .fm-icon { width: 12px; height: 12px; font-size: 8px; border-radius: 3px; }
-    .fm-legend a { color: #6b7280; text-decoration: none; font-size: 9px; }
-    .fm-legend a:hover { color: #4f46e5; }
+    .fm-legend a { color: var(--text-secondary); text-decoration: none; font-size: 9px; }
+    .fm-legend a:hover { color: var(--accent); }
 
     /* 숨김 요소들 */
     .hidden { display: none; }
@@ -229,22 +291,25 @@
       <button id="open-tab-btn" class="hdr-btn-icon" title="Open as side panel">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v12h4V4H4zm6 0v12h6V4h-6z" clip-rule="evenodd"/></svg>
       </button>
+      <button id="theme-toggle-btn" class="hdr-btn-icon" title="Theme">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
+      </button>
       <button id="options-btn" class="hdr-btn-icon" title="Settings">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
       </button>
     </div>
   </div>
 
-  <div id="pin-hint" style="display:none;background:linear-gradient(135deg,#f5f3ff,#ede9fe);border:1px solid #c7d2fe;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:#4c1d95;text-align:center;position:relative">
+  <div id="pin-hint" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--accent);text-align:center;position:relative"
     <button id="pin-hint-close" style="position:absolute;top:4px;right:8px;background:none;border:none;color:#a78bfa;cursor:pointer;font-size:13px;padding:0">×</button>
     <!-- Before/After: 툴바 모양으로 표현 -->
     <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px">
       <!-- Before: 툴바에 아이콘 없음 -->
       <div style="text-align:center">
-        <div style="display:inline-flex;align-items:center;gap:6px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px;min-width:70px;justify-content:center">
-          <span style="font-size:11px;color:#9ca3af">⋯</span>
-          <div style="width:24px;height:24px;border:1.5px dashed #d1d5db;border-radius:4px"></div>
-          <span style="font-size:11px;color:#9ca3af">⋮</span>
+        <div style="display:inline-flex;align-items:center;gap:6px;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:4px 10px;min-width:70px;justify-content:center">
+          <span style="font-size:11px;color:var(--text-muted)">⋯</span>
+          <div style="width:24px;height:24px;border:1.5px dashed var(--border);border-radius:4px"></div>
+          <span style="font-size:11px;color:var(--text-muted)">⋮</span>
         </div>
         <div style="font-size:8px;color:#9ca3af;margin-top:2px" id="pin-hint-before"></div>
       </div>
@@ -254,25 +319,25 @@
       </svg>
       <!-- After: 툴바에 아이콘 + 배지 표시 -->
       <div style="text-align:center">
-        <div style="display:inline-flex;align-items:center;gap:6px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;padding:4px 10px;min-width:70px;justify-content:center">
+        <div style="display:inline-flex;align-items:center;gap:6px;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:4px 10px;min-width:70px;justify-content:center">
           <span style="font-size:11px;color:#9ca3af">⋯</span>
-          <div style="position:relative;width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:#ede9fe;border-radius:4px;border:1.5px solid #c4b5fd">
+          <div style="position:relative;width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--accent-light);border-radius:4px;border:1.5px solid var(--accent)">
             <img src="icons/icon16.png" width="14" height="14">
             <span id="pin-hint-badge" style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);background:#7c3aed;color:white;font-size:7px;font-weight:700;padding:0 3px;border-radius:3px;line-height:1.3;white-space:nowrap">69%</span>
           </div>
           <span style="font-size:11px;color:#9ca3af">⋮</span>
         </div>
-        <div style="font-size:8px;color:#7c3aed;font-weight:600;margin-top:2px" id="pin-hint-after"></div>
+        <div style="font-size:8px;color:var(--accent);font-weight:600;margin-top:2px" id="pin-hint-after"></div>
       </div>
     </div>
     <span id="pin-hint-text" style="font-size:11px"></span>
   </div>
 
-  <div id="review-nudge" style="display:none;background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:8px 10px;margin-bottom:8px;align-items:center;gap:8px;font-size:11px">
+  <div id="review-nudge" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;align-items:center;gap:8px;font-size:11px"
     <span style="font-size:15px">⭐</span>
-    <span id="review-nudge-text" style="flex:1;color:#374151"></span>
+    <span id="review-nudge-text" style="flex:1;color:var(--text-primary)"></span>
     <a id="review-nudge-link" href="https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond/reviews" target="_blank" style="background:#4f46e5;color:white;padding:3px 10px;border-radius:5px;text-decoration:none;font-weight:600;font-size:10px;white-space:nowrap"></a>
-    <button id="review-nudge-close" style="background:none;border:none;color:#9ca3af;cursor:pointer;font-size:14px;padding:0 2px">×</button>
+    <button id="review-nudge-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 2px">×</button>
   </div>
 
   <div id="ct-popup-notices" style="display:none"></div>
@@ -380,13 +445,13 @@
 
   <!-- 추가 사용량 게이지 -->
   <div id="extra-usage-section" style="display:none;margin-bottom:10px">
-    <div id="extra-usage-summary" style="cursor:pointer;padding:6px 10px;background:white;border:1px solid #e5e7eb;border-radius:8px;font-size:11px;color:#4b5563">
+    <div id="extra-usage-summary" style="cursor:pointer;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text-secondary)"
       <div style="display:flex;align-items:center;gap:6px">
-        <span id="extra-usage-toggle" style="font-size:12px;color:#9ca3af;transition:transform .2s;flex-shrink:0">▶</span>
+        <span id="extra-usage-toggle" style="font-size:12px;color:var(--text-muted);transition:transform .2s;flex-shrink:0">▶</span>
         <span id="extra-usage-summary-text" style="flex:1"></span>
       </div>
       <!-- 도움말 (같은 박스 안) -->
-      <div id="extra-usage-tooltip" style="display:none;background:#f5f3ff;border-radius:4px;padding:6px 8px;margin-top:6px;font-size:10px;color:#4b5563;line-height:1.5"></div>
+      <div id="extra-usage-tooltip" style="display:none;background:var(--accent-light);border-radius:4px;padding:6px 8px;margin-top:6px;font-size:10px;color:var(--text-secondary);line-height:1.5"></div>
       <!-- 게이지 (같은 박스 안에서 확장) -->
       <div id="extra-usage-detail-panel" style="display:none;margin-top:6px">
         <div class="gauge-bar">
@@ -415,7 +480,7 @@
       </div>
       <span class="chart-meta" id="chart-active-info"></span>
     </div>
-    <div id="chart-placeholder" style="height:60px;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:10px" data-i18n="chart_empty"></div>
+    <div id="chart-placeholder" style="height:60px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:10px" data-i18n="chart_empty"></div>
     <div id="chart-pane-5h" style="display:none">
       <canvas id="chart-5h" width="280" height="60" style="width:100%;height:60px"></canvas>
     </div>
@@ -451,18 +516,18 @@
       <span class="value" id="pending-plan" style="color:#9a3412">-</span>
     </div>
     <!-- 플랜 변경 오더 배너 -->
-    <div id="plan-order-banner" class="hidden" style="margin:8px 12px;padding:10px 12px;border-radius:8px;border:1px solid #c4b5fd;background:#f5f3ff">
-      <div style="font-size:12px;font-weight:600;color:#5b21b6;margin-bottom:4px">📋 <span data-i18n="plan_order_title">플랜 변경 요청</span></div>
-      <div id="plan-order-body" style="font-size:12px;color:#4c1d95;line-height:1.5;margin-bottom:6px"></div>
-      <div id="plan-order-reason" class="hidden" style="font-size:11px;color:#7c3aed;margin-bottom:6px;padding:4px 6px;background:#ede9fe;border-radius:4px"></div>
-      <div id="plan-order-cost" style="font-size:11px;color:#7c3aed;margin-bottom:8px"></div>
+    <div id="plan-order-banner" class="hidden" style="margin:8px 12px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--accent-light)">
+      <div class="po-title" style="font-size:12px;font-weight:600;color:#5b21b6;margin-bottom:4px">📋 <span data-i18n="plan_order_title">플랜 변경 요청</span></div>
+      <div id="plan-order-body" class="po-body" style="font-size:12px;color:#4c1d95;line-height:1.5;margin-bottom:6px"></div>
+      <div id="plan-order-reason" class="hidden po-reason" style="font-size:11px;color:#7c3aed;margin-bottom:6px;padding:4px 6px;background:#ede9fe;border-radius:4px"></div>
+      <div id="plan-order-cost" class="po-cost" style="font-size:11px;color:#7c3aed;margin-bottom:8px"></div>
       <div style="display:flex;gap:6px">
         <button id="plan-order-accept" style="flex:1;font-size:11px;padding:5px 12px;border-radius:6px;color:white;background:#7c3aed;border:none;cursor:pointer" data-i18n="plan_order_accept">수락하고 변경</button>
-        <button id="plan-order-reject" style="font-size:11px;padding:5px 12px;border-radius:6px;cursor:pointer;background:#f3f4f6;border:1px solid #e5e7eb;color:#6b7280" data-i18n="plan_order_reject">거절</button>
+        <button id="plan-order-reject" style="font-size:11px;padding:5px 12px;border-radius:6px;cursor:pointer;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-secondary)" data-i18n="plan_order_reject">거절</button>
       </div>
     </div>
     <!-- 플랜 자동 변경 완료 배너 -->
-    <div id="plan-order-completed" class="hidden" style="margin:8px 12px;padding:10px 12px;border-radius:8px;border:1px solid #bbf7d0;background:#f0fdf4">
+    <div id="plan-order-completed" class="hidden" style="margin:8px 12px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-hover)">
       <div id="plan-order-completed-body" style="font-size:12px;color:#15803d;line-height:1.5"></div>
     </div>
     <div class="info-row hidden" id="recommendation-row">
@@ -471,13 +536,13 @@
     </div>
     <!-- 스마트 추천 상세 (서버 추천에 type이 있을 때) -->
     <div id="smart-rec-detail" class="hidden" style="padding:6px 12px 10px;font-size:11px;line-height:1.4">
-      <div id="smart-rec-reason" style="color:#374151;margin-bottom:4px"></div>
-      <div id="smart-rec-cost" style="color:#6b7280;margin-bottom:6px"></div>
+      <div id="smart-rec-reason" style="color:var(--text-primary);margin-bottom:4px"></div>
+      <div id="smart-rec-cost" style="color:var(--text-secondary);margin-bottom:6px"></div>
       <div style="display:flex;gap:6px">
         <button id="smart-rec-btn" class="hidden" style="font-size:11px;padding:5px 12px;border-radius:6px;color:white;border:none;cursor:pointer;flex:1"></button>
-        <button id="smart-rec-dismiss" class="hidden" style="font-size:11px;padding:5px 12px;border-radius:6px;cursor:pointer;background:#f3f4f6;border:1px solid #e5e7eb;color:#6b7280" data-i18n="opt_dismiss"></button>
+        <button id="smart-rec-dismiss" class="hidden" style="font-size:11px;padding:5px 12px;border-radius:6px;cursor:pointer;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-secondary)" data-i18n="opt_dismiss"></button>
       </div>
-      <button id="smart-rec-mute" class="hidden" style="font-size:10px;padding:3px 8px;margin-top:4px;border-radius:4px;cursor:pointer;background:none;border:none;color:#9ca3af;text-decoration:underline" data-i18n="rec_mute"></button>
+      <button id="smart-rec-mute" class="hidden" style="font-size:10px;padding:3px 8px;margin-top:4px;border-radius:4px;cursor:pointer;background:none;border:none;color:var(--text-muted);text-decoration:underline" data-i18n="rec_mute"></button>
     </div>
   </div>
 
@@ -488,7 +553,7 @@
   <div id="plan-actions" class="hidden">
     <div class="info-row" style="background:#fef2f2;border-radius:8px 8px 0 0">
       <span class="label" data-i18n="plan_change_test"></span>
-      <span class="value" style="font-size:11px;color:#9ca3af" id="plan-action-status">-</span>
+      <span class="value" style="font-size:11px;color:var(--text-muted)" id="plan-action-status">-</span>
     </div>
     <div style="display:flex;gap:4px">
       <button id="downgrade-5x-btn" style="flex:1;padding:6px;border:1px solid #f97316;border-radius:0 0 0 8px;font-size:11px;cursor:pointer;background:#fff7ed;color:#9a3412;font-weight:500" data-i18n="to_max5x"></button>
@@ -497,27 +562,27 @@
   </div>
 
 
-  <div id="rec-feedback-toast" style="display:none;position:fixed;bottom:10px;left:10px;right:10px;background:white;border:1px solid #e5e7eb;border-radius:10px;padding:10px 12px;box-shadow:0 4px 12px rgba(0,0,0,.12);z-index:100">
-    <button id="rft-close" style="position:absolute;top:6px;right:8px;background:none;border:none;color:#9ca3af;cursor:pointer;font-size:16px;padding:0 4px;line-height:1">&times;</button>
-    <div id="rft-question" style="font-size:11px;color:#374151;margin-bottom:6px"></div>
+  <div id="rec-feedback-toast" style="display:none;position:fixed;bottom:10px;left:10px;right:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;box-shadow:0 4px 12px rgba(0,0,0,.12);z-index:100"
+    <button id="rft-close" style="position:absolute;top:6px;right:8px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:0 4px;line-height:1">&times;</button>
+    <div id="rft-question" style="font-size:11px;color:var(--text-primary);margin-bottom:6px"></div>
     <div id="rft-actions" style="display:flex;gap:8px">
       <button id="rft-yes" style="flex:1;padding:5px;border:1px solid #22c55e;border-radius:6px;background:#f0fdf4;color:#166534;font-size:11px;font-weight:600;cursor:pointer">👍</button>
-      <button id="rft-no" style="flex:1;padding:5px;border:1px solid #e5e7eb;border-radius:6px;background:white;color:#6b7280;font-size:11px;cursor:pointer">👎</button>
+      <button id="rft-no" style="flex:1;padding:5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--text-secondary);font-size:11px;cursor:pointer">👎</button>
     </div>
     <div id="rft-share" style="display:none;margin-top:8px;text-align:center">
-      <div style="font-size:11px;color:#374151;margin-bottom:6px" id="rft-share-text"></div>
+      <div style="font-size:11px;color:var(--text-primary);margin-bottom:6px" id="rft-share-text"></div>
       <div style="display:flex;gap:6px;justify-content:center">
         <a id="rft-review" href="https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond/reviews" target="_blank" style="padding:4px 12px;background:#4f46e5;color:white;border-radius:5px;font-size:10px;text-decoration:none;font-weight:600" data-i18n="rec_fb_review"></a>
         <a id="rft-twitter" target="_blank" style="padding:4px 12px;background:#000;color:white;border-radius:5px;font-size:10px;text-decoration:none;font-weight:600">𝕏 Post</a>
-        <button id="rft-copy" style="padding:4px 12px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:5px;font-size:10px;cursor:pointer;font-weight:600"></button>
+        <button id="rft-copy" style="padding:4px 12px;background:var(--bg-hover);border:1px solid var(--border);border-radius:5px;font-size:10px;cursor:pointer;font-weight:600;color:var(--text-primary)"></button>
       </div>
     </div>
   </div>
 
   <div style="display:flex;justify-content:center;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
     <div id="user-info" class="user-info" style="margin-top:0"></div>
-    <a href="https://claudetuner.com/dashboard/settings/" target="_blank" style="font-size:11px;color:#9ca3af;text-decoration:none;display:flex;align-items:center" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
-    <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:#9ca3af;text-decoration:none" data-i18n="footer_help"></a>
+    <a href="https://claudetuner.com/dashboard/settings/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none;display:flex;align-items:center" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
+    <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="footer_help"></a>
   </div>
 
   <script src="config.js"></script>

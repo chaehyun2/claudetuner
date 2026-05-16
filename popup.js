@@ -8,6 +8,44 @@ let _isAutoOrg = true; // auto mode (auto when selectedOrgId is null)
 let _autoFollowing = true; // whether view follows cookie changes in auto mode (false when another chip is clicked)
 let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
 
+// === Theme ===
+const THEME_ICONS = { light: '\u2600\uFE0F', dark: '\uD83C\uDF19', system: '\uD83D\uDCBB' };
+function initPopupTheme() {
+  chrome.storage.local.get({ 'ct-theme': 'system' }, (r) => {
+    const pref = r['ct-theme'];
+    const resolved = pref === 'system'
+      ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : pref;
+    document.documentElement.setAttribute('data-theme', resolved);
+    updateThemeBtn(pref);
+  });
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      chrome.storage.local.get({ 'ct-theme': 'system' }, (r) => {
+        const order = ['system', 'light', 'dark'];
+        const cur = r['ct-theme'] || 'system';
+        const next = order[(order.indexOf(cur) + 1) % order.length];
+        const resolved = next === 'system'
+          ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : next;
+        chrome.storage.local.set({ 'ct-theme': next });
+        document.documentElement.setAttribute('data-theme', resolved);
+        updateThemeBtn(next);
+      });
+    });
+  }
+}
+function updateThemeBtn(mode) {
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) {
+    const svg = btn.querySelector('svg');
+    if (svg) svg.style.display = 'none';
+    btn.textContent = THEME_ICONS[mode] || THEME_ICONS.system;
+    btn.style.fontSize = '14px';
+  }
+}
+
 // Build auth headers for server requests (ext_token > API key fallback).
 // Keep in sync with bg/storage.js#getAuthHeaders.
 async function _getAuthHeaders(cfg) {
@@ -100,9 +138,9 @@ function _formatNoticeDate(dateStr) {
 }
 
 const _noticeTypeMap = {
-  info:     { cls: 'nb-info', icon: '\u2139\uFE0F', color: '#1E40AF' },
-  warning:  { cls: 'nb-warning', icon: '\u26A0\uFE0F', color: '#92400E' },
-  critical: { cls: 'nb-critical', icon: '\uD83D\uDEA8', color: '#991B1B' }
+  info:     { cls: 'nb-info', icon: '\u2139\uFE0F', titleCls: 'nt-info' },
+  warning:  { cls: 'nb-warning', icon: '\u26A0\uFE0F', titleCls: 'nt-warning' },
+  critical: { cls: 'nb-critical', icon: '\uD83D\uDEA8', titleCls: 'nt-critical' }
 };
 
 let _popupNoticeList = [];
@@ -162,8 +200,8 @@ function renderPopupNotices() {
       html += '<div class="notice-header" data-nid="' + safeId + '"' + (n.url ? ' data-url="' + escHtml(n.url) + '"' : '') + '>';
       html += '<span class="notice-icon">' + t.icon + '</span>';
       if (!n.url && hasBody) html += '<span class="notice-chevron" id="chevron-' + safeId + '">\u25B6</span>';
-      html += '<span class="notice-title" style="color:' + t.color + (n.url ? ';cursor:pointer' : '') + '">' + escHtml(n.title || '') + (n.url ? ' <span style="font-size:9px;opacity:0.5">\u2192</span>' : '') + '</span>';
-      if (dateStr) html += '<span style="font-size:10px;color:#9ca3af;margin-right:2px">' + dateStr + '</span>';
+      html += '<span class="notice-title ' + t.titleCls + '"' + (n.url ? ' style="cursor:pointer"' : '') + '>' + escHtml(n.title || '') + (n.url ? ' <span style="font-size:9px;opacity:0.5">\u2192</span>' : '') + '</span>';
+      if (dateStr) html += '<span style="font-size:10px;color:var(--text-muted);margin-right:2px">' + dateStr + '</span>';
       html += '<button class="notice-close" data-nid="' + safeId + '">\u00D7</button>';
       html += '</div>';
       if (!n.url && hasBody) html += '<div class="notice-body" id="nbody-' + safeId + '">' + _sanitizeNoticeHtml(n.body) + '</div>';
@@ -307,11 +345,11 @@ function selectOrg(orgId, container) {
           '<span class="gauge-label">Enterprise Spending</span>' +
           '<span class="gauge-value" style="color:' + spendColor + '">' + spendPct + '%</span></div>' +
           '<div class="gauge-bar"><div class="gauge-fill" style="width:' + Math.min(spendPct, 100) + '%;background:' + spendColor + '"></div></div>' +
-          '<div class="gauge-sub" style="color:#6b7280;font-size:10px">$' + usedDollars + ' / $' + limitDollars + '</div></div>';
+          '<div class="gauge-sub" style="color:var(--text-secondary);font-size:10px">$' + usedDollars + ' / $' + limitDollars + '</div></div>';
       } else {
         gaugeSection.innerHTML = '<div style="text-align:center;padding:6px 0">'
-          + '<div style="font-size:13px;font-weight:600;color:#4f46e5">Enterprise</div>'
-          + '<div style="font-size:11px;color:#6b7280;margin-top:2px">' + t('enterprise_unlimited') + '</div>'
+          + '<div style="font-size:13px;font-weight:600;color:var(--accent)">Enterprise</div>'
+          + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('enterprise_unlimited') + '</div>'
           + '</div>';
       }
     } else {
@@ -350,11 +388,11 @@ function selectOrg(orgId, container) {
       // Display reset time
       if (resetsAt5h) {
         const r5h = document.getElementById('gauge-5h-reset');
-        if (r5h) r5h.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>`;
+        if (r5h) r5h.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>`;
       }
       if (resetsAt7d) {
         const r7d = document.getElementById('gauge-7d-reset');
-        if (r7d) r7d.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>`;
+        if (r7d) r7d.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>`;
       }
     }
 
@@ -617,7 +655,7 @@ function showMultiOrgBadges(collectedOrgs) {
       // Toast notification
       const toast = document.createElement('div');
       toast.textContent = t('org_primary_changed');
-      toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1b4b;color:white;padding:8px 16px;border-radius:8px;font-size:11px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
+      toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#312e81;color:white;padding:8px 16px;border-radius:8px;font-size:11px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
       document.body.appendChild(toast);
       setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 1500);
     });
@@ -754,7 +792,7 @@ function renderFitnessMatrix(data) {
       html += '<span class="fm-badge fm-badge-rec">' + t('fm_badge_rec') + '</span>';
     }
     if (isRef) {
-      html += '<span class="fm-badge" style="background:#f3f4f6;color:#9ca3af">' + t('fm_ref') + '</span>';
+      html += '<span class="fm-badge fm-unknown">' + t('fm_ref') + '</span>';
     }
     html += '</td>';
     // Windows
@@ -848,6 +886,7 @@ function escHtml(s) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
+  initPopupTheme();
   sendGAEvent('popup_open');
 
   // Request immediate local-only refresh if data is stale (>1 min)
@@ -1012,6 +1051,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
 
+    // Sync theme when changed from options page
+    if (changes['ct-theme']) {
+      const pref = changes['ct-theme'].newValue || 'system';
+      const resolved = pref === 'system'
+        ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        : pref;
+      document.documentElement.setAttribute('data-theme', resolved);
+      updateThemeBtn(pref);
+    }
+
     // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {
       _collectedOrgs = changes.collectedOrgs.newValue || [];
@@ -1152,7 +1201,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Show toast, fade out, then close
         const toast = document.createElement('div');
         toast.textContent = t('toast_popup_next') || 'Next time it will open as a popup';
-        toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1b4b;color:white;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
+        toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#312e81;color:white;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
         document.body.appendChild(toast);
         setTimeout(() => { toast.style.opacity = '0'; }, 1200);
         setTimeout(() => { window.close(); }, 1800);
@@ -1214,7 +1263,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');
       document.getElementById('recommendation').textContent = t('current_plan_ok');
-      document.getElementById('recommendation').style.color = '#166534';
+      document.getElementById('recommendation').style.color = 'var(--text-primary)';
       chrome.storage.local.get({ lastStatus: {} }, (r) => {
         const rt = r.lastStatus?.recommendation?.type;
         if (rt) showRecFeedback(rt);
@@ -1228,7 +1277,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');
       document.getElementById('recommendation').textContent = t('current_plan_ok');
-      document.getElementById('recommendation').style.color = '#166534';
+      document.getElementById('recommendation').style.color = 'var(--text-primary)';
     });
   });
 
@@ -1293,9 +1342,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.style.background = '#f0fdf4';
       el.style.borderColor = '#bbf7d0';
       document.getElementById('plan-order-completed-body').innerHTML =
-        `<div style="font-size:13px;font-weight:600;color:#166534;margin-bottom:4px">✅ ${completed.to_plan}${isUp ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
-        `<div style="font-size:11px;color:#374151;margin-bottom:6px">${isUp ? t('plan_upgrade_desc') : dDesc}</div>` +
-        `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:#7c3aed;text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
+        `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${completed.to_plan}${isUp ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
+        `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">${isUp ? t('plan_upgrade_desc') : dDesc}</div>` +
+        `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:var(--accent);text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
     }
   });
 
@@ -1312,17 +1361,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         const isUpgrade = HIERARCHY.indexOf(_po.to_plan) > HIERARCHY.indexOf(_po.from_plan);
         const banner = document.getElementById('plan-order-banner');
         // Switch banner to success notice
-        banner.style.background = '#f0fdf4';
-        banner.style.borderColor = '#bbf7d0';
+        const _isDk = document.documentElement.dataset.theme === 'dark';
+        banner.style.background = _isDk ? '#052e16' : '#f0fdf4';
+        banner.style.borderColor = _isDk ? '#166534' : '#bbf7d0';
         const body = document.getElementById('plan-order-body');
         let downgradeDesc = t('plan_downgrade_desc');
         if (!isUpgrade && _currentSnapshot?.subscription?.renewal_date) {
           const rd = new Date(_currentSnapshot.subscription.renewal_date);
           downgradeDesc = t('plan_downgrade_desc_date', `${rd.getMonth() + 1}/${rd.getDate()}`);
         }
-        body.innerHTML = `<div style="font-size:13px;font-weight:600;color:#166534;margin-bottom:4px">✅ ${_po.to_plan || ''}${isUpgrade ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
-          `<div style="font-size:11px;color:#374151;margin-bottom:6px">${isUpgrade ? t('plan_upgrade_desc') : downgradeDesc}</div>` +
-          `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:#7c3aed;text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
+        body.innerHTML = `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${_po.to_plan || ''}${isUpgrade ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
+          `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">${isUpgrade ? t('plan_upgrade_desc') : downgradeDesc}</div>` +
+          `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:var(--accent);text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
         // Hide buttons
         document.getElementById('plan-order-accept').style.display = 'none';
         document.getElementById('plan-order-reject').style.display = 'none';
@@ -1579,8 +1629,8 @@ function _renderRecommendation(rec) {
     recEl.textContent = displayText;
 
     const recType = rec.rec_type || rec.type;
-    const typeColors = { upgrade: '#d97706', downgrade: '#059669', high: '#ef4444', adequate: '#854d0e', good: '#166534', collecting: '#6b7280', nodata: '#6b7280' };
-    recEl.style.color = typeColors[recType] || '#166534';
+    const typeColors = { upgrade: '#d97706', downgrade: '#059669', high: '#ef4444', adequate: '#854d0e', good: 'var(--text-primary)', collecting: '#6b7280', nodata: '#6b7280' };
+    recEl.style.color = typeColors[recType] || 'var(--text-primary)';
     const detail = document.getElementById('smart-rec-detail');
     if (detail) detail.classList.add('hidden');
   }
@@ -1717,11 +1767,11 @@ function updateUI(status) {
           '<span class="gauge-label">Enterprise Spending</span>' +
           '<span class="gauge-value" style="color:' + spendColor + '">' + spendPct + '%</span></div>' +
           '<div class="gauge-bar"><div class="gauge-fill" style="width:' + Math.min(spendPct, 100) + '%;background:' + spendColor + '"></div></div>' +
-          '<div class="gauge-sub" style="color:#6b7280;font-size:10px">$' + usedDollars + ' / $' + limitDollars + '</div></div>';
+          '<div class="gauge-sub" style="color:var(--text-secondary);font-size:10px">$' + usedDollars + ' / $' + limitDollars + '</div></div>';
       } else {
         gaugeSection.innerHTML = '<div style="text-align:center;padding:6px 0">'
-          + '<div style="font-size:13px;font-weight:600;color:#4f46e5">Enterprise</div>'
-          + '<div style="font-size:11px;color:#6b7280;margin-top:2px">' + t('enterprise_unlimited') + '</div>'
+          + '<div style="font-size:13px;font-weight:600;color:var(--accent)">Enterprise</div>'
+          + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('enterprise_unlimited') + '</div>'
           + '</div>';
       }
     } else if (isEnterprise) {
@@ -1736,7 +1786,7 @@ function updateUI(status) {
         document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
       }
       if (s.five_hour?.resets_at) {
-        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
+        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
       }
       renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
       if (util7d !== null) {
@@ -1745,7 +1795,7 @@ function updateUI(status) {
         document.getElementById('gauge-7d-fill').style.background = gaugeColor(util7d);
         document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
         if (s.seven_day?.resets_at) {
-          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
+          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
         }
         renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
       }
@@ -1761,7 +1811,7 @@ function updateUI(status) {
         document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
       }
       if (s.five_hour?.resets_at) {
-        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
+        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
       }
       renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
 
@@ -1773,7 +1823,7 @@ function updateUI(status) {
         document.getElementById('gauge-7d-fill').style.background = gaugeColor(util7d);
         document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
         if (s.seven_day?.resets_at) {
-          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:#6b7280;font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
+          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
         }
         renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
       } else {
@@ -1802,8 +1852,8 @@ function updateUI(status) {
           extraTooltip.style.display = visible ? 'none' : 'block';
           if (!visible) {
             extraTooltip.innerHTML = _currentLang === 'ko'
-              ? '기본 요금제(Max 20x 등)에 포함된 사용량을 다 쓰면, 충전한 크레딧에서 종량제로 차감됩니다. 추가 과금이 될 수 있으니, 필요하지 않은 경우 추가 사용량 기능을 꺼두세요.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:#7c3aed">Claude.ai에서 설정 →</a>'
-              : 'When you use up your plan\'s included usage (e.g. Max 20x), extra credits are charged pay-as-you-go. Turn off extra usage if you don\'t need it to avoid unexpected charges.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:#7c3aed">Manage in Claude.ai →</a>';
+              ? '기본 요금제(Max 20x 등)에 포함된 사용량을 다 쓰면, 충전한 크레딧에서 종량제로 차감됩니다. 추가 과금이 될 수 있으니, 필요하지 않은 경우 추가 사용량 기능을 꺼두세요.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:var(--accent)">Claude.ai에서 설정 →</a>'
+              : 'When you use up your plan\'s included usage (e.g. Max 20x), extra credits are charged pay-as-you-go. Turn off extra usage if you don\'t need it to avoid unexpected charges.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:var(--accent)">Manage in Claude.ai →</a>';
           }
           return;
         }
@@ -2201,7 +2251,7 @@ function _restoreGaugeHTML(gaugeSection) {
     '<div class="gauge-sub" id="gauge-5h-reset"></div></div>' +
     '<div class="gauge-row" id="gauge-row-7d"><div class="gauge-header">' +
     '<span class="gauge-label">' + t('usage_7d') + '</span>' +
-    '<span class="gauge-value" id="gauge-7d-value" style="color:#7c3aed">-</span>' +
+    '<span class="gauge-value" id="gauge-7d-value" style="color:var(--accent)">-</span>' +
     '<span class="gauge-predict-inline" id="gauge-7d-predict-inline" style="display:none"></span></div>' +
     '<div class="gauge-bar"><div id="gauge-7d-fill" class="gauge-fill" style="width:0;background:#7c3aed"></div>' +
     '<div id="gauge-7d-predict-fill" class="gauge-predict-fill" style="display:none"></div>' +
@@ -2390,6 +2440,9 @@ function showSuccess(msg) {
 }
 
 // === Charts (5h / 7d split + prediction line) ===
+function _cGrid() { return document.documentElement.dataset.theme === 'dark' ? '#2d3748' : '#f0f0f0'; }
+function _cLabel() { return document.documentElement.dataset.theme === 'dark' ? '#718096' : '#d1d5db'; }
+
 function drawCharts(history, plan, snapshot) {
   // Enterprise usage-based: spending summary instead of 5h/7d charts
   const isEnterprise = (plan || '').includes('Enterprise');
@@ -2447,16 +2500,16 @@ function drawCharts(history, plan, snapshot) {
           const pct = Math.min(Math.round((eu.used_credits || 0) / eu.monthly_limit * 100), 100);
           placeholder.style.display = '';
           placeholder.style.height = 'auto';
-          placeholder.innerHTML = '<div style="text-align:center;padding:6px 0;color:#6b7280;font-size:11px">'
-            + '<div style="font-size:12px;font-weight:600;color:#4f46e5;margin-bottom:2px">Enterprise Spending</div>'
-            + '<div style="font-size:18px;font-weight:700;color:#1e1b4b">$' + usedDollars + ' <span style="font-size:11px;color:#9ca3af">/ $' + limitDollars + '</span></div>'
+          placeholder.innerHTML = '<div style="text-align:center;padding:6px 0;color:var(--text-secondary);font-size:11px">'
+            + '<div style="font-size:12px;font-weight:600;color:var(--accent);margin-bottom:2px">Enterprise Spending</div>'
+            + '<div style="font-size:18px;font-weight:700;color:var(--text-primary)">$' + usedDollars + ' <span style="font-size:11px;color:var(--text-muted)">/ $' + limitDollars + '</span></div>'
             + '<div style="margin-top:2px;color:' + gaugeColor(pct) + ';font-weight:600;font-size:11px">' + pct + '% ' + t('chart_used') + '</div>'
             + '</div>';
         } else {
           placeholder.style.display = '';
           placeholder.style.height = 'auto';
-          placeholder.innerHTML = '<div style="text-align:center;padding:6px 0;color:#6b7280;font-size:11px">'
-            + '<div style="font-size:12px;font-weight:600;color:#4f46e5">Enterprise</div>'
+          placeholder.innerHTML = '<div style="text-align:center;padding:6px 0;color:var(--text-secondary);font-size:11px">'
+            + '<div style="font-size:12px;font-weight:600;color:var(--accent)">Enterprise</div>'
             + '<div style="margin-top:2px">' + t('enterprise_unlimited') + '</div></div>';
         }
       }
@@ -2663,12 +2716,12 @@ function drawSingleChart(opts) {
   }
 
   // Grid — dynamic interval (matched to y-axis scale)
-  ctx.strokeStyle = '#f0f0f0'; ctx.lineWidth = 0.5;
+  ctx.strokeStyle = _cGrid(); ctx.lineWidth = 0.5;
   const gridStep = maxY <= 15 ? 5 : maxY <= 30 ? 10 : maxY <= 60 ? 15 : 25;
   for (let gpct = gridStep; gpct < maxY; gpct += gridStep) {
     const gy = toY(gpct);
     ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(w - pad.right, gy); ctx.stroke();
-    ctx.fillStyle = '#d1d5db'; ctx.font = '7px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillStyle = _cLabel(); ctx.font = '7px sans-serif'; ctx.textAlign = 'right';
     ctx.fillText(gpct + '%', w - pad.right - 2, gy - 2);
   }
 
@@ -2693,7 +2746,7 @@ function drawSingleChart(opts) {
 
   if (allResetPoints.length > 0) {
     // Draw reset vertical lines (gray — both past and future)
-    ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = _cLabel(); ctx.lineWidth = 0.5; ctx.setLineDash([3, 3]);
     for (const rpt of allResetPoints) {
       if (rpt >= oldest && rpt <= futureEnd) {
         const rx = (rpt - oldest) / totalSpan;
@@ -2760,7 +2813,7 @@ function drawSingleChart(opts) {
 
     // Show gap intervals (dashed line)
     if (segments.length > 1) {
-      ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+      ctx.strokeStyle = _cLabel(); ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
       for (let i = 0; i < segments.length - 1; i++) {
         const endPt = segments[i][segments[i].length - 1];
         const startPt = segments[i + 1][0];
@@ -2793,7 +2846,7 @@ function drawSingleChart(opts) {
 
   // "Now" vertical line
   if (hasFuture) {
-    ctx.beginPath(); ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
+    ctx.beginPath(); ctx.strokeStyle = _cLabel(); ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
     ctx.moveTo(toX(nowX), pad.top); ctx.lineTo(toX(nowX), pad.top + ch);
     ctx.stroke(); ctx.setLineDash([]);
   }
@@ -3001,12 +3054,12 @@ function drawSpendingChart(opts) {
   }
 
   // Grid — dollar units
-  ctx.strokeStyle = '#f0f0f0'; ctx.lineWidth = 0.5;
+  ctx.strokeStyle = _cGrid(); ctx.lineWidth = 0.5;
   const gridStep = maxY <= 20 ? 5 : maxY <= 50 ? 10 : maxY <= 100 ? 25 : maxY <= 250 ? 50 : maxY <= 600 ? 100 : 250;
   for (let gv = gridStep; gv < maxY; gv += gridStep) {
     const gy = toY(gv);
     ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(w - pad.right, gy); ctx.stroke();
-    ctx.fillStyle = '#d1d5db'; ctx.font = '7px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillStyle = _cLabel(); ctx.font = '7px sans-serif'; ctx.textAlign = 'right';
     ctx.fillText('$' + gv, w - pad.right - 2, gy - 2);
   }
 
@@ -3108,7 +3161,7 @@ function drawSpendingChart(opts) {
 
     // Show gaps
     if (segments.length > 1) {
-      ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+      ctx.strokeStyle = _cLabel(); ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
       for (let i = 0; i < segments.length - 1; i++) {
         const endPt = segments[i][segments[i].length - 1];
         const startPt = segments[i + 1][0];
@@ -3144,7 +3197,7 @@ function drawSpendingChart(opts) {
 
   // "Now" vertical line
   if (hasFuture) {
-    ctx.beginPath(); ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
+    ctx.beginPath(); ctx.strokeStyle = _cLabel(); ctx.lineWidth = 0.5; ctx.setLineDash([2, 2]);
     ctx.moveTo(toX(nowX), pad.top); ctx.lineTo(toX(nowX), pad.top + ch);
     ctx.stroke(); ctx.setLineDash([]);
   }
@@ -3212,4 +3265,3 @@ function drawSpendingChart(opts) {
     ctx.fillText(capLabel, bx + bw / 2, by + badgeH - 3.5);
   }
 }
-

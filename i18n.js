@@ -320,6 +320,10 @@ const TRANSLATIONS = {
     'notify_collect_fail': '수집 중단 알림',
     'notify_collect_fail_desc': '세션 만료 등으로 수집이 중단되면 알림',
     'notify_collect_fail_ex': '"Claude.ai 세션이 만료되었습니다. 다시 로그인해주세요."',
+    'opt_theme': '테마',
+    'theme_light': '라이트',
+    'theme_dark': '다크',
+    'theme_system': '시스템',
   },
   en: {
     'no_data': 'No data collected yet',
@@ -636,6 +640,10 @@ const TRANSLATIONS = {
     'notify_collect_fail': 'Collection Stopped',
     'notify_collect_fail_desc': 'Alert when collection stops due to session expiry etc.',
     'notify_collect_fail_ex': '"Session expired. Please sign in to Claude.ai again."',
+    'opt_theme': 'Theme',
+    'theme_light': 'Light',
+    'theme_dark': 'Dark',
+    'theme_system': 'System',
   },
 };
 
