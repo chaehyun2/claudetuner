@@ -158,6 +158,9 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
       pendingPlanOrder: null,
       completedPlanOrder: { ...po, ...(auto ? { auto: true } : {}), completedAt: Date.now() },
     });
+  } else if (changeResult?.error === 'Plan already changed externally') {
+    // Plan was changed outside of the order — clear stale order so banner disappears
+    await chrome.storage.local.set({ pendingPlanOrder: null });
   }
   return changeResult;
 }

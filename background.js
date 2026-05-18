@@ -684,7 +684,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.action === 'accept') {
         try {
           const changeResult = await acceptPlanOrder(config, po, userEmail);
-          sendResponse({ success: changeResult?.success });
+          sendResponse({ success: changeResult?.success, error: changeResult?.error });
           if (changeResult?.success) {
             setTimeout(() => collectAndSend(), 3000);
           }

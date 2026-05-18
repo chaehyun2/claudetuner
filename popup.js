@@ -1441,6 +1441,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (costEl) costEl.style.display = 'none';
         // Close banner after 10 seconds
         setTimeout(() => banner.classList.add('hidden'), 10000);
+      } else if (res?.error === 'Plan already changed externally') {
+        // Plan was already changed — hide the stale banner
+        document.getElementById('plan-order-banner').classList.add('hidden');
+        showError(t('plan_already_changed') || 'Plan already changed');
       } else {
         btn.disabled = false;
         btn.textContent = t('plan_order_accept');
