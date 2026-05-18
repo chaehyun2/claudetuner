@@ -324,6 +324,16 @@ const TRANSLATIONS = {
     'theme_light': '라이트',
     'theme_dark': '다크',
     'theme_system': '시스템',
+    // Plan change confirmation modal
+    'confirm_upgrade_title': '업그레이드를 진행하시겠습니까?',
+    'confirm_downgrade_title': '다운그레이드를 진행하시겠습니까?',
+    'confirm_plan_change': '{0} → {1}',
+    'confirm_timing_immediate': '즉시 적용됩니다.',
+    'confirm_timing_renewal': '다음 갱신일부터 적용됩니다.',
+    'confirm_upgrade_btn': '업그레이드 확인',
+    'confirm_downgrade_btn': '다운그레이드 확인',
+    'confirm_cancel': '취소',
+    'confirm_warning': '⚠ 버튼을 클릭하시면 실제 요금제가 변경됩니다.',
   },
   en: {
     'no_data': 'No data collected yet',
@@ -644,6 +654,16 @@ const TRANSLATIONS = {
     'theme_light': 'Light',
     'theme_dark': 'Dark',
     'theme_system': 'System',
+    // Plan change confirmation modal
+    'confirm_upgrade_title': 'Confirm upgrade?',
+    'confirm_downgrade_title': 'Confirm downgrade?',
+    'confirm_plan_change': '{0} → {1}',
+    'confirm_timing_immediate': 'Takes effect immediately.',
+    'confirm_timing_renewal': 'Takes effect on your next renewal date.',
+    'confirm_upgrade_btn': 'Confirm Upgrade',
+    'confirm_downgrade_btn': 'Confirm Downgrade',
+    'confirm_cancel': 'Cancel',
+    'confirm_warning': '⚠ Clicking this button will change your actual plan.',
   },
 };
 

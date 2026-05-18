@@ -585,6 +585,21 @@
     <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="footer_help"></a>
   </div>
 
+  <!-- Plan change confirmation modal -->
+  <div id="smart-rec-confirm-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center">
+    <div style="width:320px;max-width:90%;background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 24px rgba(0,0,0,0.2)">
+      <div id="src-modal-title" style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:8px"></div>
+      <div id="src-modal-plan" style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:4px"></div>
+      <div id="src-modal-cost" style="font-size:11px;color:var(--text-secondary);margin-bottom:4px"></div>
+      <div id="src-modal-timing" style="font-size:11px;color:var(--text-secondary);margin-bottom:4px"></div>
+      <div id="src-modal-warning" style="font-size:11px;color:#d97706;margin-bottom:12px"></div>
+      <div style="display:flex;gap:8px">
+        <button id="src-modal-confirm" style="flex:1;font-size:11px;padding:6px 12px;border-radius:6px;color:white;border:none;cursor:pointer;font-weight:500"></button>
+        <button id="src-modal-cancel" style="flex:1;font-size:11px;padding:6px 12px;border-radius:6px;cursor:pointer;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-secondary);font-weight:500"></button>
+      </div>
+    </div>
+  </div>
+
   <script src="config.js"></script>
   <script src="analytics.js"></script>
   <script src="i18n.js"></script>

@@ -1281,17 +1281,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Smart recommendation execute button
+  // Smart recommendation execute button — show confirmation modal
   document.getElementById('smart-rec-btn').addEventListener('click', () => {
+    chrome.storage.local.get({ lastStatus: {} }, (result) => {
+      const recommendation = result.lastStatus?.recommendation;
+      if (!recommendation?.type) return;
+
+      const isUpgrade = recommendation.type === 'upgrade';
+      const modal = document.getElementById('smart-rec-confirm-modal');
+
+      document.getElementById('src-modal-title').textContent = t(isUpgrade ? 'confirm_upgrade_title' : 'confirm_downgrade_title');
+      document.getElementById('src-modal-plan').textContent = t('confirm_plan_change', recommendation.from_plan || '', recommendation.to_plan || '');
+
+      const costEl = document.getElementById('src-modal-cost');
+      if (recommendation.from_cost != null && recommendation.to_cost != null) {
+        costEl.textContent = isUpgrade
+          ? t('opt_cost_up', recommendation.from_cost, recommendation.to_cost, recommendation.cost_diff)
+          : t('opt_cost_down', recommendation.from_cost, recommendation.to_cost, recommendation.cost_diff);
+      } else {
+        costEl.textContent = '';
+      }
+
+      document.getElementById('src-modal-timing').textContent = t(isUpgrade ? 'confirm_timing_immediate' : 'confirm_timing_renewal');
+      document.getElementById('src-modal-warning').textContent = t('confirm_warning');
+
+      const confirmBtn = document.getElementById('src-modal-confirm');
+      confirmBtn.textContent = t(isUpgrade ? 'confirm_upgrade_btn' : 'confirm_downgrade_btn');
+      confirmBtn.style.background = isUpgrade ? '#059669' : '#d97706';
+      confirmBtn.disabled = false;
+
+      document.getElementById('src-modal-cancel').textContent = t('confirm_cancel');
+
+      modal.style.display = 'flex';
+    });
+  });
+
+  // Confirmation modal — confirm button
+  document.getElementById('src-modal-confirm').addEventListener('click', () => {
+    const modal = document.getElementById('smart-rec-confirm-modal');
+    const confirmBtn = document.getElementById('src-modal-confirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = t('changing');
+
     const btn = document.getElementById('smart-rec-btn');
     btn.disabled = true;
-    btn.textContent = t('changing');
 
     chrome.storage.local.get({ lastStatus: {} }, (result) => {
       const recommendation = result.lastStatus?.recommendation;
-      if (!recommendation?.type) { btn.textContent = t('no_recommend'); return; }
+      if (!recommendation?.type) { modal.style.display = 'none'; return; }
 
       chrome.runtime.sendMessage({ type: 'EXECUTE_PLAN_CHANGE', recommendation }, (res) => {
+        modal.style.display = 'none';
+        confirmBtn.disabled = false;
         btn.disabled = false;
         if (res?.success) {
           document.getElementById('smart-rec-detail').classList.add('hidden');
@@ -1304,6 +1345,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
     });
+  });
+
+  // Confirmation modal — cancel button
+  document.getElementById('src-modal-cancel').addEventListener('click', () => {
+    document.getElementById('smart-rec-confirm-modal').style.display = 'none';
+  });
+
+  // Confirmation modal — backdrop click to close
+  document.getElementById('smart-rec-confirm-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+  });
+
+  // Confirmation modal — ESC key to close
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('smart-rec-confirm-modal');
+      if (modal.style.display !== 'none') modal.style.display = 'none';
+    }
   });
 
   // Render plan change order banner
