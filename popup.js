@@ -2129,7 +2129,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     if (inlineEl) {
       inlineEl.style.display = 'inline';
       inlineEl.style.color = '#22c55e';
-      inlineEl.style.background = '#22c55e18';
+      inlineEl.style.background = _isDark() ? '#22c55e30' : '#22c55e18';
       inlineEl.textContent = '\u25b8 \u2014';
       inlineEl.title = t('predict_tip_stable');
       inlineEl.style.cursor = 'help';
@@ -2159,7 +2159,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   if (inlineEl) {
     inlineEl.style.display = 'inline';
     inlineEl.style.color = predicted >= 80 ? '#fff' : color;
-    inlineEl.style.background = predicted >= 80 ? color : `${color}18`;
+    inlineEl.style.background = predicted >= 80 ? color : `${color}${_isDark() ? '30' : '18'}`;
     inlineEl.textContent = `\u25b8 ${predictText}`;
     const obsTime = hoursDiff < 1 ? `${Math.round(hoursDiff * 60)}${t('min')}` : `${hoursDiff.toFixed(1)}${t('hours_short')}`;
     const resetTime2 = hoursToReset < 1 ? `${Math.round(hoursToReset * 60)}${t('min')}` : `${hoursToReset.toFixed(1)}${t('hours_short')}`;
@@ -2503,8 +2503,9 @@ function showSuccess(msg) {
 }
 
 // === Charts (5h / 7d split + prediction line) ===
-function _cGrid() { return document.documentElement.dataset.theme === 'dark' ? '#2d3748' : '#f0f0f0'; }
-function _cLabel() { return document.documentElement.dataset.theme === 'dark' ? '#718096' : '#d1d5db'; }
+function _isDark() { return document.documentElement.dataset.theme === 'dark'; }
+function _cGrid() { return _isDark() ? '#2d3748' : '#f0f0f0'; }
+function _cLabel() { return _isDark() ? '#718096' : '#d1d5db'; }
 
 function drawCharts(history, plan, snapshot) {
   // Enterprise usage-based: spending summary instead of 5h/7d charts
@@ -2774,7 +2775,7 @@ function drawSingleChart(opts) {
 
   // Future range background
   if (hasFuture) {
-    ctx.fillStyle = 'rgba(0,0,0,.03)';
+    ctx.fillStyle = _isDark() ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.03)';
     ctx.fillRect(toX(nowX), pad.top, toX(1) - toX(nowX), ch);
   }
 
@@ -2859,7 +2860,10 @@ function drawSingleChart(opts) {
     }
     segments.push(seg);
 
-    const alphaColor = color === '#06b6d4' ? 'rgba(6,182,212,.08)' : 'rgba(124,58,237,.08)';
+    const dk = _isDark();
+    const alphaColor = color === '#06b6d4'
+      ? (dk ? 'rgba(6,182,212,.15)' : 'rgba(6,182,212,.08)')
+      : (dk ? 'rgba(124,58,237,.15)' : 'rgba(124,58,237,.08)');
 
     // Draw line + area for each segment
     for (const seg of segments) {
@@ -3112,7 +3116,7 @@ function drawSpendingChart(opts) {
 
   // Future range background
   if (hasFuture) {
-    ctx.fillStyle = 'rgba(0,0,0,.03)';
+    ctx.fillStyle = _isDark() ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.03)';
     ctx.fillRect(toX(nowX), pad.top, toX(1) - toX(nowX), ch);
   }
 
