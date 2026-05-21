@@ -7,6 +7,16 @@ let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOr
 let _isAutoOrg = true; // auto mode (auto when selectedOrgId is null)
 let _autoFollowing = true; // whether view follows cookie changes in auto mode (false when another chip is clicked)
 let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
+let _planChangedTo = null; // plan we just changed to — suppresses same recommendation from re-rendering
+const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
+function _shouldSuppressRec(rec, pendingPlan) {
+  const recTo = rec.to_plan || rec.toPlan;
+  // Suppress if same as just-executed plan change in this session
+  if (_planChangedTo && recTo === _planChangedTo) return true;
+  // Suppress if recommended plan matches already scheduled pending plan
+  if (pendingPlan && recTo === _planApiToLabel[pendingPlan]) return true;
+  return false;
+}
 
 // === Theme ===
 const THEME_ICONS = { light: '\u2600\uFE0F', dark: '\uD83C\uDF19', system: '\uD83D\uDCBB' };
@@ -255,18 +265,21 @@ function loadOrgSelector() {
     if (chrome.runtime.lastError || !res?.success) return;
     const orgs = res.orgs;
     _orgList = orgs;
-    if (orgs.length < 2) return; // No selector needed for single org
 
     const container = document.getElementById('org-selector');
     if (!container) return;
 
     // Multi-org: show collected org badges if collectedOrgs exists
+    // (includes both Claude orgs and ChatGPT accounts)
     chrome.storage.local.get({ collectedOrgs: null }, (local) => {
       _collectedOrgs = local.collectedOrgs || [];
       if (local.collectedOrgs && local.collectedOrgs.length > 0) {
         showMultiOrgBadges(local.collectedOrgs);
         return;
       }
+
+      // Single Claude org with no collectedOrgs — no selector needed
+      if (orgs.length < 2) return;
 
       // Backward compatibility: handle existing selectedOrgId
       chrome.storage.sync.get({ selectedOrgId: null }, (config) => {
@@ -484,6 +497,9 @@ function selectOrg(orgId, container) {
     }
 
     // === 8. Update charts — clean snapshot ===
+    const isChatGPT = (orgData.provider || 'claude') === 'chatgpt';
+    const isGemini = (orgData.provider || 'claude') === 'gemini';
+    const isExternalProvider = isChatGPT || isGemini;
     const orgPlan = orgData.plan || _currentPlan;
     const orgSnapshot = {
       plan: orgPlan,
@@ -497,8 +513,13 @@ function selectOrg(orgId, container) {
     } else if (_chartAutoRoll && !_chartRollIntervalId) {
       _startChartAutoRoll();
     }
+    const chartSection = document.getElementById('chart-section');
     if (hist.length >= 2 || isUsageBased) {
+      if (chartSection) chartSection.style.display = '';
       drawCharts(hist, orgPlan, orgSnapshot);
+    } else {
+      // Not enough data: hide chart to avoid showing stale data from another org
+      if (chartSection) chartSection.style.display = 'none';
     }
 
     // === 9. Status banner ===
@@ -506,12 +527,21 @@ function selectOrg(orgId, container) {
       // Enterprise usage-based: hide banner since no 5h/7d data
       const banner = document.getElementById('status-banner');
       if (banner) banner.classList.add('hidden');
+    } else if (isExternalProvider && hist.length < 3) {
+      // ChatGPT/Gemini with insufficient history: hide banner
+      const banner = document.getElementById('status-banner');
+      if (banner) banner.classList.add('hidden');
     } else if (hist.length >= 3) {
       renderStatusBanner(orgData.h5 ?? null, orgData.d7 ?? null, hist, resetsAt5h, resetsAt7d);
     }
 
-    // Peak hours banner
-    renderPeakBanner();
+    // Peak hours banner (Claude only — not applicable to ChatGPT/Gemini)
+    if (!isExternalProvider) {
+      renderPeakBanner();
+    } else {
+      const peakEl = document.getElementById('offpeak-banner');
+      if (peakEl) peakEl.classList.add('hidden');
+    }
   });
 
   if (container) {
@@ -583,13 +613,15 @@ function showMultiOrgBadges(collectedOrgs) {
     }
   });
 
-  // Sort: Personal > Team > Enterprise
-  const planOrder = (plan) => {
-    if (/Enterprise/i.test(plan)) return 3;
-    if (/Team/i.test(plan)) return 2;
-    return 1;
+  // Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini
+  const planOrder = (org) => {
+    const p = org.provider || 'claude';
+    const base = p === 'gemini' ? 200 : p === 'chatgpt' ? 100 : 0;
+    if (/Enterprise/i.test(org.plan)) return base + 3;
+    if (/Team/i.test(org.plan)) return base + 2;
+    return base + 1;
   };
-  const sorted = [...collectedOrgs].sort((a, b) => planOrder(a.plan) - planOrder(b.plan));
+  const sorted = [...collectedOrgs].sort((a, b) => planOrder(a) - planOrder(b));
 
   // Pin SVGs
   const pinSvgFilled = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5a.5.5 0 0 1-1 0V10h-4A.5.5 0 0 1 3 9.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/></svg>';
@@ -616,8 +648,12 @@ function showMultiOrgBadges(collectedOrgs) {
     // Auto mode: show lightning badge on primary org (indicates active org, separate from view selection)
     var activeBadge = (_isAutoOrg && org.isPrimary) ? '<span class="org-chip-active" title="Active org">\u26A1</span>' : '';
 
+    const pv = org.provider || 'claude';
+    const providerLabel = pv === 'gemini' ? 'Gemini ' : pv === 'chatgpt' ? 'GPT ' : '';
+    const betaBadge = (pv === 'chatgpt' || pv === 'gemini') ? '<span class="org-chip-beta">Beta</span>' : '';
     chip.innerHTML =
-      '<span class="org-chip-plan">' + escHtml(org.plan) + '</span>' +
+      '<span class="org-chip-plan">' + providerLabel + escHtml(org.plan) + '</span>' +
+      betaBadge +
       '<span class="org-chip-name">' + escHtml(org.name) + '</span>' +
       activeBadge +
       '<span class="org-chip-usage">' + usageText + '</span>';
@@ -1070,6 +1106,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (_selectedOrgId) {
           selectOrg(_selectedOrgId, null);
         }
+      } else {
+        // Orgs dropped to single — remove stale chip DOM and reset to primary
+        const existingChips = document.getElementById('org-chips');
+        if (existingChips) existingChips.remove();
+        const existingBadge = document.getElementById('org-badge');
+        if (existingBadge) existingBadge.remove();
+        const primary = _collectedOrgs[0];
+        if (primary && _selectedOrgId !== primary.uuid) {
+          _selectedOrgId = primary.uuid;
+          selectOrg(primary.uuid, null);
+        }
       }
     }
 
@@ -1321,6 +1368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const modal = document.getElementById('smart-rec-confirm-modal');
     const confirmBtn = document.getElementById('src-modal-confirm');
     confirmBtn.disabled = true;
+    confirmBtn.classList.add('loading');
     confirmBtn.textContent = t('changing');
 
     const btn = document.getElementById('smart-rec-btn');
@@ -1333,11 +1381,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       chrome.runtime.sendMessage({ type: 'EXECUTE_PLAN_CHANGE', recommendation }, (res) => {
         modal.style.display = 'none';
         confirmBtn.disabled = false;
+        confirmBtn.classList.remove('loading');
         btn.disabled = false;
         if (res?.success) {
+          // Hide entire recommendation section after successful plan change
+          _lastRecommendation = null;
+          _planChangedTo = recommendation.to_plan || recommendation.toPlan;
           document.getElementById('smart-rec-detail').classList.add('hidden');
+          document.getElementById('smart-rec-btn').classList.add('hidden');
+          document.getElementById('smart-rec-dismiss').classList.add('hidden');
+          document.getElementById('smart-rec-mute').classList.add('hidden');
           document.getElementById('recommendation').textContent = t('change_done');
           document.getElementById('recommendation').style.color = '#059669';
+          // Clear recommendation from storage so it won't reappear on popup reopen
+          chrome.storage.local.get({ lastStatus: {} }, (s) => {
+            const ls = s.lastStatus || {};
+            delete ls.recommendation;
+            chrome.storage.local.set({ lastStatus: ls });
+          });
           showRecFeedback(recommendation.type);
         } else {
           btn.textContent = t('opt_execute');
@@ -1582,44 +1643,48 @@ function showRecFeedback(recType) {
   chrome.storage.local.get({ ['ct_rec_fb_' + recType]: false }, (r) => {
     if (r['ct_rec_fb_' + recType]) return;
     const toast = document.getElementById('rec-feedback-toast');
+    if (!toast) return;
     const actions = document.getElementById('rft-actions');
     const question = document.getElementById('rft-question');
     const share = document.getElementById('rft-share');
+    const closeBtn = document.getElementById('rft-close');
+    const yesBtn = document.getElementById('rft-yes');
+    const noBtn = document.getElementById('rft-no');
+    if (!actions || !question || !share || !closeBtn || !yesBtn || !noBtn) return;
     toast.style.display = 'block';
     toast.style.position = 'relative';
     actions.style.display = 'flex';
     question.style.display = 'block';
     share.style.display = 'none';
-    document.getElementById('rft-close').onclick = () => {
+    closeBtn.onclick = () => {
       toast.style.display = 'none';
       sendGAEvent('rec_toast_close');
     };
     question.textContent = t('rec_fb_question');
-    document.getElementById('rft-yes').textContent = '👍 ' + t('rec_fb_yes');
-    document.getElementById('rft-no').textContent = t('rec_fb_no');
+    yesBtn.textContent = '👍 ' + t('rec_fb_yes');
+    noBtn.textContent = t('rec_fb_no');
 
     const autoHide = setTimeout(() => { toast.style.display = 'none'; }, 10000);
 
-    document.getElementById('rft-yes').onclick = () => {
+    yesBtn.onclick = () => {
       clearTimeout(autoHide);
       sendGAEvent('rec_feedback_yes');
       chrome.storage.local.set({ ['ct_rec_fb_' + recType]: true });
       actions.style.display = 'none';
       question.style.display = 'none';
       share.style.display = 'block';
-      document.getElementById('rft-share-text').textContent = t('rec_fb_share');
-      document.getElementById('rft-review').textContent = t('rec_fb_review');
-      document.getElementById('rft-review').onclick = () => { sendGAEvent('rec_share_review'); };
-      document.getElementById('rft-twitter').href = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent('ClaudeTuner helped me optimize my Claude AI plan! Try it free: https://claudetuner.com #Claude #ClaudeTuner');
-      document.getElementById('rft-copy').textContent = t('rec_fb_copy');
-      document.getElementById('rft-copy').onclick = () => {
-        navigator.clipboard.writeText('https://claudetuner.com');
-        document.getElementById('rft-copy').textContent = 'Copied!';
-      };
+      const shareText = document.getElementById('rft-share-text');
+      const review = document.getElementById('rft-review');
+      const twitter = document.getElementById('rft-twitter');
+      const copy = document.getElementById('rft-copy');
+      if (shareText) shareText.textContent = t('rec_fb_share');
+      if (review) { review.textContent = t('rec_fb_review'); review.onclick = () => { sendGAEvent('rec_share_review'); }; }
+      if (twitter) twitter.href = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent('ClaudeTuner helped me optimize my Claude AI plan! Try it free: https://claudetuner.com #Claude #ClaudeTuner');
+      if (copy) { copy.textContent = t('rec_fb_copy'); copy.onclick = () => { navigator.clipboard.writeText('https://claudetuner.com'); copy.textContent = 'Copied!'; }; }
       setTimeout(() => { toast.style.display = 'none'; }, 15000);
     };
 
-    document.getElementById('rft-no').onclick = () => {
+    noBtn.onclick = () => {
       clearTimeout(autoHide);
       sendGAEvent('rec_feedback_no');
       chrome.storage.local.set({ ['ct_rec_fb_' + recType]: true });
@@ -1790,7 +1855,7 @@ function updateUI(status) {
     // Always refresh latest primary snapshot/recommendation cache
     _currentPlan = s.plan || null;
     _currentSnapshot = s;
-    if (status.recommendation) _lastRecommendation = status.recommendation;
+    if (status.recommendation && !_shouldSuppressRec(status.recommendation, s.subscription?.pending_plan)) _lastRecommendation = status.recommendation;
 
     // If non-primary org is selected, only update status indicator; delegate rest to selectOrg
     if (_selectedOrgId) {
@@ -1997,7 +2062,7 @@ function updateUI(status) {
     }
 
     // Server recommendation (unified recommendation system)
-    if (status.recommendation) {
+    if (status.recommendation && !_shouldSuppressRec(status.recommendation, s.subscription?.pending_plan)) {
       _lastRecommendation = status.recommendation;
       const recRow = document.getElementById('recommendation-row');
       if (recRow) recRow.classList.remove('hidden');
@@ -2252,9 +2317,13 @@ function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) {
 }
 
 // === Peak hours banner (Anthropic official: weekdays 12:00-18:00 UTC, shown only during peak) ===
+// Disabled: Anthropic removed peak hour limit reduction for Pro/Max (2026-05-07)
 function renderPeakBanner() {
   const el = document.getElementById('offpeak-banner');
   if (!el) return;
+  el.classList.add('hidden');
+  return; // peak hours no longer apply — re-enable if Anthropic brings them back
+
   const now = new Date();
   const utcHour = now.getUTCHours();
   const utcDay = now.getUTCDay(); // 0=Sun, 6=Sat

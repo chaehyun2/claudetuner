@@ -78,7 +78,7 @@ export async function checkCollectFailNotification(errorMsg) {
   const currentStage = collectFailState.stage || 'none';
 
   // Determine stage
-  const FIRST_DELAY = isActionable ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000; // 30min / 2h
+  const FIRST_DELAY = isActionable ? 10 * 60 * 1000 : 15 * 60 * 1000; // 10min / 15min
   const REMINDER_DELAY = 4 * 60 * 60 * 1000;  // 4 hours
   const FINAL_DELAY = 24 * 60 * 60 * 1000;    // 24 hours
 

@@ -120,6 +120,10 @@ function doSave() {
   const prevIds = JSON.stringify(_prevSelectedOrgIds || []);
   const orgChanged = JSON.stringify(selectedOrgIds || []) !== prevIds;
 
+  const collectClaude = document.getElementById('collect-claude').checked;
+  const collectChatGPT = document.getElementById('collect-chatgpt').checked;
+  const collectGemini = document.getElementById('collect-gemini').checked;
+
   const sidebarUsageEnabled = document.getElementById('sidebar-usage-enabled').checked;
   const inputUsageEnabled = document.getElementById('input-usage-enabled').checked;
 
@@ -132,7 +136,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
   const orgAutoAll = document.getElementById('org-auto-all')?.checked ?? true;
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -166,6 +170,7 @@ function doSave() {
         const extSettings = {
           intervalMinutes, usageDisplayMode, thresholdWarn, thresholdDanger,
           sidebarUsageEnabled, inputUsageEnabled, optimizationMode, orgAutoAll,
+          collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail,
         };
@@ -228,7 +233,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -256,6 +261,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       document.getElementById('threshold-warn').value = String(config.thresholdWarn || 80);
       document.getElementById('threshold-danger').value = String(config.thresholdDanger || 95);
+      document.getElementById('collect-claude').checked = config.collectClaude !== false;
+      document.getElementById('collect-chatgpt').checked = config.collectChatGPT !== false;
+      document.getElementById('collect-gemini').checked = config.collectGemini !== false;
       document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
       document.getElementById('input-usage-enabled').checked = config.inputUsageEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
@@ -289,6 +297,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Thresholds
   document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); updateNotifyExamples(); autoSave(); });
   document.getElementById('threshold-danger').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); updateNotifyExamples(); autoSave(); });
+
+  // Provider collection toggles
+  document.getElementById('collect-claude').addEventListener('change', autoSave);
+  document.getElementById('collect-chatgpt').addEventListener('change', autoSave);
+  document.getElementById('collect-gemini').addEventListener('change', autoSave);
 
   // Page usage toggles (sidebar + input area)
   document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);

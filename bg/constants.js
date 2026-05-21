@@ -18,7 +18,10 @@ export const LOCAL_BACKGROUND_INTERVAL_MINUTES = 5;
 export const VISIBILITY_THROTTLE_MS = 30_000;
 export const POPUP_COLLECT_THROTTLE_MS = 60_000;
 export const CLAUDE_API_BASE = 'https://claude.ai';
-export const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+export const CHATGPT_API_BASE = 'https://chatgpt.com';
+export const CHATGPT_SESSION_COOKIE = '__Secure-next-auth.session-token';
+export const GEMINI_API_BASE = 'https://gemini.google.com';
+export const HEARTBEAT_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
 export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (for Enterprise spending monthly chart)
 
 export const PLAN_HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];

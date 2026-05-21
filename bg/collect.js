@@ -590,6 +590,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         resetsAt5h: snapshot.five_hour?.resets_at ?? o.resetsAt5h,
         resetsAt7d: snapshot.seven_day?.resets_at ?? o.resetsAt7d,
         extraUsage: snapshot.extra_usage ?? o.extraUsage,
+        updatedAt: Date.now(),
       } : o);
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
@@ -674,9 +675,13 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         await chrome.storage.local.set({ ct_admin_order_auto_approve: result.admin_order_auto_approve });
       }
 
-      // Handle plan change order
+      // Handle plan change order (skip if already completed)
       if (result.plan_order) {
         const po = result.plan_order;
+        const { completedPlanOrder: cpo } = await chrome.storage.local.get('completedPlanOrder');
+        if (cpo && cpo.order_id === po.order_id) {
+          console.log(`[Claude Tuner] Plan order #${po.order_id} already completed, skipping`);
+        } else {
         console.log(`[Claude Tuner] Plan order received: #${po.order_id} ${po.from_plan} → ${po.to_plan} (auto_approve=${po.auto_approve})`);
         await chrome.storage.local.set({ pendingPlanOrder: po });
         if (po.auto_approve) {
@@ -703,6 +708,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           });
           logNotification('plan-order');
         }
+        }
       }
 
       // Update lastStatus with server recommendation (also refreshes badge)
@@ -713,7 +719,8 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           await setStatus(curStatus);
         }
         const rec = result.recommendation;
-        if (rec.type === 'upgrade' || rec.type === 'downgrade') {
+        const _hasPending = !!snapshot.subscription?.pending_plan;
+        if ((rec.type === 'upgrade' || rec.type === 'downgrade') && !_hasPending) {
           await showRecommendationBadge(snapshot, rec.type);
         }
       }
@@ -789,7 +796,9 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     await appendUsageHistory(buildHistoryPoint(snapshot, plan));
 
     // 4-2. Update badge (based on previous recommendation, async-updated on server response)
-    if (recommendation?.type === 'upgrade' || recommendation?.type === 'downgrade') {
+    // Skip recommendation badge if plan change is already scheduled (subscription has pending_plan)
+    const hasPendingPlan = !!snapshot.subscription?.pending_plan;
+    if ((recommendation?.type === 'upgrade' || recommendation?.type === 'downgrade') && !hasPendingPlan) {
       await showRecommendationBadge(snapshot, recommendation.type);
     } else {
       await updateBadge(snapshot.seven_day.utilization, snapshot.five_hour.utilization);
@@ -973,11 +982,15 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
 
       // Save collected org list (only successful orgs shown in popup, with usage data)
+      // Preserve non-Claude orgs (ChatGPT/Gemini) — they are merged separately
+      const { collectedOrgs: prevOrgsAll = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+      const nonClaudeOrgs = prevOrgsAll.filter(o => o.provider && o.provider !== 'claude');
       const collectedOrgsRaw = targetOrgs.filter(o => successOrgs.includes(o.uuid));
       const collectedOrgs = [];
       for (const o of collectedOrgsRaw) {
         collectedOrgs.push({
           uuid: o.uuid, name: o.name, plan: orgUsageMap[o.uuid]?.plan || await refineTeamPlan(detectPlan(o), o.uuid),
+          provider: 'claude',
           isPrimary: o.uuid === bestOrg?.uuid,
           h5: orgUsageMap[o.uuid]?.h5 ?? null,
           d7: orgUsageMap[o.uuid]?.d7 ?? null,
@@ -986,9 +999,11 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           resetsAt5h: orgUsageMap[o.uuid]?.resetsAt5h ?? null,
           resetsAt7d: orgUsageMap[o.uuid]?.resetsAt7d ?? null,
           extraUsage: orgUsageMap[o.uuid]?.extraUsage ?? null,
+          updatedAt: Date.now(),
         });
       }
-      await chrome.storage.local.set({ collectedOrgs, failedOrgs: failedOrgs.length > 0 ? failedOrgs : null });
+
+      await chrome.storage.local.set({ collectedOrgs: [...collectedOrgs, ...nonClaudeOrgs], failedOrgs: failedOrgs.length > 0 ? failedOrgs : null });
       _timings['7_extra_orgs'] = Math.round(performance.now() - _ts);
     }
 

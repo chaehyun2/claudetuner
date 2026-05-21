@@ -38,6 +38,7 @@
     .check-label input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
     .check-label span { font-size: 12px; color: var(--text-primary); }
     .check-sub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+    .badge-beta { font-size: 9px; font-weight: 700; color: #e67e22; background: rgba(230,126,34,.12); padding: 1px 5px; border-radius: 4px; letter-spacing: .3px; vertical-align: middle; }
     input, select {
       width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
       font-size: 13px; color: var(--text-primary); background: var(--bg-card); transition: border-color .15s;
@@ -219,6 +220,22 @@
   <!-- 수집 설정 -->
   <div class="card" id="collect-settings">
     <div class="card-title" data-i18n="collect_settings"></div>
+    <div class="form-group">
+      <label class="form-label" data-i18n="collect_provider_label"></label>
+      <label class="check-label">
+        <input type="checkbox" id="collect-claude" checked>
+        <span data-i18n="collect_claude"></span>
+      </label>
+      <label class="check-label">
+        <input type="checkbox" id="collect-chatgpt" checked>
+        <span data-i18n="collect_chatgpt"></span> <span class="badge-beta">Beta</span>
+      </label>
+      <label class="check-label">
+        <input type="checkbox" id="collect-gemini" checked>
+        <span data-i18n="collect_gemini"></span> <span class="badge-beta">Beta</span>
+        <span style="font-size:11px;color:#9ca3af;margin-left:4px" data-i18n="collect_gemini_hint"></span>
+      </label>
+    </div>
     <div class="form-group">
       <div style="display:flex;align-items:center;justify-content:space-between;">
         <label class="form-label" style="margin-bottom:0" data-i18n="org_select"></label>

@@ -12,7 +12,7 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { bt } from './bg/i18n.js';
 import { getConfig, getLastStatus, getUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
-import { updateBadge } from './bg/badge.js';
+import { updateBadge, resetIcon } from './bg/badge.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
@@ -20,18 +20,85 @@ import {
   setCollectAndSendRef,
 } from './bg/plan.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/collect.js';
+import { collectChatGPT } from './bg/collect-chatgpt.js';
+import { collectGemini } from './bg/collect-gemini.js';
+
+// Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
+async function mergeChatGPTOrgs() {
+  try {
+    const result = await collectChatGPT();
+    const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+    const nonChatGPT = collectedOrgs.filter(o => o.provider !== 'chatgpt');
+    if (result.orgs.length > 0) {
+      await chrome.storage.local.set({ collectedOrgs: [...nonChatGPT, ...result.orgs] });
+    } else {
+      // Preserve previous ChatGPT orgs when collection returns empty
+      const prevChatGPT = collectedOrgs.filter(o => o.provider === 'chatgpt');
+      if (prevChatGPT.length > 0 && nonChatGPT.length !== collectedOrgs.length) {
+        // Already preserved — no write needed
+      }
+    }
+  } catch (e) {
+    console.warn('[Claude Tuner] ChatGPT collection skipped:', e.message);
+  }
+}
+
+// Merge Gemini orgs into collectedOrgs storage (independent of Claude collection)
+async function mergeGeminiOrgs() {
+  try {
+    const result = await collectGemini();
+    const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+    const nonGemini = collectedOrgs.filter(o => o.provider !== 'gemini');
+    if (result.orgs.length > 0) {
+      await chrome.storage.local.set({ collectedOrgs: [...nonGemini, ...result.orgs] });
+    }
+  } catch (e) {
+    console.warn('[Claude Tuner] Gemini collection skipped:', e.message);
+  }
+}
 
 // Wrap collectAndSend to suppress spurious cookie-change events during collection
+// ChatGPT/Gemini collection runs independently after Claude (regardless of Claude result)
 async function collectAndSend(opts) {
   _collecting = true;
-  try { return await _collectAndSend(opts); }
-  finally { _collecting = false; }
+  try {
+    const { collectClaude = true, collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectClaude: true, collectChatGPT: true, collectGemini: true });
+    let result = { success: false, skipped: true };
+    if (collectClaude) {
+      result = await _collectAndSend(opts);
+    }
+    if (collectChatGPT) {
+      mergeChatGPTOrgs().catch(() => {});
+    }
+    if (collectGemini) {
+      mergeGeminiOrgs().catch(() => {});
+    }
+    return result;
+  } catch (e) {
+    // Claude failed — still try ChatGPT/Gemini independently if enabled
+    const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+    if (collectChatGPT) mergeChatGPTOrgs().catch(() => {});
+    if (collectGemini) mergeGeminiOrgs().catch(() => {});
+    throw e;
+  } finally {
+    _collecting = false;
+  }
 }
 
 // Domain migration: auto-migrate existing users' serverUrl
 chrome.storage.sync.get({ serverUrl: '' }, ({ serverUrl }) => {
   if (serverUrl === 'https://api.claudetuner.letrun.ai') {
     chrome.storage.sync.set({ serverUrl: DEFAULT_SERVER_URL });
+  }
+});
+
+// Restore correct icon + badge on every service worker wake
+// (Chrome persists stale icon state across SW restarts)
+getLastStatus().then(s => {
+  if (s?.snapshot) {
+    updateBadge(s.snapshot.seven_day?.utilization, s.snapshot.five_hour?.utilization);
+  } else {
+    resetIcon();
   }
 });
 
@@ -842,16 +909,14 @@ async function buildSidebarUsageData(reqOrgId) {
     orgData = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
   }
 
-  // Prefer snapshot over collectedOrgs when snapshot is for the same org and is newer.
+  // Prefer snapshot when it's for the same org and is newer than collectedOrgs.
   // Between setStatus (updates snapshot) and collectedOrgs write (happens after multi-org
-  // polling), collectedOrgs can be stale — causing the input bar to show old values while
-  // the badge (which reads snapshot directly) shows the correct value.
+  // polling), collectedOrgs can be stale — use timestamp comparison to pick the fresher source.
   const snapshotOrgMatch = snapshot && orgData &&
     snapshot.claude_org_uuid === orgData.uuid &&
-    status?.timestamp && snapshot.collected_at;
-  const useSnapshot = snapshotOrgMatch && orgData.h5 != null &&
-    snapshot.five_hour?.utilization != null &&
-    snapshot.five_hour.utilization !== orgData.h5;
+    snapshot.five_hour?.utilization != null;
+  const useSnapshot = snapshotOrgMatch && status?.timestamp &&
+    (!orgData.updatedAt || status.timestamp >= orgData.updatedAt);
 
   const h5 = useSnapshot ? snapshot.five_hour.utilization : (orgData?.h5 ?? snapshot?.five_hour?.utilization ?? null);
   const d7 = useSnapshot ? (snapshot.seven_day?.utilization ?? orgData?.d7 ?? null) : (orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null);

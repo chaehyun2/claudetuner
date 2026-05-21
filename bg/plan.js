@@ -3,6 +3,7 @@ import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus, authedFetch } from './storage.js';
 import { logNotification } from './notifications.js';
+import { resetIcon } from './badge.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -158,9 +159,14 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
       pendingPlanOrder: null,
       completedPlanOrder: { ...po, ...(auto ? { auto: true } : {}), completedAt: Date.now() },
     });
+    // Restore normal icon + badge now that pendingPlanOrder is cleared
+    resetIcon();
+    chrome.action.setBadgeText({ text: '' });
   } else if (changeResult?.error === 'Plan already changed externally') {
     // Plan was changed outside of the order — clear stale order so banner disappears
     await chrome.storage.local.set({ pendingPlanOrder: null });
+    resetIcon();
+    chrome.action.setBadgeText({ text: '' });
   }
   return changeResult;
 }
@@ -227,8 +233,9 @@ export async function executePlanChange(recommendation) {
       });
     }
 
-    // Success
+    // Success — clear badge and restore normal icon (order icon may be active)
     chrome.action.setBadgeText({ text: '' });
+    resetIcon();
     await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', fromPlan, toPlan), 2);
 
     console.log(`[Claude Tuner] Plan change successful: ${fromPlan} → ${toPlan}`);

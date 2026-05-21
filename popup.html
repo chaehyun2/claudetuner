@@ -67,6 +67,8 @@
     .hdr-btn-primary.loading { display: inline-flex; align-items: center; gap: 4px; }
     .hdr-btn-primary.loading::before { content: ''; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: btn-spin .6s linear infinite; }
     @keyframes btn-spin { to { transform: rotate(360deg); } }
+    button.loading { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+    button.loading::before { content: ''; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: btn-spin .6s linear infinite; flex-shrink: 0; }
     .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); display: inline-block; }
     .hdr-btn-link:hover { background: var(--accent-light); }
     .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
@@ -112,7 +114,7 @@
     .chart-legend { display: flex; gap: 12px; justify-content: center; margin-top: 3px; font-size: 9px; }
 
     /* Off-peak 프로모션 배너 */
-    .offpeak-banner { border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; font-size: 11px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .offpeak-banner { border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; font-size: 11px; font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .offpeak-banner.is-offpeak { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
     .offpeak-banner.is-peak { background: #fefce8; border: 1px solid #fde68a; color: #854d0e; }
     .offpeak-banner .op-icon { font-size: 13px; flex-shrink: 0; }
@@ -120,7 +122,7 @@
     .offpeak-banner .op-sub { font-size: 9px; opacity: 0.8; }
     .offpeak-banner .op-help { width: 16px; height: 16px; border-radius: 50%; border: 1px solid currentColor; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; cursor: pointer; opacity: 0.6; flex-shrink: 0; }
     .offpeak-banner .op-help:hover { opacity: 1; }
-    .offpeak-banner .op-tooltip { margin-top: 6px; padding: 6px 8px; background: #fef9c3; border-radius: 4px; font-size: 10px; line-height: 1.5; opacity: 0.95; }
+    .offpeak-banner .op-tooltip { width: 100%; margin-top: 2px; padding: 6px 8px; background: #fef9c3; border-radius: 4px; font-size: 10px; line-height: 1.5; opacity: 0.95; }
 
     /* 상태 배너 */
     .status-banner { border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; font-size: 11px; font-weight: 500; }
@@ -236,6 +238,7 @@
     .org-chip-name { color: var(--text-muted); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .org-chip-usage { font-size: 11px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; }
     .org-chip-active { font-size: 10px; flex-shrink: 0; }
+    .org-chip-beta { font-size: 8px; font-weight: 700; color: #e67e22; background: rgba(230,126,34,.12); padding: 0 3px; border-radius: 3px; letter-spacing: .2px; flex-shrink: 0; }
     /* 핀 아이콘 (클릭 시 Auto OFF + org 고정) */
     .org-chip-pin { flex-shrink: 0; width: 20px; height: 20px; padding: 4px; cursor: pointer; opacity: 0.25; transition: opacity .15s, color .15s; color: #9ca3af; display: flex; align-items: center; justify-content: center; border-radius: 4px; margin: -2px -2px -2px 0; }
     .org-chip:hover .org-chip-pin { opacity: 0.5; }
@@ -301,7 +304,7 @@
     </div>
   </div>
 
-  <div id="pin-hint" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--accent);text-align:center;position:relative"
+  <div id="pin-hint" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--accent);text-align:center;position:relative">
     <button id="pin-hint-close" style="position:absolute;top:4px;right:8px;background:none;border:none;color:#a78bfa;cursor:pointer;font-size:13px;padding:0">×</button>
     <!-- Before/After: 툴바 모양으로 표현 -->
     <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px">
@@ -334,7 +337,7 @@
     <span id="pin-hint-text" style="font-size:11px"></span>
   </div>
 
-  <div id="review-nudge" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;align-items:center;gap:8px;font-size:11px"
+  <div id="review-nudge" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;align-items:center;gap:8px;font-size:11px">
     <span style="font-size:15px">⭐</span>
     <span id="review-nudge-text" style="flex:1;color:var(--text-primary)"></span>
     <a id="review-nudge-link" href="https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond/reviews" target="_blank" style="background:#4f46e5;color:white;padding:3px 10px;border-radius:5px;text-decoration:none;font-weight:600;font-size:10px;white-space:nowrap"></a>
@@ -588,7 +591,7 @@
 
   <!-- Plan change confirmation modal -->
   <div id="smart-rec-confirm-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center">
-    <div style="width:320px;max-width:90%;background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 24px rgba(0,0,0,0.2)">
+    <div style="width:320px;max-width:90%;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 24px rgba(0,0,0,0.3)">
       <div id="src-modal-title" style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:8px"></div>
       <div id="src-modal-plan" style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:4px"></div>
       <div id="src-modal-cost" style="font-size:11px;color:var(--text-secondary);margin-bottom:4px"></div>

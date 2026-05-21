@@ -80,10 +80,12 @@
   }
 
   function isPeakNow() {
-    const now = new Date();
-    const day = now.getUTCDay();
-    const hour = now.getUTCHours();
-    return day >= 1 && day <= 5 && hour >= 12 && hour < 18;
+    // Disabled: Anthropic removed peak hour limit reduction (2026-05-07)
+    return false;
+    // const now = new Date();
+    // const day = now.getUTCDay();
+    // const hour = now.getUTCHours();
+    // return day >= 1 && day <= 5 && hour >= 12 && hour < 18;
   }
 
   function getPeakLocalRange() {
