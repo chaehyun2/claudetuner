@@ -23,6 +23,16 @@ import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/coll
 import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { collectGemini } from './bg/collect-gemini.js';
 
+// Check if optional host permission is granted for a provider
+function hasProviderPermission(provider) {
+  const origins = {
+    chatgpt: ['https://chatgpt.com/*'],
+    gemini: ['https://gemini.google.com/*'],
+  };
+  if (!origins[provider]) return Promise.resolve(true);
+  return chrome.permissions.contains({ origins: origins[provider] });
+}
+
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
 async function mergeChatGPTOrgs() {
   try {
@@ -67,18 +77,18 @@ async function collectAndSend(opts) {
     if (collectClaude) {
       result = await _collectAndSend(opts);
     }
-    if (collectChatGPT) {
+    if (collectChatGPT && await hasProviderPermission('chatgpt')) {
       mergeChatGPTOrgs().catch(() => {});
     }
-    if (collectGemini) {
+    if (collectGemini && await hasProviderPermission('gemini')) {
       mergeGeminiOrgs().catch(() => {});
     }
     return result;
   } catch (e) {
     // Claude failed — still try ChatGPT/Gemini independently if enabled
     const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
-    if (collectChatGPT) mergeChatGPTOrgs().catch(() => {});
-    if (collectGemini) mergeGeminiOrgs().catch(() => {});
+    if (collectChatGPT && await hasProviderPermission('chatgpt')) mergeChatGPTOrgs().catch(() => {});
+    if (collectGemini && await hasProviderPermission('gemini')) mergeGeminiOrgs().catch(() => {});
     throw e;
   } finally {
     _collecting = false;
@@ -150,6 +160,18 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: undefined });
     if (sidePanelAutoOpened === undefined) {
       await chrome.storage.local.set({ sidePanelAutoOpened: true });
+    }
+    // v1.24→1.25 migration: re-request previously-required host permissions
+    // that moved to optional_host_permissions (Chrome may not auto-retain them)
+    const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+    const optionalOrigins = [];
+    if (collectChatGPT) optionalOrigins.push('https://chatgpt.com/*');
+    if (collectGemini) optionalOrigins.push('https://gemini.google.com/*');
+    if (optionalOrigins.length > 0) {
+      const already = await chrome.permissions.contains({ origins: optionalOrigins });
+      if (!already) {
+        console.log('[Claude Tuner] Migration: optional provider permissions not retained, popup will prompt');
+      }
     }
   }
   await setupAlarm();

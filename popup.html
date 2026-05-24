@@ -35,6 +35,11 @@
     [data-theme="dark"] .error-banner .error-hint { color: var(--text-muted); }
     [data-theme="dark"] .error-banner .error-timing { color: var(--text-muted); }
     [data-theme="dark"] .error-banner a { color: var(--accent); }
+    .perm-banner { padding: 8px 10px; margin: 0 0 6px; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 8px; font-size: 11px; color: #92400e; line-height: 1.4; }
+    .perm-banner button { background: #b45309; color: #fff; border: none; border-radius: 4px; padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; margin-left: 6px; }
+    .perm-banner button:hover { background: #92400e; }
+    [data-theme="dark"] .perm-banner { background: #422006; border-color: #b45309; color: #fde68a; }
+    [data-theme="dark"] .perm-banner button { background: #d97706; }
     [data-theme="dark"] .btn-primary:disabled { background: #3730a3; color: #818cf8; }
     [data-theme="dark"] #privacy-row { background: #1a1500; }
     [data-theme="dark"] #privacy-row .label { color: #fde68a; }
@@ -345,6 +350,7 @@
   </div>
 
   <div id="ct-popup-notices" style="display:none"></div>
+  <div id="perm-banner" class="perm-banner hidden"></div>
 
   <div class="status-row">
     <div id="status-indicator" class="status-dot gray"></div>

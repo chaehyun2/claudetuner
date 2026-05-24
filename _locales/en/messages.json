@@ -1,11 +1,11 @@
 {
   "appName": {
-    "message": "Claude Tuner - AI Usage Tracker for Claude"
+    "message": "Claude Tuner - Claude·ChatGPT·Gemini Tracker"
   },
   "appDescription": {
-    "message": "Claude.ai usage tracker — monitor rate limits, predict resets, simulate plans & manage team usage. Free for Pro/Max/Team."
+    "message": "Track Claude, ChatGPT & Gemini usage — monitor rate limits, predict resets, optimize plans & manage team usage. Free."
   },
   "appDefaultTitle": {
-    "message": "Claude Tuner - Claude.ai Usage Tracker & Rate Limit Monitor"
+    "message": "Claude Tuner - Claude, ChatGPT & Gemini Usage Tracker"
   }
 }

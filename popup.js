@@ -1,3 +1,39 @@
+// Check optional provider permissions and show banner if needed
+async function checkProviderPermissions() {
+  const banner = document.getElementById('perm-banner');
+  if (!banner) return;
+  const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+  const missing = [];
+  if (collectChatGPT) {
+    const ok = await chrome.permissions.contains({ origins: ['https://chatgpt.com/*'] });
+    if (!ok) missing.push({ label: 'ChatGPT', origins: ['https://chatgpt.com/*'] });
+  }
+  if (collectGemini) {
+    const ok = await chrome.permissions.contains({ origins: ['https://gemini.google.com/*'] });
+    if (!ok) missing.push({ label: 'Gemini', origins: ['https://gemini.google.com/*'] });
+  }
+  if (missing.length === 0) { banner.classList.add('hidden'); return; }
+  const names = missing.map(m => m.label).join(', ');
+  banner.innerHTML = '';
+  banner.appendChild(document.createTextNode(t('perm_banner_text', names) || names + ' collection requires permission.'));
+  const btn = document.createElement('button');
+  btn.textContent = t('perm_banner_btn') || 'Grant';
+  btn.addEventListener('click', async () => {
+    try {
+      const allOrigins = missing.flatMap(m => m.origins);
+      const granted = await chrome.permissions.request({ origins: allOrigins });
+      if (granted) {
+        banner.classList.add('hidden');
+        chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('[Claude Tuner] Permission request failed:', e.message);
+    }
+  });
+  banner.appendChild(btn);
+  banner.classList.remove('hidden');
+}
+
 let _currentPlan = null;
 let _usageHistory = [];
 let _currentSnapshot = null;
@@ -952,6 +988,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   loadPopupAnnouncements();
   loadOrgSelector();
+  checkProviderPermissions();
   loadFitnessMatrix();
 
   // Fitness table click opens dashboard (except link clicks)

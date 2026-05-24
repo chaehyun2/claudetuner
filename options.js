@@ -2,6 +2,23 @@ let _prevSelectedOrgIds = [];
 let _saveTimer = null;
 let _lastInteractedCard = null;
 
+// Check + display permission hints for optional providers
+async function _updateProviderPermHints() {
+  const providers = [
+    { id: 'collect-chatgpt', origins: ['https://chatgpt.com/*'] },
+    { id: 'collect-gemini', origins: ['https://gemini.google.com/*'] },
+  ];
+  for (const p of providers) {
+    const cb = document.getElementById(p.id);
+    if (!cb) continue;
+    const hint = cb.closest('label')?.querySelector('.perm-hint');
+    const granted = await chrome.permissions.contains({ origins: p.origins });
+    if (hint) {
+      hint.style.display = (cb.checked && !granted) ? '' : 'none';
+    }
+  }
+}
+
 // === Theme ===
 function initOptionsTheme() {
   chrome.storage.local.get({ 'ct-theme': 'system' }, (r) => {
@@ -264,6 +281,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('collect-claude').checked = config.collectClaude !== false;
       document.getElementById('collect-chatgpt').checked = config.collectChatGPT !== false;
       document.getElementById('collect-gemini').checked = config.collectGemini !== false;
+      // Show permission hint if toggle ON but permission not granted
+      _updateProviderPermHints();
       document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
       document.getElementById('input-usage-enabled').checked = config.inputUsageEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
@@ -300,8 +319,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Provider collection toggles
   document.getElementById('collect-claude').addEventListener('change', autoSave);
-  document.getElementById('collect-chatgpt').addEventListener('change', autoSave);
-  document.getElementById('collect-gemini').addEventListener('change', autoSave);
+  // ChatGPT/Gemini: request optional permission when toggled ON
+  document.getElementById('collect-chatgpt').addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      try {
+        const granted = await chrome.permissions.request({ origins: ['https://chatgpt.com/*'] });
+        if (!granted) { e.target.checked = false; _updateProviderPermHints(); return; }
+      } catch { e.target.checked = false; _updateProviderPermHints(); return; }
+    }
+    _updateProviderPermHints();
+    autoSave();
+  });
+  document.getElementById('collect-gemini').addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      try {
+        const granted = await chrome.permissions.request({ origins: ['https://gemini.google.com/*'] });
+        if (!granted) { e.target.checked = false; _updateProviderPermHints(); return; }
+      } catch { e.target.checked = false; _updateProviderPermHints(); return; }
+    }
+    autoSave();
+  });
 
   // Page usage toggles (sidebar + input area)
   document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);

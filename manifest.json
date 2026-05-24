@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "1.24.0",
+  "version": "1.24.1",
   "description": "__MSG_appDescription__",
   "default_locale": "en",
   "permissions": [
@@ -16,9 +16,11 @@
   ],
   "host_permissions": [
     "https://claude.ai/*",
-    "https://chatgpt.com/*",
-    "https://gemini.google.com/*",
     "https://claudetuner.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://chatgpt.com/*",
+    "https://gemini.google.com/*"
   ],
   "background": {
     "service_worker": "background.js",

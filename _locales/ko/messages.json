@@ -1,11 +1,11 @@
 {
   "appName": {
-    "message": "Claude Tuner - AI Usage Tracker for Claude"
+    "message": "Claude Tuner - Claude·ChatGPT·Gemini Tracker"
   },
   "appDescription": {
-    "message": "Claude.ai 사용량 실시간 추적 — 속도 제한 모니터링, 리셋 예측, 플랜 시뮬레이션, 무료 팀 대시보드. Pro/Max/Team 지원."
+    "message": "Claude·ChatGPT·Gemini 사용량 실시간 추적 — 속도 제한 모니터링, 리셋 예측, 플랜 최적화, 팀 대시보드. 무료."
   },
   "appDefaultTitle": {
-    "message": "Claude Tuner - Claude.ai 사용량 추적 & 속도 제한 모니터"
+    "message": "Claude Tuner - Claude·ChatGPT·Gemini 사용량 추적기"
   }
 }
