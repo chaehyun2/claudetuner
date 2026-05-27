@@ -7,7 +7,7 @@ import {
 } from './constants.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
-import { updateBadge, updateBadgeError, resetIcon } from './badge.js';
+import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, logNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
@@ -260,8 +260,13 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         bestPlan = detectPlan(bestOrg);
         selectionMethod = 'manual';
       } else {
-        console.warn('[Claude Tuner] selectedOrgId not found, resetting to auto');
-        await chrome.storage.sync.set({ selectedOrgId: null });
+        // selectedOrgId may be an external provider (ChatGPT/Gemini) — don't reset
+        const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+        const isExternal = collectedOrgs.some(o => o.uuid === config.selectedOrgId && o.provider && o.provider !== 'claude');
+        if (!isExternal) {
+          console.warn('[Claude Tuner] selectedOrgId not found, resetting to auto');
+          await chrome.storage.sync.set({ selectedOrgId: null });
+        }
       }
     }
 
@@ -594,7 +599,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       } : o);
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
-      updateBadge(snapshot.seven_day?.utilization, snapshot.five_hour?.utilization);
+      updateBadgeForSelectedOrg(snapshot);
       return { success: true, snapshot, localOnly: true };
     }
 
@@ -801,11 +806,19 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     if ((recommendation?.type === 'upgrade' || recommendation?.type === 'downgrade') && !hasPendingPlan) {
       await showRecommendationBadge(snapshot, recommendation.type);
     } else {
-      await updateBadge(snapshot.seven_day.utilization, snapshot.five_hour.utilization);
+      await updateBadgeForSelectedOrg(snapshot);
     }
 
-    // 4-3. Usage threshold alerts
-    await checkUsageAlerts(snapshot);
+    // 4-3. Usage threshold alerts (use selected org data if pinned to non-Claude org)
+    const selectedUsage = await getSelectedOrgUsage();
+    if (selectedUsage) {
+      await checkUsageAlerts({
+        five_hour: { utilization: selectedUsage.h5 },
+        seven_day: { utilization: selectedUsage.d7 },
+      });
+    } else {
+      await checkUsageAlerts(snapshot);
+    }
 
     sendGAEvent('collect_success', { plan: snapshot.plan, fetch_mode: fetchMode });
     // On success: reset heartbeat timer + clear error code + reset collect fail state
@@ -985,13 +998,18 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       // Preserve non-Claude orgs (ChatGPT/Gemini) — they are merged separately
       const { collectedOrgs: prevOrgsAll = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
       const nonClaudeOrgs = prevOrgsAll.filter(o => o.provider && o.provider !== 'claude');
+      // Preserve user's pinned primary org if it still exists
+      const prevPrimaryUuid = prevOrgsAll.find(o => o.isPrimary)?.uuid;
       const collectedOrgsRaw = targetOrgs.filter(o => successOrgs.includes(o.uuid));
+      const allNewUuids = [...collectedOrgsRaw.map(o => o.uuid), ...nonClaudeOrgs.map(o => o.uuid)];
+      const primaryUuid = (prevPrimaryUuid && allNewUuids.includes(prevPrimaryUuid))
+        ? prevPrimaryUuid : bestOrg?.uuid;
       const collectedOrgs = [];
       for (const o of collectedOrgsRaw) {
         collectedOrgs.push({
           uuid: o.uuid, name: o.name, plan: orgUsageMap[o.uuid]?.plan || await refineTeamPlan(detectPlan(o), o.uuid),
           provider: 'claude',
-          isPrimary: o.uuid === bestOrg?.uuid,
+          isPrimary: o.uuid === primaryUuid,
           h5: orgUsageMap[o.uuid]?.h5 ?? null,
           d7: orgUsageMap[o.uuid]?.d7 ?? null,
           spendUsed: orgUsageMap[o.uuid]?.spendUsed ?? null,
@@ -1003,7 +1021,9 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         });
       }
 
-      await chrome.storage.local.set({ collectedOrgs: [...collectedOrgs, ...nonClaudeOrgs], failedOrgs: failedOrgs.length > 0 ? failedOrgs : null });
+      // Update isPrimary for non-Claude orgs to match the resolved primary
+      const mergedNonClaude = nonClaudeOrgs.map(o => ({ ...o, isPrimary: o.uuid === primaryUuid }));
+      await chrome.storage.local.set({ collectedOrgs: [...collectedOrgs, ...mergedNonClaude], failedOrgs: failedOrgs.length > 0 ? failedOrgs : null });
       _timings['7_extra_orgs'] = Math.round(performance.now() - _ts);
     }
 

@@ -229,11 +229,6 @@
     .org-option.selected .org-check::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: white; }
     /* 조직 칩 표시 */
     .org-chips { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-top: 8px; width: 100%; overflow: hidden; }
-    /* Auto 토글 행 */
-    .org-auto-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-body); }
-    .org-auto-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--text-primary); cursor: pointer; user-select: none; }
-    .org-auto-cb { width: 13px; height: 13px; accent-color: #4f46e5; cursor: pointer; margin: 0; }
-    .org-auto-desc { font-size: 10px; color: var(--text-secondary); }
     .org-chip { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer; transition: background .15s; }
     .org-chip:not(:last-child) { border-bottom: 1px solid var(--border); }
     .org-chip:hover { background: var(--bg-hover); }
@@ -519,7 +514,10 @@
     </div>
     <div class="info-row hidden" id="privacy-row" style="background:#fffbeb">
       <span class="label" style="color:#92400e;display:flex;align-items:center;gap:3px"><svg width="12" height="12" viewBox="0 0 20 20" fill="#d97706"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg><span data-i18n="privacy_training"></span></span>
-      <a id="privacy-value" href="#" style="font-weight:600;font-size:11px;color:#b45309;text-decoration:none">-</a>
+      <span style="display:flex;align-items:center;gap:6px">
+        <a id="privacy-value" href="#" style="font-weight:600;font-size:11px;color:#b45309;text-decoration:none">-</a>
+        <a id="privacy-dismiss" href="#" style="font-size:11px;color:var(--text-muted);text-decoration:underline;cursor:pointer" data-i18n="privacy_dismiss"></a>
+      </span>
     </div>
     <div class="info-row hidden" id="pending-row">
       <span class="label" data-i18n="pending_change"></span>
@@ -557,7 +555,10 @@
   </div>
 
   <!-- 다운그레이드 취소 -->
-  <button id="cancel-downgrade-btn" class="btn-cancel hidden" style="width:100%" data-i18n="cancel_downgrade"></button>
+  <div id="cancel-downgrade-wrap" style="display:none;align-items:center;gap:6px;margin-bottom:10px;padding:0 12px">
+    <button id="cancel-downgrade-btn" class="btn-cancel" style="flex:1;margin-bottom:0" data-i18n="cancel_downgrade"></button>
+    <a id="hide-downgrade-btn" href="#" style="font-size:11px;color:var(--text-muted);white-space:nowrap;text-decoration:underline;cursor:pointer" data-i18n="hide_downgrade_btn"></a>
+  </div>
 
   <!-- 플랜 변경 테스트 (비활성) -->
   <div id="plan-actions" class="hidden">

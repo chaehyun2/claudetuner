@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "1.24.1",
+  "version": "1.24.3",
   "description": "__MSG_appDescription__",
   "default_locale": "en",
   "permissions": [
@@ -46,7 +46,8 @@
   },
   "externally_connectable": {
     "matches": [
-      "https://claudetuner.com/*"
+      "https://claudetuner.com/*",
+      "https://*.claude-tuner-site-git.pages.dev/*"
     ]
   },
   "content_scripts": [{
@@ -58,7 +59,8 @@
   "web_accessible_resources": [{
     "resources": ["icons/icon48.png"],
     "matches": [
-      "https://claudetuner.com/*"
+      "https://claudetuner.com/*",
+      "https://*.claude-tuner-site-git.pages.dev/*"
     ]
   }, {
     "resources": ["icons/icon16.png"],

@@ -40,9 +40,27 @@ let _currentSnapshot = null;
 let _orgList = null; // cached org list
 let _selectedOrgId = null; // selected org UUID (multi-org view)
 let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOrg, etc.)
-let _isAutoOrg = true; // auto mode (auto when selectedOrgId is null)
-let _autoFollowing = true; // whether view follows cookie changes in auto mode (false when another chip is clicked)
+// Auto org mode removed in v1.24.3 — see memory/auto-org-feature-archive.md for restoration
 let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
+
+// Check if selected org is NOT the Claude primary org (used to skip Claude-only rendering)
+function _isNonClaudePrimarySelected() {
+  if (!_selectedOrgId || !_currentSnapshot) return false;
+  return _selectedOrgId !== _currentSnapshot.claude_org_uuid;
+}
+
+// Hide all Claude-only UI elements (recommendation, fitness, privacy, pending plan, renewal)
+function _hideClaudeOnlyUI() {
+  const ids = ['recommendation-row', 'smart-rec-detail', 'fitness-section', 'privacy-row', 'pending-row'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
+  }
+  const cancelWrap = document.getElementById('cancel-downgrade-wrap');
+  if (cancelWrap) cancelWrap.style.display = 'none';
+  const renewalGroup = document.getElementById('renewal-group');
+  if (renewalGroup) renewalGroup.style.display = 'none';
+}
 let _planChangedTo = null; // plan we just changed to — suppresses same recommendation from re-rendering
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 function _shouldSuppressRec(rec, pendingPlan) {
@@ -127,10 +145,11 @@ async function _authedFetch(cfg, url, options = {}) {
 // Return only history matching the selected org
 function _filteredHistory() {
   if (!_selectedOrgId) return _usageHistory;
-  // Include legacy history (without org field) when primary org is selected
-  const isPrimarySelected = _collectedOrgs.find(o => o.uuid === _selectedOrgId)?.isPrimary;
+  // Include legacy history (without org field) only when a Claude primary org is selected
+  const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
+  const includeLegacy = selOrg?.isPrimary && (selOrg?.provider || 'claude') === 'claude';
   return _usageHistory.filter(p =>
-    p.org === _selectedOrgId || (!p.org && isPrimarySelected)
+    p.org === _selectedOrgId || (!p.org && includeLegacy)
   );
 }
 
@@ -359,13 +378,15 @@ function selectOrg(orgId, container) {
 
   _selectedOrgId = orgId;
 
-  // Look up selected org data from collectedOrgs
-  chrome.storage.local.get({ collectedOrgs: [] }, (local) => {
+  // Look up selected org data from collectedOrgs (+ lastStatus for recommendation restore)
+  chrome.storage.local.get({ collectedOrgs: [], lastStatus: null }, (local) => {
     _collectedOrgs = local.collectedOrgs || [];
     const orgData = _collectedOrgs.find(o => o.uuid === orgId);
     if (!orgData) return;
     const hist = _filteredHistory();
     const isPrimary = orgData.isPrimary;
+    const providerKey = orgData.provider || 'claude';
+    const isClaudeOrg = providerKey === 'claude';
     const isEnterprise = /Enterprise/i.test(orgData.plan);
     const isUsageBased = isEnterprise && orgData.h5 == null && orgData.d7 == null;
 
@@ -379,6 +400,7 @@ function selectOrg(orgId, container) {
 
     // === 2. Update gauges ===
     const gaugeSection = document.getElementById('gauge-section');
+    gaugeSection.classList.remove('hidden');
     const renewalGroup = document.getElementById('renewal-group');
 
     if (isUsageBased) {
@@ -403,9 +425,9 @@ function selectOrg(orgId, container) {
       }
     } else {
       // 5h/7d gauge (common for Pro/Max/Team/Enterprise seat-based)
-      if (isEnterprise || !isPrimary) {
+      if (isEnterprise || !isClaudeOrg || !isPrimary) {
         if (renewalGroup) renewalGroup.style.display = 'none';
-      } else if (isPrimary && _currentSnapshot?.subscription?.renewal_date && renewalGroup) {
+      } else if (_currentSnapshot?.subscription?.renewal_date && renewalGroup) {
         renewalGroup.style.display = 'flex';
       }
       _restoreGaugeHTML(gaugeSection);
@@ -445,10 +467,10 @@ function selectOrg(orgId, container) {
       }
     }
 
-    // === 3. Extra usage section ===
+    // === 3. Extra usage section (Claude Enterprise only) ===
     const extraSection = document.getElementById('extra-usage-section');
     if (extraSection) {
-      const eu = orgData.extraUsage;
+      const eu = isClaudeOrg ? orgData.extraUsage : null;
       if (eu && eu.is_enabled && (eu.used_credits || 0) > 0) {
         extraSection.style.display = '';
         const usedCents = eu.used_credits || 0;
@@ -473,10 +495,10 @@ function selectOrg(orgId, container) {
       }
     }
 
-    // === 4. Subscription / Pending plan ===
+    // === 4. Subscription / Pending plan (Claude only) ===
     const pendingRow = document.getElementById('pending-row');
-    const cancelDowngradeBtn = document.getElementById('cancel-downgrade-btn');
-    if (isPrimary) {
+    const cancelDowngradeWrap = document.getElementById('cancel-downgrade-wrap');
+    if (isClaudeOrg && isPrimary) {
       // primary: restore subscription from _currentSnapshot
       if (_currentSnapshot?.subscription?.pending_plan) {
         if (pendingRow) {
@@ -484,47 +506,62 @@ function selectOrg(orgId, container) {
           const planLabels = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x', cancel: t('pending_cancel') };
           const pendingEl = document.getElementById('pending-plan');
           if (pendingEl) pendingEl.textContent = planLabels[_currentSnapshot.subscription.pending_plan] || _currentSnapshot.subscription.pending_plan;
-          if (cancelDowngradeBtn && _currentSnapshot.subscription.pending_plan !== 'cancel') cancelDowngradeBtn.classList.remove('hidden');
+          if (cancelDowngradeWrap && _currentSnapshot.subscription.pending_plan !== 'cancel') {
+            // Check if user dismissed this specific pending plan
+            chrome.storage.local.get({ hiddenDowngradePlan: null }, (s) => {
+              if (s.hiddenDowngradePlan === _currentSnapshot.subscription.pending_plan) {
+                cancelDowngradeWrap.style.display = 'none';
+              } else {
+                cancelDowngradeWrap.style.display = 'flex';
+              }
+            });
+          }
         }
       } else {
         if (pendingRow) pendingRow.classList.add('hidden');
-        if (cancelDowngradeBtn) cancelDowngradeBtn.classList.add('hidden');
+        if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
       }
     } else {
       // non-primary: no subscription info available
       if (renewalGroup) renewalGroup.style.display = 'none';
       if (pendingRow) pendingRow.classList.add('hidden');
-      if (cancelDowngradeBtn) cancelDowngradeBtn.classList.add('hidden');
+      if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
     }
 
-    // === 5. Recommendation ===
+    // === 5. Recommendation & 6. Privacy — Claude only (no logic for external providers yet) ===
     const recRow = document.getElementById('recommendation-row');
     const recDetail = document.getElementById('smart-rec-detail');
-    if (isPrimary && _lastRecommendation) {
-      // primary: restore cached recommendation
-      if (recRow) recRow.classList.remove('hidden');
-      _renderRecommendation(_lastRecommendation);
+    if (isClaudeOrg) {
+      // Restore recommendation from cache or from lastStatus
+      const rec = _lastRecommendation || local.lastStatus?.recommendation;
+      if (rec && !_shouldSuppressRec(rec, _currentSnapshot?.subscription?.pending_plan)) {
+        _lastRecommendation = rec;
+        if (recRow) recRow.classList.remove('hidden');
+        _renderRecommendation(rec);
+      } else {
+        if (recRow) recRow.classList.add('hidden');
+        if (recDetail) recDetail.classList.add('hidden');
+      }
     } else {
-      // non-primary: no recommendation available
       if (recRow) recRow.classList.add('hidden');
       if (recDetail) recDetail.classList.add('hidden');
     }
 
-    // === 6. Privacy row ===
     const privacyRow = document.getElementById('privacy-row');
-    if (isPrimary && _currentSnapshot?.grove_enabled === true) {
-      if (privacyRow) privacyRow.classList.remove('hidden');
+    if (isClaudeOrg && _currentSnapshot?.grove_enabled === true) {
+      chrome.storage.local.get({ hiddenPrivacyBanner: false }, (s) => {
+        if (privacyRow) privacyRow.classList.toggle('hidden', !!s.hiddenPrivacyBanner);
+      });
     } else {
       if (privacyRow) privacyRow.classList.add('hidden');
     }
 
-    // === 7. Fitness matrix ===
+    // === 7. Fitness matrix (Claude only — no plan comparison for external providers) ===
     const fitnessSection = document.getElementById('fitness-section');
-    if (!isPrimary || isEnterprise) {
+    if (!isClaudeOrg || isEnterprise) {
       if (fitnessSection) fitnessSection.classList.add('hidden');
     } else {
-      // primary + non-Enterprise: show if cached data exists (managed by loadFitnessMatrix)
-      // Try to re-show if it was hidden
+      // Claude non-Enterprise: show if cached data exists (managed by loadFitnessMatrix)
       chrome.storage.local.get({ fitnessCache: null }, (fc) => {
         if (fc.fitnessCache?.data && fitnessSection) {
           fitnessSection.classList.remove('hidden');
@@ -606,48 +643,11 @@ function showMultiOrgBadges(collectedOrgs) {
   wrapper.id = 'org-chips';
   wrapper.className = 'org-chips';
 
-  // Auto toggle row + description
-  const autoRow = document.createElement('div');
-  autoRow.className = 'org-auto-row';
-  const autoLabel = document.createElement('label');
-  autoLabel.className = 'org-auto-toggle';
-  const autoCheckbox = document.createElement('input');
-  autoCheckbox.type = 'checkbox';
-  autoCheckbox.checked = _isAutoOrg;
-  autoCheckbox.className = 'org-auto-cb';
-  autoLabel.appendChild(autoCheckbox);
-  autoLabel.appendChild(document.createTextNode(' Auto'));
-  autoRow.appendChild(autoLabel);
-  const autoDesc = document.createElement('span');
-  autoDesc.className = 'org-auto-desc';
-  autoDesc.textContent = _isAutoOrg ? t('org_auto_on') : t('org_auto_off');
-  autoRow.appendChild(autoDesc);
-  wrapper.appendChild(autoRow);
-
-  autoCheckbox.addEventListener('change', () => {
-    _isAutoOrg = autoCheckbox.checked;
-    _autoFollowing = _isAutoOrg; // Auto ON: resume following
-    autoDesc.textContent = _isAutoOrg ? t('org_auto_on') : t('org_auto_off');
-    if (_isAutoOrg) {
-      // Auto ON: reset selectedOrgId, read current active org from cookie and switch immediately
-      chrome.storage.sync.set({ selectedOrgId: null });
-      // Read directly from cookie (instead of background message — side panel compatible)
-      chrome.cookies.get({ name: 'lastActiveOrg', url: 'https://claude.ai' }, (cookie) => {
-        const cookieOrgId = cookie?.value || null;
-        const target = (cookieOrgId && _collectedOrgs.find(o => o.uuid === cookieOrgId))
-          || _collectedOrgs.find(o => o.isPrimary);
-        if (target) {
-          _collectedOrgs.forEach(o => { o.isPrimary = (o.uuid === target.uuid); });
-          chrome.storage.local.set({ collectedOrgs: _collectedOrgs });
-          _selectedOrgId = target.uuid;
-          selectOrg(target.uuid, null);
-        }
-        showMultiOrgBadges(_collectedOrgs);
-      });
-    } else {
-      showMultiOrgBadges(_collectedOrgs);
-    }
-  });
+  // Hint row showing pin status
+  const hintRow = document.createElement('div');
+  hintRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:5px 10px;border-bottom:1px solid var(--border);font-size:10px;color:var(--text-secondary)';
+  hintRow.textContent = t('org_pin_hint');
+  wrapper.appendChild(hintRow);
 
   // Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini
   const planOrder = (org) => {
@@ -681,9 +681,6 @@ function showMultiOrgBadges(collectedOrgs) {
       usageText = org.d7 != null ? Math.round(org.d7) + '%' : '-';
     }
 
-    // Auto mode: show lightning badge on primary org (indicates active org, separate from view selection)
-    var activeBadge = (_isAutoOrg && org.isPrimary) ? '<span class="org-chip-active" title="Active org">\u26A1</span>' : '';
-
     const pv = org.provider || 'claude';
     const providerLabel = pv === 'gemini' ? 'Gemini ' : pv === 'chatgpt' ? 'GPT ' : '';
     const betaBadge = (pv === 'chatgpt' || pv === 'gemini') ? '<span class="org-chip-beta">Beta</span>' : '';
@@ -691,24 +688,20 @@ function showMultiOrgBadges(collectedOrgs) {
       '<span class="org-chip-plan">' + providerLabel + escHtml(org.plan) + '</span>' +
       betaBadge +
       '<span class="org-chip-name">' + escHtml(org.name) + '</span>' +
-      activeBadge +
       '<span class="org-chip-usage">' + usageText + '</span>';
 
     // Pin icon: always visible. Click to turn Auto OFF and pin to this org
     const pin = document.createElement('span');
-    const isPinned = !_isAutoOrg && org.isPrimary;
+    const isPinned = org.isPrimary;
     pin.className = 'org-chip-pin' + (isPinned ? ' active' : '');
     pin.innerHTML = isPinned ? pinSvgFilled : pinSvgOutline;
     pin.title = t('org_set_primary');
     pin.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (isPinned) return; // Already pinned to this org
-      // Auto OFF + pin to this org
-      _isAutoOrg = false;
+      if (isPinned) return;
       _collectedOrgs.forEach(o => { o.isPrimary = (o.uuid === org.uuid); });
       chrome.storage.local.set({ collectedOrgs: _collectedOrgs });
       chrome.storage.sync.set({ selectedOrgId: org.uuid });
-      // Sync to server immediately
       chrome.storage.sync.get({ serverUrl: '', apiKey: '' }, (cfg) => {
         if (!cfg.serverUrl) return;
         chrome.storage.local.get({ lastStatus: null }, async (local) => {
@@ -724,19 +717,20 @@ function showMultiOrgBadges(collectedOrgs) {
       _selectedOrgId = org.uuid;
       selectOrg(org.uuid, null);
       showMultiOrgBadges(_collectedOrgs);
-      // Toast notification
+      chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' }).catch(() => {});
       const toast = document.createElement('div');
       toast.textContent = t('org_primary_changed');
-      toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#312e81;color:white;padding:8px 16px;border-radius:8px;font-size:11px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;';
+      toast.style.cssText = 'position:fixed;top:50px;left:50%;transform:translateX(-50%);background:#312e81;color:white;padding:8px 16px;border-radius:8px;font-size:11px;font-weight:600;z-index:9999;transition:opacity 0.5s;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
       document.body.appendChild(toast);
       setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 1500);
     });
     chip.appendChild(pin);
 
     chip.addEventListener('click', () => {
-      // Auto mode: clicking primary chip resumes following, other chips stop following
-      if (_isAutoOrg) _autoFollowing = org.isPrimary;
+      _selectedOrgId = org.uuid;
+      chrome.storage.sync.set({ selectedOrgId: org.uuid });
       selectOrg(org.uuid, null);
+      chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' }).catch(() => {});
     });
     wrapper.appendChild(chip);
   }
@@ -908,6 +902,8 @@ function renderFitnessMatrix(data) {
 async function loadFitnessMatrix() {
   const section = document.getElementById('fitness-section');
   if (!section) return;
+  // Non-Claude org selected: never show fitness matrix
+  if (_isNonClaudePrimarySelected()) { section.classList.add('hidden'); return; }
 
   // Need user email from lastStatus
   const { lastStatus, fitnessCache } = await new Promise(r =>
@@ -1028,25 +1024,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Load current status + history directly from chrome.storage
-  // Restore Auto/Manual + selected org from selectedOrgId (sync)
+  // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
-    _isAutoOrg = !syncCfg.selectedOrgId;
-
     chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (result) => {
       _usageHistory = result.usageHistory || [];
       _historyReady = true;
 
-      // Multi-org: initialize with saved org for Manual, primary org for Auto
+      // Multi-org: restore pinned org or fall back to primary
       const cOrgs = result.collectedOrgs || [];
       if (cOrgs.length >= 1) {
         _collectedOrgs = cOrgs;
-        if (!_isAutoOrg && syncCfg.selectedOrgId) {
-          // Manual mode: restore user-pinned org
-          const manualOrg = cOrgs.find(o => o.uuid === syncCfg.selectedOrgId);
-          if (manualOrg) _selectedOrgId = manualOrg.uuid;
-          else _selectedOrgId = cOrgs.find(o => o.isPrimary)?.uuid || cOrgs[0]?.uuid || null;
+        if (syncCfg.selectedOrgId) {
+          const pinned = cOrgs.find(o => o.uuid === syncCfg.selectedOrgId);
+          _selectedOrgId = pinned ? pinned.uuid : (cOrgs.find(o => o.isPrimary)?.uuid || cOrgs[0]?.uuid || null);
         } else {
-          // Auto mode: primary org (fallback to first org if no primary)
           const primary = cOrgs.find(o => o.isPrimary) || cOrgs[0];
           if (primary) _selectedOrgId = primary.uuid;
         }
@@ -1058,6 +1049,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         _currentPlan = status?.snapshot?.plan || null;
         _currentSnapshot = status?.snapshot || null;
         loadFitnessMatrix();
+        // Init: if non-Claude org is selected, render it via selectOrg
+        // (updateUI skips rendering for non-Claude orgs)
+        if (_selectedOrgId && _selectedOrgId !== status.snapshot?.claude_org_uuid) {
+          selectOrg(_selectedOrgId, null);
+        }
       }
       _statusReady = true;
 
@@ -1092,31 +1088,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (_collectedOrgs.length >= 2) showMultiOrgBadges(_collectedOrgs);
         loadFitnessMatrix();
       });
-    }
-  });
-
-  // Immediately reflect cookie org changes
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type !== 'ORG_COOKIE_CHANGED' || !_isAutoOrg || !msg.orgId) return;
-    // Move lightning badge
-    document.querySelectorAll('#org-chips .org-chip-active').forEach(el => el.remove());
-    const targetChip = document.querySelector('#org-chips .org-chip[data-org-id="' + msg.orgId + '"]');
-    if (targetChip) {
-      const badge = document.createElement('span');
-      badge.className = 'org-chip-active';
-      badge.title = 'Active org';
-      badge.textContent = '\u26A1';
-      const usageEl = targetChip.querySelector('.org-chip-usage');
-      if (usageEl) targetChip.insertBefore(badge, usageEl);
-      else targetChip.appendChild(badge);
-    }
-    // Switch view if in following mode
-    if (_autoFollowing && _selectedOrgId !== msg.orgId) {
-      _selectedOrgId = msg.orgId;
-      document.querySelectorAll('#org-chips .org-chip').forEach(c => {
-        c.classList.toggle('selected', c.dataset.orgId === msg.orgId);
-      });
-      selectOrg(msg.orgId, null);
     }
   });
 
@@ -1160,20 +1131,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!changes.lastStatus) return;
     const status = changes.lastStatus.newValue;
     if (status) {
-      _usageHistory = []; // History is refreshed separately
-      chrome.storage.local.get({ usageHistory: [] }, (r) => {
+      chrome.storage.local.get({ usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
+        _collectedOrgs = r.collectedOrgs || [];
         updateUI(status);
-        // Since updateUI early returns when non-primary org is selected,
-        // charts/banners below only execute when primary is displayed
-        const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
-        if (_selectedOrgId && selOrg && !selOrg.isPrimary) return;
         _currentPlan = status?.snapshot?.plan || null;
         _currentSnapshot = status?.snapshot || null;
-        const hist = _filteredHistory();
-        if (hist.length >= 2) drawCharts(hist, _currentPlan, _currentSnapshot);
-        if (hist.length >= 3 && _currentSnapshot) {
-          renderStatusBanner(_currentSnapshot.five_hour?.utilization ?? null, _currentSnapshot.seven_day?.utilization ?? null, hist, _currentSnapshot.five_hour?.resets_at, _currentSnapshot.seven_day?.resets_at);
+        // updateUI handles early return for non-Claude orgs; only draw charts for Claude primary
+        if (!_selectedOrgId || _selectedOrgId === status?.snapshot?.claude_org_uuid) {
+          const hist = _filteredHistory();
+          if (hist.length >= 2) drawCharts(hist, _currentPlan, _currentSnapshot);
+          if (hist.length >= 3 && _currentSnapshot) {
+            renderStatusBanner(_currentSnapshot.five_hour?.utilization ?? null, _currentSnapshot.seven_day?.utilization ?? null, hist, _currentSnapshot.five_hour?.resets_at, _currentSnapshot.seven_day?.resets_at);
+          }
         }
       });
     }
@@ -1199,38 +1169,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
-      // Update UI with saved lastStatus for both success/failure (including error banner)
-      chrome.storage.local.get({ lastStatus: null, usageHistory: [] }, (r) => {
-        // Must assign history first so updateUI -> renderGaugePrediction can reference it
+      // Update UI with saved lastStatus — single callback to avoid race conditions
+      chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
+        _collectedOrgs = r.collectedOrgs || [];
         const s = r.lastStatus;
         if (s) {
           updateUI(s);
           _currentPlan = s?.snapshot?.plan || null;
           _currentSnapshot = s?.snapshot || null;
         }
-        // If non-primary org is selected, charts/banners are handled by selectOrg
-        const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
-        if (_selectedOrgId && selOrg && !selOrg.isPrimary) return;
-        const hist2 = _filteredHistory();
-        if (hist2.length >= 2) drawCharts(hist2, _currentPlan, _currentSnapshot);
-        if (hist2.length >= 3 && _currentSnapshot) {
-          renderStatusBanner(_currentSnapshot.five_hour?.utilization ?? null, _currentSnapshot.seven_day?.utilization ?? null, hist2, _currentSnapshot.five_hour?.resets_at, _currentSnapshot.seven_day?.resets_at);
+
+        // Refresh org chips
+        if (result && result.success) {
+          if (!_orgList) loadOrgSelector();
+          if (_collectedOrgs.length >= 2) {
+            showMultiOrgBadges(_collectedOrgs);
+          }
+          chrome.storage.local.remove('fitnessCache', () => loadFitnessMatrix());
+        }
+
+        // Non-Claude org: selectOrg is called from collectedOrgs onChange; skip chart/banner
+        if (!_selectedOrgId || _selectedOrgId === s?.snapshot?.claude_org_uuid) {
+          const hist2 = _filteredHistory();
+          if (hist2.length >= 2) drawCharts(hist2, _currentPlan, _currentSnapshot);
+          if (hist2.length >= 3 && _currentSnapshot) {
+            renderStatusBanner(_currentSnapshot.five_hour?.utilization ?? null, _currentSnapshot.seven_day?.utilization ?? null, hist2, _currentSnapshot.five_hour?.resets_at, _currentSnapshot.seven_day?.resets_at);
+          }
         }
       });
-      if (result && result.success) {
-        // Re-check org selector after first successful collection (show if previously hidden)
-        if (!_orgList) loadOrgSelector();
-        // Refresh org chip usage rates
-        chrome.storage.local.get({ collectedOrgs: null }, (local) => {
-          _collectedOrgs = local.collectedOrgs || [];
-          if (local.collectedOrgs && local.collectedOrgs.length >= 2) {
-            showMultiOrgBadges(local.collectedOrgs);
-          }
-        });
-        // Invalidate fitness cache and reload
-        chrome.storage.local.remove('fitnessCache', () => loadFitnessMatrix());
-      }
     });
   });
 
@@ -1463,8 +1430,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Render plan change order banner
-  chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null }, (store) => {
+  // Render plan change order banner (Claude only)
+  chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null, collectedOrgs: [] }, (store) => {
+    const primaryOrg = (store.collectedOrgs || []).find(o => o.isPrimary);
+    const primaryProvider = primaryOrg?.provider || 'claude';
+    if (primaryProvider !== 'claude') return; // plan orders are Claude-specific
     const po = store.pendingPlanOrder;
     const completed = store.completedPlanOrder;
     if (po) {
@@ -1570,8 +1540,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       btn.disabled = false;
       if (res?.success) {
-        btn.classList.add('hidden');
+        document.getElementById('cancel-downgrade-wrap').style.display = 'none';
         document.getElementById('pending-row').classList.add('hidden');
+        chrome.storage.local.remove('hiddenDowngradePlan');
         showSuccess(t('downgrade_cancelled'));
         chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' });
       } else {
@@ -1579,6 +1550,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         showError(res?.error || t('collect_fail'));
       }
     });
+  });
+
+  // Hide downgrade button (dismiss)
+  document.getElementById('hide-downgrade-btn').addEventListener('click', (e) => {
+    e.preventDefault();
+    const pendingPlan = _currentSnapshot?.subscription?.pending_plan;
+    if (pendingPlan) {
+      chrome.storage.local.set({ hiddenDowngradePlan: pendingPlan });
+    }
+    document.getElementById('cancel-downgrade-wrap').style.display = 'none';
+  });
+
+  // Privacy banner dismiss
+  document.getElementById('privacy-dismiss').addEventListener('click', (e) => {
+    e.preventDefault();
+    chrome.storage.local.set({ hiddenPrivacyBanner: true });
+    document.getElementById('privacy-row').classList.add('hidden');
   });
 
   // Downgrade test button
@@ -1802,7 +1790,17 @@ function _renderRecommendation(rec) {
 }
 
 // === UI Update ===
+let _updateUITimer = null;
+let _lastUpdateUIStatus = null;
+
+// Debounced wrapper: collapses rapid-fire updateUI calls (e.g. lastStatus + collectedOrgs changes)
 function updateUI(status) {
+  _lastUpdateUIStatus = status;
+  if (_updateUITimer) clearTimeout(_updateUITimer);
+  _updateUITimer = setTimeout(() => { _updateUITimer = null; _updateUICore(_lastUpdateUIStatus); }, 50);
+}
+
+function _updateUICore(status) {
   // Always show version
   const userInfoEl = document.getElementById('user-info');
   if (userInfoEl && !userInfoEl.textContent.includes('v')) {
@@ -1894,19 +1892,11 @@ function updateUI(status) {
     _currentSnapshot = s;
     if (status.recommendation && !_shouldSuppressRec(status.recommendation, s.subscription?.pending_plan)) _lastRecommendation = status.recommendation;
 
-    // If non-primary org is selected, only update status indicator; delegate rest to selectOrg
-    if (_selectedOrgId) {
-      const selOrg = _collectedOrgs.find(o => o.uuid === _selectedOrgId);
-      if (selOrg && !selOrg.isPrimary) {
-        // Re-apply selected org view after refreshing org chips
-        chrome.storage.local.get({ collectedOrgs: [] }, (local) => {
-          _collectedOrgs = local.collectedOrgs || [];
-          if (_collectedOrgs.length >= 2) showMultiOrgBadges(_collectedOrgs);
-          selectOrg(_selectedOrgId, null);
-        });
-        return;
-      }
-      // If primary is selected, fall through below (normal updateUI execution)
+    // If selected org differs from Claude primary, skip all rendering.
+    // Status indicator and caches are already updated above.
+    // selectOrg handles non-Claude rendering (called from chip click or collectedOrgs onChange).
+    if (_selectedOrgId && _selectedOrgId !== s.claude_org_uuid) {
+      return;
     }
 
     const isEnterprise = (s.plan || '').includes('Enterprise');
@@ -2067,13 +2057,17 @@ function updateUI(status) {
     const privacyRow = document.getElementById('privacy-row');
     const privacyVal = document.getElementById('privacy-value');
     if (s.grove_enabled === true) {
-      privacyRow.classList.remove('hidden');
       privacyVal.textContent = t('privacy_on');
       privacyVal.href = '#';
       privacyVal.onclick = (e) => { e.preventDefault(); chrome.tabs.create({ url: 'https://claude.ai/settings/data-privacy-controls' }); };
       privacyVal.title = t('privacy_link_title');
+      chrome.storage.local.get({ hiddenPrivacyBanner: false }, (st) => {
+        privacyRow.classList.toggle('hidden', !!st.hiddenPrivacyBanner);
+      });
     } else {
       privacyRow.classList.add('hidden');
+      // grove turned off — clear dismiss so it re-appears if turned on again
+      chrome.storage.local.remove('hiddenPrivacyBanner');
     }
 
     if (s.subscription?.renewal_date) {
@@ -2094,7 +2088,16 @@ function updateUI(status) {
       const planLabels = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x', cancel: t('pending_cancel') };
       pendingEl.textContent = planLabels[s.subscription.pending_plan] || s.subscription.pending_plan;
       if (s.subscription.pending_plan !== 'cancel') {
-        document.getElementById('cancel-downgrade-btn').classList.remove('hidden');
+        chrome.storage.local.get({ hiddenDowngradePlan: null }, (st) => {
+          const wrap = document.getElementById('cancel-downgrade-wrap');
+          if (wrap) {
+            if (st.hiddenDowngradePlan === s.subscription.pending_plan) {
+              wrap.style.display = 'none';
+            } else {
+              wrap.style.display = 'flex';
+            }
+          }
+        });
       }
     }
 

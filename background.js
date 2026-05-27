@@ -10,9 +10,9 @@ import {
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
-import { getConfig, getLastStatus, getUsageHistory, authedFetch } from './bg/storage.js';
+import { getConfig, getLastStatus, getUsageHistory, appendUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
-import { updateBadge, resetIcon } from './bg/badge.js';
+import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
@@ -40,12 +40,16 @@ async function mergeChatGPTOrgs() {
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonChatGPT = collectedOrgs.filter(o => o.provider !== 'chatgpt');
     if (result.orgs.length > 0) {
-      await chrome.storage.local.set({ collectedOrgs: [...nonChatGPT, ...result.orgs] });
-    } else {
-      // Preserve previous ChatGPT orgs when collection returns empty
-      const prevChatGPT = collectedOrgs.filter(o => o.provider === 'chatgpt');
-      if (prevChatGPT.length > 0 && nonChatGPT.length !== collectedOrgs.length) {
-        // Already preserved — no write needed
+      // Preserve user-pinned primary org
+      const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;
+      const merged = result.orgs.map(o => ({ ...o, isPrimary: o.uuid === prevPrimaryUuid }));
+      await chrome.storage.local.set({ collectedOrgs: [...nonChatGPT, ...merged] });
+      // Save history for chart display
+      for (const org of result.orgs) {
+        await appendUsageHistory({
+          t: Date.now(), h5: org.h5 ?? null, d7: org.d7 ?? null,
+          p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
+        });
       }
     }
   } catch (e) {
@@ -60,7 +64,17 @@ async function mergeGeminiOrgs() {
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonGemini = collectedOrgs.filter(o => o.provider !== 'gemini');
     if (result.orgs.length > 0) {
-      await chrome.storage.local.set({ collectedOrgs: [...nonGemini, ...result.orgs] });
+      // Preserve user-pinned primary org
+      const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;
+      const merged = result.orgs.map(o => ({ ...o, isPrimary: o.uuid === prevPrimaryUuid }));
+      await chrome.storage.local.set({ collectedOrgs: [...nonGemini, ...merged] });
+      // Save history for chart display
+      for (const org of result.orgs) {
+        await appendUsageHistory({
+          t: Date.now(), h5: org.h5 ?? null, d7: org.d7 ?? null,
+          p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
+        });
+      }
     }
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection skipped:', e.message);
@@ -106,7 +120,7 @@ chrome.storage.sync.get({ serverUrl: '' }, ({ serverUrl }) => {
 // (Chrome persists stale icon state across SW restarts)
 getLastStatus().then(s => {
   if (s?.snapshot) {
-    updateBadge(s.snapshot.seven_day?.utilization, s.snapshot.five_hour?.utilization);
+    updateBadgeForSelectedOrg(s.snapshot);
   } else {
     resetIcon();
   }
@@ -644,11 +658,24 @@ async function scheduleExpireAlarms(snapshot) {
     }
   }
 
-  const resetTimes = [];
+  let resetTimes = [];
   if (snapshot.five_hour?.resets_at) resetTimes.push({ key: '5h', time: snapshot.five_hour.resets_at });
   if (snapshot.seven_day?.resets_at) resetTimes.push({ key: '7d', time: snapshot.seven_day.resets_at });
   if (snapshot.seven_day_omelette?.resets_at) resetTimes.push({ key: 'design', time: snapshot.seven_day_omelette.resets_at });
   if (snapshot.seven_day_sonnet?.resets_at) resetTimes.push({ key: 'sonnet', time: snapshot.seven_day_sonnet.resets_at });
+
+  // If a non-Claude org is selected, use its reset times for notifications
+  const selectedUsage = await getSelectedOrgUsage();
+  if (selectedUsage && selectedUsage.provider !== 'claude') {
+    if (selectedUsage.resetsAt5h) {
+      resetTimes = resetTimes.filter(r => r.key !== '5h');
+      resetTimes.push({ key: '5h', time: selectedUsage.resetsAt5h });
+    }
+    if (selectedUsage.resetsAt7d) {
+      resetTimes = resetTimes.filter(r => r.key !== '7d');
+      resetTimes.push({ key: '7d', time: selectedUsage.resetsAt7d });
+    }
+  }
 
   const now = Date.now();
   const offsets = [
@@ -741,7 +768,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'REFRESH_BADGE') {
     getLastStatus().then((status) => {
       if (status?.snapshot) {
-        updateBadge(status.snapshot.seven_day?.utilization, status.snapshot.five_hour?.utilization);
+        updateBadgeForSelectedOrg(status.snapshot);
       }
       sendResponse({ success: true });
     });
@@ -787,7 +814,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // Restore badge to show utilization
         const lastStatus = await getLastStatus();
         if (lastStatus?.snapshot) {
-          await updateBadge(lastStatus.snapshot.seven_day?.utilization, lastStatus.snapshot.five_hour?.utilization);
+          await updateBadgeForSelectedOrg(lastStatus.snapshot);
         }
         sendResponse({ success: true });
       }

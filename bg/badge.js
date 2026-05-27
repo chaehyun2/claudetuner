@@ -1,3 +1,32 @@
+// Get usage data for the currently selected org (returns null if auto mode)
+export async function getSelectedOrgUsage() {
+  const { selectedOrgId } = await chrome.storage.sync.get({ selectedOrgId: null });
+  if (!selectedOrgId) return null;
+
+  const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+  const org = collectedOrgs.find(o => o.uuid === selectedOrgId);
+  if (!org) return null;
+
+  return {
+    h5: org.h5 ?? null,
+    d7: org.d7 ?? null,
+    resetsAt5h: org.resetsAt5h ?? null,
+    resetsAt7d: org.resetsAt7d ?? null,
+    provider: org.provider || 'claude',
+  };
+}
+
+// Update badge for the selected org (falls back to Claude primary snapshot)
+export async function updateBadgeForSelectedOrg(claudeSnapshot) {
+  const selected = await getSelectedOrgUsage();
+  if (selected) {
+    return updateBadge(selected.d7, selected.h5);
+  }
+  if (claudeSnapshot) {
+    return updateBadge(claudeSnapshot.seven_day?.utilization, claudeSnapshot.five_hour?.utilization);
+  }
+}
+
 // === Badge update (based on usage display mode) ===
 export async function updateBadge(util7d, util5h) {
   resetIcon(); // Restore normal icon if it was showing error
