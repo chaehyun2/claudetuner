@@ -943,8 +943,11 @@ async function buildSidebarUsageData(reqOrgId) {
     new Promise(r => chrome.storage.local.get({ collectedOrgs: [], sidebarLang: null }, r)),
   ]);
 
-  const collectedOrgs = local.collectedOrgs || [];
+  const allOrgs = local.collectedOrgs || [];
   const snapshot = status?.snapshot;
+
+  // Sidebar/input on claude.ai should only display Claude data
+  const collectedOrgs = allOrgs.filter(o => (o.provider || 'claude') === 'claude');
   if (!snapshot && collectedOrgs.length === 0) return null;
 
   // Determine which org to show — respect the requested org strictly
@@ -1058,13 +1061,17 @@ async function pushSidebarUsage() {
 }
 
 // Hook into storage changes to push sidebar updates after collection.
-// Only trigger on collectedOrgs change — it is written AFTER lastStatus,
-// so all data (including snapshot) is guaranteed fresh at this point.
+// Only trigger when Claude orgs actually changed — ChatGPT/Gemini merges
+// should not cause sidebar/input to re-render on claude.ai.
 // For skipServer/boost mode (no collectedOrgs write), pushSidebarUsage()
 // is called explicitly in collect.js.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.collectedOrgs) {
-    pushSidebarUsage();
+    const oldClaude = (changes.collectedOrgs.oldValue || []).filter(o => (o.provider || 'claude') === 'claude');
+    const newClaude = (changes.collectedOrgs.newValue || []).filter(o => (o.provider || 'claude') === 'claude');
+    if (JSON.stringify(oldClaude) !== JSON.stringify(newClaude)) {
+      pushSidebarUsage();
+    }
   }
 });
 

@@ -584,6 +584,10 @@
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: getActiveOrgId() }, (res) => {
         if (seq !== _reqSeq) return; // stale response — discard
         if (chrome.runtime.lastError || !res) return;
+        // Skip re-render if data hasn't changed (prevents flicker from non-Claude merges)
+        if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
+            _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;
         renderContent();
       });

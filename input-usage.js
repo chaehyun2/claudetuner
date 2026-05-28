@@ -444,6 +444,10 @@
         if (seq !== _reqSeq) return; // stale response from an older concurrent call — discard
         if (chrome.runtime.lastError) { onFail(); return; }
         if (!res) { onFail(); return; } // keep previous _data if available
+        // Skip re-render if data hasn't changed (prevents flicker from non-Claude merges)
+        if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
+            _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;
         renderStrip();
         if (_dataRetryTimer) { clearInterval(_dataRetryTimer); _dataRetryTimer = null; }

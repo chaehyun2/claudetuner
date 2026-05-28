@@ -6,9 +6,11 @@ import { getConfig, getAuthHeaders, appendUsageHistory } from './storage.js';
 // otAQ7b returns policy names like "v3p2_plus_policy"
 const GEMINI_PLAN_MAP = {
   1: 'Free',
-  2: 'Business',   // Google Workspace (Business Standard etc.)
-  4: 'Plus',       // Google One AI Premium (Gemini Advanced)
-  5: 'AI Pro',     // If exists
+  2: 'Business',   // Google Workspace (bundled into Business Standard/Plus/Enterprise)
+  3: 'AI Plus',    // $7.99/mo — entry-level paid tier (post I/O 2026)
+  4: 'Advanced',   // Google One AI Premium (legacy Gemini Advanced)
+  5: 'AI Pro',     // $19.99/mo — full Gemini 3.1 Pro, 1M context
+  6: 'AI Ultra',   // $99.99/mo — 5x Pro usage, developer tier
 };
 
 // Convert [seconds, nanos] timestamp to ISO string, then normalize to minute precision
