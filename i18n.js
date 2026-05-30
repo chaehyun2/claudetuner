@@ -73,6 +73,8 @@ const TRANSLATIONS = {
     'toast_popup_next': '다음부터 팝업으로 열립니다',
     'btn_dashboard_link': '대시보드에서 상세 데이터 보기',
     'error_banner_title': '수집 실패',
+    'claude_disconnected_title': 'Claude.ai 연결 끊김',
+    'claude_disconnected_secondary': 'Claude 사용량 수집만 일시 중단되었습니다. 메인 프로바이더는 정상 추적 중입니다.',
     'error_banner_hint': '에서 로그인 상태를 확인해주세요.',
     'open_claude': 'Claude.ai 열기',
     // Status banner (6-tier pace)
@@ -182,10 +184,10 @@ const TRANSLATIONS = {
     'downgrade_cancelled': '다운그레이드가 취소되었습니다',
     // Onboarding
     'ob_title': 'Claude Tuner에 오신 걸 환영합니다!',
-    'ob_desc': 'Claude.ai 사용량을 실시간으로 모니터링하고 최적화하세요.',
-    'ob_step1_title': 'Claude.ai에 로그인하세요',
-    'ob_step1_title_html': '<a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude.ai</a>에 로그인하세요',
-    'ob_step1_desc': '브라우저에서 claude.ai에 로그인된 상태여야 합니다.',
+    'ob_desc': 'Claude · ChatGPT · Gemini 사용량을 실시간으로 모니터링하고 최적화하세요.',
+    'ob_step1_title': '사용 중인 AI 서비스에 로그인하세요',
+    'ob_step1_title_html': '<a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude</a> · <a href="https://chatgpt.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">ChatGPT</a> · <a href="https://gemini.google.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Gemini</a> 에 로그인하세요',
+    'ob_step1_desc': '사용하는 서비스에 로그인하면 자동 감지됩니다. ChatGPT · Gemini는 팝업에서 권한 허용이 필요합니다.',
     'ob_step2_title': '지금 바로 데이터를 수집하세요',
     'ob_step2_desc': '아래 버튼을 눌러 첫 데이터를 수집합니다. 이후 자동 수집됩니다.',
     'ob_step3_title': '대시보드에서 더 자세히 확인하세요',
@@ -346,6 +348,9 @@ const TRANSLATIONS = {
     'confirm_downgrade_btn': '다운그레이드 확인',
     'confirm_cancel': '취소',
     'confirm_warning': '⚠ 버튼을 클릭하시면 실제 요금제가 변경됩니다.',
+    // Independent account
+    'independent_signed_in_as': '로그인 계정:',
+    'sign_out': '로그아웃',
   },
   en: {
     'no_data': 'No data collected yet',
@@ -417,6 +422,8 @@ const TRANSLATIONS = {
     'toast_popup_next': 'Next time it will open as a popup',
     'btn_dashboard_link': 'View detailed data on Dashboard',
     'error_banner_title': 'Collection Failed',
+    'claude_disconnected_title': 'Claude.ai disconnected',
+    'claude_disconnected_secondary': 'Only Claude usage tracking is paused. Your primary provider is still being tracked normally.',
     'error_banner_hint': 'to check your login status.',
     'open_claude': 'Open Claude.ai',
     // Status banner (6-tier pace)
@@ -525,10 +532,10 @@ const TRANSLATIONS = {
     'downgrade_cancelled': 'Downgrade cancelled',
     // Onboarding
     'ob_title': 'Welcome to Claude Tuner!',
-    'ob_desc': 'Monitor and optimize your Claude.ai usage in real time.',
-    'ob_step1_title': 'Sign in to Claude.ai',
-    'ob_step1_title_html': 'Sign in to <a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude.ai</a>',
-    'ob_step1_desc': 'Make sure you are signed in to claude.ai in your browser.',
+    'ob_desc': 'Monitor and optimize your Claude, ChatGPT & Gemini usage in real time.',
+    'ob_step1_title': 'Sign in to the AI service you use',
+    'ob_step1_title_html': 'Sign in to <a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude</a> · <a href="https://chatgpt.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">ChatGPT</a> · <a href="https://gemini.google.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Gemini</a>',
+    'ob_step1_desc': 'Sign in to any service you use and we\'ll detect it automatically. ChatGPT & Gemini need permission granted in the popup.',
     'ob_step2_title': 'Collect your first data',
     'ob_step2_desc': 'Click the button below to collect data. It will auto-collect after this.',
     'ob_step3_title': 'Explore the Dashboard',
@@ -688,6 +695,9 @@ const TRANSLATIONS = {
     'confirm_downgrade_btn': 'Confirm Downgrade',
     'confirm_cancel': 'Cancel',
     'confirm_warning': '⚠ Clicking this button will change your actual plan.',
+    // Independent account
+    'independent_signed_in_as': 'Signed in as',
+    'sign_out': 'Sign out',
   },
 };
 

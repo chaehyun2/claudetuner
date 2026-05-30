@@ -1,4 +1,4 @@
-import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY } from './constants.js';
+import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME } from './constants.js';
 
 export async function getConfig() {
   return new Promise((resolve) => {
@@ -168,4 +168,69 @@ export async function authedFetch(config, url, options = {}) {
 /** Extract the Bearer token from a getAuthHeaders() result, or null if API_KEY. */
 export function bearerFromAuthHeaders(auth) {
   return auth?.Authorization?.startsWith('Bearer ') ? auth.Authorization.slice(7) : null;
+}
+
+/**
+ * POST a snapshot to /api/snapshots with auth handling shared across all
+ * collection paths (Claude, ChatGPT, Gemini). Mirrors the auth-recovery logic
+ * the Claude path uses so that provider-only (independent) accounts — whose
+ * provider snapshots are their ONLY snapshot path — also recover from token
+ * invalidation and detect account deletion.
+ *
+ * Handles:
+ *  - 401/403: stale/invalid ext_token → race-safe clear so the next cycle
+ *    re-issues a fresh token (or falls back to API_KEY for Claude accounts).
+ *    Sets needsReauth so independent accounts (which cannot use API_KEY) can
+ *    re-show the sign-in UI.
+ *  - 410 account_deleted: stop collection, flag deletion, set badge.
+ *  - result.ext_token: persist rotated/issued token (TOFU).
+ *
+ * Returns the parsed result object on success, or null on any error/auth path.
+ */
+export async function postSnapshot(config, payload) {
+  if (!config.serverUrl) return null;
+  const authHeaders = await getAuthHeaders(config);
+  const sentToken = bearerFromAuthHeaders(authHeaders);
+
+  const response = await fetch(`${config.serverUrl}/api/snapshots`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 401 || response.status === 403) {
+    const cleared = await clearExtTokenIfMatches(sentToken);
+    if (cleared) {
+      console.log(`[Claude Tuner] ext_token cleared (${response.status}). Will re-auth on next cycle.`);
+      // Independent accounts cannot fall back to API_KEY — flag for re-sign-in UI.
+      await chrome.storage.local.set({ needsReauth: true });
+    }
+    return null;
+  }
+
+  if (response.status === 410) {
+    const errData = await response.json().catch(() => ({}));
+    if (errData.account_deleted) {
+      console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
+      await chrome.storage.local.set({ account_deleted: true });
+      chrome.alarms.clear(ALARM_NAME);
+      chrome.action.setBadgeText({ text: '!' });
+      chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+    }
+    return null;
+  }
+
+  if (!response.ok) {
+    console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
+    return null;
+  }
+
+  const result = await response.json().catch(() => ({}));
+  // Store ext_token from server (TOFU issuance or refresh)
+  if (result.ext_token) {
+    await setExtToken(result.ext_token);
+    // A fresh token arrived — clear any stale re-auth flag.
+    await chrome.storage.local.remove('needsReauth');
+  }
+  return result;
 }

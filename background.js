@@ -10,7 +10,7 @@ import {
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
-import { getConfig, getLastStatus, getUsageHistory, appendUsageHistory, authedFetch } from './bg/storage.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification } from './bg/notifications.js';
@@ -33,6 +33,18 @@ function hasProviderPermission(provider) {
   return chrome.permissions.contains({ origins: origins[provider] });
 }
 
+// Whether the user currently has a Claude.ai session (sessionKey cookie).
+// Used to attempt Claude collection even for provider-first users who later
+// sign in to Claude — without it, skipClaude would permanently skip Claude.
+async function hasClaudeSession() {
+  try {
+    const cookies = await chrome.cookies.getAll({ url: 'https://claude.ai' });
+    return cookies.some((c) => c.name === 'sessionKey');
+  } catch {
+    return false;
+  }
+}
+
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
 async function mergeChatGPTOrgs() {
   try {
@@ -51,6 +63,10 @@ async function mergeChatGPTOrgs() {
           p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
         });
       }
+      // Provider-only users (no Claude) — refresh the badge to this provider's
+      // usage, since the Claude path won't run to update it.
+      const { accountCache } = await chrome.storage.local.get({ accountCache: null });
+      if (!accountCache?.email) await updateBadgeForSelectedOrg(null);
     }
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection skipped:', e.message);
@@ -75,6 +91,10 @@ async function mergeGeminiOrgs() {
           p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
         });
       }
+      // Provider-only users (no Claude) — refresh the badge to this provider's
+      // usage, since the Claude path won't run to update it.
+      const { accountCache } = await chrome.storage.local.get({ accountCache: null });
+      if (!accountCache?.email) await updateBadgeForSelectedOrg(null);
     }
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection skipped:', e.message);
@@ -88,8 +108,45 @@ async function collectAndSend(opts) {
   try {
     const { collectClaude = true, collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectClaude: true, collectChatGPT: true, collectGemini: true });
     let result = { success: false, skipped: true };
-    if (collectClaude) {
+    // Don't attempt Claude collection for users who clearly aren't Claude users —
+    // it would always fail and surface a misleading "session expired" error +
+    // "!" badge. This covers magic-link (independent) accounts AND signed-out
+    // provider-only users (Gemini/ChatGPT collected, no Claude org/session).
+    const { accountCache, independentAccount, collectedOrgs = [] } =
+      await chrome.storage.local.get({ accountCache: null, independentAccount: null, collectedOrgs: [] });
+    const hasClaudeOrg = collectedOrgs.some(o => (o.provider || 'claude') === 'claude');
+    const hasProviderOrg = collectedOrgs.some(o => (o.provider || 'claude') !== 'claude');
+    // Attempt Claude when a Claude.ai session exists — a provider-first user who
+    // later signs in to Claude should be picked up, not permanently skipped.
+    const claudeSession = await hasClaudeSession();
+    const skipClaude = !accountCache?.email && !hasClaudeOrg && !claudeSession
+      && (!!independentAccount?.email || hasProviderOrg);
+    let claudeAttempted = false;
+    if (collectClaude && !skipClaude) {
+      claudeAttempted = true;
       result = await _collectAndSend(opts);
+    } else if (skipClaude) {
+      const prev = await getLastStatus();
+      if (prev?.error) { await setStatus(null); resetIcon(); }
+    }
+    // Claude was attempted (because a session cookie was present) and failed with
+    // an AUTH/session error, yet there's no Claude account backing it
+    // (accountCache.email) while provider orgs exist — i.e. a non-Claude user with
+    // a stale/invalid Claude session. Don't surface a Claude failure to them:
+    // drop any leftover Claude org and clear the error/"!" badge. A valid session
+    // would have SUCCEEDED above and repopulated the cache, so an active account
+    // is never affected. Gated on auth errors only (not transient network/
+    // rate-limit failures) and done post-attempt.
+    const _errCode = (result && result.error) || '';
+    const _isAuthError = _errCode.startsWith('err_auth_failed') || _errCode.startsWith('err_session_expired');
+    if (claudeAttempted && result && !result.success && _isAuthError && !accountCache?.email && hasProviderOrg) {
+      const { collectedOrgs: cur = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+      const pruned = cur.filter(o => (o.provider || 'claude') !== 'claude');
+      if (pruned.length !== cur.length) {
+        await chrome.storage.local.set({ collectedOrgs: pruned });
+      }
+      const prevStale = await getLastStatus();
+      if (prevStale?.error) { await setStatus(null); resetIcon(); }
     }
     if (collectChatGPT && await hasProviderPermission('chatgpt')) {
       mergeChatGPTOrgs().catch(() => {});
@@ -228,11 +285,32 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return;
   }
 
-  // Get collection status (for welcome page onboarding checklist)
+  // Get collection status (for welcome page onboarding checklist).
+  // Returns per-provider collection state so the welcome page can drive a
+  // multi-provider checklist (Claude / ChatGPT / Gemini). `success` and
+  // `lastStatus` are kept for backward compatibility with older welcome pages.
   if (message && message.type === 'get_status') {
     (async () => {
       const status = await getLastStatus();
-      sendResponse({ success: status?.success || false, lastStatus: status });
+      const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+      const collectedBy = (provider) =>
+        collectedOrgs.some(o => (o.provider || 'claude') === provider);
+      const [chatgptPerm, geminiPerm] = await Promise.all([
+        hasProviderPermission('chatgpt'),
+        hasProviderPermission('gemini'),
+      ]);
+      const providers = {
+        claude: { collected: collectedBy('claude') || !!status?.success, hasPermission: true },
+        chatgpt: { collected: collectedBy('chatgpt'), hasPermission: chatgptPerm },
+        gemini: { collected: collectedBy('gemini'), hasPermission: geminiPerm },
+      };
+      const anyCollected = Object.values(providers).some(p => p.collected);
+      sendResponse({
+        success: status?.success || false,
+        lastStatus: status,
+        providers,
+        anyCollected,
+      });
     })();
     return true; // async sendResponse
   }
@@ -288,6 +366,15 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
             userName = acct?.full_name || acct?.display_name || '';
           } catch (e) {
             console.warn('[Claude Tuner] Login: account API failed:', e.message);
+          }
+        }
+
+        // Fall back to independent account if no Claude session
+        if (!email) {
+          const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
+          if (independentAccount?.email) {
+            email = independentAccount.email;
+            userName = independentAccount.name || '';
           }
         }
 
@@ -878,6 +965,63 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }).catch(err => {
       sendResponse({ success: false, error: err.message });
     });
+    return true;
+  }
+
+  // === Independent Account: email signup/login ===
+  if (message.type === 'REQUEST_MAGIC_LINK') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        const resp = await fetch(`${config.serverUrl}/api/auth/magic-link`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: message.email,
+            purpose: message.purpose || 'login',
+            lang: message.lang || 'en',
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          sendResponse({ success: false, error: data.error || 'server_error' });
+          return;
+        }
+        sendResponse({ success: true, purpose: data.purpose });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+  if (message.type === 'VERIFY_MAGIC_CODE') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        const resp = await fetch(`${config.serverUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: message.email,
+            code: message.code,
+            client: 'extension',
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          sendResponse({ success: false, error: data.error || 'invalid_code' });
+          return;
+        }
+        // Store independent account + ext_token
+        await chrome.storage.local.set({
+          independentAccount: { email: data.email, name: data.name || '' },
+          extToken: data.ext_token,
+        });
+        sendResponse({ success: true, email: data.email, name: data.name });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
     return true;
   }
 });

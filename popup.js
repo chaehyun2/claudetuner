@@ -40,6 +40,16 @@ let _currentSnapshot = null;
 let _orgList = null; // cached org list
 let _selectedOrgId = null; // selected org UUID (multi-org view)
 let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOrg, etc.)
+let _claudeNoticeDismissed = false; // user dismissed the demoted Claude-disconnected notice (reset when Claude recovers)
+let _isIndependent = false; // signed in via email (no Claude account) — suppress all Claude-centric status/errors
+let _independentEmail = ''; // independent account email (shown in the footer)
+
+// Human-readable label for a provider org (e.g. "Gemini Advanced", "ChatGPT Plus")
+function _providerOrgLabel(org) {
+  if (!org) return '';
+  const PROVIDER_LABELS = { chatgpt: 'ChatGPT', gemini: 'Gemini' };
+  return [PROVIDER_LABELS[org.provider] || '', org.plan || ''].filter(Boolean).join(' ').trim();
+}
 // Auto org mode removed in v1.24.3 — see memory/auto-org-feature-archive.md for restoration
 let _lastRecommendation = null; // cached recommendation (restored when returning to primary org)
 
@@ -396,7 +406,9 @@ function selectOrg(orgId, container) {
 
     // === 1. Display plan ===
     const planEl = document.getElementById('plan');
-    if (planEl) planEl.textContent = orgData.plan || '';
+    // Qualify non-Claude plans with the provider name (e.g. "Gemini Advanced")
+    // so the provider is identifiable even when no org chips are shown.
+    if (planEl) planEl.textContent = _providerOrgLabel(orgData) || orgData.plan || '';
 
     // === 2. Update gauges ===
     const gaugeSection = document.getElementById('gauge-section');
@@ -727,10 +739,11 @@ function showMultiOrgBadges(collectedOrgs) {
     chip.appendChild(pin);
 
     chip.addEventListener('click', () => {
+      // Selecting a chip only changes the popup view — it does NOT change the
+      // toolbar badge or the pinned org. The badge follows the pinned (📌) org;
+      // use the pin to make an org primary.
       _selectedOrgId = org.uuid;
-      chrome.storage.sync.set({ selectedOrgId: org.uuid });
       selectOrg(org.uuid, null);
-      chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' }).catch(() => {});
     });
     wrapper.appendChild(chip);
   }
@@ -982,6 +995,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
+  // === Independent Account: show email auth / re-auth / signed-in state ===
+  const { accountCache: _ac, independentAccount: _ia, collectedOrgs: _co } =
+    await chrome.storage.local.get({
+      accountCache: null, independentAccount: null, collectedOrgs: [],
+    });
+  // Genuine independent = email account, no Claude session, AND no Claude org
+  // data. The Claude-org check avoids a false positive (showing the independent
+  // row + footer Claude email at once) while accountCache is still being
+  // populated on a Claude user's first collection of the session.
+  const _hasClaudeOrg = (_co || []).some(o => (o.provider || 'claude') === 'claude');
+  const isIndependent = !_ac?.email && !!_ia?.email && !_hasClaudeOrg;
+  _isIndependent = isIndependent; // expose to _updateUICore (suppress Claude-centric UI)
+  _independentEmail = isIndependent ? (_ia.email || '') : ''; // shown in the footer
+  // The in-popup email signup form was removed: with TOFU symmetric identity,
+  // simply signing in to Claude/ChatGPT/Gemini auto-syncs usage — no signup
+  // needed. The magic-link flow now only exists as a dashboard login fallback.
+  // Existing independent (email) accounts still get the footer sign-out link.
+  if (isIndependent) {
+    const signOut = document.getElementById('independent-signout');
+    if (signOut) {
+      signOut.classList.remove('hidden');
+      signOut.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await chrome.storage.local.remove(['independentAccount', 'extToken', 'needsReauth']);
+        location.reload();
+      });
+    }
+  }
+
   loadPopupAnnouncements();
   loadOrgSelector();
   checkProviderPermissions();
@@ -1026,8 +1068,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load current status + history directly from chrome.storage
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (result) => {
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false }, (result) => {
       _usageHistory = result.usageHistory || [];
+      _claudeNoticeDismissed = result.claudeNoticeDismissed || false;
       _historyReady = true;
 
       // Multi-org: restore pinned org or fall back to primary
@@ -1049,11 +1092,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         _currentPlan = status?.snapshot?.plan || null;
         _currentSnapshot = status?.snapshot || null;
         loadFitnessMatrix();
-        // Init: if non-Claude org is selected, render it via selectOrg
-        // (updateUI skips rendering for non-Claude orgs)
-        if (_selectedOrgId && _selectedOrgId !== status.snapshot?.claude_org_uuid) {
-          selectOrg(_selectedOrgId, null);
-        }
+      }
+      // Render the selected provider org via selectOrg whenever a non-Claude org
+      // is selected. This must run even when status is null/absent — independent
+      // (email) users have no Claude lastStatus, so their gauge/charts would
+      // otherwise never render.
+      if (_selectedOrgId && _selectedOrgId !== status?.snapshot?.claude_org_uuid) {
+        selectOrg(_selectedOrgId, null);
       }
       _statusReady = true;
 
@@ -1126,6 +1171,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           selectOrg(primary.uuid, null);
         }
       }
+      // Re-render the status UI with the newly-arrived org data. Without this,
+      // a provider-only (e.g. Gemini) collection that completes while the panel
+      // is open never re-runs the provider-only / demote / onboarding / footer-
+      // email decisions in _updateUICore — they were evaluated on the first
+      // paint when _collectedOrgs was still empty, leaving a stale "Claude
+      // collection failed" banner + onboarding + missing footer email until the
+      // panel is reopened. The lastStatus handler below returns early when only
+      // collectedOrgs changed, so this is the sole re-render trigger then.
+      updateUI(_lastUpdateUIStatus);
     }
 
     if (!changes.lastStatus) return;
@@ -1816,6 +1870,66 @@ function _updateUICore(status) {
 
   const onboarding = document.getElementById('onboarding');
 
+  // Provider-only users (no Claude org): status reflects the provider org,
+  // never Claude. This covers both independent (email) accounts AND signed-out
+  // users who only collect Gemini/ChatGPT locally — a Claude collection failure
+  // is irrelevant noise to them, so never show the Claude failure UI.
+  const _hasClaudeOrg = (_collectedOrgs || []).some(o => (o.provider || 'claude') === 'claude');
+  const _hasProviderOrg = (_collectedOrgs || []).some(o => (o.provider || 'claude') !== 'claude');
+  const _providerOnly = !_hasClaudeOrg && _hasProviderOrg;
+  if (_isIndependent || _providerOnly) {
+    const dismissBtnI = document.getElementById('error-dismiss');
+    if (dismissBtnI) dismissBtnI.style.display = 'none';
+    const provOrg = (_collectedOrgs || []).find(o => o.isPrimary) || (_collectedOrgs || [])[0];
+    if (provOrg) {
+      const label = _providerOrgLabel(provOrg);
+      indicator.className = 'status-dot green';
+      // Top status shows collection freshness ("✓ 3m ago / ⏳ Nm") like the Claude
+      // path; the provider name/plan goes in the "current plan" row below. Derive
+      // last-collected from this org's latest usage-history point (providers don't
+      // write lastStatus).
+      const orgPoints = (_usageHistory || []).filter(p => p.org === provOrg.uuid);
+      const lastT = orgPoints.reduce((m, p) => Math.max(m, p.t || 0), 0);
+      if (lastT) {
+        statusText.textContent = `✓ ${formatTimeAgo(lastT)}`;
+        chrome.alarms.get('claude-usage-poll', (alarm) => {
+          if (alarm && alarm.scheduledTime) {
+            const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
+            statusText.textContent += ` / ⏳ ${mins}${t('min_later_check')}`;
+          }
+        });
+      } else {
+        statusText.textContent = label ? `✓ ${label}` : '✓';
+      }
+      // Surface which provider account is being tracked in the "current plan"
+      // row (independent users have no Claude render to reveal it otherwise).
+      const infoSection = document.getElementById('info-section');
+      if (infoSection) infoSection.classList.remove('hidden');
+      const planEl = document.getElementById('plan');
+      if (planEl) planEl.textContent = label || provOrg.plan || '';
+      if (onboarding) onboarding.classList.add('hidden');
+    } else {
+      indicator.className = 'status-dot gray';
+      statusText.textContent = t('no_data');
+      if (onboarding) onboarding.classList.remove('hidden');
+    }
+    // Footer: show the account email (next to the sign-out link), consolidating
+    // account display in one place like Claude accounts. Independent (magic-link)
+    // accounts use _independentEmail; provider-only TOFU users (Gemini/ChatGPT,
+    // no magic-link signup) fall back to the provider org's own email. The name
+    // check keeps it backward-compatible with orgs collected before the `email`
+    // field existed (name held the email, or 'Gemini'/'ChatGPT' when unknown).
+    const userInfoEl = document.getElementById('user-info');
+    if (userInfoEl) {
+      const ver = 'v' + chrome.runtime.getManifest().version;
+      const provEmail = provOrg
+        && (provOrg.email || (/@/.test(provOrg.name || '') ? provOrg.name : ''));
+      const footerEmail = _independentEmail || provEmail || '';
+      userInfoEl.textContent = footerEmail ? `${footerEmail} | ${ver}` : ver;
+    }
+    return;
+  }
+
   if (!status) {
     indicator.className = 'status-dot gray';
     statusText.textContent = t('no_data');
@@ -1824,6 +1938,63 @@ function _updateUICore(status) {
   }
 
   if (status.error) {
+    const errorTitle = errorBanner.querySelector('.error-title');
+    // lastStatus errors always originate from Claude collection. A Claude-only
+    // failure is not a global failure when the user is actively tracking a
+    // provider — demote it to a small, non-red notice and show the provider as
+    // healthy. Gate on provider data presence (not accountCache.email, which
+    // persists after a session expires and so can't tell "active" from "former"
+    // Claude users). Prefer the pinned primary if it's a non-Claude org.
+    const primaryOrg = (_collectedOrgs || []).find(o => o.isPrimary);
+    const primaryIsNonClaude = !!(primaryOrg && (primaryOrg.provider || 'claude') !== 'claude');
+    const providerWithData = (_collectedOrgs || []).find(o =>
+      (o.provider || 'claude') !== 'claude' && (o.h5 != null || o.d7 != null));
+    const demoteOrg = (primaryIsNonClaude ? primaryOrg : null) || providerWithData || null;
+
+    if (demoteOrg) {
+      const label = _providerOrgLabel(demoteOrg);
+      indicator.className = 'status-dot green';
+      statusText.textContent = label ? `✓ ${label}` : '✓';
+      if (onboarding) onboarding.classList.add('hidden');
+
+      const dismissBtn = document.getElementById('error-dismiss');
+      // If the user already dismissed this notice, keep the healthy status but
+      // hide the notice (stays dismissed until Claude recovers — see success path).
+      if (_claudeNoticeDismissed) {
+        errorBanner.classList.add('hidden');
+        return;
+      }
+
+      errorBanner.classList.add('soft');
+      errorBanner.classList.remove('hidden');
+      if (errorTitle) errorTitle.textContent = t('claude_disconnected_title');
+      errorMsg.textContent = t('claude_disconnected_secondary');
+      // Keep the "Open Claude.ai" hint (still useful to reconnect), drop timing noise.
+      const errorHint = errorBanner.querySelector('.error-hint');
+      if (errorHint) errorHint.style.display = '';
+      const timingElSoft = document.getElementById('error-timing');
+      if (timingElSoft) timingElSoft.innerHTML = '';
+      // Show + bind the dismiss (×) button (only for this soft, non-critical notice).
+      if (dismissBtn) {
+        dismissBtn.style.display = '';
+        if (!dismissBtn.dataset.bound) {
+          dismissBtn.dataset.bound = '1';
+          dismissBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _claudeNoticeDismissed = true;
+            chrome.storage.local.set({ claudeNoticeDismissed: true });
+            errorBanner.classList.add('hidden');
+          });
+        }
+      }
+      return;
+    }
+
+    // Hard failure (Claude is primary, or no non-Claude primary pinned): red banner
+    errorBanner.classList.remove('soft');
+    if (errorTitle) errorTitle.textContent = t('error_banner_title');
+    const dismissBtnHard = document.getElementById('error-dismiss');
+    if (dismissBtnHard) dismissBtnHard.style.display = 'none';
     indicator.className = 'status-dot red';
     statusText.textContent = t('collect_fail');
     // Translate i18n key: "err_auth_failed:401" -> t('err_auth_failed', '401')
@@ -1869,6 +2040,15 @@ function _updateUICore(status) {
   const timingEl = document.getElementById('error-timing');
   if (timingEl) timingEl.innerHTML = '';
   if (onboarding) onboarding.classList.add('hidden');
+
+  // Claude recovered — reset the dismissed-notice flag so a future disconnection
+  // surfaces the notice again.
+  if (_claudeNoticeDismissed) {
+    _claudeNoticeDismissed = false;
+    chrome.storage.local.remove('claudeNoticeDismissed');
+  }
+  const dismissBtnOk = document.getElementById('error-dismiss');
+  if (dismissBtnOk) dismissBtnOk.style.display = 'none';
 
   if (status.success && status.snapshot) {
     indicator.className = 'status-dot green';

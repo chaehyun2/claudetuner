@@ -1,10 +1,12 @@
-// Get usage data for the currently selected org (returns null if auto mode)
+// Get usage data for the PINNED (primary) org. The toolbar badge follows the
+// pinned org, NOT the transient popup selection — selecting a chip only changes
+// the popup view. If nothing is pinned: for a provider-only user (no Claude org)
+// fall back to the first provider org so they still get a badge; for Claude
+// users return null so the caller falls back to the Claude snapshot.
 export async function getSelectedOrgUsage() {
-  const { selectedOrgId } = await chrome.storage.sync.get({ selectedOrgId: null });
-  if (!selectedOrgId) return null;
-
   const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
-  const org = collectedOrgs.find(o => o.uuid === selectedOrgId);
+  const hasClaudeOrg = collectedOrgs.some(o => (o.provider || 'claude') === 'claude');
+  const org = collectedOrgs.find(o => o.isPrimary) || (!hasClaudeOrg ? collectedOrgs[0] : null);
   if (!org) return null;
 
   return {

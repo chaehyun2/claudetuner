@@ -35,6 +35,9 @@
     [data-theme="dark"] .error-banner .error-hint { color: var(--text-muted); }
     [data-theme="dark"] .error-banner .error-timing { color: var(--text-muted); }
     [data-theme="dark"] .error-banner a { color: var(--accent); }
+    [data-theme="dark"] .error-banner.soft { background: var(--bg-card); border-color: var(--border); }
+    [data-theme="dark"] .error-banner.soft .error-title,
+    [data-theme="dark"] .error-banner.soft .error-msg { color: var(--text-secondary); }
     .perm-banner { padding: 8px 10px; margin: 0 0 6px; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 8px; font-size: 11px; color: #92400e; line-height: 1.4; }
     .perm-banner button { background: #b45309; color: #fff; border: none; border-radius: 4px; padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; margin-left: 6px; }
     .perm-banner button:hover { background: #92400e; }
@@ -182,12 +185,18 @@
     .notice-footer a { font-size: 10px; color: var(--text-secondary); text-decoration: none; }
 
     /* 에러 배너 */
-    .error-banner { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+    .error-banner { position: relative; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+    .error-dismiss { position: absolute; top: 4px; right: 6px; background: none; border: none; font-size: 16px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 2px 4px; }
+    .error-dismiss:hover { color: #6b7280; }
     .error-banner .error-title { font-size: 12px; font-weight: 600; color: #dc2626; margin-bottom: 4px; }
     .error-banner .error-msg { font-size: 11px; color: #991b1b; margin-bottom: 6px; word-break: break-word; }
     .error-banner .error-hint { font-size: 11px; color: #6b7280; }
     .error-banner .error-timing { font-size: 11px; color: #6b7280; margin-top: 6px; line-height: 1.6; }
     .error-banner a { color: #4f46e5; text-decoration: underline; cursor: pointer; }
+    /* Soft variant: demoted notice for a non-primary provider failure (e.g. Claude down while Gemini is primary) */
+    .error-banner.soft { background: #f9fafb; border-color: #e5e7eb; }
+    .error-banner.soft .error-title { color: #6b7280; }
+    .error-banner.soft .error-msg { color: #6b7280; }
 
     /* 온보딩 가이드 */
     .onboarding { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
@@ -361,6 +370,7 @@
 
   <!-- 에러 배너 -->
   <div id="error-banner" class="error-banner hidden">
+    <button id="error-dismiss" class="error-dismiss" style="display:none" aria-label="dismiss">&times;</button>
     <div class="error-title" data-i18n="error_banner_title"></div>
     <div class="error-msg" id="error-msg"></div>
     <div class="error-hint">
@@ -594,6 +604,8 @@
     <div id="user-info" class="user-info" style="margin-top:0"></div>
     <a href="https://claudetuner.com/dashboard/settings/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none;display:flex;align-items:center" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
     <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="footer_help"></a>
+    <!-- Independent (email) accounts: sign-out lives in the footer next to the account email -->
+    <a id="independent-signout" href="#" class="hidden" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none" data-i18n="sign_out">Sign out</a>
   </div>
 
   <!-- Plan change confirmation modal -->

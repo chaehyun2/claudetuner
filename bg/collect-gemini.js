@@ -1,6 +1,6 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, getAuthHeaders, appendUsageHistory } from './storage.js';
+import { getConfig, appendUsageHistory, postSnapshot } from './storage.js';
 
 // Gemini plan ID mapping (from jSf9Qc response first field)
 // otAQ7b returns policy names like "v3p2_plus_policy"
@@ -83,6 +83,7 @@ export async function collectGemini() {
     const org = {
       uuid: accountId,
       name: email || 'Gemini',
+      email: email || null, // provider account email (shown in the popup footer)
       plan,
       provider: 'gemini',
       isPrimary: false,
@@ -124,15 +125,24 @@ async function sendGeminiSnapshot(org, geminiEmail, plan) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
-  const authHeaders = await getAuthHeaders(config);
-
-  // Use Claude email (from accountCache) as primary identity for server
-  const { accountCache } = await chrome.storage.local.get({ accountCache: null });
-  const serverEmail = accountCache?.email;
+  // Server identity, in priority order:
+  //  1. Claude email (accountCache) — Claude user; this provider is an extra org
+  //  2. independent account email (magic-link) — chosen unified identity
+  //  3. the Gemini account's own email (TOFU) — no Claude/magic-link, so the
+  //     Gemini email IS the identity (same trust model Claude already uses)
+  const { accountCache, independentAccount } = await chrome.storage.local.get({
+    accountCache: null, independentAccount: null,
+  });
+  const serverEmail = accountCache?.email || independentAccount?.email || geminiEmail;
   if (!serverEmail) {
-    console.warn('[Claude Tuner] Gemini snapshot skipped: no Claude account (ext_token email required)');
+    console.warn('[Claude Tuner] Gemini snapshot skipped: no email (no Claude/independent account and no Gemini email)');
     return;
   }
+
+  // When there is no Claude account, this provider is the user's primary data,
+  // so the snapshot must maintain the users row (current_plan, last_seen_at).
+  // For Claude users it's an "extra org" that must not overwrite current_plan.
+  const isExtraOrg = !!accountCache?.email;
 
   const extVersion = chrome.runtime.getManifest().version;
 
@@ -152,15 +162,11 @@ async function sendGeminiSnapshot(org, geminiEmail, plan) {
     claude_org_uuid: org.uuid,
     provider: 'gemini',
     provider_email: geminiEmail || null,
-    is_extra_org: true,
+    is_extra_org: isExtraOrg,
   };
 
-  await fetch(`${config.serverUrl}/api/snapshots`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
-    body: JSON.stringify(payload),
-  });
+  // Shared helper handles auth recovery (401/403), account deletion (410),
+  // and ext_token rotation — critical for independent accounts whose provider
+  // snapshots are their only server contact.
+  await postSnapshot(config, payload);
 }

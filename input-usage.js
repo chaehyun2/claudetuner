@@ -305,8 +305,13 @@
     const { host } = buildShadowRoot();
     wrapper.appendChild(host);
 
+    // Render with cached _data only — do NOT refetch on (re)mount.
+    // The composer is the highest-churn React subtree on claude.ai, so it
+    // remounts constantly; coupling a data request to each remount surfaced
+    // every transient org-resolution state and caused the strip to flicker
+    // between orgs. Data is fetched on init / timer / refresh signal / org
+    // change / visibility instead (see requestUsageData callers).
     renderStrip();
-    requestUsageData();
     return true;
   }
 
@@ -324,8 +329,17 @@
     mountWidget();
   }
 
-  // ── MutationObserver (matches CUT — no debounce) ──
-  const observer = new MutationObserver(() => ensureMounted());
+  // ── MutationObserver (debounced) ──
+  // The composer subtree mutates on every keystroke/focus/render, firing this
+  // observer in bursts. ensureMounted() only needs to run once per burst, so
+  // coalesce calls into a single rAF tick to avoid wasteful work. The 800ms
+  // interval below still guarantees remount even if a mutation is missed.
+  let _remountScheduled = false;
+  const observer = new MutationObserver(() => {
+    if (_remountScheduled) return;
+    _remountScheduled = true;
+    requestAnimationFrame(() => { _remountScheduled = false; ensureMounted(); });
+  });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   // Theme observer
@@ -422,14 +436,13 @@
   // ── Data communication ──
   let _dataRetryTimer = null;
   let _reqSeq = 0; // sequence number to discard stale responses from concurrent calls
+  let _lastGoodOrgId = null; // last non-null active org id, reused when cookie read is transiently empty
 
   function requestUsageData() {
     try {
       if (!chrome.runtime?.id) return;
     } catch { return; } // extension context truly dead — nothing to do
 
-    const orgId = getActiveOrgId();
-    const seq = ++_reqSeq;
     const onFail = () => {
       // Only retry when no data at all (initial load)
       if (_data || _dataRetryTimer) return;
@@ -439,6 +452,20 @@
         requestUsageData();
       }, 2000);
     };
+
+    // Reuse the last known-good org id when the cookie is transiently empty
+    // (SPA navigation / early load). Sending orgId:null makes the background
+    // fall back to the primary org, which can differ from the active one and
+    // shows the wrong org's numbers. If we have never seen a good id, keep
+    // whatever data is on screen — but schedule a bounded retry so a session
+    // where the cookie is briefly unreadable at init still eventually loads.
+    const orgId = getActiveOrgId() || _lastGoodOrgId;
+    if (!orgId) { onFail(); return; }
+    _lastGoodOrgId = orgId;
+    // Keep org-change detection in sync so an init fetch doesn't trigger a
+    // redundant re-fetch on the next checkOrgChange() tick.
+    _lastOrgId = orgId;
+    const seq = ++_reqSeq;
     try {
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId }, (res) => {
         if (seq !== _reqSeq) return; // stale response from an older concurrent call — discard
@@ -487,7 +514,7 @@
     chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
       _enabled = cfg.inputUsageEnabled !== false;
-      if (_enabled) ensureMounted();
+      if (_enabled) { ensureMounted(); requestUsageData(); }
     });
   } catch {
     // Storage read failed (extension context dead) — stay disabled
@@ -499,7 +526,7 @@
       if (changes.inputUsageEnabled) {
         _enabled = changes.inputUsageEnabled.newValue !== false;
         if (!_enabled) { const el = document.getElementById(HOST_ID); if (el) el.remove(); }
-        else ensureMounted();
+        else { ensureMounted(); requestUsageData(); }
       }
       if (changes.lang) {
         _lang = changes.lang.newValue === 'auto' ? detectLang() : changes.lang.newValue;

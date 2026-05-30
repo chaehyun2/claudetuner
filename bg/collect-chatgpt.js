@@ -1,6 +1,6 @@
 import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, getAuthHeaders, appendUsageHistory } from './storage.js';
+import { getConfig, appendUsageHistory, postSnapshot } from './storage.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -42,6 +42,7 @@ export async function collectChatGPT() {
     const org = {
       uuid: accountId,
       name: email || 'ChatGPT',
+      email: email || null, // provider account email (shown in the popup footer)
       plan: plan,
       provider: 'chatgpt',
       isPrimary: false,
@@ -85,15 +86,24 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
-  const authHeaders = await getAuthHeaders(config);
-
-  // Use Claude email (from accountCache) as primary identity for server
-  const { accountCache } = await chrome.storage.local.get({ accountCache: null });
-  const serverEmail = accountCache?.email;
+  // Server identity, in priority order:
+  //  1. Claude email (accountCache) — Claude user; this provider is an extra org
+  //  2. independent account email (magic-link) — chosen unified identity
+  //  3. the ChatGPT account's own email (TOFU) — no Claude/magic-link, so the
+  //     ChatGPT email IS the identity (same trust model Claude already uses)
+  const { accountCache, independentAccount } = await chrome.storage.local.get({
+    accountCache: null, independentAccount: null,
+  });
+  const serverEmail = accountCache?.email || independentAccount?.email || chatgptEmail;
   if (!serverEmail) {
-    console.warn('[Claude Tuner] ChatGPT snapshot skipped: no Claude account (ext_token email required)');
+    console.warn('[Claude Tuner] ChatGPT snapshot skipped: no email (no Claude/independent account and no ChatGPT email)');
     return;
   }
+
+  // When there is no Claude account, this provider is the user's primary data,
+  // so the snapshot must maintain the users row (current_plan, last_seen_at).
+  // For Claude users it's an "extra org" that must not overwrite current_plan.
+  const isExtraOrg = !!accountCache?.email;
 
   const extVersion = chrome.runtime.getManifest().version;
 
@@ -113,15 +123,11 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
     claude_org_uuid: org.uuid,
     provider: 'chatgpt',
     provider_email: chatgptEmail || null,
-    is_extra_org: true,
+    is_extra_org: isExtraOrg,
   };
 
-  await fetch(`${config.serverUrl}/api/snapshots`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
-    body: JSON.stringify(payload),
-  });
+  // Shared helper handles auth recovery (401/403), account deletion (410),
+  // and ext_token rotation — critical for independent accounts whose provider
+  // snapshots are their only server contact.
+  await postSnapshot(config, payload);
 }
