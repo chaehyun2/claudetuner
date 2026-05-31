@@ -329,6 +329,34 @@
     mountWidget();
   }
 
+  // ── Context-guarded intervals / observers ──
+  // After a dev extension reload, the previous IIFE instance stays in the
+  // page (window persists across content-script re-injection). Its intervals
+  // and MutationObservers keep firing and re-paint the shared shadow host
+  // with its frozen _data (chrome.runtime is dead so requestUsageData() bails
+  // and never refreshes it), producing the rolling "3% / 2% / 1%" /
+  // missing-logo flicker. Tear everything down the moment we observe the
+  // runtime is gone — the new instance owns the page from there.
+  const _intervals = [];
+  const _observers = [];
+  let _torndown = false;
+  function teardownIfDead() {
+    if (_torndown) return true;
+    try { if (chrome.runtime?.id) return false; } catch { /* fall through */ }
+    _torndown = true;
+    _intervals.forEach(clearInterval);
+    _observers.forEach(o => { try { o.disconnect(); } catch { /* noop */ } });
+    return true;
+  }
+  function ctSetInterval(fn, ms) {
+    const id = setInterval(() => {
+      if (teardownIfDead()) return;
+      fn();
+    }, ms);
+    _intervals.push(id);
+    return id;
+  }
+
   // ── MutationObserver (debounced) ──
   // The composer subtree mutates on every keystroke/focus/render, firing this
   // observer in bursts. ensureMounted() only needs to run once per burst, so
@@ -336,15 +364,18 @@
   // interval below still guarantees remount even if a mutation is missed.
   let _remountScheduled = false;
   const observer = new MutationObserver(() => {
+    if (teardownIfDead()) return;
     if (_remountScheduled) return;
     _remountScheduled = true;
     requestAnimationFrame(() => { _remountScheduled = false; ensureMounted(); });
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
+  _observers.push(observer);
 
   // Theme observer
-  const themeObserver = new MutationObserver(syncTheme);
+  const themeObserver = new MutationObserver(() => { if (!teardownIfDead()) syncTheme(); });
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-mode'] });
+  _observers.push(themeObserver);
 
   // ── Render ──
   function renderStrip() {
@@ -495,7 +526,7 @@
 
   // ── URL change detection (Claude.ai SPA) ──
   let lastUrl = location.href;
-  setInterval(() => {
+  ctSetInterval(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       ensureMounted();
@@ -508,7 +539,7 @@
   }
 
   // Permanent mount check — React may remove our host at any time
-  setInterval(ensureMounted, 800);
+  ctSetInterval(ensureMounted, 800);
 
   try {
     chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true }, (cfg) => {
@@ -536,8 +567,8 @@
   } catch { /* context dead */ }
 
   // Periodic refresh (countdown timer + data)
-  setInterval(() => { try { renderStrip(); checkOrgChange(); } catch { /* noop */ } }, 30000);
-  setInterval(requestUsageData, 60000);
+  ctSetInterval(() => { try { renderStrip(); checkOrgChange(); } catch { /* noop */ } }, 30000);
+  ctSetInterval(requestUsageData, 60000);
 
   // Visibility change → refresh
   document.addEventListener('visibilitychange', () => {

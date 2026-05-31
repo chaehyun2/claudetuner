@@ -60,6 +60,7 @@ export const BG_I18N = {
   ko: {
     reset_soon_title: '{0} 한도 곧 리셋',
     reset_soon_msg: '약 5분 후 {0} 사용량이 리셋됩니다. 큰 작업은 리셋 후에 시작하세요!',
+    reset_soon_usage_prefix: '현재 {0}% 사용 중. ',
     reset_done_title: '{0} 한도 리셋 완료!',
     reset_done_msg: '{0} 사용량이 리셋되었습니다. 다시 마음껏 사용하세요!',
     alert_title: '사용량 {0}% 도달',
@@ -95,6 +96,7 @@ export const BG_I18N = {
   en: {
     reset_soon_title: '{0} limit resetting soon',
     reset_soon_msg: '{0} usage will reset in ~5 minutes. Start big tasks after the reset!',
+    reset_soon_usage_prefix: 'Currently at {0}%. ',
     reset_done_title: '{0} limit reset!',
     reset_done_msg: '{0} usage has been reset. Use freely!',
     alert_title: 'Usage reached {0}%',

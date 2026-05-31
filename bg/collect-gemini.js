@@ -5,12 +5,26 @@ import { getConfig, appendUsageHistory, postSnapshot } from './storage.js';
 // Gemini plan ID mapping (from jSf9Qc response first field)
 // otAQ7b returns policy names like "v3p2_plus_policy"
 const GEMINI_PLAN_MAP = {
+  // Numeric planId (jSf9Qc response)
   1: 'Free',
   2: 'Business',   // Google Workspace (bundled into Business Standard/Plus/Enterprise)
   3: 'AI Plus',    // $7.99/mo — entry-level paid tier (post I/O 2026)
   4: 'Advanced',   // Google One AI Premium (legacy Gemini Advanced)
   5: 'AI Pro',     // $19.99/mo — full Gemini 3.1 Pro, 1M context
   6: 'AI Ultra',   // $99.99/mo — 5x Pro usage, developer tier
+  // String variants (planId may arrive as string from some API paths)
+  '1': 'Free',
+  '2': 'Business',
+  '3': 'AI Plus',
+  '4': 'Advanced',
+  '5': 'AI Pro',
+  '6': 'AI Ultra',
+  // Policy/label names (otAQ7b or alternative response formats)
+  'Free': 'Free',
+  'Plus': 'AI Pro',
+  'Advanced': 'Advanced',
+  'Business': 'Business',
+  'Ultra': 'AI Ultra',
 };
 
 // Convert [seconds, nanos] timestamp to ISO string, then normalize to minute precision

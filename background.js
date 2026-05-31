@@ -148,18 +148,25 @@ async function collectAndSend(opts) {
       const prevStale = await getLastStatus();
       if (prevStale?.error) { await setStatus(null); resetIcon(); }
     }
+    // Await provider collection (sequentially) so the MV3 service worker stays
+    // alive until each fetch+POST finishes. Fire-and-forget here meant the SW
+    // could be terminated right after the awaited Claude work, killing in-flight
+    // provider requests → dropped snapshots / irregular collection. Sequential
+    // (not parallel) keeps peak load minimal on low-spec machines; .catch keeps
+    // each provider independent so one failure doesn't block the other.
     if (collectChatGPT && await hasProviderPermission('chatgpt')) {
-      mergeChatGPTOrgs().catch(() => {});
+      await mergeChatGPTOrgs().catch(() => {});
     }
     if (collectGemini && await hasProviderPermission('gemini')) {
-      mergeGeminiOrgs().catch(() => {});
+      await mergeGeminiOrgs().catch(() => {});
     }
     return result;
   } catch (e) {
-    // Claude failed — still try ChatGPT/Gemini independently if enabled
+    // Claude failed — still try ChatGPT/Gemini independently if enabled.
+    // Await (sequentially) so the SW isn't terminated mid-request.
     const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
-    if (collectChatGPT && await hasProviderPermission('chatgpt')) mergeChatGPTOrgs().catch(() => {});
-    if (collectGemini && await hasProviderPermission('gemini')) mergeGeminiOrgs().catch(() => {});
+    if (collectChatGPT && await hasProviderPermission('chatgpt')) await mergeChatGPTOrgs().catch(() => {});
+    if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs().catch(() => {});
     throw e;
   } finally {
     _collecting = false;
@@ -697,15 +704,21 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name.includes('-notify5')) {
       const { notifyResetSoon = true } = await chrome.storage.sync.get({ notifyResetSoon: true });
       if (notifyResetSoon) {
-        const win = await bt(alarm.name.includes('-5h-') ? 'win_5h' : 'win_7d');
-        chrome.notifications.create(`reset-soon-${Date.now()}`, {
+        const is5h = alarm.name.includes('-5h-');
+        const win = await bt(is5h ? 'win_5h' : 'win_7d');
+        const ctxLabel = await getResetNotifContext();
+        const usage = await getCurrentUsageForWindow(is5h ? '5h' : '7d');
+        const prefix = usage != null ? await bt('reset_soon_usage_prefix', usage) : '';
+        const opts = {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('reset_soon_title', win),
-          message: await bt('reset_soon_msg', win) + '\n' + await bt('notif_settings_hint'),
+          message: prefix + await bt('reset_soon_msg', win) + '\n' + await bt('notif_settings_hint'),
           buttons: [{ title: await bt('notif_settings_btn') }],
           priority: 1,
-        });
+        };
+        if (ctxLabel) opts.contextMessage = ctxLabel;
+        chrome.notifications.create(`reset-soon-${Date.now()}`, opts);
         logNotification('reset-soon');
       }
       return;
@@ -716,14 +729,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       const { notifyResetDone = true } = await chrome.storage.sync.get({ notifyResetDone: true });
       if (notifyResetDone) {
         const win = await bt(alarm.name.includes('-5h-') ? 'win_5h' : 'win_7d');
-        chrome.notifications.create(`reset-done-${Date.now()}`, {
+        const ctxLabel = await getResetNotifContext();
+        const opts = {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('reset_done_title', win),
           message: await bt('reset_done_msg', win) + '\n' + await bt('notif_settings_hint'),
           buttons: [{ title: await bt('notif_settings_btn') }],
           priority: 1,
-        });
+        };
+        if (ctxLabel) opts.contextMessage = ctxLabel;
+        chrome.notifications.create(`reset-done-${Date.now()}`, opts);
         logNotification('reset-done');
       }
     }
@@ -731,6 +747,36 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await collectAndSend();
   }
 });
+
+// Build a short label like "Claude" or "Claude · Dable Labs" for reset notifications.
+// Single-Claude-org users see just the provider name; multi-org / non-Claude users
+// get the org name appended so they can tell which account the alarm is for.
+const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
+async function buildResetContextLabel() {
+  const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+  if (!collectedOrgs.length) return null;
+  const primary = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
+  const provider = primary.provider || 'claude';
+  const providerName = PROVIDER_LABELS[provider] || provider;
+  if (collectedOrgs.length === 1 && provider === 'claude') return providerName;
+  const orgName = (primary.name || '').trim();
+  return orgName ? `${providerName} · ${orgName}` : providerName;
+}
+
+async function getResetNotifContext() {
+  const { _resetNotifContext = null } = await chrome.storage.local.get('_resetNotifContext');
+  return _resetNotifContext;
+}
+
+// Read current utilization (%) for the primary org and given window ('5h' | '7d').
+// Returns null if no primary org or value isn't a number.
+async function getCurrentUsageForWindow(windowKey) {
+  const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+  if (!collectedOrgs.length) return null;
+  const primary = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
+  const val = windowKey === '5h' ? primary.h5 : primary.d7;
+  return (typeof val === 'number' && isFinite(val)) ? Math.round(val) : null;
+}
 
 // Schedule additional collection alarms based on expire times
 // Collect at 2min before, 1min before, and at resets_at
@@ -795,6 +841,10 @@ async function scheduleExpireAlarms(snapshot) {
   if (scheduled > 0) {
     console.log(`[Claude Tuner] ${scheduled} expire alarms scheduled`);
   }
+
+  // Stash provider/org context so the alarm-fire notification can show it.
+  const ctxLabel = await buildResetContextLabel();
+  await chrome.storage.local.set({ _resetNotifContext: ctxLabel || null });
 }
 
 // === Visibility + Popup/Panel open handlers ===
