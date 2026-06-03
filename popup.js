@@ -748,6 +748,19 @@ function showMultiOrgBadges(collectedOrgs) {
     wrapper.appendChild(chip);
   }
 
+  // 3-org cap hint: when the user has more orgs than the server-side cap,
+  // surface a link to the dashboard settings where the active 3 are chosen.
+  // Cap enforcement is server-side; this is just a discoverability nudge.
+  if (collectedOrgs.length > 3) {
+    const capRow = document.createElement('a');
+    capRow.href = 'https://claudetuner.com/dashboard/settings/';
+    capRow.target = '_blank';
+    capRow.rel = 'noopener';
+    capRow.style.cssText = 'display:block;padding:6px 10px;border-top:1px solid var(--border);font-size:10px;color:var(--accent);text-decoration:none;text-align:center;background:var(--bg-hover)';
+    capRow.textContent = t('org_cap_hint');
+    wrapper.appendChild(capRow);
+  }
+
   userInfo.parentNode.insertBefore(wrapper, userInfo);
 }
 

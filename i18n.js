@@ -245,6 +245,7 @@ const TRANSLATIONS = {
     // Organization selection
     'org_select': '모니터링 조직',
     'org_select_hint': '여러 조직에 가입된 경우, 수집할 조직을 선택하세요.',
+    'org_managed_in_dashboard': '활성 조직은 이제 <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">대시보드 설정</a>에서 관리합니다. (최대 3개)',
     'org_auto': '자동',
     'org_auto_current': '현재 수집: {0} ({1})',
     'org_changed': '조직이 변경되었습니다. 데이터가 초기화됩니다.',
@@ -262,6 +263,7 @@ const TRANSLATIONS = {
     'org_auto_on': 'Claude에서 선택한 조직을 따라갑니다 (⚡ = 활성)',
     'org_auto_off': '📌으로 고정된 조직을 사용 중',
     'org_pin_hint': '📌으로 메인 조직 고정',
+    'org_cap_hint': '조직이 3개를 초과합니다 — 활성 3개 선택하기 →',
     // Plan fitness matrix
     'fm_col_plan': '플랜',
     'fm_window_24h': '최근\n24시간',
@@ -592,6 +594,7 @@ const TRANSLATIONS = {
     // Org selection
     'org_select': 'Monitoring Organization',
     'org_select_hint': 'If you belong to multiple orgs, select which one to monitor.',
+    'org_managed_in_dashboard': 'Active organizations are now managed in the <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">dashboard settings</a> (max 3).',
     'org_auto': 'Auto',
     'org_auto_current': 'Currently collecting: {0} ({1})',
     'org_changed': 'Organization changed. Data has been reset.',
@@ -609,6 +612,7 @@ const TRANSLATIONS = {
     'org_auto_on': 'Follows your active org in Claude (⚡ = active)',
     'org_auto_off': 'Using pinned org',
     'org_pin_hint': 'Pin 📌 to set main org',
+    'org_cap_hint': 'More than 3 orgs — pick your active 3 →',
     // Fitness matrix
     'fm_col_plan': 'Plan',
     'fm_window_24h': 'Last\n24h',

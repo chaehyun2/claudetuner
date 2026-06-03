@@ -239,16 +239,11 @@
       </label>
     </div>
     <div class="form-group">
-      <div style="display:flex;align-items:center;justify-content:space-between;">
-        <label class="form-label" style="margin-bottom:0" data-i18n="org_select"></label>
-        <button class="btn-refresh" id="org-refresh" data-i18n="org_refresh" title="Refresh"></button>
+      <label class="form-label" data-i18n="org_select"></label>
+      <div class="form-hint" data-i18n-html="org_managed_in_dashboard">
+        Active organizations are now managed in the
+        <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">dashboard settings</a>.
       </div>
-      <label class="check-label" style="margin-top:4px">
-        <input type="checkbox" id="org-auto-all" checked>
-        <span data-i18n="org_auto_all"></span>
-      </label>
-      <div id="org-checklist" class="org-checklist"></div>
-      <div class="form-hint" id="org-hint" data-i18n="org_select_hint"></div>
     </div>
     <div class="form-group">
       <label class="form-label" data-i18n="collect_interval"></label>

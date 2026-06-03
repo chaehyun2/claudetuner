@@ -824,10 +824,39 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     // On success: reset heartbeat timer + clear error code + reset collect fail state
     chrome.storage.local.remove(['lastHeartbeatAt', 'collectFailState']);
 
-    // === Multi-org collection: send additional org snapshots beyond primary (up to 3 orgs total) ===
+    // === Multi-org collection: send all monitorable orgs; server-side 3-org cap
+    // drops snapshots for orgs the user hasn't selected as active.
     if (!skipServer) {
-      const MAX_ORGS = 3;
-      // Determine target orgs: exclude API + exclude Free if multi-org
+      // One-shot migration: hand legacy chrome.storage.sync `selectedOrgIds` to the
+      // server's `selected_orgs` and clear local fields. Claude-only — non-Claude
+      // providers never had a local selection. Runs once per device.
+      try {
+        const { selectedOrgsMigrated } = await chrome.storage.local.get({ selectedOrgsMigrated: false });
+        if (!selectedOrgsMigrated) {
+          const { selectedOrgIds } = await chrome.storage.sync.get({ selectedOrgIds: null });
+          if (Array.isArray(selectedOrgIds) && selectedOrgIds.length >= 1 && selectedOrgIds.length <= 3) {
+            const payload = selectedOrgIds.map(uuid => ({ provider: 'claude', org_uuid: uuid }));
+            const resp = await authedFetch(config, `${config.serverUrl}/api/me/selected-orgs`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', 'X-User-Email': snapshot.user_email },
+              body: JSON.stringify({ selected_orgs: payload }),
+            });
+            if (resp.ok) {
+              await chrome.storage.sync.remove(['selectedOrgIds', 'orgAutoAll']);
+              await chrome.storage.local.set({ selectedOrgsMigrated: true });
+            }
+          } else {
+            // Nothing to migrate — still mark done so we don't retry every collect
+            await chrome.storage.local.set({ selectedOrgsMigrated: true });
+          }
+        }
+      } catch (e) {
+        console.warn('[Claude Tuner] selected_orgs migration failed (will retry next cycle):', e.message);
+      }
+
+      // Determine target orgs: exclude API + exclude Free if multi-org.
+      // No client-side count cap — the server's selected_orgs decides what is
+      // persisted; non-selected orgs come back as {skipped:true, skip_org:true}.
       const isMultiOrg = orgList.filter(o => detectPlan(o) !== 'API').length > 1;
       const monitorableOrgs = orgList.filter(o => {
         const p = detectPlan(o);
@@ -835,26 +864,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         if (isMultiOrg && p === 'Free') return false;
         return true;
       });
-      let targetOrgs = monitorableOrgs;
-
-      const { orgAutoAll, selectedOrgIds } = await chrome.storage.sync.get({ orgAutoAll: true, selectedOrgIds: null });
-
-      if (orgAutoAll) {
-        // Auto collect all: all orgs (MAX_ORGS limit applied)
-        targetOrgs = monitorableOrgs.slice(0, MAX_ORGS);
-      } else if (monitorableOrgs.length > MAX_ORGS) {
-        // Manual selection mode + 4 or more orgs
-        if (selectedOrgIds && Array.isArray(selectedOrgIds) && selectedOrgIds.length > 0) {
-          targetOrgs = monitorableOrgs.filter(o => selectedOrgIds.includes(o.uuid));
-          if (targetOrgs.length === 0) targetOrgs = monitorableOrgs.slice(0, MAX_ORGS);
-        } else {
-          targetOrgs = monitorableOrgs
-            .map(o => ({ org: o, score: planScoreMap[detectPlan(o)] || 0 }))
-            .sort((a, b) => b.score - a.score)
-            .slice(0, MAX_ORGS)
-            .map(x => x.org);
-        }
-      }
+      const targetOrgs = monitorableOrgs;
 
       // Collect additional orgs beyond primary (continue collecting other orgs on individual failure)
       // === Adaptive polling: secondary orgs adjust poll interval based on usage changes ===

@@ -132,11 +132,7 @@ function doSave() {
 
   if (thresholdDanger <= thresholdWarn) return; // Skip save on validation failure
 
-  const selectedOrgIds = _selectedOrgIds.length > 0 ? [..._selectedOrgIds] : null;
-  const selectedOrgId = selectedOrgIds ? selectedOrgIds[0] : null;
-  const prevIds = JSON.stringify(_prevSelectedOrgIds || []);
-  const orgChanged = JSON.stringify(selectedOrgIds || []) !== prevIds;
-
+  // Active org selection moved to dashboard settings — no longer persisted client-side
   const collectClaude = document.getElementById('collect-claude').checked;
   const collectChatGPT = document.getElementById('collect-chatgpt').checked;
   const collectGemini = document.getElementById('collect-gemini').checked;
@@ -152,8 +148,7 @@ function doSave() {
   const notifyPlanChange = document.getElementById('notify-plan-change').checked;
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
-  const orgAutoAll = document.getElementById('org-auto-all')?.checked ?? true;
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, selectedOrgId, selectedOrgIds, orgAutoAll, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -186,7 +181,7 @@ function doSave() {
       if (userEmail) {
         const extSettings = {
           intervalMinutes, usageDisplayMode, thresholdWarn, thresholdDanger,
-          sidebarUsageEnabled, inputUsageEnabled, optimizationMode, orgAutoAll,
+          sidebarUsageEnabled, inputUsageEnabled, optimizationMode,
           collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail,
@@ -199,14 +194,7 @@ function doSave() {
       }
     });
 
-    if (orgChanged) {
-      chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'usageAlertState', 'accountCache', 'needsOrgSelection'], () => {
-        _prevSelectedOrgIds = selectedOrgIds ? [...selectedOrgIds] : [];
-        showToast(t('org_changed'));
-      });
-    } else {
-      showToast(_lastInteractedCard ? `${_lastInteractedCard} ${t('auto_saved')}` : t('auto_saved'));
-    }
+    showToast(_lastInteractedCard ? `${_lastInteractedCard} ${t('auto_saved')}` : t('auto_saved'));
   });
 }
 
