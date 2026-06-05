@@ -652,6 +652,7 @@
   <script src="config.js"></script>
   <script src="analytics.js"></script>
   <script src="i18n.js"></script>
-  <script src="popup.js"></script>
+  <!-- popup.js is an ES module; config/analytics/i18n stay classic globals (also used by content scripts) and load first. -->
+  <script type="module" src="popup.js"></script>
 </body>
 </html>
