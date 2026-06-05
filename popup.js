@@ -36,11 +36,13 @@ async function checkProviderPermissions() {
 
 let _currentPlan = null;
 let _usageHistory = [];
+let _historyLoaded = false; // usage history fetched at least once (gate the day-1 forecast teaser to avoid a flash before load)
 let _currentSnapshot = null;
 let _orgList = null; // cached org list
 let _selectedOrgId = null; // selected org UUID (multi-org view)
 let _collectedOrgs = []; // cached collectedOrgs (for _filteredHistory, selectOrg, etc.)
 let _claudeNoticeDismissed = false; // user dismissed the demoted Claude-disconnected notice (reset when Claude recovers)
+let _dashNudgeEvaluated = false; // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
 let _isIndependent = false; // signed in via email (no Claude account) — suppress all Claude-centric status/errors
 let _independentEmail = ''; // independent account email (shown in the footer)
 
@@ -220,10 +222,11 @@ const _noticeTypeMap = {
 
 let _popupNoticeList = [];
 
-async function loadPopupAnnouncements() {
+async function loadPopupAnnouncements(attempt = 0) {
   try {
     const cacheBuster = Math.floor(Date.now() / 3600000);
     const res = await fetch(ANNOUNCEMENT_URL + '?t=' + cacheBuster);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const list = await res.json();
     if (!Array.isArray(list)) return;
     const extVer = chrome.runtime.getManifest().version;
@@ -236,7 +239,12 @@ async function loadPopupAnnouncements() {
       return true;
     });
     renderPopupNotices();
-  } catch(e) {} // Silently ignore announcement fetch failures
+  } catch (e) {
+    // The side panel can open before the network/SW is ready, so the first fetch
+    // races and the bell never appears until the panel is reopened. Retry a few
+    // times instead of silently giving up on the first failure.
+    if (attempt < 3) setTimeout(() => loadPopupAnnouncements(attempt + 1), 800 * (attempt + 1));
+  }
 }
 
 function renderPopupNotices() {
@@ -393,6 +401,10 @@ function selectOrg(orgId, container) {
     _collectedOrgs = local.collectedOrgs || [];
     const orgData = _collectedOrgs.find(o => o.uuid === orgId);
     if (!orgData) return;
+    // Clear the prediction headline up front; the 5h-gauge branch below re-shows
+    // it. Usage-based Enterprise / no-5h orgs never call renderGaugePrediction,
+    // so without this a headline from a previous org would linger.
+    setPredictHeadline(null);
     const hist = _filteredHistory();
     const isPrimary = orgData.isPrimary;
     const providerKey = orgData.provider || 'claude';
@@ -1038,6 +1050,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   loadPopupAnnouncements();
+  // Side panel persists across hide/show: if the initial fetch never populated
+  // the list, re-try when the panel becomes visible again (matches the "reopen
+  // makes the bell appear" behavior, without a manual close/reopen).
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _popupNoticeList.length === 0) loadPopupAnnouncements();
+  });
   loadOrgSelector();
   checkProviderPermissions();
   loadFitnessMatrix();
@@ -1083,6 +1101,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
     chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false }, (result) => {
       _usageHistory = result.usageHistory || [];
+      _historyLoaded = true;
       _claudeNoticeDismissed = result.claudeNoticeDismissed || false;
       _historyReady = true;
 
@@ -1127,6 +1146,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Full UI re-render including dynamically generated text
       chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
+        _historyLoaded = true;
         if (r.lastStatus) {
           // Reset to primary org uuid (null would mix multi-org histories)
           const cOrgs = r.collectedOrgs || [];
@@ -1200,6 +1220,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (status) {
       chrome.storage.local.get({ usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
+        _historyLoaded = true;
         _collectedOrgs = r.collectedOrgs || [];
         updateUI(status);
         _currentPlan = status?.snapshot?.plan || null;
@@ -1239,6 +1260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Update UI with saved lastStatus — single callback to avoid race conditions
       chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         _usageHistory = r.usageHistory || [];
+        _historyLoaded = true;
         _collectedOrgs = r.collectedOrgs || [];
         const s = r.lastStatus;
         if (s) {
@@ -1860,6 +1882,37 @@ function _renderRecommendation(rec) {
 let _updateUITimer = null;
 let _lastUpdateUIStatus = null;
 
+// One-time nudge toward the web dashboard, shown right after a successful
+// collection. Dashboard reach is the strongest retention signal for new users
+// (esp. overseas: reachers churn ~4.9% vs ~19% for non-reachers), but the popup
+// hides its onboarding block on success, leaving no prominent path. Show this
+// up to a few times, then stop; any interaction (open or dismiss) ends it.
+const DASH_NUDGE_MAX_SHOWS = 3;
+function maybeShowDashNudge() {
+  if (_dashNudgeEvaluated) return; // evaluate once per popup open
+  _dashNudgeEvaluated = true;
+  const el = document.getElementById('dash-nudge');
+  if (!el) return;
+  chrome.storage.local.get({ dashNudge: { done: false, shows: 0 } }, (r) => {
+    const st = (r && r.dashNudge) || { done: false, shows: 0 };
+    if (st.done) return;
+    const shows = (st.shows || 0) + 1;
+    el.classList.remove('hidden');
+    // Stop showing after the cap even if the user never interacts.
+    chrome.storage.local.set({ dashNudge: { done: shows >= DASH_NUDGE_MAX_SHOWS, shows } });
+    const end = () => {
+      el.classList.add('hidden');
+      chrome.storage.local.set({ dashNudge: { done: true, shows } });
+    };
+    const link = document.getElementById('dash-nudge-link');
+    if (link) link.addEventListener('click', () => { // opens dashboard in a new tab
+      chrome.storage.local.set({ dashNudge: { done: true, shows } });
+    });
+    const close = document.getElementById('dash-nudge-close');
+    if (close) close.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); end(); });
+  });
+}
+
 // Debounced wrapper: collapses rapid-fire updateUI calls (e.g. lastStatus + collectedOrgs changes)
 function updateUI(status) {
   _lastUpdateUIStatus = status;
@@ -2053,6 +2106,7 @@ function _updateUICore(status) {
   const timingEl = document.getElementById('error-timing');
   if (timingEl) timingEl.innerHTML = '';
   if (onboarding) onboarding.classList.add('hidden');
+  maybeShowDashNudge();
 
   // Claude recovered — reset the dismissed-notice flag so a future disconnection
   // surfaces the notice again.
@@ -2088,9 +2142,16 @@ function _updateUICore(status) {
     // If selected org differs from Claude primary, skip all rendering.
     // Status indicator and caches are already updated above.
     // selectOrg handles non-Claude rendering (called from chip click or collectedOrgs onChange).
+    // (Reset the prediction headline only past this point — when this render owns
+    // the gauges. The selected-org path leaves it to selectOrg() so a debounced
+    // status render doesn't wipe a headline selectOrg set.)
     if (_selectedOrgId && _selectedOrgId !== s.claude_org_uuid) {
       return;
     }
+
+    // Reset the headline; the gauge branches below re-show it via
+    // renderGaugePrediction('5h'), or leave it hidden (usage-based Enterprise).
+    setPredictHeadline(null);
 
     const isEnterprise = (s.plan || '').includes('Enterprise');
 
@@ -2378,6 +2439,17 @@ function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
   return { rate, predicted, hoursToReset, hoursDiff };
 }
 
+// Prediction headline strip above the gauges (driven only by the 5h gauge).
+// Pass null to hide. tone 'is-alert' for the limit-reached forecast.
+function setPredictHeadline(html, tone) {
+  const el = document.getElementById('predict-headline');
+  if (!el) return;
+  if (!html) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.className = 'predict-headline' + (tone ? ' ' + tone : '');
+  el.textContent = html;
+  el.classList.remove('hidden');
+}
+
 function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const marker = document.getElementById(`gauge-${id}-predict`);
   const label = document.getElementById(`gauge-${id}-predict-label`);
@@ -2402,11 +2474,20 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   };
 
   // Fully hide if no reset time or utilization is null
-  if (!resetsAt || currentUtil === null) { hide(); return; }
+  if (!resetsAt || currentUtil === null) {
+    hide();
+    if (id === '5h') setPredictHeadline(null);
+    return;
+  }
 
-  // Insufficient history: show collecting indicator
+  // Insufficient history: show collecting indicator + day-1 teaser headline.
+  // The forecast needs 2-3 data points, so a new user's first session has none —
+  // the teaser conveys the (unique) upcoming value and a reason to come back.
   if (!history || history.length < 3) {
     showCollecting();
+    // Only after history has actually loaded, else the teaser flashes on every
+    // popup open before the async history fetch resolves.
+    if (id === '5h' && _historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
     return;
   }
 
@@ -2414,6 +2495,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
   if (!pred) {
     showCollecting();
+    if (id === '5h' && _historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
     return;
   }
 
@@ -2424,6 +2506,7 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // Minimal change or decreasing trend: show "stable"
   if (rate <= 0 || predicted - currentUtil < 3) {
     hide();
+    if (id === '5h') setPredictHeadline(null);
     if (inlineEl) {
       inlineEl.style.display = 'inline';
       inlineEl.style.color = '#22c55e';
@@ -2451,6 +2534,13 @@ function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     limitTimeStr = _currentLang === 'ko'
       ? `${mo}/${da}(${dayStr}) ${hh >= 12 ? '오후' : '오전'} ${hh % 12 || 12}시`
       : `${mo}/${da}(${dayStr}) ${hh % 12 || 12}${hh >= 12 ? 'PM' : 'AM'}`;
+  }
+
+  // Headline: surface the limit-reached forecast prominently (only when we
+  // actually project hitting 100%); otherwise keep the strip clean.
+  if (id === '5h') {
+    setPredictHeadline(limitTimeStr ? t('predict_headline_limit', limitTimeStr) : null,
+      limitTimeStr ? 'is-alert' : undefined);
   }
 
   // (A) Header inline prediction: "▸ 78%" or "▸ 4/12 2PM" badge

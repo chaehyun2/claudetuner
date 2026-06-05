@@ -60,7 +60,7 @@
     [data-theme="dark"] #plan-actions .info-row { background: #2a0a0a !important; }
     [data-theme="dark"] #downgrade-5x-btn { background: #1c0f00 !important; color: #fdba74 !important; border-color: #9a3412 !important; }
     [data-theme="dark"] #downgrade-pro-btn { background: #2a0a0a !important; color: #fca5a5 !important; border-color: #991b1b !important; }
-    [data-theme="dark"] .hdr-btn-link:hover { background: var(--accent-light); }
+    [data-theme="dark"] .hdr-btn-link:hover { background: var(--accent); color: #fff; }
     [data-theme="dark"] .hdr-btn-primary:disabled { background: #3730a3; color: #c7d2fe; }
     [data-theme="dark"] .org-chip.primary .org-chip-plan { color: var(--accent); }
     [data-theme="dark"] .org-chip-pin.active, [data-theme="dark"] .org-chip-pin:hover { color: var(--accent); }
@@ -77,8 +77,8 @@
     @keyframes btn-spin { to { transform: rotate(360deg); } }
     button.loading { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
     button.loading::before { content: ''; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: btn-spin .6s linear infinite; flex-shrink: 0; }
-    .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); display: inline-block; }
-    .hdr-btn-link:hover { background: var(--accent-light); }
+    .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); font-weight: 600; display: inline-flex; align-items: center; gap: 3px; border: 1px solid transparent; }
+    .hdr-btn-link:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
     .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
     .hdr-btn-icon:hover { color: var(--text-primary); background: var(--bg-hover); }
 
@@ -222,6 +222,19 @@
     .ob-link { display: block; text-align: center; margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
     .ob-link a { color: var(--accent); text-decoration: none; }
     .ob-link a:hover { text-decoration: underline; }
+    .ob-cta-secondary { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 9px; background: var(--accent-light); color: var(--accent); border: none; border-radius: 8px; font-size: 12px; font-weight: 600; text-align: center; text-decoration: none; }
+    .ob-cta-secondary:hover { background: var(--accent); color: #fff; }
+    /* One-time dashboard nudge shown right after the first successful collection */
+    .dash-nudge { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 8px 10px; background: var(--accent-light); border-radius: 8px; }
+    .dash-nudge-link { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: none; }
+    .dash-nudge-link:hover { text-decoration: underline; }
+    .dash-nudge-arrow { margin-left: auto; }
+    .dash-nudge-close { flex: none; background: none; border: none; color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .dash-nudge-close:hover { color: var(--text-primary); }
+    /* Prediction headline — surfaces the forecast (our differentiator) above the gauges */
+    .predict-headline { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; background: var(--accent-light); color: var(--accent); }
+    .predict-headline.is-alert { background: #ef444418; color: #ef4444; }
+    [data-theme="dark"] .predict-headline.is-alert { background: #ef444430; }
 
     /* 조직 선택 카드 */
     .org-selector { background: var(--bg-card); border: 1px solid #c7d2fe; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
@@ -293,7 +306,7 @@
     <h1><a href="https://claudetuner.com" target="_blank" style="color:inherit;text-decoration:none">ClaudeTuner</a></h1>
     <div class="header-actions">
       <button id="collect-btn" class="hdr-btn hdr-btn-primary" data-i18n="btn_collect"></button>
-      <a href="https://claudetuner.com/dashboard" target="_blank" class="hdr-btn hdr-btn-link" data-i18n="btn_detail"></a>
+      <a href="https://claudetuner.com/dashboard" target="_blank" class="hdr-btn hdr-btn-link" data-i18n-title="btn_detail" title="Analytics"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style="flex:none"><path d="M3 3a1 1 0 011 1v12h12a1 1 0 110 2H3a1 1 0 01-1-1V4a1 1 0 011-1zm14 3a1 1 0 011 1v2a1 1 0 11-2 0V9.414l-3.293 3.293a1 1 0 01-1.414 0L9 10.414l-2.293 2.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0L12 10.586 14.586 8H13a1 1 0 110-2h4z"/></svg></a>
       <button id="notice-toggle-btn" class="hdr-btn-icon" title="Announcements" style="display:none;position:relative">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-2.83-2h5.66A3 3 0 0110 18z"/></svg>
         <span id="notice-badge" style="display:none;position:absolute;top:-2px;right:-2px;background:#ef4444;color:white;font-size:8px;font-weight:700;min-width:13px;height:13px;border-radius:50%;align-items:center;justify-content:center;line-height:1">0</span>
@@ -419,12 +432,25 @@
       </div>
     </div>
     <button class="ob-cta" id="ob-collect-btn" data-i18n="ob_cta"></button>
+    <a href="https://claudetuner.com/dashboard" target="_blank" class="ob-cta-secondary" data-i18n="ob_step3_title"></a>
     <div class="ob-link"><a href="https://claudetuner.com/welcome/" target="_blank" data-i18n="ob_guide_link"></a></div>
-    <div class="ob-link"><a href="https://claudetuner.com/dashboard" target="_blank" data-i18n="ob_step3_title"></a></div>
   </div>
 
   <!-- Off-peak 프로모션 배너 -->
   <div id="offpeak-banner" class="offpeak-banner hidden"></div>
+
+  <!-- One-time dashboard nudge (shown after first successful collection) -->
+  <div id="dash-nudge" class="dash-nudge hidden">
+    <a href="https://claudetuner.com/dashboard" target="_blank" id="dash-nudge-link" class="dash-nudge-link">
+      <span>📊</span><span data-i18n="dash_nudge"></span><span class="dash-nudge-arrow">→</span>
+    </a>
+    <button id="dash-nudge-close" class="dash-nudge-close" data-i18n-title="dash_nudge_dismiss" title="Dismiss" aria-label="Dismiss">&times;</button>
+  </div>
+
+  <!-- Prediction headline: the differentiator vs Claude's native usage view.
+       Driven solely by renderGaugePrediction('5h'). Sibling of #gauge-section
+       (not a child) so the Enterprise/_restoreGaugeHTML innerHTML swaps can't wipe it. -->
+  <div id="predict-headline" class="predict-headline hidden"></div>
 
   <!-- 사용률 게이지 -->
   <div id="gauge-section" class="gauge-card hidden">

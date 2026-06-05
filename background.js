@@ -230,7 +230,20 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   // Open welcome page on fresh install (captures ref_source)
   if (details.reason === 'install') {
-    chrome.tabs.create({ url: `${SITE_URL}/welcome/` });
+    // Only force the welcome page's language when the user has *explicitly* set
+    // the extension language. On 'auto' (the default), pass no param and let the
+    // welcome page self-detect via navigator.language — the same signal the popup
+    // uses. (Do NOT use chrome.i18n.getUILanguage()/bgLang here: it reflects
+    // Chrome's app UI language, which can differ from navigator.language and would
+    // mismatch what the user sees in the popup.)
+    let explicitLang = null;
+    try {
+      const { lang } = await chrome.storage.sync.get({ lang: 'auto' });
+      if (lang === 'ko' || lang === 'en') explicitLang = lang;
+    } catch (e) { /* fall through with no param */ }
+    const welcomeUrl = new URL('/welcome/', SITE_URL);
+    if (explicitLang) welcomeUrl.searchParams.set('lang', explicitLang);
+    chrome.tabs.create({ url: welcomeUrl.toString() });
     // Allow auto-open side panel on first Claude.ai visit (fresh install only)
     await chrome.storage.local.set({ sidePanelAutoOpened: false });
   } else if (details.reason === 'update') {
