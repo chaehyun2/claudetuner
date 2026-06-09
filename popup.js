@@ -231,7 +231,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load current status + history directly from chrome.storage
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false }, (result) => {
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null }, (result) => {
+      state.onboardOrgName = result.onboardOrgName || null;
       state.usageHistory = result.usageHistory || [];
       state.historyLoaded = true;
       state.claudeNoticeDismissed = result.claudeNoticeDismissed || false;
@@ -313,6 +314,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         : pref;
       document.documentElement.setAttribute('data-theme', resolved);
       updateThemeBtn(pref);
+    }
+
+    // Team onboarding context updated from welcome page
+    if (changes.onboardOrgName) {
+      state.onboardOrgName = changes.onboardOrgName.newValue || null;
+      updateUI(state.lastUpdateUIStatus);
     }
 
     // Immediately refresh org chips when collectedOrgs changes

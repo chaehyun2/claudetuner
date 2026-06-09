@@ -299,6 +299,14 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return;
   }
 
+  if (message && message.type === 'set_org_context' && message.org_name) {
+    chrome.storage.local.set({ onboardOrgName: message.org_name }, () => {
+      console.log('[Claude Tuner] onboardOrgName set:', message.org_name);
+      sendResponse({ ok: true });
+    });
+    return true; // async sendResponse
+  }
+
   // Get extension info
   if (message && message.type === 'GET_INFO') {
     sendResponse({ version: chrome.runtime.getManifest().version });

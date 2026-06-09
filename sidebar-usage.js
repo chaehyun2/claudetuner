@@ -160,6 +160,9 @@
       if (!Array.isArray(list)) return;
       const extVer = chrome.runtime.getManifest().version;
       _notices = list.filter(n => {
+        // /api/announcements also carries promo (ad) banners now — the sidebar shows notices
+        // only, so drop promos (they have their own placement + tz/campaign handling).
+        if (n.type === 'promo') return false;
         if (n.min_version && !compareVersions(extVer, n.min_version)) return false;
         if (n.lang && n.lang !== _lang) return false;
         return true;

@@ -184,6 +184,19 @@
     .notice-footer { text-align: center; margin-top: 6px; }
     .notice-footer a { font-size: 10px; color: var(--text-secondary); text-decoration: none; }
 
+    /* 프로모 배너 (파트너 프로젝트 홍보, 재사용 가능) */
+    .notice-banner.nb-promo { background: #F5F3FF; border: 1px solid #DDD6FE; }
+    [data-theme="dark"] .notice-banner.nb-promo { background: #2e1065; border: 1px solid #4c1d95; }
+    .promo-row { display: flex; align-items: center; gap: 9px; }
+    .promo-logo { width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0; object-fit: cover; }
+    .promo-text { flex: 1; min-width: 0; padding-right: 12px; }
+    .promo-title { font-size: 11px; font-weight: 700; color: #5B21B6; line-height: 15px; }
+    [data-theme="dark"] .promo-title { color: #c4b5fd; }
+    .promo-body { font-size: 10px; color: var(--text-secondary); margin-top: 2px; line-height: 14px; }
+    .promo-cta { flex-shrink: 0; background: #5B21B6; color: #fff; font-size: 10px; font-weight: 600; padding: 5px 9px; border-radius: 7px; text-decoration: none; white-space: nowrap; cursor: pointer; }
+    [data-theme="dark"] .promo-cta { background: #7c3aed; }
+    .notice-banner.nb-promo .notice-close { position: absolute; top: 6px; right: 8px; }
+
     /* 에러 배너 */
     .error-banner { position: relative; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
     .error-dismiss { position: absolute; top: 4px; right: 6px; background: none; border: none; font-size: 16px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 2px 4px; }
@@ -366,6 +379,8 @@
     <button id="review-nudge-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:0 2px">×</button>
   </div>
 
+  <!-- Promo (ad) banners: always visible, independent of the bell toggle below -->
+  <div id="ct-popup-promos"></div>
   <div id="ct-popup-notices" style="display:none"></div>
   <div id="perm-banner" class="perm-banner hidden"></div>
 
@@ -396,7 +411,7 @@
   <div id="onboarding" class="onboarding hidden">
     <div class="ob-hero">
       <div class="ob-icon">✨</div>
-      <h2 data-i18n="ob_title"></h2>
+      <h2 id="ob-title" data-i18n="ob_title"></h2>
       <p data-i18n="ob_desc"></p>
     </div>
     <div class="ob-steps">

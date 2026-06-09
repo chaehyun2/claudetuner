@@ -184,6 +184,7 @@ const TRANSLATIONS = {
     'downgrade_cancelled': '다운그레이드가 취소되었습니다',
     // Onboarding
     'ob_title': 'Claude Tuner에 오신 걸 환영합니다!',
+    'ob_title_team': '{0} 팀에 오신 것을 환영합니다!',
     'ob_desc': 'Claude · ChatGPT · Gemini 사용량을 실시간으로 모니터링하고 최적화하세요.',
     'ob_step1_title': '사용 중인 AI 서비스에 로그인하세요',
     'ob_step1_title_html': '<a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude</a> · <a href="https://chatgpt.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">ChatGPT</a> · <a href="https://gemini.google.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Gemini</a> 에 로그인하세요',
@@ -538,6 +539,7 @@ const TRANSLATIONS = {
     'downgrade_cancelled': 'Downgrade cancelled',
     // Onboarding
     'ob_title': 'Welcome to Claude Tuner!',
+    'ob_title_team': 'Welcome to {0}!',
     'ob_desc': 'Monitor and optimize your Claude, ChatGPT & Gemini usage in real time.',
     'ob_step1_title': 'Sign in to the AI service you use',
     'ob_step1_title_html': 'Sign in to <a href="https://claude.ai" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Claude</a> · <a href="https://chatgpt.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">ChatGPT</a> · <a href="https://gemini.google.com" target="_blank" rel="noopener" style="color:#7C3AED;text-decoration:underline">Gemini</a>',

@@ -7,6 +7,12 @@ import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPe
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
 import { _providerOrgLabel } from './org-selector.js';
 
+function _applyTeamOnboarding(onboarding) {
+  if (!state.onboardOrgName || !onboarding) return;
+  const obTitle = onboarding.querySelector('#ob-title');
+  if (obTitle) obTitle.textContent = t('ob_title_team', state.onboardOrgName);
+}
+
 export function _updateUICore(status) {
   // Always show version
   const userInfoEl = document.getElementById('user-info');
@@ -64,7 +70,7 @@ export function _updateUICore(status) {
     } else {
       indicator.className = 'status-dot gray';
       statusText.textContent = t('no_data');
-      if (onboarding) onboarding.classList.remove('hidden');
+      if (onboarding) { onboarding.classList.remove('hidden'); _applyTeamOnboarding(onboarding); }
     }
     // Footer: show the account email (next to the sign-out link), consolidating
     // account display in one place like Claude accounts. Independent (magic-link)
@@ -86,7 +92,7 @@ export function _updateUICore(status) {
   if (!status) {
     indicator.className = 'status-dot gray';
     statusText.textContent = t('no_data');
-    if (onboarding) onboarding.classList.remove('hidden');
+    if (onboarding) { onboarding.classList.remove('hidden'); _applyTeamOnboarding(onboarding); }
     return;
   }
 
@@ -193,6 +199,7 @@ export function _updateUICore(status) {
   const timingEl = document.getElementById('error-timing');
   if (timingEl) timingEl.innerHTML = '';
   if (onboarding) onboarding.classList.add('hidden');
+  if (state.onboardOrgName) { state.onboardOrgName = null; chrome.storage.local.remove('onboardOrgName'); }
   maybeShowDashNudge();
 
   // Claude recovered — reset the dismissed-notice flag so a future disconnection
