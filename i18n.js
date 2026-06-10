@@ -77,6 +77,10 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Claude 사용량 수집만 일시 중단되었습니다. 메인 프로바이더는 정상 추적 중입니다.',
     'error_banner_hint': '에서 로그인 상태를 확인해주세요.',
     'open_claude': 'Claude.ai 열기',
+    'email_mismatch_title': '⚠️ Claude 사용량이 수집되지 않고 있어요',
+    'email_mismatch_msg': 'Claude.ai 로그인 계정({0})이 Claude Tuner 로그인 계정과 달라 Claude 사용량이 수집되지 않습니다.',
+    'email_mismatch_msg_noemail': 'Claude.ai 로그인 계정이 Claude Tuner 로그인 계정과 달라 Claude 사용량이 수집되지 않습니다.',
+    'email_mismatch_hint': '에 Claude Tuner와 같은 이메일로 로그인하면 수집이 시작됩니다.',
     // Status banner (6-tier pace)
     'pace_comfortable': '여유 — 마음껏 사용하세요!',
     'pace_ontrack': '순조로움 — 적절한 페이스입니다',
@@ -433,6 +437,10 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Only Claude usage tracking is paused. Your primary provider is still being tracked normally.',
     'error_banner_hint': 'to check your login status.',
     'open_claude': 'Open Claude.ai',
+    'email_mismatch_title': '⚠️ Claude usage isn\'t being collected',
+    'email_mismatch_msg': 'Your Claude.ai account ({0}) is different from your Claude Tuner account, so Claude usage cannot be collected.',
+    'email_mismatch_msg_noemail': 'Your Claude.ai account is different from your Claude Tuner account, so Claude usage cannot be collected.',
+    'email_mismatch_hint': 'with the same email as Claude Tuner to start collecting.',
     // Status banner (6-tier pace)
     'pace_comfortable': 'Comfortable — use freely!',
     'pace_ontrack': 'On Track — sustainable pace',

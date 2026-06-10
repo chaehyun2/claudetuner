@@ -622,14 +622,31 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       },
       body: JSON.stringify(body),
     }).then(async (response) => {
-      if (response.status === 401 || response.status === 403) {
-        // ext_token invalid (401) or email mismatch after account switch (403) —
-        // clear and fall back to API key on next cycle to re-issue a fresh token.
-        // Race-safe: only clear if the token we sent is still the stored one
-        // (a concurrent request may have already rotated the token).
+      if (response.status === 403) {
+        // 403 = email mismatch: this Claude snapshot's account email differs from
+        // the Tuner login identity bound to the ext_token, so the server rejects it.
+        // Common for multi-provider users whose claude.ai account email ≠ their
+        // Tuner login (ChatGPT/Gemini keep the token bound to the Tuner email, so
+        // Claude silently never collects). Surface a popup warning explaining why.
+        const errData = await response.json().catch(() => ({}));
+        if (errData.error === 'Email mismatch') {
+          await chrome.storage.local.set({
+            claudeEmailMismatch: { claudeEmail: snapshot.user_email || null, ts: Date.now() },
+          });
+        }
+        // Keep existing token-clear fallback (race-safe: only clears if unchanged).
         const cleared = await clearExtTokenIfMatches(sentToken);
         if (cleared) {
-          console.log(`[Claude Tuner] ext_token cleared (${response.status}). Will re-auth on next cycle.`);
+          console.log('[Claude Tuner] ext_token cleared (403). Will re-auth on next cycle.');
+        }
+        return;
+      }
+      if (response.status === 401) {
+        // ext_token invalid/expired — clear and fall back to API key next cycle.
+        // Race-safe: only clear if the token we sent is still the stored one.
+        const cleared = await clearExtTokenIfMatches(sentToken);
+        if (cleared) {
+          console.log('[Claude Tuner] ext_token cleared (401). Will re-auth on next cycle.');
         }
         return;
       }
@@ -650,6 +667,10 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
       const result = await response.json();
       console.log(`[Claude Tuner] Snapshot sent: ${result.success ? 'ok' : 'fail'}${result.skipped ? ' (skipped)' : ''}`);
+
+      // Claude accepted (email matched the token identity) — clear any prior
+      // email-mismatch warning so the popup banner disappears once collection works.
+      await chrome.storage.local.remove('claudeEmailMismatch');
 
       // Store ext_token from server (TOFU issuance or refresh)
       if (result.ext_token) {

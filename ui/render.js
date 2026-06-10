@@ -27,6 +27,11 @@ export function _updateUICore(status) {
   // Hide error banner by default
   errorBanner.classList.add('hidden');
 
+  // Claude account email mismatch warning (independent of the Claude error path —
+  // it must show even for "provider-only" looking users, since the whole point is
+  // that their Claude account never collected). Fire-and-forget; reads storage.
+  renderEmailMismatchWarning();
+
   const onboarding = document.getElementById('onboarding');
 
   // Provider-only users (no Claude org): status reflects the provider org,
@@ -470,5 +475,36 @@ export function _updateUICore(status) {
     if (s.user_email !== 'unknown') parts.push(s.user_email);
     parts.push('v' + chrome.runtime.getManifest().version);
     document.getElementById('user-info').textContent = parts.join(' | ');
+  }
+}
+
+// Renders the amber "Claude account email mismatch" banner from storage.
+// Set by bg/collect.js when a Claude snapshot is rejected with 403 (the claude.ai
+// account email ≠ the Tuner login bound to the ext_token), cleared on the next
+// successful Claude collection. Dismissable; re-arms when a newer mismatch occurs.
+export async function renderEmailMismatchWarning() {
+  const banner = document.getElementById('claude-email-warn');
+  if (!banner) return;
+  const { claudeEmailMismatch = null, claudeEmailMismatchDismissedTs = 0 } =
+    await chrome.storage.local.get({ claudeEmailMismatch: null, claudeEmailMismatchDismissedTs: 0 });
+
+  const active = claudeEmailMismatch && claudeEmailMismatch.ts > claudeEmailMismatchDismissedTs;
+  if (!active) { banner.classList.add('hidden'); return; }
+
+  const email = claudeEmailMismatch.claudeEmail;
+  document.getElementById('email-warn-title').textContent = t('email_mismatch_title');
+  document.getElementById('email-warn-msg').textContent =
+    email ? t('email_mismatch_msg', email) : t('email_mismatch_msg_noemail');
+  document.getElementById('email-warn-link').textContent = t('open_claude');
+  document.getElementById('email-warn-hint').textContent = t('email_mismatch_hint');
+  banner.classList.remove('hidden');
+
+  const dismiss = document.getElementById('email-warn-dismiss');
+  if (dismiss && !dismiss.dataset.bound) {
+    dismiss.dataset.bound = '1';
+    dismiss.addEventListener('click', async () => {
+      banner.classList.add('hidden');
+      await chrome.storage.local.set({ claudeEmailMismatchDismissedTs: Date.now() });
+    });
   }
 }

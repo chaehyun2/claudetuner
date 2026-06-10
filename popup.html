@@ -210,6 +210,17 @@
     .error-banner.soft { background: #f9fafb; border-color: #e5e7eb; }
     .error-banner.soft .error-title { color: #6b7280; }
     .error-banner.soft .error-msg { color: #6b7280; }
+    /* Amber warning banner: Claude account email ≠ Tuner login (Claude collection blocked by 403) */
+    .warn-banner { position: relative; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+    .warn-banner .warn-title { font-size: 12px; font-weight: 600; color: #b45309; margin-bottom: 4px; }
+    .warn-banner .warn-msg { font-size: 11px; color: #92400e; margin-bottom: 6px; word-break: break-word; }
+    .warn-banner .warn-hint { font-size: 11px; color: #6b7280; }
+    .warn-banner a { color: #4f46e5; text-decoration: underline; cursor: pointer; }
+    [data-theme="dark"] .warn-banner { background: #2a1a05; border-color: #92400e; }
+    [data-theme="dark"] .warn-banner .warn-title { color: #fbbf24; }
+    [data-theme="dark"] .warn-banner .warn-msg { color: #fcd34d; }
+    [data-theme="dark"] .warn-banner .warn-hint { color: var(--text-muted); }
+    [data-theme="dark"] .warn-banner a { color: var(--accent); }
 
     /* 온보딩 가이드 */
     .onboarding { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
@@ -405,6 +416,16 @@
       <a href="https://claude.ai" target="_blank" data-i18n="open_claude"></a> <span data-i18n="error_banner_hint"></span>
     </div>
     <div class="error-timing" id="error-timing"></div>
+  </div>
+
+  <!-- Claude account email mismatch warning (claude.ai login ≠ Tuner login → 403 silent drop) -->
+  <div id="claude-email-warn" class="warn-banner hidden">
+    <button id="email-warn-dismiss" class="error-dismiss" aria-label="dismiss">&times;</button>
+    <div class="warn-title" id="email-warn-title"></div>
+    <div class="warn-msg" id="email-warn-msg"></div>
+    <div class="warn-hint">
+      <a href="https://claude.ai" target="_blank" id="email-warn-link"></a> <span id="email-warn-hint"></span>
+    </div>
   </div>
 
   <!-- 온보딩 가이드 -->
