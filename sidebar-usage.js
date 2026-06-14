@@ -10,8 +10,8 @@
   const MOUNT_INTERVAL_MS = 1000;
   const COUNTDOWN_INTERVAL_MS = 1000;
 
-  const ANNOUNCE_URL = 'https://api.claudetuner.com/api/announcements';
   const NOTICE_BASE = 'https://notice.claudetuner.com/';
+  const CORE = globalThis.__ctUsageCore;
 
   // ── State ──
   let _enabled = null;    // null until storage read; controlled by options
@@ -153,51 +153,23 @@
 
   // ── Announcements ──
   async function fetchNotices() {
+    // Defensive: notices depend on the shared core. If it's missing (e.g. a stale
+    // cached sidebar-usage.js after an update where usage-shared.js wasn't
+    // injected), skip notices entirely — the rest of the sidebar still works.
+    if (!CORE || !CORE.fetchAnnouncements) return;
     try {
-      const cacheBuster = Math.floor(Date.now() / 3600000);
-      const res = await fetch(ANNOUNCE_URL + '?t=' + cacheBuster);
-      const list = await res.json();
-      if (!Array.isArray(list)) return;
-      const extVer = chrome.runtime.getManifest().version;
-      _notices = list.filter(n => {
-        // /api/announcements also carries promo (ad) banners now — the sidebar shows notices
-        // only, so drop promos (they have their own placement + tz/campaign handling).
-        if (n.type === 'promo') return false;
-        if (n.min_version && !compareVersions(extVer, n.min_version)) return false;
-        if (n.lang && n.lang !== _lang) return false;
-        return true;
-      });
+      // Shared fetch/filter (drops promos, applies min_version + lang). Throws on
+      // transient error → keep last-known notices.
+      _notices = await CORE.fetchAnnouncements(_lang, chrome.runtime.getManifest().version);
       updateBellBadge();
       renderInlineNotice();
-    } catch (e) { /* silent */ }
-  }
-
-  function compareVersions(a, b) {
-    const pa = (a || '0').split('.').map(Number);
-    const pb = (b || '0').split('.').map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const va = pa[i] || 0, vb = pb[i] || 0;
-      if (va > vb) return true;
-      if (va < vb) return false;
-    }
-    return true;
-  }
-
-  function getUnseenCount() {
-    if (!_lastSeenId || _notices.length === 0) return _notices.length;
-    // Notices are assumed sorted newest first by ID or date
-    let count = 0;
-    for (const n of _notices) {
-      if (n.id === _lastSeenId) break;
-      count++;
-    }
-    return count;
+    } catch (e) { /* silent — keep last-known notices */ }
   }
 
   function updateBellBadge() {
     const badge = document.getElementById('ct-sb-bell-badge');
-    if (!badge) return;
-    const unseen = getUnseenCount();
+    if (!badge || !CORE || !CORE.getUnseenCount) return;
+    const unseen = CORE.getUnseenCount(_notices, _lastSeenId);
     if (unseen > 0) {
       badge.textContent = unseen;
       badge.style.display = '';
@@ -254,7 +226,7 @@
   }
 
   function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   function getActiveOrgId() {
@@ -519,6 +491,10 @@
     content.innerHTML = '';
     content.appendChild(frag);
     updateBellBadge();
+    // Sync the inline banner on (re)mount — notices may have resolved before the
+    // panel existed (fetchNotices' renderInlineNotice then found no container),
+    // leaving the banner hidden until the next 30-min refresh.
+    if (_notices.length > 0) renderInlineNotice();
   }
 
   // ── Countdown update (every second) ──

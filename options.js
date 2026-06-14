@@ -139,6 +139,8 @@ function doSave() {
 
   const sidebarUsageEnabled = document.getElementById('sidebar-usage-enabled').checked;
   const inputUsageEnabled = document.getElementById('input-usage-enabled').checked;
+  const chatgptSidebarUsageEnabled = document.getElementById('chatgpt-sidebar-usage-enabled').checked;
+  const chatgptInputUsageEnabled = document.getElementById('chatgpt-input-usage-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
@@ -148,7 +150,7 @@ function doSave() {
   const notifyPlanChange = document.getElementById('notify-plan-change').checked;
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -181,7 +183,7 @@ function doSave() {
       if (userEmail) {
         const extSettings = {
           intervalMinutes, usageDisplayMode, thresholdWarn, thresholdDanger,
-          sidebarUsageEnabled, inputUsageEnabled, optimizationMode,
+          sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, optimizationMode,
           collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail,
@@ -238,7 +240,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -273,6 +275,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       _updateProviderPermHints();
       document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
       document.getElementById('input-usage-enabled').checked = config.inputUsageEnabled !== false;
+      document.getElementById('chatgpt-sidebar-usage-enabled').checked = config.chatgptSidebarUsageEnabled !== false;
+      document.getElementById('chatgpt-input-usage-enabled').checked = config.chatgptInputUsageEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
       document.getElementById('notify-usage-warn').checked = config.notifyUsageWarn !== false;
@@ -331,6 +335,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Page usage toggles (sidebar + input area)
   document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('input-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('chatgpt-sidebar-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('chatgpt-input-usage-enabled').addEventListener('change', autoSave);
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {

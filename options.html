@@ -198,22 +198,32 @@
   <input type="hidden" id="server-url" value="" />
   <input type="hidden" id="api-key" />
 
-  <!-- Claude.ai page usage (sidebar + input) -->
+  <!-- In-page usage (Claude + ChatGPT, configured separately) -->
   <div class="card" id="page-usage">
     <div class="card-title" data-i18n="page_usage_title"></div>
     <div class="form-group">
+      <label class="form-label" data-i18n="page_usage_claude"></label>
       <label class="check-label">
         <input type="checkbox" id="sidebar-usage-enabled" checked>
         <span data-i18n="sidebar_usage_desc"></span>
       </label>
-      <div class="form-hint" data-i18n="sidebar_usage_hint"></div>
-    </div>
-    <div class="form-group">
       <label class="check-label">
         <input type="checkbox" id="input-usage-enabled" checked>
         <span data-i18n="input_usage_desc"></span>
       </label>
-      <div class="form-hint" data-i18n="input_usage_hint"></div>
+      <div class="form-hint" data-i18n="claude_usage_hint"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" data-i18n="page_usage_chatgpt"></label>
+      <label class="check-label">
+        <input type="checkbox" id="chatgpt-sidebar-usage-enabled" checked>
+        <span data-i18n="chatgpt_sidebar_usage_desc"></span>
+      </label>
+      <label class="check-label">
+        <input type="checkbox" id="chatgpt-input-usage-enabled" checked>
+        <span data-i18n="chatgpt_input_usage_desc"></span>
+      </label>
+      <div class="form-hint" data-i18n="chatgpt_usage_hint"></div>
     </div>
   </div>
 

@@ -114,6 +114,8 @@
     .info-row:not(:last-child) { border-bottom: 1px solid var(--border); }
     .info-row .label { color: var(--text-secondary); white-space: nowrap; font-size: 10px; }
     .info-row .value { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+    /* Recommendation text can be a full sentence (e.g. top-plan guidance) — allow it to wrap instead of clipping. */
+    #recommendation { white-space: normal; text-align: right; }
 
     /* 스파크라인 */
     .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px 6px; margin-bottom: 10px; }

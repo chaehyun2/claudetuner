@@ -1,0 +1,211 @@
+/* Claude Tuner — ChatGPT usage panel + input strip (self-contained styling) */
+
+/* Theme tokens — light defaults, overridden for ChatGPT dark mode below. */
+:root {
+  --ct-cg-text: #0d0d0d;
+  --ct-cg-text-muted: #8f8f8f;
+  --ct-cg-surface: rgba(0, 0, 0, 0.03);
+  --ct-cg-track: rgba(0, 0, 0, 0.1);
+  --ct-cg-border: rgba(0, 0, 0, 0.08);
+  --ct-cg-hover: rgba(0, 0, 0, 0.05);
+}
+html.dark, html.dark-oled {
+  --ct-cg-text: #ececec;
+  --ct-cg-text-muted: #9b9b9b;
+  --ct-cg-surface: rgba(255, 255, 255, 0.05);
+  --ct-cg-track: rgba(255, 255, 255, 0.14);
+  --ct-cg-border: rgba(255, 255, 255, 0.1);
+  --ct-cg-hover: rgba(255, 255, 255, 0.08);
+}
+
+/* ── Sidebar panel (no card — blends into the native nav) ── */
+.ct-cg-panel {
+  margin: 2px 0 8px;
+  font-family: inherit;
+  white-space: normal;
+}
+
+/* Header reuses ChatGPT's __menu-item layout; just size our bits + disable hover cursor. */
+.ct-cg-head { cursor: default; }
+.ct-cg-logo { width: 18px; height: 18px; border-radius: 4px; display: block; }
+.ct-cg-title { font-size: 14px; }
+
+/* Content aligns under the menu rows (icon column → right edge). */
+.ct-cg-content {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 4px 14px 0;
+}
+
+.ct-cg-message { font-size: 12px; padding: 2px 0; }
+
+.ct-cg-limit { display: flex; flex-direction: column; gap: 4px; }
+.ct-cg-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  gap: 6px;
+}
+.ct-cg-label-left { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; }
+.ct-cg-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ct-cg-arrow { font-size: 10px; }
+.ct-cg-pred { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ct-cg-reset {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ct-cg-bar { position: relative; height: 4px; }
+.ct-cg-bar-track {
+  position: absolute; inset: 0;
+  background: rgba(127, 127, 127, 0.22);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ct-cg-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+.ct-cg-bar-pred-fill {
+  position: absolute; top: 0; height: 100%;
+  background: repeating-linear-gradient(90deg, rgba(127, 127, 127, 0.35) 0 2px, transparent 2px 4px);
+}
+.ct-cg-bar-marker {
+  position: absolute; top: -1px; width: 2px; height: 6px;
+  border-radius: 1px; transform: translateX(-1px);
+}
+
+.ct-cg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 1px;
+  font-size: 12px;
+}
+.ct-cg-plan { font-weight: 500; }
+.ct-cg-actions { display: inline-flex; align-items: center; gap: 2px; }
+.ct-cg-actions a, .ct-cg-settings-btn, .ct-cg-bell-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  padding: 0; margin: 0;
+  border: none; background: none; cursor: pointer;
+  color: inherit;
+  border-radius: 6px;
+}
+.ct-cg-actions a:hover, .ct-cg-settings-btn:hover, .ct-cg-bell-btn:hover { background: rgba(127, 127, 127, 0.16); }
+.ct-cg-actions svg { width: 14px; height: 14px; }
+.ct-cg-bell-badge {
+  position: absolute; top: 0; right: 0;
+  min-width: 13px; height: 13px; padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: #ef4444; color: #fff;
+  font-size: 9px; line-height: 13px; font-weight: 700;
+  text-align: center;
+}
+
+/* Inline announcement banner */
+.ct-cg-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 12px 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+  font-size: 12px;
+}
+.ct-cg-notice-icon { flex-shrink: 0; }
+.ct-cg-notice-text { flex: 1; min-width: 0; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-cg-notice-text:hover { text-decoration: underline; }
+.ct-cg-notice-close {
+  flex-shrink: 0;
+  border: none; background: none; cursor: pointer;
+  font-size: 14px; line-height: 1; color: inherit;
+  padding: 0 2px;
+}
+
+/* ── Input strip ── */
+.ct-cg-strip {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding: 0 8px 2px;
+  box-sizing: border-box;
+  font-family: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+.ct-cg-strip-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ct-cg-text-muted);
+  flex-wrap: nowrap;
+}
+/* The metrics/reset/plan are one clickable link → dashboard. */
+.ct-cg-strip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: inherit;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  flex-wrap: wrap;
+}
+.ct-cg-strip-main:hover { background: var(--ct-cg-surface); border-color: var(--ct-cg-border); }
+/* Settings gear (separate from the dashboard link). */
+.ct-cg-strip-gear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex-shrink: 0;
+  padding: 0; border: none; background: none; cursor: pointer;
+  color: var(--ct-cg-text-muted); border-radius: 6px;
+}
+.ct-cg-strip-gear:hover { background: var(--ct-cg-surface); color: var(--ct-cg-text); }
+.ct-cg-strip-gear svg { width: 13px; height: 13px; }
+.ct-cg-strip-contact { text-decoration: none; }
+
+/* Below-box variant: a full-width row directly under the composer box,
+   left-aligned (roughly under the box's content edge). Wraps gracefully on
+   narrow composers rather than clipping. */
+.ct-cg-strip-belowbox {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 2px 12px 2px;
+}
+
+.ct-cg-strip-logo { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
+.ct-cg-strip-seg { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Compact inline gauge bar (current fill + optional prediction marker). */
+.ct-cg-strip-bar {
+  position: relative;
+  display: inline-block;
+  width: 52px;
+  height: 4px;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+.ct-cg-strip-bar-track {
+  position: absolute; inset: 0;
+  background: rgba(127, 127, 127, 0.25);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ct-cg-strip-bar-fill { display: block; height: 100%; border-radius: 3px; }
+.ct-cg-strip-bar-marker {
+  position: absolute; top: -1px; width: 2px; height: 6px;
+  border-radius: 1px; transform: translateX(-1px);
+}
+.ct-cg-strip-muted { color: var(--ct-cg-text-muted); }
+.ct-cg-strip-reset { color: var(--ct-cg-text-muted); }
+.ct-cg-strip-dot { color: var(--ct-cg-text-muted); opacity: 0.5; }
