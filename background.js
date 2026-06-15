@@ -703,18 +703,38 @@ chrome.cookies.onChanged.addListener((info) => {
 });
 
 // === webRequest: detect Claude.ai completion 429 → collect immediately ===
-// Refresh usage data immediately when a rate limit (429) occurs on message send/retry
+// Refresh usage data immediately when a rate limit (429) occurs on message send/retry.
+// The first 429 force-posts promptly (capture the rate-limit moment), but each 429 also
+// forces a server POST — so a user sitting on a sustained rate limit could fire one every
+// 30s and undercut adaptive-polling savings. Use exponential backoff: the throttle window
+// doubles on each consecutive 429-triggered collect (30s → 60s → … capped at 10min), and
+// resets to the base once 429s stop for a quiet period (the limit cleared).
 let _last429Collect = 0;
-const RATELIMIT_COLLECT_THROTTLE_MS = 30 * 1000; // 30-second throttle (prevent consecutive 429s)
+let _429BackoffMs = 0; // current backoff window; 0 = fresh (next 429 collects promptly)
+const RATELIMIT_BASE_THROTTLE_MS = 30 * 1000;      // minimum spacing between forced collects
+const RATELIMIT_MAX_THROTTLE_MS = 10 * 60 * 1000;  // cap — sustained 429 = usage already maxed
+const RATELIMIT_BACKOFF_RESET_MS = 15 * 60 * 1000; // quiet gap → treat next 429 as fresh
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     if (details.statusCode === 429) {
       const now = Date.now();
-      if (now - _last429Collect < RATELIMIT_COLLECT_THROTTLE_MS) return;
+      const sinceLast = now - _last429Collect;
+      // A long quiet gap means the rate limit cleared — reset backoff so the next
+      // 429 collects promptly again.
+      if (sinceLast >= RATELIMIT_BACKOFF_RESET_MS) _429BackoffMs = 0;
+      const throttle = Math.max(RATELIMIT_BASE_THROTTLE_MS, _429BackoffMs);
+      if (sinceLast < throttle) return;
       _last429Collect = now;
-      console.log(`[Claude Tuner] 429 detected: ${details.url.split('?')[0]}`);
-      collectAndSend().then((result) => {
+      // Grow the window for the NEXT consecutive 429 (exponential, capped).
+      _429BackoffMs = Math.min(
+        _429BackoffMs ? _429BackoffMs * 2 : RATELIMIT_BASE_THROTTLE_MS * 2,
+        RATELIMIT_MAX_THROTTLE_MS
+      );
+      console.log(`[Claude Tuner] 429 detected: ${details.url.split('?')[0]} (next throttle ${Math.round(_429BackoffMs / 1000)}s)`);
+      // force: a rate-limit event is a real usage change — always post it, even if
+      // the primary org's adaptive tier would otherwise be mid-interval (idle/dormant).
+      collectAndSend({ force: true }).then((result) => {
         if (result.success) scheduleExpireAlarms(result.snapshot);
       });
     }

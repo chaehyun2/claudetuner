@@ -51,6 +51,11 @@ export const ORG_POLL_TIERS = {
 };
 export const ORG_POLL_TIER_ORDER = ['active', 'idle', 'dormant'];
 export const ORG_POLL_CHANGE_THRESHOLD = 0.1; // utilization pp change to consider "changed"
+// After a need_history backfill attempt, suppress re-triggering for this long. At a
+// slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
+// needHistory would otherwise stay true forever and bypass the adaptive tier gate —
+// pinning the primary org to active cadence and defeating the idle/dormant backoff.
+export const HISTORY_BACKFILL_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h
 
 // === Error classification ===
 export const ACTIONABLE_ERRORS = ['err_session_expired', 'err_no_cookies', 'err_auth_failed'];

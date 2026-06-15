@@ -354,6 +354,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateUI(state.lastUpdateUIStatus);
     }
 
+    // Live-apply the extra-usage card visibility toggled from the Options page,
+    // so the open side panel reflects it immediately (no reopen needed).
+    if (changes.hiddenExtraUsage) {
+      if (changes.hiddenExtraUsage.newValue) {
+        // Hide instantly without a full re-render (non-disruptive).
+        const sec = document.getElementById('extra-usage-section');
+        if (sec) sec.style.display = 'none';
+      } else if (state.collectedOrgs?.length >= 2 && state.selectedOrgId) {
+        // Re-render the currently-viewed org so its card repopulates + shows.
+        selectOrg(state.selectedOrgId, null);
+      } else if (state.lastUpdateUIStatus) {
+        updateUI(state.lastUpdateUIStatus);
+      }
+    }
+
     if (!changes.lastStatus) return;
     const status = changes.lastStatus.newValue;
     if (status) {
@@ -796,6 +811,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.storage.local.set({ hiddenPrivacyBanner: true });
     document.getElementById('privacy-row').classList.add('hidden');
   });
+
+  // Extra usage card hide (×) — restorable from Options
+  const extraHideBtn = document.getElementById('extra-usage-hide');
+  if (extraHideBtn) {
+    extraHideBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      chrome.storage.local.set({ hiddenExtraUsage: true });
+      const sec = document.getElementById('extra-usage-section');
+      if (sec) sec.style.display = 'none';
+      showSuccess(t('extra_usage_hidden_toast'));
+    });
+  }
 
   // Downgrade test button
   function setupDowngradeBtn(btnId, targetPlan) {

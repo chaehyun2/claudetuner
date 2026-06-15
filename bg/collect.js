@@ -3,7 +3,7 @@ import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_INTERVAL_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER, ORG_POLL_CHANGE_THRESHOLD,
-  DEFAULT_SERVER_URL,
+  HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
@@ -610,6 +610,40 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     const needHistory = recent6h.length < 30 && Date.now() > historyEmptyUntil;
     const body = { ...snapshot, ...(force ? { force: true } : {}), ...(needHistory ? { need_history: true } : {}) };
 
+    // === Primary org adaptive gate ===
+    // Reuse the same per-org tier machinery that governs extra orgs so the primary
+    // (the bulk of ingest) also backs off when usage is flat: active≈baseInterval →
+    // idle 30m → dormant 2h. We gate ONLY the server POST; the local UI/history/badge
+    // below still run every tick so the popup stays fresh. This orgPollState load is
+    // shared with the extra-org loop (single get + single set → no race).
+    const { orgPollState: _pollState = {} } = await chrome.storage.local.get({ orgPollState: {} });
+    const orgPollState = _pollState || {};
+    const baseIntervalMs = (config.intervalMinutes || DEFAULT_INTERVAL_MINUTES) * 60 * 1000;
+    const now = Date.now();
+    if (bestOrg?.uuid && !orgPollState[bestOrg.uuid]) orgPollState[bestOrg.uuid] = getOrgPollDefault();
+    const primaryState = (bestOrg?.uuid && orgPollState[bestOrg.uuid]) || getOrgPollDefault();
+    const primaryCurrentValues = {
+      h5: snapshot.five_hour?.utilization ?? null,
+      d7: snapshot.seven_day?.utilization ?? null,
+      extraUsed: snapshot.extra_usage?.used_credits ?? null,
+      resetsAt5h: snapshot.five_hour?.resets_at ?? null,
+      resetsAt7d: snapshot.seven_day?.resets_at ?? null,
+      extraUsage: snapshot.extra_usage ?? null,
+    };
+    // force (manual/welcome) and needHistory (sparse local history → must backfill)
+    // always post, bypassing the tier interval. Otherwise post only when the tier
+    // says this org is due.
+    const primaryDue = force || needHistory || isOrgDueForPoll(primaryState, now, baseIntervalMs);
+    if (!primaryDue) {
+      console.log(`[Claude Tuner] Primary adaptive skip [${primaryState.tier}]`);
+    } else {
+      // Advance the tier state machine only on an actual POST (lastPollAt must track
+      // the last POST, and unchangedCount must not inflate from local-only ticks).
+      if (bestOrg?.uuid) {
+        const changed = hasOrgUsageChanged(primaryState.lastValues, primaryCurrentValues);
+        orgPollState[bestOrg.uuid] = updateOrgPollState(primaryState, primaryCurrentValues, changed);
+      }
+
     // === Server POST: fire-and-forget (don't wait for response) ===
     // Send server save in background, proceed with local UI update first
     const authHeaders = await getAuthHeaders(config);
@@ -765,19 +799,24 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
               const meData = await meResp.json();
               if (meData.recent_snapshots && meData.recent_snapshots.length > 0) {
                 await mergeServerSnapshots(meData.recent_snapshots, plan, snapshot.claude_org_uuid);
-              } else {
-                await chrome.storage.local.set({ historyEmptyUntil: Date.now() + 6 * 3600000 });
               }
             }
           } catch (e) {
             console.warn('[Claude Tuner] Failed to fetch /api/me for history bootstrap:', e.message);
-            await chrome.storage.local.set({ historyEmptyUntil: Date.now() + 6 * 3600000 });
           }
         }
+        // Suppress need_history re-triggering for a cooldown after every backfill attempt
+        // (merged, server-empty, or fetch error alike). At a slow idle/dormant cadence the
+        // 6h window structurally holds < 30 points, so without this needHistory stays true,
+        // bypasses the adaptive tier gate (primaryDue), and pins the primary org to active
+        // cadence — defeating the idle/dormant backoff. We already merged whatever the
+        // server had; re-requesting every cycle is futile and blocks the backoff.
+        await chrome.storage.local.set({ historyEmptyUntil: Date.now() + HISTORY_BACKFILL_COOLDOWN_MS });
       }
     }).catch((e) => {
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
     });
+    } // end primary adaptive gate (primaryDue)
 
     // === Local UI update (don't wait for server response) ===
     const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
@@ -905,11 +944,9 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       const failedOrgs = [];
       const skippedOrgs = []; // Orgs skipped by adaptive polling
 
-      // Load adaptive poll state
-      const { orgPollState: _pollState } = await chrome.storage.local.get({ orgPollState: {} });
-      const orgPollState = _pollState || {};
-      const baseIntervalMs = (config.intervalMinutes || DEFAULT_INTERVAL_MINUTES) * 60 * 1000;
-      const now = Date.now();
+      // orgPollState / baseIntervalMs / now were loaded once in the primary-org
+      // gate above; reuse the same in-memory map so primary + extra mutations are
+      // persisted by the single set() below (no second get/set → no race).
 
       for (const extraOrg of additionalOrgs) {
         // Initialize poll state for new orgs
@@ -1010,8 +1047,10 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
         }
       }
 
-      // Clean up poll state for orgs no longer in targetOrgs
-      const activeOrgIds = new Set(targetOrgs.map(o => o.uuid));
+      // Clean up poll state for orgs no longer in targetOrgs. Always keep the
+      // primary (bestOrg) — a multi-org Free primary is excluded from targetOrgs
+      // but still has an active gate entry that must not be pruned.
+      const activeOrgIds = new Set([bestOrg?.uuid, ...targetOrgs.map(o => o.uuid)]);
       for (const uuid of Object.keys(orgPollState)) {
         if (!activeOrgIds.has(uuid)) delete orgPollState[uuid];
       }

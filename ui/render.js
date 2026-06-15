@@ -354,6 +354,8 @@ export function _updateUICore(status) {
     if (extraSummary && !extraSummary._bound) {
       extraSummary._bound = true;
       extraSummary.addEventListener('click', (e) => {
+        // Hide (×) is handled in popup.js (stops propagation); guard defensively.
+        if (e.target.id === 'extra-usage-hide') return;
         if (e.target.id === 'extra-usage-help') {
           e.stopPropagation();
           const visible = extraTooltip.style.display !== 'none';
@@ -371,26 +373,28 @@ export function _updateUICore(status) {
       });
     }
     if (s.extra_usage && s.extra_usage.is_enabled && (s.extra_usage.used_credits || 0) > 0) {
-      extraSection.style.display = '';
-      const usedCents = s.extra_usage.used_credits || 0;
-      const limitCents = s.extra_usage.monthly_limit || 1;
-      const util = Math.round((usedCents / limitCents) * 100);
-      const used = (usedCents / 100).toFixed(2);
-      const limit = (limitCents / 100).toFixed(0);
-      const color = util >= 90 ? '#ef4444' : util >= 70 ? '#f59e0b' : '#22c55e';
-      // One-line summary
-      const summaryText = document.getElementById('extra-usage-summary-text');
-      summaryText.innerHTML = `${t('extra_usage_label')} <span id="extra-usage-help" style="cursor:pointer;color:#9ca3af;font-size:10px">(?)</span> <b style="color:${color}">$${used}/$${limit} (${util}%)</b>`;
-      // Gauge detail
-      document.getElementById('extra-usage-fill').style.width = `${Math.min(util, 100)}%`;
-      document.getElementById('extra-usage-fill').style.background = color;
-      const now = new Date();
-      const nextMonth1st = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-      const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-      document.getElementById('extra-usage-detail').textContent = `$${used} / $${limit} · ${nextMonth1st.getMonth() + 1}/1(${dayNames[nextMonth1st.getDay()]}) ${getLang() === 'ko' ? '리셋' : 'reset'}`;
-      // Auto-expand if usage is increasing
-      chrome.storage.local.get({ ct_prev_extra_used: 0 }, (prev) => {
-        const increasing = usedCents > (prev.ct_prev_extra_used || 0);
+      // hiddenExtraUsage: user-dismissed via the × button (restorable in Options).
+      chrome.storage.local.get({ hiddenExtraUsage: false, ct_prev_extra_used: 0 }, (cfg) => {
+        if (cfg.hiddenExtraUsage) { extraSection.style.display = 'none'; return; }
+        extraSection.style.display = '';
+        const usedCents = s.extra_usage.used_credits || 0;
+        const limitCents = s.extra_usage.monthly_limit || 1;
+        const util = Math.round((usedCents / limitCents) * 100);
+        const used = (usedCents / 100).toFixed(2);
+        const limit = (limitCents / 100).toFixed(0);
+        const color = util >= 90 ? '#ef4444' : util >= 70 ? '#f59e0b' : '#22c55e';
+        // One-line summary
+        const summaryText = document.getElementById('extra-usage-summary-text');
+        summaryText.innerHTML = `${t('extra_usage_label')} <span id="extra-usage-help" style="cursor:pointer;color:#9ca3af;font-size:10px">(?)</span> <b style="color:${color}">$${used}/$${limit} (${util}%)</b>`;
+        // Gauge detail
+        document.getElementById('extra-usage-fill').style.width = `${Math.min(util, 100)}%`;
+        document.getElementById('extra-usage-fill').style.background = color;
+        const now = new Date();
+        const nextMonth1st = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        document.getElementById('extra-usage-detail').textContent = `$${used} / $${limit} · ${nextMonth1st.getMonth() + 1}/1(${dayNames[nextMonth1st.getDay()]}) ${getLang() === 'ko' ? '리셋' : 'reset'}`;
+        // Auto-expand if usage is increasing
+        const increasing = usedCents > (cfg.ct_prev_extra_used || 0);
         if (increasing && extraPanel.style.display === 'none') {
           extraPanel.style.display = 'block';
           extraToggle.style.transform = 'rotate(90deg)';

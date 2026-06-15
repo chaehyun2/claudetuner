@@ -238,6 +238,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // Extra usage card visibility (popup) — synced with the popup's × button.
+  // Standalone storage.local key (popup-only pref, not part of synced config).
+  const showExtraCb = document.getElementById('show-extra-usage');
+  if (showExtraCb) {
+    const { hiddenExtraUsage } = await chrome.storage.local.get({ hiddenExtraUsage: false });
+    showExtraCb.checked = !hiddenExtraUsage;
+    showExtraCb.addEventListener('change', () => {
+      chrome.storage.local.set({ hiddenExtraUsage: !showExtraCb.checked });
+      showToast(`${t('popup_display_title')} ${t('auto_saved')}`);
+    });
+  }
+
   // Load saved settings
   chrome.storage.sync.get(
     { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
@@ -381,7 +393,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Data reset button
   document.getElementById('reset-btn').addEventListener('click', () => {
     if (!confirm(t('reset_confirm'))) return;
-    chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState'], () => {
+    // Also clear historyEmptyUntil so the next collect can immediately backfill the
+    // wiped sparkline — otherwise an active need_history cooldown would suppress the
+    // bootstrap for up to 6h, leaving the chart empty (see HISTORY_BACKFILL_COOLDOWN_MS).
+    chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState', 'historyEmptyUntil'], () => {
       showToast(t('reset_done'));
       document.getElementById('history-count').textContent = '0';
       document.getElementById('last-collected').textContent = '-';

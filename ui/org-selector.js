@@ -178,24 +178,28 @@ export function selectOrg(orgId, container) {
     if (extraSection) {
       const eu = isClaudeOrg ? orgData.extraUsage : null;
       if (eu && eu.is_enabled && (eu.used_credits || 0) > 0) {
-        extraSection.style.display = '';
-        const usedCents = eu.used_credits || 0;
-        const limitCents = eu.monthly_limit || 1;
-        const util = Math.round((usedCents / limitCents) * 100);
-        const used = (usedCents / 100).toFixed(2);
-        const limit = (limitCents / 100).toFixed(0);
-        const color = util >= 90 ? '#ef4444' : util >= 70 ? '#f59e0b' : '#22c55e';
-        const summaryText = document.getElementById('extra-usage-summary-text');
-        if (summaryText) summaryText.innerHTML = `${t('extra_usage_label')} <span id="extra-usage-help" style="cursor:pointer;color:#9ca3af;font-size:10px">(?)</span> <b style="color:${color}">$${used}/$${limit} (${util}%)</b>`;
-        const fillEl = document.getElementById('extra-usage-fill');
-        if (fillEl) { fillEl.style.width = `${Math.min(util, 100)}%`; fillEl.style.background = color; }
-        const detailEl = document.getElementById('extra-usage-detail');
-        if (detailEl) {
-          const now = new Date();
-          const nextMonth1st = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-          const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-          detailEl.textContent = `$${used} / $${limit} · ${nextMonth1st.getMonth() + 1}/1(${dayNames[nextMonth1st.getDay()]}) ${getLang() === 'ko' ? '리셋' : 'reset'}`;
-        }
+        // Respect the user's hidden preference (set via the popup's × button).
+        chrome.storage.local.get({ hiddenExtraUsage: false }, (cfg) => {
+          if (cfg.hiddenExtraUsage) { extraSection.style.display = 'none'; return; }
+          extraSection.style.display = '';
+          const usedCents = eu.used_credits || 0;
+          const limitCents = eu.monthly_limit || 1;
+          const util = Math.round((usedCents / limitCents) * 100);
+          const used = (usedCents / 100).toFixed(2);
+          const limit = (limitCents / 100).toFixed(0);
+          const color = util >= 90 ? '#ef4444' : util >= 70 ? '#f59e0b' : '#22c55e';
+          const summaryText = document.getElementById('extra-usage-summary-text');
+          if (summaryText) summaryText.innerHTML = `${t('extra_usage_label')} <span id="extra-usage-help" style="cursor:pointer;color:#9ca3af;font-size:10px">(?)</span> <b style="color:${color}">$${used}/$${limit} (${util}%)</b>`;
+          const fillEl = document.getElementById('extra-usage-fill');
+          if (fillEl) { fillEl.style.width = `${Math.min(util, 100)}%`; fillEl.style.background = color; }
+          const detailEl = document.getElementById('extra-usage-detail');
+          if (detailEl) {
+            const now = new Date();
+            const nextMonth1st = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+            const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+            detailEl.textContent = `$${used} / $${limit} · ${nextMonth1st.getMonth() + 1}/1(${dayNames[nextMonth1st.getDay()]}) ${getLang() === 'ko' ? '리셋' : 'reset'}`;
+          }
+        });
       } else {
         extraSection.style.display = 'none';
       }
