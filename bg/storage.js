@@ -97,6 +97,35 @@ export async function getExtToken() {
   });
 }
 
+// Stable per-installation id (effectively per browser profile, since
+// chrome.storage.local is profile-scoped). Created once, then persisted. Sent
+// with each snapshot so the server can attribute snapshots to a specific install
+// and measure multi-browser usage (distinct install_id per user_email) — needed
+// to decide whether server-side dedup can be removed.
+//
+// Memoized per service-worker instance: the 4 payloads in one cycle (and any
+// overlapping cycle in the same SW) share one in-flight read-or-create, so they
+// can't each generate a different UUID before the first persists (which would
+// transiently overcount one install as several). Reset on failure so a transient
+// storage error doesn't poison the cache forever.
+let _installIdPromise = null;
+export function getOrCreateInstallId() {
+  if (!_installIdPromise) {
+    _installIdPromise = (async () => {
+      const { install_id } = await chrome.storage.local.get('install_id');
+      if (install_id) return install_id;
+      // 12 hex chars (48-bit). Only needs to distinguish a handful of installs
+      // per user_email (we always group by it), so a full 36-char UUID is wasteful
+      // on every snapshot row — this is ~1/3 the column size with collision odds
+      // ~0 for a user's few browsers.
+      const id = Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, '0')).join('');
+      await chrome.storage.local.set({ install_id: id });
+      return id;
+    })().catch((e) => { _installIdPromise = null; throw e; });
+  }
+  return _installIdPromise;
+}
+
 export async function setExtToken(token) {
   return chrome.storage.local.set({ extToken: token });
 }

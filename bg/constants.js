@@ -51,6 +51,18 @@ export const ORG_POLL_TIERS = {
 };
 export const ORG_POLL_TIER_ORDER = ['active', 'idle', 'dormant'];
 export const ORG_POLL_CHANGE_THRESHOLD = 0.1; // utilization pp change to consider "changed"
+
+// === Delta-gated server send (primary org) ===
+// Local collection/history still runs every alarm tick (popup stays fresh);
+// we only gate the SERVER POST: send when usage changed (and >= MIN_INTERVAL
+// since the last POST), or force a flat heartbeat every FLOOR. This both cuts
+// snapshot INSERTs and avoids the wasted POST+read the server-side dedup would
+// otherwise do. FLOOR (1h) must stay < the server disconnection gates
+// (3h skip / 6h email) and < the dashboard chart gap CLAUDE_GAP_MS (140min),
+// and >= the server unchanged-usage dedup window (60min) so heartbeats aren't
+// deduped away. Do NOT remove the floor — it is the liveness signal.
+export const SEND_HEARTBEAT_FLOOR_MS = 60 * 60 * 1000; // 1h: force-send even if unchanged
+export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid changed re-sends
 // After a need_history backfill attempt, suppress re-triggering for this long. At a
 // slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
 // needHistory would otherwise stay true forever and bypass the adaptive tier gate —

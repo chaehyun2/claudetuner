@@ -1,6 +1,7 @@
 import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, appendUsageHistory, postSnapshot } from './storage.js';
+import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId } from './storage.js';
+import { gateProviderSnapshot } from './send-gate.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -19,7 +20,7 @@ function unixToResetTime(ts) {
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
  * Fails silently (returns empty orgs) if user is not logged into ChatGPT.
  */
-export async function collectChatGPT() {
+export async function collectChatGPT(force = false) {
   const loggedIn = await isChatGPTLoggedIn();
   if (!loggedIn) {
     return { success: false, orgs: [] };
@@ -67,10 +68,23 @@ export async function collectChatGPT() {
       el: null,
     });
 
-    // Send snapshot to server (fire-and-forget)
-    sendChatGPTSnapshot(org, email, plan).catch(e =>
-      console.warn('[Claude Tuner] ChatGPT snapshot send failed:', e.message)
-    );
+    // Send snapshot to server — delta-gated (shared with Claude collectors).
+    // Skip unchanged heartbeats the server would only dedup; local history above
+    // is always kept so the popup chart stays continuous. Returned org is
+    // unaffected, so popup/merge display is independent of the gate.
+    const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d };
+    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force });
+    if (gate.send) {
+      // Commit only on a confirmed-successful POST so a failed send leaves the
+      // gate unadvanced and the next cycle retries (no silent drop of a change).
+      const res = await sendChatGPTSnapshot(org, email, plan).catch(e => {
+        console.warn('[Claude Tuner] ChatGPT snapshot send failed:', e.message);
+        return null;
+      });
+      if (res) await gate.commit();
+    } else {
+      console.log(`[Claude Tuner] ChatGPT delta-gate skip (${gate.reason})`);
+    }
 
     return { success: true, orgs: [org] };
   } catch (e) {
@@ -124,10 +138,12 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
     provider: 'chatgpt',
     provider_email: chatgptEmail || null,
     is_extra_org: isExtraOrg,
+    install_id: await getOrCreateInstallId(),
   };
 
   // Shared helper handles auth recovery (401/403), account deletion (410),
   // and ext_token rotation — critical for independent accounts whose provider
-  // snapshots are their only server contact.
-  await postSnapshot(config, payload);
+  // snapshots are their only server contact. Returns the server result on
+  // success, or null on any failure (caller uses this to gate the commit).
+  return await postSnapshot(config, payload);
 }

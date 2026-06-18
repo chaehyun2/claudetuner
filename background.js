@@ -7,6 +7,7 @@ import {
   VISIBILITY_THROTTLE_MS, POPUP_COLLECT_THROTTLE_MS,
   NOTIF_ID_OPTIMIZE, NOTIF_ID_ALERT,
   DEFAULT_SERVER_URL, SITE_URL,
+  SEND_MIN_INTERVAL_MS,
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
@@ -110,9 +111,9 @@ async function hasClaudeSession() {
 }
 
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
-async function mergeChatGPTOrgs() {
+async function mergeChatGPTOrgs(force = false) {
   try {
-    const result = await collectChatGPT();
+    const result = await collectChatGPT(force);
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonChatGPT = collectedOrgs.filter(o => o.provider !== 'chatgpt');
     if (result.orgs.length > 0) {
@@ -138,9 +139,9 @@ async function mergeChatGPTOrgs() {
 }
 
 // Merge Gemini orgs into collectedOrgs storage (independent of Claude collection)
-async function mergeGeminiOrgs() {
+async function mergeGeminiOrgs(force = false) {
   try {
-    const result = await collectGemini();
+    const result = await collectGemini(force);
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonGemini = collectedOrgs.filter(o => o.provider !== 'gemini');
     if (result.orgs.length > 0) {
@@ -219,18 +220,18 @@ async function collectAndSend(opts) {
     // (not parallel) keeps peak load minimal on low-spec machines; .catch keeps
     // each provider independent so one failure doesn't block the other.
     if (collectChatGPT && await hasProviderPermission('chatgpt')) {
-      await mergeChatGPTOrgs().catch(() => {});
+      await mergeChatGPTOrgs(opts?.force).catch(() => {});
     }
     if (collectGemini && await hasProviderPermission('gemini')) {
-      await mergeGeminiOrgs().catch(() => {});
+      await mergeGeminiOrgs(opts?.force).catch(() => {});
     }
     return result;
   } catch (e) {
     // Claude failed — still try ChatGPT/Gemini independently if enabled.
     // Await (sequentially) so the SW isn't terminated mid-request.
     const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
-    if (collectChatGPT && await hasProviderPermission('chatgpt')) await mergeChatGPTOrgs().catch(() => {});
-    if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs().catch(() => {});
+    if (collectChatGPT && await hasProviderPermission('chatgpt')) await mergeChatGPTOrgs(opts?.force).catch(() => {});
+    if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs(opts?.force).catch(() => {});
     throw e;
   } finally {
     _collecting = false;
@@ -633,12 +634,11 @@ async function tryTabCollect(reason) {
 
   console.log(`[Claude Tuner] Tab collect triggered: ${reason}${wasError ? ' (retry after error)' : ''}`);
 
-  // Apply server POST gate (same logic as alarm handler)
-  const config = await getConfig();
-  const serverInterval = (await chrome.storage.local.get('serverPollInterval')).serverPollInterval
-    || config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+  // Coarse server-path floor (same as the alarm handler): run the server path
+  // at most ~every SEND_MIN_INTERVAL; the per-org delta-gate inside
+  // collectAndSend makes the actual send decision (change / 1h heartbeat floor).
   const { _lastServerPost = 0 } = await chrome.storage.local.get('_lastServerPost');
-  const shouldPost = (Date.now() - _lastServerPost) >= (serverInterval * 60_000 - 30_000);
+  const shouldPost = (Date.now() - _lastServerPost) >= (SEND_MIN_INTERVAL_MS - 30_000);
 
   const result = await collectAndSend({ skipServer: !shouldPost });
   if (result.success) {
@@ -789,12 +789,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
   if (alarm.name === ALARM_NAME) {
-    // Server POST gate: only send to server if enough time has passed
-    const config = await getConfig();
-    const serverInterval = (await chrome.storage.local.get('serverPollInterval')).serverPollInterval
-      || config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+    // Coarse server-path floor: run the server path at most ~every
+    // SEND_MIN_INTERVAL (10min). The actual send decision is made per-org by the
+    // delta-gate inside collectAndSend (send on usage change, or a 1h heartbeat
+    // floor). This replaces the old serverPollInterval time-throttle — with
+    // delta-gating the client already minimizes sends by change, so the coarse
+    // gate only needs to bound how often we re-evaluate. Local history/UI still
+    // updates every alarm tick (skipServer path) so the popup stays fresh.
     const { _lastServerPost = 0 } = await chrome.storage.local.get('_lastServerPost');
-    const shouldPost = (Date.now() - _lastServerPost) >= (serverInterval * 60_000 - 30_000); // 30s tolerance
+    const shouldPost = (Date.now() - _lastServerPost) >= (SEND_MIN_INTERVAL_MS - 30_000); // 30s tolerance
 
     const result = await collectAndSend({ skipServer: !shouldPost });
     if (result.success) {
@@ -895,13 +898,15 @@ async function getCurrentUsageForWindow(windowKey) {
 async function scheduleExpireAlarms(snapshot) {
   if (!snapshot) return;
 
-  // Clear all existing expire alarms
-  const allAlarms = await chrome.alarms.getAll();
-  for (const a of allAlarms) {
-    if (a.name.startsWith(ALARM_EXPIRE_PREFIX)) {
-      await chrome.alarms.clear(a.name);
-    }
-  }
+  // NOTE: we intentionally do NOT clear existing expire alarms first. Alarm names
+  // are deterministic per (key, suffix), so chrome.alarms.create() overwrites the
+  // same alarm when the reset time shifts. Clearing first + the >30s guard below
+  // would DELETE an already-scheduled due-soon alarm and then refuse to recreate
+  // it (a collection cycle inside the ramp window could thus starve pre1/after).
+  // Not clearing lets a due-soon alarm survive and fire. Stale alarms for a reset
+  // key that disappeared simply fire once (a harmless collect) and aren't
+  // recreated. Combined with the stable per-device jitter below, every reschedule
+  // lands each ramp alarm at the same time → idempotent.
 
   let resetTimes = [];
   if (snapshot.five_hour?.resets_at) resetTimes.push({ key: '5h', time: snapshot.five_hour.resets_at });
@@ -923,13 +928,34 @@ async function scheduleExpireAlarms(snapshot) {
   }
 
   const now = Date.now();
+  // Ramp trimmed to peak + drop. The server's 60min unchanged-usage dedup
+  // already collapses the redundant steps: for a plateaued user, pre2/pre1/at
+  // land identical pre-reset values and only the post-reset drop survives
+  // (2026-06-17 data: e.g. 100→100→100→0). pre2 and 'at' were therefore dropped —
+  // pre1 captures the pre-reset peak, 'after' the post-reset drop — which also
+  // halves the synchronized top-of-hour POST volume the deduped steps still cost.
   const offsets = [
     { suffix: 'notify5', minutes: -5 }, // Notification 5min before
-    { suffix: 'pre2', minutes: -2 },    // Collect 2min before
-    { suffix: 'pre1', minutes: -1 },    // Collect 1min before
-    { suffix: 'at', minutes: 0 },       // Collect at reset
-    { suffix: 'after', minutes: 2 },    // Collect + notify 2min after reset
+    { suffix: 'pre1', minutes: -1 },    // Collect 1min before (peak)
+    { suffix: 'after', minutes: 2 },    // Collect + notify 2min after reset (drop)
   ];
+
+  // De-sync the fleet: reset times are clock-aligned (7d all at :00, 5h at :X0),
+  // so without jitter every device's collect alarms fire at the same wall-clock
+  // minute → a ~40% top-of-hour write spike on the single-writer D1 (2026-06-17).
+  // Use a STABLE per-device jitter fraction (generated once, persisted): the same
+  // device always shifts by the same amount → reschedules land each alarm at the
+  // SAME time (idempotent, no starvation), while different devices get different
+  // offsets → the cohort spreads across ~90s. Apply it DIRECTIONALLY — pre-reset
+  // alarms shift EARLIER and post-reset alarms shift LATER — so a jittered 'pre1'
+  // never crosses the reset (still captures the peak) and 'after' never fires
+  // before the reset (still captures the drop).
+  let { ct_jitter_offset: jf } = await chrome.storage.local.get('ct_jitter_offset');
+  if (typeof jf !== 'number' || jf < 0 || jf > 1) {
+    jf = Math.random();
+    await chrome.storage.local.set({ ct_jitter_offset: jf });
+  }
+  const jitterMag = jf * 90 * 1000; // stable 0..90s for this device
 
   let scheduled = 0;
   for (const { key, time } of resetTimes) {
@@ -937,7 +963,9 @@ async function scheduleExpireAlarms(snapshot) {
     if (isNaN(expireMs)) continue;
 
     for (const { suffix, minutes } of offsets) {
-      const triggerMs = expireMs + minutes * 60 * 1000;
+      // pre-reset (minutes <= 0) shifts earlier, post-reset shifts later
+      const dirJitter = minutes <= 0 ? -jitterMag : jitterMag;
+      const triggerMs = expireMs + minutes * 60 * 1000 + dirJitter;
       const delayMs = triggerMs - now;
 
       // Only schedule if in the future and more than 30 seconds away

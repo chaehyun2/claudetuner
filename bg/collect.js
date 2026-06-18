@@ -2,9 +2,10 @@ import { sendGAEvent } from './analytics.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_INTERVAL_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
-  ORG_POLL_TIERS, ORG_POLL_TIER_ORDER, ORG_POLL_CHANGE_THRESHOLD,
+  ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
+import { hasOrgUsageChanged, shouldSendSnapshot } from './send-gate.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
@@ -13,11 +14,16 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
 
 // === Adaptive Polling helpers ===
 export function getOrgPollDefault() {
-  return { tier: 'active', unchangedCount: 0, lastValues: { h5: null, d7: null, extraUsed: null }, lastPollAt: 0 };
+  // lastValues/lastPollAt drive the adaptive tier (updated every poll).
+  // lastSentValues/lastSentAt drive the send-gate (updated only when we POST) —
+  // kept separate because "changed since last poll" (tier) and "changed since
+  // last sent" (gate) are different questions. Primary reuses lastValues/
+  // lastPollAt since its updateOrgPollState only runs when it sends.
+  return { tier: 'active', unchangedCount: 0, lastValues: { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null }, lastPollAt: 0, lastSentValues: null, lastSentAt: 0 };
 }
 
 /** Check if an org is due for polling based on its adaptive tier */
@@ -25,12 +31,6 @@ export function isOrgDueForPoll(state, now, baseIntervalMs) {
   const tierInfo = ORG_POLL_TIERS[state.tier] || ORG_POLL_TIERS.active;
   const effectiveInterval = tierInfo.intervalMs || baseIntervalMs;
   return (now - state.lastPollAt) >= effectiveInterval * 0.9;
-}
-
-/** Compare usage values and return true if changed beyond threshold */
-export function hasOrgUsageChanged(prev, current) {
-  const diff = (a, b) => a != null && b != null && Math.abs(a - b) >= ORG_POLL_CHANGE_THRESHOLD;
-  return diff(prev.h5, current.h5) || diff(prev.d7, current.d7) || diff(prev.extraUsed, current.extraUsed);
 }
 
 /** Update org poll state after a poll. Returns the updated state object */
@@ -214,7 +214,21 @@ export async function getLastActiveOrgId() {
 }
 
 // === Core Collection Engine ===
-export async function collectAndSend({ force = false, skipServer = false } = {}) {
+// Serialize all Claude collection runs. Multiple call sites (alarm, tab-collect,
+// 429 force, popup/manual) can fire concurrently; each loads orgPollState at the
+// start and writes the whole object at the end, so overlapping runs would
+// last-writer-wins and lose each other's per-org state. Chain runs so they never
+// overlap. Each caller still gets its OWN run's result; a throw doesn't break the
+// chain (next run proceeds either way).
+let _collectChain = Promise.resolve();
+export function collectAndSend(opts = {}) {
+  const run = () => collectAndSendImpl(opts);
+  const p = _collectChain.then(run, run);
+  _collectChain = p.catch(() => {});
+  return p;
+}
+
+async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
   const _t0 = performance.now();
   const _timings = {};
   // Skip collection if account is deleted
@@ -565,6 +579,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       claude_org_name: bestOrg?.name || null,
       is_primary_org: !!config.selectedOrgId && config.selectedOrgId === bestOrg?.uuid,
       last_active_org_uuid: cookieOrgId || null,
+      install_id: await getOrCreateInstallId(),
     };
 
     // Include ref_source (removed after first send)
@@ -610,12 +625,15 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
     const needHistory = recent6h.length < 30 && Date.now() > historyEmptyUntil;
     const body = { ...snapshot, ...(force ? { force: true } : {}), ...(needHistory ? { need_history: true } : {}) };
 
-    // === Primary org adaptive gate ===
-    // Reuse the same per-org tier machinery that governs extra orgs so the primary
-    // (the bulk of ingest) also backs off when usage is flat: active≈baseInterval →
-    // idle 30m → dormant 2h. We gate ONLY the server POST; the local UI/history/badge
-    // below still run every tick so the popup stays fresh. This orgPollState load is
-    // shared with the extra-org loop (single get + single set → no race).
+    // === Primary org delta-gated send ===
+    // We gate ONLY the server POST; the local UI/history/badge below still run
+    // every alarm tick so the popup stays fresh regardless. Send when usage
+    // changed (and >= MIN_INTERVAL since the last POST) or the 1h heartbeat
+    // FLOOR elapsed; otherwise skip the POST. This replaces the old tier-cadence
+    // gate (active→idle 30m→dormant 2h), which delayed a real change by up to 2h
+    // on the dashboard. lastValues/lastPollAt are advanced only on a POST (below),
+    // so they track the last *sent* values/time — exactly what the gate needs.
+    // orgPollState load is shared with the extra-org loop (single get/set → no race).
     const { orgPollState: _pollState = {} } = await chrome.storage.local.get({ orgPollState: {} });
     const orgPollState = _pollState || {};
     const baseIntervalMs = (config.intervalMinutes || DEFAULT_INTERVAL_MINUTES) * 60 * 1000;
@@ -630,18 +648,44 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       resetsAt7d: snapshot.seven_day?.resets_at ?? null,
       extraUsage: snapshot.extra_usage ?? null,
     };
-    // force (manual/welcome) and needHistory (sparse local history → must backfill)
-    // always post, bypassing the tier interval. Otherwise post only when the tier
-    // says this org is due.
-    const primaryDue = force || needHistory || isOrgDueForPoll(primaryState, now, baseIntervalMs);
+    // force (manual/welcome) and needHistory (sparse local history → must backfill,
+    // already rate-limited by historyEmptyUntil) always post. Otherwise the shared
+    // gate decides: changed (10min min-interval) OR the 1h heartbeat floor.
+    // Primary reuses lastPollAt as "last sent" — updateOrgPollState below runs only
+    // in this send branch, so lastValues/lastPollAt already track the last POST.
+    const { send: primaryDue, changed: primaryChanged, reason: primaryGateReason } = shouldSendSnapshot(
+      primaryState.lastValues, primaryState.lastPollAt, primaryCurrentValues,
+      { force: force || needHistory },
+    );
     if (!primaryDue) {
-      console.log(`[Claude Tuner] Primary adaptive skip [${primaryState.tier}]`);
+      console.log(`[Claude Tuner] Primary delta-gate skip (${primaryGateReason})`);
     } else {
-      // Advance the tier state machine only on an actual POST (lastPollAt must track
-      // the last POST, and unchangedCount must not inflate from local-only ticks).
+      // Advance state optimistically so lastValues/lastPollAt track the last
+      // *sent* values/time (the gate above depends on this). On a TRANSIENT POST
+      // failure we roll this back (below) so the next tick retries — otherwise a
+      // failed heartbeat would silently block the next send for a full FLOOR (1h).
+      const prevPrimaryValues = primaryState.lastValues;
+      const prevPrimaryPollAt = primaryState.lastPollAt;
       if (bestOrg?.uuid) {
-        const changed = hasOrgUsageChanged(primaryState.lastValues, primaryCurrentValues);
-        orgPollState[bestOrg.uuid] = updateOrgPollState(primaryState, primaryCurrentValues, changed);
+        orgPollState[bestOrg.uuid] = updateOrgPollState(primaryState, primaryCurrentValues, primaryChanged);
+      }
+      // Roll the primary org's send-state back to its pre-POST values on a
+      // transient failure (5xx/network). Persistent rejects (403 mismatch / 401 /
+      // 410) intentionally do NOT roll back — they should back off, not hammer.
+      const rollbackPrimary = async () => {
+        if (!bestOrg?.uuid) return;
+        const { orgPollState: cur = {} } = await chrome.storage.local.get({ orgPollState: {} });
+        if (cur[bestOrg.uuid]) {
+          cur[bestOrg.uuid] = { ...cur[bestOrg.uuid], lastValues: prevPrimaryValues, lastPollAt: prevPrimaryPollAt };
+          await chrome.storage.local.set({ orgPollState: cur });
+        }
+      };
+
+      // need_history backfill: claim the cooldown at ATTEMPT time (not only on a
+      // successful response) so a non-OK or thrown POST can't leave needHistory
+      // true and re-trigger a forced send every tick (defeating the gate — #220).
+      if (needHistory) {
+        await chrome.storage.local.set({ historyEmptyUntil: Date.now() + HISTORY_BACKFILL_COOLDOWN_MS });
       }
 
     // === Server POST: fire-and-forget (don't wait for response) ===
@@ -697,6 +741,7 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
       }
       if (!response.ok) {
         console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
+        await rollbackPrimary(); // transient (e.g. 5xx) → let the next tick retry
         return;
       }
       const result = await response.json();
@@ -805,16 +850,12 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             console.warn('[Claude Tuner] Failed to fetch /api/me for history bootstrap:', e.message);
           }
         }
-        // Suppress need_history re-triggering for a cooldown after every backfill attempt
-        // (merged, server-empty, or fetch error alike). At a slow idle/dormant cadence the
-        // 6h window structurally holds < 30 points, so without this needHistory stays true,
-        // bypasses the adaptive tier gate (primaryDue), and pins the primary org to active
-        // cadence — defeating the idle/dormant backoff. We already merged whatever the
-        // server had; re-requesting every cycle is futile and blocks the backoff.
-        await chrome.storage.local.set({ historyEmptyUntil: Date.now() + HISTORY_BACKFILL_COOLDOWN_MS });
+        // (historyEmptyUntil cooldown is now claimed at POST-attempt time above,
+        // so it's set on success/non-OK/throw alike — no need to set it here.)
       }
     }).catch((e) => {
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
+      rollbackPrimary().catch(() => {}); // transient network failure → retry next tick
     });
     } // end primary adaptive gate (primaryDue)
 
@@ -995,8 +1036,16 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             resetsAt7d: normalizeResetTime(extraUsage.seven_day?.resets_at) || null,
             extraUsage: normalizeExtraUsage(extraUsage.extra_usage),
           };
+          // Tier uses change-vs-last-poll (consecutive flat polls → back off).
           const usageChanged = hasOrgUsageChanged(pollState.lastValues, currentValues);
           orgPollState[extraOrg.uuid] = updateOrgPollState(pollState, currentValues, usageChanged);
+
+          // Send gate (shared with primary/ChatGPT/Gemini) uses change-vs-last-SENT
+          // — pollState is the pre-update reference; its lastValues is bumped every
+          // poll for the tier, so the gate reads the separate lastSent* fields.
+          const { send: extraDue, changed: extraChanged, reason: extraGateReason } = shouldSendSnapshot(
+            pollState.lastSentValues, pollState.lastSentAt, currentValues, { force },
+          );
 
           const isPersonalExtra = !NON_PERSONAL_PLANS.some(t => extraPlan.startsWith(t));
           const extraSnapshot = {
@@ -1012,7 +1061,11 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
             grove_detected: false,
             claude_org_uuid: extraOrg.uuid,
             claude_org_name: extraOrg.name || null,
-            is_heartbeat: !usageChanged,
+            // Heartbeat = unchanged vs what the server last received (last sent),
+            // matching the gate — NOT vs last poll, or a changed snapshot sent
+            // after a rate-limited window would be mislabeled and re-deduped.
+            is_heartbeat: !extraChanged,
+            install_id: await getOrCreateInstallId(),
           };
 
           // Usage API success — populate orgUsageMap/successOrgs immediately (regardless of server POST result)
@@ -1028,18 +1081,51 @@ export async function collectAndSend({ force = false, skipServer = false } = {})
           // Save extra org history too (for per-org view)
           await appendUsageHistory(buildHistoryPoint(extraSnapshot, extraPlan));
           const tierTag = orgPollState[extraOrg.uuid].tier !== 'active' ? ` [${orgPollState[extraOrg.uuid].tier}]` : '';
-          console.log(`[Claude Tuner] Extra org snapshot: ${extraOrg.name} (${extraPlan})${tierTag}${usageChanged ? '' : ' [heartbeat]'}`);
+          console.log(`[Claude Tuner] Extra org snapshot: ${extraOrg.name} (${extraPlan})${tierTag}${extraChanged ? '' : ' [heartbeat]'}`);
 
-          // Server POST: fire-and-forget
-          authedFetch(config, `${config.serverUrl}/api/snapshots`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(force ? { ...extraSnapshot, force: true } : extraSnapshot),
-          }).then(r => {
-            if (r && !r.ok) console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
-          }).catch(e => {
-            console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
-          });
+          // Delta-gated server POST. Skip unchanged heartbeats the server would
+          // only dedup; local history above is always kept.
+          if (extraDue) {
+            // Advance the send-state optimistically (persisted in the batch save
+            // below). On a TRANSIENT failure roll it back so the next tick retries
+            // — mirrors the primary path; otherwise a failed send would suppress
+            // the next POST for a full heartbeat floor (1h).
+            const prevSentValues = pollState.lastSentValues;
+            const prevSentAt = pollState.lastSentAt;
+            orgPollState[extraOrg.uuid] = { ...orgPollState[extraOrg.uuid], lastSentValues: currentValues, lastSentAt: Date.now() };
+            const rollbackExtra = async () => {
+              // Revert in-memory first: if the batch save at the end of the loop
+              // hasn't run yet, it then persists the reverted state instead of the
+              // optimistic advance. If it already ran, the storage write below
+              // reverts the persisted copy. Covers both orderings.
+              if (orgPollState[extraOrg.uuid]) {
+                orgPollState[extraOrg.uuid] = { ...orgPollState[extraOrg.uuid], lastSentValues: prevSentValues, lastSentAt: prevSentAt };
+              }
+              const { orgPollState: cur = {} } = await chrome.storage.local.get({ orgPollState: {} });
+              if (cur[extraOrg.uuid]) {
+                cur[extraOrg.uuid] = { ...cur[extraOrg.uuid], lastSentValues: prevSentValues, lastSentAt: prevSentAt };
+                await chrome.storage.local.set({ orgPollState: cur });
+              }
+            };
+            // Server POST: fire-and-forget
+            authedFetch(config, `${config.serverUrl}/api/snapshots`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(force ? { ...extraSnapshot, force: true } : extraSnapshot),
+            }).then(r => {
+              // 5xx/network → transient, roll back to retry. 4xx (401/403/410) →
+              // persistent; leave advanced so we back off, not hammer.
+              if (r && !r.ok) {
+                console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
+                if (r.status >= 500) rollbackExtra();
+              }
+            }).catch(e => {
+              console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
+              rollbackExtra();
+            });
+          } else {
+            console.log(`[Claude Tuner] Extra org ${extraOrg.name} delta-gate skip (${extraGateReason})`);
+          }
         } catch (e) {
           // 403/401 = removed from org, 429 = rate limited, etc. — continue collecting other orgs
           failedOrgs.push({ uuid: extraOrg.uuid, name: extraOrg.name, reason: e.message });
