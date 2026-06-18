@@ -1,4 +1,5 @@
 import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME } from './constants.js';
+import { noteServerFailure, noteServerSuccess } from './send-gate.js';
 
 export async function getConfig() {
   return new Promise((resolve) => {
@@ -251,10 +252,14 @@ export async function postSnapshot(config, payload) {
 
   if (!response.ok) {
     console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
+    // 5xx → server/D1 overload: extend the shared backoff. (401/403/410 returned
+    // above are persistent per-user issues, not server health — they don't back off.)
+    if (response.status >= 500) await noteServerFailure();
     return null;
   }
 
   const result = await response.json().catch(() => ({}));
+  await noteServerSuccess(); // confirmed-healthy POST clears any backoff
   // Store ext_token from server (TOFU issuance or refresh)
   if (result.ext_token) {
     await setExtToken(result.ext_token);

@@ -5,7 +5,7 @@ import {
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
-import { hasOrgUsageChanged, shouldSendSnapshot } from './send-gate.js';
+import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
@@ -236,6 +236,16 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
   if (account_deleted) {
     console.log('[Claude Tuner] Account deleted. Skipping collection.');
     return { success: false, account_deleted: true };
+  }
+
+  // Centralized server-failure backoff: while a 5xx backoff window is active, do
+  // all the local collection/UI work but skip the server POST (primary + extra
+  // orgs). Done here — not at the alarm/tab gate — so every collectAndSend caller
+  // (force collect, idle wake, 429 retry, reset/expire, manual, plan-order) is
+  // covered, not just the two periodic gates. force does NOT bypass: the server is
+  // down, so forcing only adds load (mirrors gateProviderSnapshot for ChatGPT/Gemini).
+  if (!skipServer && await isServerBackedOff()) {
+    skipServer = true;
   }
 
   const config = await getConfig();
@@ -742,9 +752,13 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       if (!response.ok) {
         console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
         await rollbackPrimary(); // transient (e.g. 5xx) → let the next tick retry
+        // 5xx → server/D1 overload: extend the shared backoff so the next tick
+        // doesn't immediately re-hammer a saturated server (#228 retry-on-5xx).
+        if (response.status >= 500) await noteServerFailure();
         return;
       }
       const result = await response.json();
+      await noteServerSuccess(); // confirmed-healthy POST clears any backoff
       console.log(`[Claude Tuner] Snapshot sent: ${result.success ? 'ok' : 'fail'}${result.skipped ? ' (skipped)' : ''}`);
 
       // Claude accepted (email matched the token identity) — clear any prior
@@ -856,6 +870,7 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
     }).catch((e) => {
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
       rollbackPrimary().catch(() => {}); // transient network failure → retry next tick
+      noteServerFailure().catch(() => {}); // network failure → extend shared backoff
     });
     } // end primary adaptive gate (primaryDue)
 
@@ -1117,11 +1132,14 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
               // persistent; leave advanced so we back off, not hammer.
               if (r && !r.ok) {
                 console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
-                if (r.status >= 500) rollbackExtra();
+                if (r.status >= 500) { rollbackExtra(); noteServerFailure().catch(() => {}); }
+              } else if (r && r.ok) {
+                noteServerSuccess().catch(() => {}); // healthy POST clears backoff
               }
             }).catch(e => {
               console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
               rollbackExtra();
+              noteServerFailure().catch(() => {}); // network failure → extend shared backoff
             });
           } else {
             console.log(`[Claude Tuner] Extra org ${extraOrg.name} delta-gate skip (${extraGateReason})`);

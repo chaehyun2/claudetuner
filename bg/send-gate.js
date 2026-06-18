@@ -7,7 +7,57 @@
 // This module is the single place that decides "is this snapshot worth POSTing?"
 // so all collectors share one delta-gate instead of each reinventing it.
 
-import { ORG_POLL_CHANGE_THRESHOLD, SEND_HEARTBEAT_FLOOR_MS, SEND_MIN_INTERVAL_MS } from './constants.js';
+import { ORG_POLL_CHANGE_THRESHOLD, SEND_HEARTBEAT_FLOOR_MS, SEND_MIN_INTERVAL_MS, SERVER_BACKOFF_BASE_MS, SERVER_BACKOFF_CAP_MS } from './constants.js';
+
+// ── Server-failure backoff ──────────────────────────────────────────────────
+// Global (not per-org) because a 5xx means the shared server/D1 is unhealthy, so
+// every collector should back off together rather than each hammering it. Set by
+// the POST paths on 5xx/network failure, cleared on the next confirmed success.
+const SERVER_BACKOFF_KEY = '_serverBackoff';
+
+// Serialize all read-modify-write of _serverBackoff. Multiple collectors (primary
+// + extra orgs + providers) can POST concurrently in one service-worker cycle, so
+// without this two failures could both read fails=0 and both write fails=1, losing
+// the exponential escalation (or a success/failure could interleave). A module-level
+// promise chain runs the mutations one at a time within this SW instance.
+let _backoffMutex = Promise.resolve();
+function withBackoffLock(fn) {
+  const run = _backoffMutex.then(fn, fn);
+  _backoffMutex = run.then(() => {}, () => {});
+  return run;
+}
+
+/** True while we're inside a server-failure backoff window — callers skip the POST. */
+export async function isServerBackedOff(now = Date.now()) {
+  const { [SERVER_BACKOFF_KEY]: b } = await chrome.storage.local.get({ [SERVER_BACKOFF_KEY]: null });
+  return !!(b && b.until && now < b.until);
+}
+
+/**
+ * Record a transient server failure (5xx / network) and extend the backoff.
+ * Exponential on CONSECUTIVE failures: BASE, 2×, 4×, … capped at CAP. The FIRST
+ * failure is exactly BASE (no jitter) so a one-off blip behaves like today's
+ * next-tick retry; escalated waits get ±15% jitter so the fleet doesn't resume in
+ * lockstep. Serialized via withBackoffLock so concurrent failures don't clobber
+ * the counter.
+ */
+export async function noteServerFailure(now = Date.now()) {
+  return withBackoffLock(async () => {
+    const { [SERVER_BACKOFF_KEY]: b } = await chrome.storage.local.get({ [SERVER_BACKOFF_KEY]: null });
+    const fails = ((b && b.fails) || 0) + 1;
+    const capped = Math.min(SERVER_BACKOFF_BASE_MS * Math.pow(2, fails - 1), SERVER_BACKOFF_CAP_MS);
+    const wait = fails <= 1 ? capped : Math.round(capped * (0.85 + Math.random() * 0.3));
+    await chrome.storage.local.set({ [SERVER_BACKOFF_KEY]: { until: now + wait, fails } });
+  });
+}
+
+/** Clear the backoff after a confirmed-successful POST. */
+export async function noteServerSuccess() {
+  return withBackoffLock(async () => {
+    const { [SERVER_BACKOFF_KEY]: b } = await chrome.storage.local.get({ [SERVER_BACKOFF_KEY]: null });
+    if (b && (b.fails || b.until)) await chrome.storage.local.set({ [SERVER_BACKOFF_KEY]: { until: 0, fails: 0 } });
+  });
+}
 
 /** Compare usage values; true if changed beyond threshold (or a 5h/7d reset window rolled over). */
 export function hasOrgUsageChanged(prev, current) {
@@ -61,6 +111,10 @@ const SEND_GATE_PREFIX = 'ctSendGate_';
 export async function gateProviderSnapshot(uuid, currentValues, { force = false } = {}) {
   const key = SEND_GATE_PREFIX + uuid;
   const prev = (await chrome.storage.local.get({ [key]: null }))[key] || {};
+  // ChatGPT/Gemini are collected outside the alarm's collectAndSend path, so the
+  // background.js server-path gate doesn't cover them — honor the backoff here so
+  // they also stop POSTing while the server is in a 5xx backoff window.
+  if (await isServerBackedOff()) return { send: false, reason: 'server-backoff', commit: async () => {} };
   const { send, reason } = shouldSendSnapshot(prev.lastValues, prev.lastSentAt, currentValues, { force });
   const commit = async () => {
     await chrome.storage.local.set({ [key]: { lastValues: currentValues, lastSentAt: Date.now() } });

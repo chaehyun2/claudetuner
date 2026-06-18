@@ -63,6 +63,17 @@ export const ORG_POLL_CHANGE_THRESHOLD = 0.1; // utilization pp change to consid
 // deduped away. Do NOT remove the floor — it is the liveness signal.
 export const SEND_HEARTBEAT_FLOOR_MS = 60 * 60 * 1000; // 1h: force-send even if unchanged
 export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid changed re-sends
+// Server-failure backoff: when /api/snapshots returns 5xx (server/D1 overload) or
+// the POST fails at the network layer, exponentially back off the SERVER POST so a
+// sustained outage isn't retried every SEND_MIN_INTERVAL tick (the retry-on-5xx
+// rollback added in #228/#233 otherwise hammers the server exactly when it's
+// already saturated — 2026-06-18 read-saturation incident). The first failure
+// backs off BASE (= one normal interval, same as today's next-tick retry); only
+// CONSECUTIVE failures escalate (BASE, 2×, 4×, … up to CAP). CAP stays < the chart
+// gap CLAUDE_GAP_MS (140min) and the disconnection gates (3h/6h) so even at max
+// backoff a client resumes well before any false "수집 끊김" / disconnection email.
+export const SERVER_BACKOFF_BASE_MS = SEND_MIN_INTERVAL_MS; // 10min
+export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
 // After a need_history backfill attempt, suppress re-triggering for this long. At a
 // slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
 // needHistory would otherwise stay true forever and bypass the adaptive tier gate —
