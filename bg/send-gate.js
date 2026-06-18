@@ -81,11 +81,30 @@ export function hasOrgUsageChanged(prev, current) {
  * matches what the server last stored.
  */
 export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { force = false, now = Date.now() } = {}) {
+  prevValues = prevValues || {};
   // Always compute the real change (vs last sent) — callers use it to set the
   // is_heartbeat flag and to drive the adaptive tier, which must NOT be told
   // "changed" just because a forced/needHistory send bypassed the gate.
   const changed = hasOrgUsageChanged(prevValues, currentValues);
+  // force = "always post" (manual/backfill/429/plan-change). It bypasses the
+  // stale-reset guard below to mirror the SERVER, whose stale-reset guard also
+  // lives inside `if (!force)` — so we never drop a force send.
   if (force) return { send: true, changed, reason: 'force' };
+  // Stale-reset guard (non-force, client-side): drop a snapshot whose resets_at
+  // moved BACKWARD vs the last SENT one — a delayed/cached API response from an OLD
+  // window (reset windows only advance, so cur < prev is always stale, not a real
+  // change). Parse to epoch and require both finite, so a malformed/missing value
+  // never triggers a (wrong) drop. First send (no prev) can't compare → allowed.
+  // Replaces the server's non-force dedup-SELECT stale-reset read for gated clients.
+  const backwardReset = (prev, cur) => {
+    if (prev == null || cur == null) return false;
+    const p = Date.parse(prev), c = Date.parse(cur);
+    return Number.isFinite(p) && Number.isFinite(c) && c < p;
+  };
+  if (backwardReset(prevValues.resetsAt7d, currentValues.resetsAt7d) ||
+      backwardReset(prevValues.resetsAt5h, currentValues.resetsAt5h)) {
+    return { send: false, changed: false, reason: 'stale-reset' };
+  }
   const sinceSent = now - (lastSentAt || 0);
   if (changed && sinceSent >= SEND_MIN_INTERVAL_MS) return { send: true, changed, reason: 'changed' };
   if (sinceSent >= SEND_HEARTBEAT_FLOOR_MS) return { send: true, changed, reason: 'floor' };
