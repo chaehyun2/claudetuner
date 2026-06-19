@@ -123,9 +123,11 @@ function autoSave() {
 function doSave() {
   const serverUrl = document.getElementById('server-url').value.replace(/\/+$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
-  const intervalMinutes = parseInt(document.getElementById('interval').value, 10);
   const optimizationMode = getRadioValue('optimization-group') || 'notify_only';
-  const intervalExplicitlySet = !document.getElementById('interval-server-default').checked;
+  // Collection interval is no longer user-set — managed automatically (adaptive +
+  // server cadence). Keep intervalExplicitlySet=false so the server poll hint always
+  // applies, and never overwrite the stored intervalMinutes (idle base) from here.
+  const intervalExplicitlySet = false;
   const usageDisplayMode = getRadioValue('usage-display-group') || '7d';
   const thresholdWarn = parseInt(document.getElementById('threshold-warn').value, 10) || 80;
   const thresholdDanger = parseInt(document.getElementById('threshold-danger').value, 10) || 95;
@@ -150,7 +152,7 @@ function doSave() {
   const notifyPlanChange = document.getElementById('notify-plan-change').checked;
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalMinutes, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -168,13 +170,8 @@ function doSave() {
   });
 
   chrome.storage.sync.set(config, () => {
-    chrome.alarms.clear('claude-usage-poll', () => {
-      chrome.alarms.create('claude-usage-poll', {
-        delayInMinutes: 1,
-        periodInMinutes: intervalMinutes,
-      });
-    });
-
+    // Poll alarm is owned by background.js (activity-adaptive + server cadence) — the
+    // options page no longer forces a fixed period.
     chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' });
 
     // Sync settings to server for analytics (fire-and-forget)
@@ -182,7 +179,7 @@ function doSave() {
       const userEmail = st.lastStatus?.snapshot?.user_email;
       if (userEmail) {
         const extSettings = {
-          intervalMinutes, usageDisplayMode, thresholdWarn, thresholdDanger,
+          usageDisplayMode, thresholdWarn, thresholdDanger,
           sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, optimizationMode,
           collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
@@ -256,8 +253,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
-      ensureIntervalOption(config.intervalMinutes);
-      document.getElementById('interval').value = String(config.intervalMinutes);
 
       // Optimization mode
       chrome.storage.local.get({ ct_admin_order_auto_approve: false }, (local) => {
@@ -267,10 +262,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         else optMode = 'notify_only';
         initRadioGroup('optimization-group', optMode, () => autoSave());
       });
-
-      const useServerDefault = !config.intervalExplicitlySet;
-      document.getElementById('interval-server-default').checked = useServerDefault;
-      document.getElementById('interval').disabled = useServerDefault;
 
       // Badge display mode
       initRadioGroup('usage-display-group', config.usageDisplayMode || '7d', () => {
@@ -301,21 +292,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   );
 
-  // Display server default interval
-  chrome.storage.local.get({ serverPollInterval: null }, (data) => {
-    const el = document.getElementById('interval-server-value');
-    if (data.serverPollInterval) {
-      el.textContent = `(${t('interval_current_server', data.serverPollInterval)})`;
-    }
-  });
-
   // === Auto-save event bindings ===
-  // Collection interval
-  document.getElementById('interval-server-default').addEventListener('change', (e) => {
-    document.getElementById('interval').disabled = e.target.checked;
-    autoSave();
-  });
-  document.getElementById('interval').addEventListener('change', autoSave);
 
   // Thresholds
   document.getElementById('threshold-warn').addEventListener('change', () => { validateThresholds(); updateBadgePreview(); updateNotifyExamples(); autoSave(); });
@@ -472,26 +449,6 @@ function formatTimeAgo(timestamp) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}${t('ago_hour')}`;
   return `${Math.floor(hours / 24)}${t('ago_day')}`;
-}
-
-function ensureIntervalOption(minutes) {
-  const select = document.getElementById('interval');
-  const val = String(minutes);
-  for (const opt of select.options) {
-    if (opt.value === val) return;
-  }
-  const opt = document.createElement('option');
-  opt.value = val;
-  opt.textContent = `${minutes} min`;
-  let inserted = false;
-  for (const existing of select.options) {
-    if (parseInt(existing.value, 10) > minutes) {
-      select.insertBefore(opt, existing);
-      inserted = true;
-      break;
-    }
-  }
-  if (!inserted) select.appendChild(opt);
 }
 
 function showToast(message, isError) {

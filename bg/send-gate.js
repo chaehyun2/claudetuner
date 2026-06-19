@@ -8,6 +8,7 @@
 // so all collectors share one delta-gate instead of each reinventing it.
 
 import { ORG_POLL_CHANGE_THRESHOLD, SEND_HEARTBEAT_FLOOR_MS, SEND_MIN_INTERVAL_MS, SERVER_BACKOFF_BASE_MS, SERVER_BACKOFF_CAP_MS } from './constants.js';
+import { getCadence } from './cadence-config.js';
 
 // ── Server-failure backoff ──────────────────────────────────────────────────
 // Global (not per-org) because a 5xx means the shared server/D1 is unhealthy, so
@@ -80,11 +81,13 @@ export function hasOrgUsageChanged(prev, current) {
  * polled one — comparing against last-sent catches slow cumulative drift and
  * matches what the server last stored.
  */
-export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { force = false, now = Date.now() } = {}) {
+export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { force = false, now = Date.now(), sendFloorMs = SEND_MIN_INTERVAL_MS, heartbeatFloorMs = SEND_HEARTBEAT_FLOOR_MS } = {}) {
   prevValues = prevValues || {};
   // Always compute the real change (vs last sent) — callers use it to set the
   // is_heartbeat flag and to drive the adaptive tier, which must NOT be told
   // "changed" just because a forced/needHistory send bypassed the gate.
+  // sendFloorMs / heartbeatFloorMs default to the hardcoded constants; callers that
+  // resolved a server override (via getCadence) pass the steered values in.
   const changed = hasOrgUsageChanged(prevValues, currentValues);
   // force = "always post" (manual/backfill/429/plan-change). It bypasses the
   // stale-reset guard below to mirror the SERVER, whose stale-reset guard also
@@ -106,8 +109,8 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
     return { send: false, changed: false, reason: 'stale-reset' };
   }
   const sinceSent = now - (lastSentAt || 0);
-  if (changed && sinceSent >= SEND_MIN_INTERVAL_MS) return { send: true, changed, reason: 'changed' };
-  if (sinceSent >= SEND_HEARTBEAT_FLOOR_MS) return { send: true, changed, reason: 'floor' };
+  if (changed && sinceSent >= sendFloorMs) return { send: true, changed, reason: 'changed' };
+  if (sinceSent >= heartbeatFloorMs) return { send: true, changed, reason: 'floor' };
   return { send: false, changed, reason: changed ? 'rate-limited' : 'unchanged' };
 }
 
@@ -134,7 +137,9 @@ export async function gateProviderSnapshot(uuid, currentValues, { force = false 
   // background.js server-path gate doesn't cover them — honor the backoff here so
   // they also stop POSTing while the server is in a 5xx backoff window.
   if (await isServerBackedOff()) return { send: false, reason: 'server-backoff', commit: async () => {} };
-  const { send, reason } = shouldSendSnapshot(prev.lastValues, prev.lastSentAt, currentValues, { force });
+  const cadence = await getCadence();
+  const { send, reason } = shouldSendSnapshot(prev.lastValues, prev.lastSentAt, currentValues,
+    { force, sendFloorMs: cadence.sendFloorMs, heartbeatFloorMs: cadence.heartbeatFloorMs });
   const commit = async () => {
     await chrome.storage.local.set({ [key]: { lastValues: currentValues, lastSentAt: Date.now() } });
   };

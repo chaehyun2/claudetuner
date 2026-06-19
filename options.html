@@ -267,21 +267,8 @@
         <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">dashboard settings</a>.
       </div>
     </div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="collect_interval"></label>
-      <label class="check-label">
-        <input type="checkbox" id="interval-server-default" checked>
-        <span data-i18n="interval_use_server_default"></span>
-        <span class="check-sub" id="interval-server-value"></span>
-      </label>
-      <select id="interval" disabled>
-        <option value="5">5 min</option>
-        <option value="10">10 min</option>
-        <option value="15">15 min</option>
-        <option value="30">30 min</option>
-        <option value="60">60 min</option>
-      </select>
-    </div>
+    <!-- Collection interval is no longer user-configurable: it is managed
+         automatically (activity-adaptive locally + server-tunable cadence). -->
   </div>
 
   <!-- 툴바 배지 -->

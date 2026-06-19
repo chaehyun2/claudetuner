@@ -21,6 +21,7 @@ import {
   setCollectAndSendRef,
 } from './bg/plan.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/collect.js';
+import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { collectGemini } from './bg/collect-gemini.js';
 
@@ -171,6 +172,14 @@ async function mergeGeminiOrgs(force = false) {
 async function collectAndSend(opts) {
   _collecting = true;
   try {
+    // Provider-incident collection pause (server circuit breaker), enforced for the
+    // WHOLE orchestration — Claude + ChatGPT + Gemini — so no provider is fetched
+    // while paused. force (manual) bypasses. (collect.js has its own guard for direct
+    // Claude calls; this one covers the provider merges below that bypass it.)
+    if (!opts?.force && isCollectionPaused(await getCadence())) {
+      console.log('[Claude Tuner] Collection paused by server (provider incident). Skipping all providers.');
+      return { success: false, paused: true };
+    }
     const { collectClaude = true, collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectClaude: true, collectChatGPT: true, collectGemini: true });
     let result = { success: false, skipped: true };
     // Don't attempt Claude collection for users who clearly aren't Claude users —
@@ -555,26 +564,43 @@ async function setupAlarm() {
 async function updatePollAlarm() {
   const config = await getConfig();
   const baseInterval = config.intervalMinutes || DEFAULT_INTERVAL_MINUTES;
+  const cadence = await getCadence();
 
-  // Free plan: fixed 60min, ignore activity
+  // Base interval by plan/activity. Free plan is fixed 60min (ignores activity); paid
+  // plans use the activity tiers.
+  let interval;
   if (baseInterval === FREE_PLAN_INTERVAL_MINUTES) {
-    chrome.alarms.create(ALARM_NAME, { delayInMinutes: FREE_PLAN_INTERVAL_MINUTES, periodInMinutes: FREE_PLAN_INTERVAL_MINUTES });
-    return;
+    interval = FREE_PLAN_INTERVAL_MINUTES;
+  } else {
+    const state = getActivityState();
+    switch (state) {
+      case ACTIVITY_STATES.ACTIVE:     interval = LOCAL_ACTIVE_INTERVAL_MINUTES; break;     // 2min (floored below)
+      case ACTIVITY_STATES.BACKGROUND: interval = LOCAL_BACKGROUND_INTERVAL_MINUTES; break; // 5min
+      default:                         interval = baseInterval; break;                       // 10min (server default)
+    }
   }
 
-  const state = getActivityState();
-  let interval;
-  switch (state) {
-    case ACTIVITY_STATES.ACTIVE:     interval = LOCAL_ACTIVE_INTERVAL_MINUTES; break;     // 2min
-    case ACTIVITY_STATES.BACKGROUND: interval = LOCAL_BACKGROUND_INTERVAL_MINUTES; break; // 5min
-    default:                         interval = baseInterval; break;                       // 10min (server default)
+  // Collection floor applies to ALL plans (incl. Free): never collect faster than the
+  // resolved collect floor (hard 5min min + any server collect_floor for provider
+  // incidents). MAX so the server can only SLOW collection, never speed it past the
+  // 5min hard floor (too fast → provider ban). Active's 2min effectively becomes >=5min;
+  // a fleet collect_floor above 60 also slows Free.
+  const collectFloorMin = cadence.collectFloorMs / 60000;
+  interval = Math.max(interval, collectFloorMin);
+  // Collection pause (provider-incident circuit breaker): delay the next tick to the
+  // pause end so the fleet stops hitting the provider; the collectAndSend pause guard
+  // is the authoritative skip if a tick still fires.
+  const paused = isCollectionPaused(cadence);
+  let delay = interval;
+  if (paused) {
+    delay = Math.max(interval, Math.ceil((cadence.collectPauseUntil - Date.now()) / 60000));
   }
 
   const existing = await chrome.alarms.get(ALARM_NAME);
-  if (existing && Math.abs(existing.periodInMinutes - interval) < 0.5) return; // no change needed
+  if (!paused && existing && Math.abs(existing.periodInMinutes - interval) < 0.5) return; // no change needed
 
-  chrome.alarms.create(ALARM_NAME, { delayInMinutes: interval, periodInMinutes: interval });
-  console.log(`[Claude Tuner] Poll alarm: ${interval}m (activity=${state})`);
+  chrome.alarms.create(ALARM_NAME, { delayInMinutes: delay, periodInMinutes: interval });
+  console.log(`[Claude Tuner] Poll alarm: ${interval}m (collectFloor=${collectFloorMin}m${paused ? `, paused ${delay}m` : ''})`);
 }
 
 // === Auto-open side panel on first Claude.ai visit after fresh install ===
@@ -1443,3 +1469,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // Resolve circular dependency between bg/collect.js ↔ bg/plan.js: inject via setter
 setCollectAndSendRef(collectAndSend);
+
+// Reschedule the poll alarm immediately when the server changes the cadence (e.g.
+// raises the collect floor or starts/ends a pause) — without this the existing alarm
+// keeps its old period until an unrelated activity event fires updatePollAlarm.
+setCadenceChangeHandler(updatePollAlarm);

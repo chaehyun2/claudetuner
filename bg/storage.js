@@ -1,5 +1,6 @@
 import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME } from './constants.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
+import { applyServerCadence } from './cadence-config.js';
 
 export async function getConfig() {
   return new Promise((resolve) => {
@@ -260,6 +261,9 @@ export async function postSnapshot(config, payload) {
 
   const result = await response.json().catch(() => ({}));
   await noteServerSuccess(); // confirmed-healthy POST clears any backoff
+  // Store any server-tunable cadence override here — the shared chokepoint for ALL
+  // POSTs (Claude + ChatGPT + Gemini), so provider-only accounts get cadence too.
+  await applyServerCadence(result);
   // Store ext_token from server (TOFU issuance or refresh)
   if (result.ext_token) {
     await setExtToken(result.ext_token);

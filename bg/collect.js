@@ -6,6 +6,7 @@ import {
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
+import { getCadence, isCollectionPaused, applyServerCadence } from './cadence-config.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
@@ -236,6 +237,18 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
   if (account_deleted) {
     console.log('[Claude Tuner] Account deleted. Skipping collection.');
     return { success: false, account_deleted: true };
+  }
+
+  // Provider-incident collection pause (server circuit breaker): skip the whole
+  // collection (provider fetch) while paused, regardless of what scheduled the tick —
+  // this is the authoritative guard (the alarm reschedule in updatePollAlarm is just
+  // an optimization). force (manual/welcome) bypasses: negligible volume, user-initiated.
+  if (!force) {
+    const _pauseCadence = await getCadence();
+    if (isCollectionPaused(_pauseCadence)) {
+      console.log('[Claude Tuner] Collection paused by server (provider incident). Skipping.');
+      return { success: false, paused: true };
+    }
   }
 
   // Centralized server-failure backoff: while a 5xx backoff window is active, do
@@ -663,9 +676,10 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
     // gate decides: changed (10min min-interval) OR the 1h heartbeat floor.
     // Primary reuses lastPollAt as "last sent" — updateOrgPollState below runs only
     // in this send branch, so lastValues/lastPollAt already track the last POST.
+    const primaryCadence = await getCadence();
     const { send: primaryDue, changed: primaryChanged, reason: primaryGateReason } = shouldSendSnapshot(
       primaryState.lastValues, primaryState.lastPollAt, primaryCurrentValues,
-      { force: force || needHistory },
+      { force: force || needHistory, sendFloorMs: primaryCadence.sendFloorMs, heartbeatFloorMs: primaryCadence.heartbeatFloorMs },
     );
     if (!primaryDue) {
       console.log(`[Claude Tuner] Primary delta-gate skip (${primaryGateReason})`);
@@ -784,6 +798,12 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
           }
         }
       }
+
+      // Store server-tunable cadence override from THIS Claude response. The Claude
+      // primary/extra paths POST via authedFetch directly (not postSnapshot), so they
+      // need their own call — postSnapshot's call covers only ChatGPT/Gemini. Paths
+      // are disjoint (Claude→authedFetch, providers→postSnapshot) so no double-apply.
+      await applyServerCadence(result);
 
       // Save review nudge state
       if (result.review_nudge) {
@@ -1058,8 +1078,10 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
           // Send gate (shared with primary/ChatGPT/Gemini) uses change-vs-last-SENT
           // — pollState is the pre-update reference; its lastValues is bumped every
           // poll for the tier, so the gate reads the separate lastSent* fields.
+          const extraCadence = await getCadence();
           const { send: extraDue, changed: extraChanged, reason: extraGateReason } = shouldSendSnapshot(
-            pollState.lastSentValues, pollState.lastSentAt, currentValues, { force },
+            pollState.lastSentValues, pollState.lastSentAt, currentValues,
+            { force, sendFloorMs: extraCadence.sendFloorMs, heartbeatFloorMs: extraCadence.heartbeatFloorMs },
           );
 
           const isPersonalExtra = !NON_PERSONAL_PLANS.some(t => extraPlan.startsWith(t));

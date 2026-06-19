@@ -74,6 +74,19 @@ export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid 
 // backoff a client resumes well before any false "수집 끊김" / disconnection email.
 export const SERVER_BACKOFF_BASE_MS = SEND_MIN_INTERVAL_MS; // 10min
 export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
+
+// === Server-tunable cadence (cadence-config.js) ===
+// Collection (Claude/ChatGPT/Gemini fetch) and server POST cadence can be steered
+// fleet-wide by the server (faster than a CWS release) for provider incidents
+// (Claude outage / rate-limit change) and our own D1 load. Each parameter has a
+// hardcoded default here so the extension ALWAYS works standalone; the server only
+// OVERRIDES. Overrides decay back to these defaults after CADENCE_TTL_MS if the
+// server can't reconfirm them — so an aggressive value can't persist if the server
+// dies (this TTL-decay replaces clamps for the unclamped send floor).
+export const COLLECT_HARD_FLOOR_MS = 5 * 60 * 1000;        // 5min: never collect faster, even at active tier (clamp kept — too-fast = provider ban risk)
+export const HEARTBEAT_FLOOR_MIN_MS = 60 * 60 * 1000;      // heartbeat clamp lower bound (>= server 60min dedup window)
+export const HEARTBEAT_FLOOR_MAX_MS = 140 * 60 * 1000;     // heartbeat clamp upper bound (< chart gap CLAUDE_GAP_MS 140min / 3h skip / 6h email) — exclusive
+export const CADENCE_TTL_MS = 12 * 60 * 60 * 1000;         // 12h: a server override not reconfirmed within this decays to the hardcoded default
 // After a need_history backfill attempt, suppress re-triggering for this long. At a
 // slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
 // needHistory would otherwise stay true forever and bypass the adaptive tier gate —
