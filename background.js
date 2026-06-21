@@ -587,11 +587,33 @@ async function updatePollAlarm() {
   // a fleet collect_floor above 60 also slows Free.
   const collectFloorMin = cadence.collectFloorMs / 60000;
   interval = Math.max(interval, collectFloorMin);
+  // Corrupt-config guard: a malformed stored `intervalMinutes` or server `poll_interval_minutes`
+  // can make `interval` NaN/Infinity (Math.max(NaN, n) === NaN), which would make delayInMinutes
+  // NaN — Chrome silently drops the alarm and collection STOPS. Fall back to the default interval
+  // (always finite; collectFloorMin is itself clamped finite by cadence-config). Pre-existing risk;
+  // the jitter below would propagate it, so harden here.
+  if (!Number.isFinite(interval) || interval <= 0) interval = DEFAULT_INTERVAL_MINUTES;
   // Collection pause (provider-incident circuit breaker): delay the next tick to the
   // pause end so the fleet stops hitting the provider; the collectAndSend pause guard
   // is the authoritative skip if a tick still fires.
   const paused = isCollectionPaused(cadence);
-  let delay = interval;
+  // De-sync jitter: give the FIRST fire a per-client random phase offset so clients that
+  // (re)create their alarm at the same instant don't all fire on the same wall-clock minute.
+  // The synchronizer is the Monday-morning wave of users opening Claude: they transition to
+  // the active tier together (interval 10→5min), the alarm is re-created at ~the same time,
+  // and Chrome fires periodic alarms RELATIVE TO CREATION — so every client's phase clusters
+  // and ~1/3 of the active fleet then POSTs on one server minute every `interval`, stalling
+  // the single-D1 primary (2026-06-21 incident). NB collection ≠ posting, but the periodic
+  // server POST only happens inside collectAndSend (the ALARM_NAME wake) — the SW is dormant
+  // otherwise — so spreading the collection grid spreads the POSTs too; per-user POST rate is
+  // still the 15min send floor, this only spreads WHEN each client's grid lands.
+  // The jitter is ADDED to `interval` (never below it → can't undercut the collect floor /
+  // provider protection) and CAPPED at the collect floor (collectFloorMin) so the extra
+  // first-fire delay is bounded (~5min) even for the 60min free-plan interval — while the
+  // dominant 5min active/bg tier (the wave) still gets a full-period spread (cap == its period).
+  // `interval` is server-tunable (collectFloor pushed via /api/snapshots) so the jitter scales.
+  // The phase persists because the alarm isn't re-created while the interval is unchanged (guard below).
+  let delay = interval + Math.random() * Math.min(interval, collectFloorMin);
   if (paused) {
     delay = Math.max(interval, Math.ceil((cadence.collectPauseUntil - Date.now()) / 60000));
   }
