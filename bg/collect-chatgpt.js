@@ -9,6 +9,17 @@ function capitalizeFirst(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// Map raw ChatGPT plan_type codes to intuitive display names.
+// 'prolite' = the $100 Pro tier (5x Plus quota, launched 2026-04); 'pro' = $200 Pro (20x Plus).
+const CHATGPT_PLAN_NAMES = {
+  free: 'Free', go: 'Go', plus: 'Plus', prolite: 'Pro 5x', pro: 'Pro 20x',
+  team: 'Team', business: 'Business', enterprise: 'Enterprise',
+  education: 'Education', k12: 'Education (K-12)',
+};
+function chatgptPlanName(code) {
+  return CHATGPT_PLAN_NAMES[(code || 'free').toLowerCase()] || capitalizeFirst(code || 'free');
+}
+
 // Convert Unix timestamp (seconds) to ISO string, then normalize to minute precision
 function unixToResetTime(ts) {
   if (!ts) return null;
@@ -36,7 +47,7 @@ export async function collectChatGPT(force = false) {
 
     const primary = usage.rate_limit.primary_window;
     const secondary = usage.rate_limit.secondary_window;
-    const plan = capitalizeFirst(usage.plan_type || 'free');
+    const plan = chatgptPlanName(usage.plan_type);
     const accountId = usage.account_id || usage.user_id || 'unknown';
     const email = usage.email || null;
 

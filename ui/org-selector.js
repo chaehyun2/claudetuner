@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute } from './util.js';
+import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks } from './util.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -77,6 +77,7 @@ export function selectOrg(orgId, container) {
   }
 
   state.selectedOrgId = orgId;
+  refreshDashboardLinks(orgId); // keep static dashboard anchors pointed at the viewed org
 
   // Look up selected org data from collectedOrgs (+ lastStatus for recommendation restore)
   chrome.storage.local.get({ collectedOrgs: [], lastStatus: null }, (local) => {

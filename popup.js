@@ -2,8 +2,10 @@
 import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, isChartAutoRoll, isChartRolling } from './ui/charts.js';
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory } from './ui/state.js';
+import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
+import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
 
@@ -198,7 +200,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     fmSection.title = 'Dashboard';
     fmSection.addEventListener('click', (e) => {
       if (e.target.closest('a')) return;
-      chrome.tabs.create({ url: 'https://claudetuner.com/dashboard' });
+      chrome.tabs.create({ url: dashboardUrl(state.selectedOrgId) });
     });
   }
 
@@ -230,12 +232,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load current status + history directly from chrome.storage
   // Restore pinned org from selectedOrgId (sync)
-  chrome.storage.sync.get({ selectedOrgId: null }, (syncCfg) => {
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null }, (result) => {
+  chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
+    state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false }, (result) => {
       state.onboardOrgName = result.onboardOrgName || null;
       state.usageHistory = result.usageHistory || [];
       state.historyLoaded = true;
       state.claudeNoticeDismissed = result.claudeNoticeDismissed || false;
+      state.lastView = result.lastView || 'overview';
+      state.overviewHintDismissed = !!result.overviewHintDismissed;
       _historyReady = true;
 
       // Multi-org: restore pinned org or fall back to primary
@@ -265,15 +270,59 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (state.selectedOrgId && state.selectedOrgId !== status?.snapshot?.claude_org_uuid) {
         selectOrg(state.selectedOrgId, null);
       }
+      // Initial primary-org render goes through _updateUICore (not selectOrg), so
+      // point the static dashboard anchors at the org here too.
+      refreshDashboardLinks(state.selectedOrgId);
       _statusReady = true;
 
       tryDrawCharts();
       initRunner();
+
+      // Master-detail default view: multi-org/multi-provider users get the tab
+      // switcher and land on their last-viewed screen (overview by default; detail
+      // if that's where they left off). Single-account users see the detail view
+      // directly with no tabs.
+      const viewTabs = document.getElementById('view-tabs');
+      if (state.collectedOrgs.length >= 2) {
+        if (viewTabs) viewTabs.classList.remove('hidden');
+        if (state.lastView === 'detail') {
+          const orgId = (state.selectedOrgId && state.collectedOrgs.some(o => o.uuid === state.selectedOrgId))
+            ? state.selectedOrgId
+            : (state.collectedOrgs.find(o => o.isPrimary) || state.collectedOrgs[0]).uuid;
+          enterDetail(orgId);
+        } else {
+          enterOverview();
+        }
+      } else if (viewTabs) {
+        viewTabs.classList.add('hidden');
+      }
     });
+  });
+
+  // Top tab switcher: 모아 보기 ↔ 자세히. The detail tab re-opens the last-viewed
+  // org (or the primary) so it always has something to show.
+  const tabOverview = document.getElementById('tab-overview');
+  const tabDetail = document.getElementById('tab-detail');
+  if (tabOverview) tabOverview.addEventListener('click', () => enterOverview());
+  if (tabDetail) tabDetail.addEventListener('click', () => {
+    const orgs = state.collectedOrgs || [];
+    // Only honor selectedOrgId if it still exists — a live update may have removed
+    // it, and entering a stale uuid would leave selectOrg() with no data to render.
+    const valid = state.selectedOrgId && orgs.some(o => o.uuid === state.selectedOrgId);
+    const orgId = valid ? state.selectedOrgId : (orgs.find(o => o.isPrimary) || orgs[0])?.uuid;
+    if (orgId) enterDetail(orgId);
   });
 
   // Re-render popup immediately when language is changed in options
   chrome.storage.onChanged.addListener((changes, area) => {
+    // Overview card order changed on another device (chrome.storage.sync): adopt it
+    // and re-render the cards if the overview is currently visible.
+    if (area === 'sync' && changes.overviewOrder) {
+      state.overviewOrder = changes.overviewOrder.newValue || [];
+      // Don't re-render mid-drag (would yank the card out from under the gesture);
+      // dragend re-renders from the latest saved order anyway.
+      if (isOverviewActive() && !isDragging()) renderOverview();
+    }
     if (area === 'sync' && changes.lang) {
       setLang(changes.lang.newValue);
       // Full UI re-render including dynamically generated text
@@ -281,11 +330,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.usageHistory = r.usageHistory || [];
         state.historyLoaded = true;
         if (r.lastStatus) {
-          // Reset to primary org uuid (null would mix multi-org histories)
+          // Keep the currently-viewed org if it still exists (preserve a non-primary
+          // detail target across a language change); otherwise fall back to primary.
+          // A concrete uuid is required — null would mix multi-org histories.
           const cOrgs = r.collectedOrgs || [];
           if (cOrgs.length >= 1) state.collectedOrgs = cOrgs;
+          const stillValid = state.selectedOrgId && state.collectedOrgs.some(o => o.uuid === state.selectedOrgId);
           const primary = state.collectedOrgs.find(o => o.isPrimary) || state.collectedOrgs[0];
-          state.selectedOrgId = primary ? primary.uuid : null;
+          state.selectedOrgId = stillValid ? state.selectedOrgId : (primary ? primary.uuid : null);
+          refreshDashboardLinks(state.selectedOrgId);
           updateUI(r.lastStatus);
           state.currentPlan = r.lastStatus?.snapshot?.plan || null;
           state.currentSnapshot = r.lastStatus?.snapshot || null;
@@ -297,6 +350,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         // Re-render org chips too (reflects plan name translations, etc.)
         if (state.collectedOrgs.length >= 2) showMultiOrgBadges(state.collectedOrgs);
+        // Re-render overview cards (title + countdown strings are i18n).
+        if (isOverviewActive()) renderOverview();
         loadFitnessMatrix();
       });
     }
@@ -325,22 +380,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {
       state.collectedOrgs = changes.collectedOrgs.newValue || [];
+      const viewTabs = document.getElementById('view-tabs');
       if (state.collectedOrgs.length >= 2) {
         showMultiOrgBadges(state.collectedOrgs);
-        // Refresh selected org data (without switching view)
-        if (state.selectedOrgId) {
+        if (viewTabs) viewTabs.classList.remove('hidden');
+        // If the overview is on screen, re-render its cards with the fresh data;
+        // otherwise just refresh the open detail view (without switching).
+        if (isOverviewActive()) {
+          renderOverview();
+        } else if (state.selectedOrgId) {
           selectOrg(state.selectedOrgId, null);
         }
+        // Tabs may have just been unhidden (single→multi) without going through
+        // enter{Overview,Detail}; mark the active tab to match the visible view.
+        syncViewTabs();
       } else {
-        // Orgs dropped to single — remove stale chip DOM and reset to primary
+        // Orgs dropped to single — leave the overview, remove stale chip DOM, reset to primary
+        if (viewTabs) viewTabs.classList.add('hidden');
         const existingChips = document.getElementById('org-chips');
         if (existingChips) existingChips.remove();
         const existingBadge = document.getElementById('org-badge');
         if (existingBadge) existingBadge.remove();
         const primary = state.collectedOrgs[0];
-        if (primary && state.selectedOrgId !== primary.uuid) {
-          state.selectedOrgId = primary.uuid;
-          selectOrg(primary.uuid, null);
+        if (primary) {
+          enterDetail(primary.uuid);
+        } else {
+          // Zero orgs (e.g. account reset / sign-out): leave the overview so the
+          // no-data / onboarding shell rendered by updateUI() below is visible —
+          // without this the body stays in overview mode and freezes the screen.
+          exitOverview();
+          refreshDashboardLinks(null); // no org → plain dashboard
         }
       }
       // Re-render the status UI with the newly-arrived org data. Without this,
@@ -546,9 +615,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     }
   });
-  // Chart card click opens dashboard
+  // Chart card click opens dashboard (deep-linked to the viewed org)
   document.getElementById('chart-section').addEventListener('click', () => {
-    chrome.tabs.create({ url: 'https://claudetuner.com/dashboard' });
+    chrome.tabs.create({ url: dashboardUrl(state.selectedOrgId) });
   });
 
   // Smart recommendation dismiss button

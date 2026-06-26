@@ -108,6 +108,57 @@
     .gauge-predict { position: absolute; top: -2px; width: 2px; height: 12px; border-radius: 1px; transform: translateX(-1px); }
     .gauge-predict-label { position: absolute; top: -13px; font-size: 8px; font-weight: 600; transform: translateX(-50%); white-space: nowrap; }
 
+    /* === Overview ("모아 보기") master screen === */
+    /* When the overview is active, hide every detail section. Removing the class
+       restores each section to whatever its own visibility logic last set. */
+    body.ct-view-overview #predict-headline,
+    body.ct-view-overview #gauge-section,
+    body.ct-view-overview #extra-usage-section,
+    body.ct-view-overview #fitness-section,
+    body.ct-view-overview #status-banner,
+    body.ct-view-overview #chart-section,
+    body.ct-view-overview #info-section,
+    body.ct-view-overview #cancel-downgrade-wrap,
+    body.ct-view-overview #plan-actions,
+    body.ct-view-overview #offpeak-banner,
+    body.ct-view-overview #dash-nudge,
+    body.ct-view-overview #org-chips { display: none !important; }
+
+    .overview-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+    .ov-title { font-size: 11px; font-weight: 700; color: var(--text-secondary); padding: 0 2px; }
+    .ov-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; transition: border-color .15s, background .15s; }
+    .ov-card:hover { background: var(--bg-hover); border-color: var(--accent); }
+    .ov-card.primary { border-left: 3px solid #4f46e5; }
+    .ov-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .ov-plan { font-weight: 700; font-size: 11px; color: var(--text-primary); flex-shrink: 0; }
+    .ov-card.primary .ov-plan { color: #4f46e5; }
+    .ov-name { color: var(--text-muted); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ov-pin { font-size: 11px; flex-shrink: 0; }
+    .ov-logo { display: inline-flex; align-items: center; flex-shrink: 0; }
+    .ov-logo svg { display: block; }
+    .ov-grip { flex-shrink: 0; cursor: grab; color: var(--text-muted); font-size: 13px; line-height: 1; opacity: .45; user-select: none; padding: 0 1px; }
+    .ov-grip:hover { opacity: 1; }
+    .ov-grip:active { cursor: grabbing; }
+    .ov-card.ov-dragging { opacity: .55; border-color: var(--accent); }
+    /* Chevron: persistent "this card opens a detail view" affordance. */
+    .ov-chevron { flex-shrink: 0; color: var(--text-muted); font-size: 16px; font-weight: 700; line-height: 1; margin-left: 2px; }
+    .ov-card:hover .ov-chevron { color: var(--accent); }
+    /* One-time hint banner teaching the card→detail interaction. */
+    .ov-hint { display: flex; align-items: center; gap: 6px; background: var(--accent-light); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px 6px 10px; font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
+    .ov-hint span { flex: 1; }
+    .ov-hint-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; flex-shrink: 0; }
+    .ov-hint-x:hover { color: var(--text-primary); }
+    /* 5h/7d sit side by side inside each card, mirroring the detail gauge-card. */
+    .ov-gauges { display: flex; gap: 10px; }
+    .ov-gauges .gauge-row { flex: 1; min-width: 0; }
+    .ov-unlimited { font-size: 11px; font-weight: 600; color: var(--accent); padding: 4px 0; display: inline-block; }
+
+    /* Top tab switcher (모아 보기 | 자세히) — always visible for multi-account users. */
+    .view-tabs { display: flex; gap: 0; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .view-tab { flex: 1; background: none; border: none; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
+    .view-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .view-tab:not(.active):hover { color: var(--text-secondary); }
+
     /* 정보 카드 */
     .info-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; }
     .info-row { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 12px; flex-wrap: nowrap; }
@@ -332,7 +383,7 @@
     <h1><a href="https://claudetuner.com" target="_blank" style="color:inherit;text-decoration:none">ClaudeTuner</a></h1>
     <div class="header-actions">
       <button id="collect-btn" class="hdr-btn hdr-btn-primary" data-i18n="btn_collect"></button>
-      <a href="https://claudetuner.com/dashboard" target="_blank" class="hdr-btn hdr-btn-link" data-i18n-title="btn_detail" title="Analytics"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style="flex:none"><path d="M3 3a1 1 0 011 1v12h12a1 1 0 110 2H3a1 1 0 01-1-1V4a1 1 0 011-1zm14 3a1 1 0 011 1v2a1 1 0 11-2 0V9.414l-3.293 3.293a1 1 0 01-1.414 0L9 10.414l-2.293 2.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0L12 10.586 14.586 8H13a1 1 0 110-2h4z"/></svg></a>
+      <a href="https://claudetuner.com/dashboard" data-dash-link target="_blank" class="hdr-btn hdr-btn-link" data-i18n-title="btn_detail" title="Analytics"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style="flex:none"><path d="M3 3a1 1 0 011 1v12h12a1 1 0 110 2H3a1 1 0 01-1-1V4a1 1 0 011-1zm14 3a1 1 0 011 1v2a1 1 0 11-2 0V9.414l-3.293 3.293a1 1 0 01-1.414 0L9 10.414l-2.293 2.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0L12 10.586 14.586 8H13a1 1 0 110-2h4z"/></svg></a>
       <button id="notice-toggle-btn" class="hdr-btn-icon" title="Announcements" style="display:none;position:relative">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-2.83-2h5.66A3 3 0 0110 18z"/></svg>
         <span id="notice-badge" style="display:none;position:absolute;top:-2px;right:-2px;background:#ef4444;color:white;font-size:8px;font-weight:700;min-width:13px;height:13px;border-radius:50%;align-items:center;justify-content:center;line-height:1">0</span>
@@ -404,6 +455,17 @@
       <div class="runner-char" id="runner-char">🏃</div>
     </div>
     <button class="runner-pause" id="runner-pause" style="display:none" title="⏸">⏸</button>
+  </div>
+
+  <!-- Overview ("모아 보기") master screen — one card per collected org/provider.
+       Shown only for multi-org/multi-provider users; populated by ui/overview.js. -->
+  <div id="overview-section" class="overview-section hidden"></div>
+
+  <!-- Top tab switcher between Overview ("모아 보기") and detail ("자세히").
+       Always visible for multi-org/multi-provider users (shown via popup.js). -->
+  <div id="view-tabs" class="view-tabs hidden">
+    <button id="tab-overview" class="view-tab" data-i18n="ov_title"></button>
+    <button id="tab-detail" class="view-tab" data-i18n="ov_detail"></button>
   </div>
 
   <!-- 조직 선택 (복수 조직 시) -->
@@ -479,7 +541,7 @@
 
   <!-- One-time dashboard nudge (shown after first successful collection) -->
   <div id="dash-nudge" class="dash-nudge hidden">
-    <a href="https://claudetuner.com/dashboard" target="_blank" id="dash-nudge-link" class="dash-nudge-link">
+    <a href="https://claudetuner.com/dashboard" data-dash-link target="_blank" id="dash-nudge-link" class="dash-nudge-link">
       <span>📊</span><span data-i18n="dash_nudge"></span><span class="dash-nudge-arrow">→</span>
     </a>
     <button id="dash-nudge-close" class="dash-nudge-close" data-i18n-title="dash_nudge_dismiss" title="Dismiss" aria-label="Dismiss">&times;</button>

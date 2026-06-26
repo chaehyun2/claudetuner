@@ -4,8 +4,8 @@
 import { state, _filteredHistory } from './state.js';
 import { calcPaceTier, _isDark } from './util.js';
 
-// Used by both gauge prediction and banner evaluation
-function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
+// Used by both gauge prediction and banner evaluation (and the overview cards).
+export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
   if (!resetsAt || currentUtil === null || !history || history.length < 3) return null;
 
   const now = Date.now();

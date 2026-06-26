@@ -11,6 +11,9 @@ export const state = {
   orgList: null, // cached org list
   selectedOrgId: null, // selected org UUID (multi-org view)
   collectedOrgs: [], // cached collectedOrgs (for _filteredHistory, selectOrg, etc.)
+  overviewOrder: [], // user's saved overview card order (uuid list, chrome.storage.sync)
+  lastView: 'overview', // last-viewed multi-account screen ('overview' | 'detail'), restored on open
+  overviewHintDismissed: false, // user dismissed the one-time "click a card for detail" hint
   claudeNoticeDismissed: false, // user dismissed the demoted Claude-disconnected notice (reset when Claude recovers)
   dashNudgeEvaluated: false, // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
   isIndependent: false, // signed in via email (no Claude account) — suppress all Claude-centric status/errors

@@ -100,3 +100,19 @@ export function calcPaceTier(currentUtil, resetsAt, windowSeconds) {
 export function _isDark() { return document.documentElement.dataset.theme === 'dark'; }
 export function _cGrid() { return _isDark() ? '#2d3748' : '#f0f0f0'; }
 export function _cLabel() { return _isDark() ? '#718096' : '#d1d5db'; }
+
+// Dashboard URL deep-linked to a specific org (?org=<uuid>); plain dashboard when no
+// org. The dashboard resolves the uuid against its org list (provider included), so a
+// single org param covers Claude/ChatGPT/Gemini.
+export function dashboardUrl(orgId) {
+  return orgId
+    ? `https://claudetuner.com/dashboard/?org=${encodeURIComponent(orgId)}`
+    : 'https://claudetuner.com/dashboard';
+}
+
+// Point every static dashboard anchor (marked data-dash-link) at the given org, so
+// links shown in the detail view carry the org the user is currently viewing.
+export function refreshDashboardLinks(orgId) {
+  const url = dashboardUrl(orgId);
+  document.querySelectorAll('a[data-dash-link]').forEach(a => { a.href = url; });
+}

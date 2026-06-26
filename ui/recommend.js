@@ -2,7 +2,7 @@
 // Leaf domain (does not call org-selector/prediction). Imports shared state + selectors, pure
 // helpers, and the auth fetch wrapper; i18n `t` and CT_CONFIG are globals from classic scripts.
 import { state, _isNonClaudePrimarySelected } from './state.js';
-import { escHtml, _fmIcon } from './util.js';
+import { escHtml, _fmIcon, dashboardUrl } from './util.js';
 import { _authedFetch } from './auth.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
@@ -82,7 +82,7 @@ function renderFitnessMatrix(data) {
   for (const l of legend) {
     html += '<span class="fm-legend-item"><span class="fm-icon ' + l.cls + '">' + l.icon + '</span>' + l.label + '</span>';
   }
-  html += '</div><a href="https://claudetuner.com/dashboard" target="_blank">' + t('fm_reason') + ' →</a></div>';
+  html += '</div><a href="' + dashboardUrl(state.selectedOrgId) + '" target="_blank">' + t('fm_reason') + ' →</a></div>';
   content.innerHTML = html;
 }
 
