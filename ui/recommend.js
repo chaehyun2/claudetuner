@@ -7,6 +7,17 @@ import { _authedFetch } from './auth.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 
+// Normalize a plan value (server canonical label like "Max 20x" or api id like "max_20x_monthly")
+// to a known canonical label, or null when absent/unrecognized. Returning null for unknown
+// strings means the stale-plan guard only fires on a CONFIDENT mismatch (both sides are known
+// labels and differ) — an unrecognized/new tier never causes a valid rec to be suppressed.
+const _KNOWN_PLANS = ['Free', 'Pro', 'Team Standard', 'Team Premium', 'Max 5x', 'Max 20x', 'Enterprise'];
+const _canonPlan = (p) => {
+  if (p == null) return null;
+  const v = _planApiToLabel[p] || p;
+  return _KNOWN_PLANS.includes(v) ? v : null;
+};
+
 export function _shouldSuppressRec(rec, pendingPlan) {
   const recTo = rec.to_plan || rec.toPlan;
   // Suppress if same as just-executed plan change in this session
@@ -249,6 +260,23 @@ export function _renderRecommendation(rec) {
   if (!rec) return;
   const recEl = document.getElementById('recommendation');
   if (!recEl) return;
+
+  // Stale-plan guard: a cached actionable rec whose basis plan no longer matches the
+  // user's current plan (e.g. they changed plans since the rec was computed; server
+  // 24h-throttle + snapshot dedup can leave the prior rec cached) must NOT be shown —
+  // otherwise e.g. a Max 20x user sees a stale "upgrade to Max 5x" card. Only suppress
+  // on a confident mismatch (both sides resolve to known canonical labels and differ);
+  // if either is unknown we render as before (no regression).
+  const _recFromPlan = _canonPlan(rec.from_plan || rec.fromPlan);
+  const _curPlan = _canonPlan(state.currentPlan);
+  const _planStale = _recFromPlan != null && _curPlan != null && _recFromPlan !== _curPlan;
+  if (_planStale) {
+    recEl.textContent = t('current_plan_ok');
+    recEl.style.color = 'var(--text-primary)';
+    const detail = document.getElementById('smart-rec-detail');
+    if (detail) detail.classList.add('hidden');
+    return;
+  }
 
   const isActionable = (rec.type === 'upgrade' || rec.type === 'downgrade') && rec.to_plan;
   if (isActionable) {

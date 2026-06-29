@@ -8,7 +8,7 @@
 // rather than re-implementing them. The detail renderer itself is left untouched — the
 // overview only hides the detail sections via a body class, so removing that class
 // restores each section to whatever its own logic last set (zero regression risk).
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, _isDark, refreshDashboardLinks } from './util.js';
+import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
 import { state } from './state.js';
 import { calcPredictedAtReset } from './prediction.js';
 import { selectOrg } from './org-selector.js';
@@ -142,7 +142,7 @@ function _renderCard(org) {
     + '<div class="ov-head">'
     + `<span class="ov-grip" draggable="true" title="${escHtml(t('ov_reorder'))}" aria-label="${escHtml(t('ov_reorder'))}">⠿</span>`
     + _providerLogo(provider)
-    + `<span class="ov-plan">${escHtml(org.plan || '')}</span>${beta}`
+    + `<span class="ov-plan">${escHtml(planDisplayName(org.plan, provider))}</span>${beta}`
     + `<span class="ov-name">${escHtml(org.name || '')}</span>${pin}`
     + '<span class="ov-chevron" aria-hidden="true">›</span>'
     + '</div>'

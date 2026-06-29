@@ -114,8 +114,22 @@
     return count;
   }
 
+  // Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases
+  // ("Prolite" = Pro 5x tier, "Pro" = Pro 20x tier); remap them to the user-facing
+  // names so the extension matches the dashboard's planDisplayName(). Other tiers
+  // (Plus/Go/Free/Team) and Claude/Gemini plans are already readable → pass through.
+  function planDisplayName(plan, provider) {
+    const p = (plan || '').trim().toLowerCase();
+    if (provider === 'chatgpt') {
+      if (p === 'prolite' || p === 'pro 5x') return 'Pro 5x';
+      if (p === 'pro' || p === 'pro 20x') return 'Pro 20x';
+    }
+    return plan || '';
+  }
+
   globalThis.__ctUsageCore = {
     gaugeColor,
+    planDisplayName,
     formatCountdown,
     formatResetAbsolute,
     escapeHtml,

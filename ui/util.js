@@ -58,9 +58,42 @@ export function formatResetAbsolute(resetAt) {
   return `${month}/${date}(${dayName}) ${h12}${ampm}`;
 }
 
-export function planToMultiplier(plan) {
+// Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases
+// ("Prolite" = Pro 5x tier, "Pro" = Pro 20x tier); remap them to the user-facing
+// names so the popup matches the dashboard's planDisplayName(). Other tiers
+// (Plus/Go/Free/Team) and Claude/Gemini plans are already readable → pass through.
+export function planDisplayName(plan, provider) {
+  const p = (plan || '').trim().toLowerCase();
+  if (provider === 'chatgpt') {
+    if (p === 'prolite' || p === 'pro 5x') return 'Pro 5x';
+    if (p === 'pro' || p === 'pro 20x') return 'Pro 20x';
+  }
+  return plan || '';
+}
+
+// Provider-aware quota multiplier, mirroring the dashboard's planMultiplier().
+// ChatGPT/Gemini use exact-match tiers (their raw plan_type names differ from
+// Claude's); Claude falls through to the original substring logic. ChatGPT "Pro"
+// = Pro 20x tier (20x), "Prolite"/"Pro 5x" = Pro 5x tier (5x) — the same aliases
+// remapped by planDisplayName().
+export function planToMultiplier(plan, provider) {
+  const p = (plan || '').toLowerCase();
+  if (provider === 'chatgpt') {
+    if (p === 'free') return 0.2;
+    if (p === 'go') return 0.4;
+    if (p === 'pro' || p === 'pro 20x') return 20;
+    if (p === 'pro 5x' || p === 'prolite') return 5;
+    if (p === 'team') return 1.25;
+    return 1; // plus, education, business, unknown
+  }
+  if (provider === 'gemini') {
+    if (p === 'free') return 0.2;
+    if (p.includes('ultra')) return 5;
+    if (p === 'ai plus') return 0.4;
+    return 1; // AI Pro/Advanced, Business, unknown
+  }
+  // Claude (default): original substring logic
   if (!plan) return 1;
-  const p = plan.toLowerCase();
   if (p.includes('20')) return 20;
   if (p.includes('5x') || (p.includes('max') && p.includes('5'))) return 5;
   if (p.includes('max')) return 5; // "Max" alone defaults to 5x

@@ -147,12 +147,14 @@ export function drawCharts(history, plan, snapshot) {
   if (history.length < 2) return;
 
   const now = Date.now();
-  const currentMult = planToMultiplier(plan);
+  // Provider determines the multiplier scale (ChatGPT/Gemini tiers differ from Claude)
+  const provider = snapshot?.provider || 'claude';
+  const currentMult = planToMultiplier(plan, provider);
 
   // Normalize past data to current plan scale
   // (e.g. Pro 80% -> Max 5x switch -> converted to 16%)
   const sorted = history.slice().sort((a, b) => a.t - b.t).map((pt) => {
-    const entryMult = planToMultiplier(pt.p || plan);
+    const entryMult = planToMultiplier(pt.p || plan, provider);
     if (entryMult === currentMult) return pt;
     const scale = entryMult / currentMult;
     return { t: pt.t, h5: pt.h5 != null ? pt.h5 * scale : null, d7: pt.d7 != null ? pt.d7 * scale : null, p: pt.p, r7: pt.r7 };

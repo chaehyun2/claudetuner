@@ -17,6 +17,25 @@ import {
 } from './plan.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
 
+// Canonical plan label (accepts server labels or personal api-ids) → known label, or null
+// when absent/unrecognized so the stale-rec guard fires only on a confident mismatch.
+const _PLAN_CANON = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
+const _KNOWN_PLANS = ['Free', 'Pro', 'Team Standard', 'Team Premium', 'Max 5x', 'Max 20x', 'Enterprise'];
+function _canonPlanBg(p) {
+  if (p == null) return null;
+  const v = _PLAN_CANON[p] || p;
+  return _KNOWN_PLANS.includes(v) ? v : null;
+}
+// True when an actionable (upgrade/downgrade) rec's basis plan no longer matches the current
+// plan (both resolve to known labels and differ) — i.e. a stale rec cached before a plan change.
+// Such recs must not be saved/badged/shown (e.g. cached "Pro→Max 5x upgrade" after Pro→Max 20x).
+function _recPlanStale(rec, planVal) {
+  if (!rec || (rec.type !== 'upgrade' && rec.type !== 'downgrade')) return false;
+  const from = _canonPlanBg(rec.from_plan || rec.fromPlan);
+  const cur = _canonPlanBg(planVal);
+  return from != null && cur != null && from !== cur;
+}
+
 // === Adaptive Polling helpers ===
 export function getOrgPollDefault() {
   // lastValues/lastPollAt drive the adaptive tier (updated every poll).
@@ -852,14 +871,18 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
 
       // Update lastStatus with server recommendation (also refreshes badge)
       if (!result.skipped && result.recommendation) {
+        // The server caches recs by email (~1h) without the plan in the key, so a plan-change
+        // POST can return a rec computed for the prior plan. Drop such a stale actionable rec
+        // before saving/badging so neither the card nor the badge shows it (non-actionable
+        // recs like "adequate" are unaffected). Card is also guarded in ui/recommend.js.
+        const rec = _recPlanStale(result.recommendation, snapshot.plan) ? null : result.recommendation;
         const curStatus = await getLastStatus();
         if (curStatus) {
-          curStatus.recommendation = result.recommendation;
+          curStatus.recommendation = rec;
           await setStatus(curStatus);
         }
-        const rec = result.recommendation;
         const _hasPending = !!snapshot.subscription?.pending_plan;
-        if ((rec.type === 'upgrade' || rec.type === 'downgrade') && !_hasPending) {
+        if (rec && (rec.type === 'upgrade' || rec.type === 'downgrade') && !_hasPending) {
           await showRecommendationBadge(snapshot, rec.type);
         }
       }
@@ -900,7 +923,12 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
 
     // Keep previous recommendation (will be async-updated when server response arrives)
     const prevStatus = await getLastStatus();
-    const recommendation = prevStatus?.recommendation || null;
+    let recommendation = prevStatus?.recommendation || null;
+    // Drop a stale actionable rec whose basis plan no longer matches the current snapshot
+    // plan (the user changed plans since it was cached; server 24h-throttle + snapshot dedup
+    // can leave the prior rec). Prevents a nonsensical card/badge (e.g. a Max 20x user seeing
+    // a cached "upgrade to Max 5x") until the server returns a fresh rec.
+    if (_recPlanStale(recommendation, snapshot.plan)) recommendation = null;
 
     await setStatus({
       success: true,

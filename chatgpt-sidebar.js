@@ -181,7 +181,7 @@
 
     const footer = document.createElement('div');
     footer.className = 'ct-cg-footer text-token-text-tertiary';
-    const planText = _data.plan ? `<span class="ct-cg-plan text-token-text-secondary">${CORE.escapeHtml(_data.plan)}</span>` : '<span></span>';
+    const planText = _data.plan ? `<span class="ct-cg-plan text-token-text-secondary">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'chatgpt'))}</span>` : '<span></span>';
     footer.innerHTML = `
       ${planText}
       <span class="ct-cg-actions">

@@ -148,7 +148,7 @@
       main += `${dot}<span class="ct-cg-strip-seg"><span class="ct-cg-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
     }
     if (_data.plan) {
-      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(_data.plan)}</span>`;
+      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'chatgpt'))}</span>`;
     }
     strip.innerHTML =
       `<div class="ct-cg-strip-inner">` +
