@@ -1,0 +1,200 @@
+/* Claude Tuner — Gemini sidebar usage panel (self-contained styling)
+   Gemini exposes no theme utility classes we can borrow (unlike ChatGPT's
+   token classes), so every color comes from our own tokens below. Dark mode is
+   detected three ways: Gemini's <body class="dark-theme"> and <html dark>
+   attribute, plus a prefers-color-scheme fallback. */
+
+/* Theme tokens — light defaults. */
+:root {
+  --ct-gm-text: #1f1f1f;
+  --ct-gm-text-muted: #5f6368;
+  --ct-gm-surface: rgba(0, 0, 0, 0.03);
+  --ct-gm-track: rgba(0, 0, 0, 0.1);
+  --ct-gm-border: rgba(0, 0, 0, 0.08);
+  --ct-gm-hover: rgba(0, 0, 0, 0.06);
+}
+body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] body {
+  --ct-gm-text: #e3e3e3;
+  --ct-gm-text-muted: #9aa0a6;
+  --ct-gm-surface: rgba(255, 255, 255, 0.05);
+  --ct-gm-track: rgba(255, 255, 255, 0.14);
+  --ct-gm-border: rgba(255, 255, 255, 0.1);
+  --ct-gm-hover: rgba(255, 255, 255, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  /* OS-dark fallback only when Gemini has NOT set an explicit light theme on
+     either <html> or <body> (matches gemini-input.js's isDarkTheme detection). */
+  html:not(.light-theme):not([data-theme="light"]) body:not(.light-theme) {
+    --ct-gm-text: #e3e3e3;
+    --ct-gm-text-muted: #9aa0a6;
+    --ct-gm-surface: rgba(255, 255, 255, 0.05);
+    --ct-gm-track: rgba(255, 255, 255, 0.14);
+    --ct-gm-border: rgba(255, 255, 255, 0.1);
+    --ct-gm-hover: rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* ── Sidebar panel — blends into Gemini's native nav: no card box (no border,
+   background, or radius), inherits Gemini's font, and aligns with the menu items
+   above it so it reads as a native section rather than a bolted-on widget. ── */
+.ct-gm-panel {
+  margin: 2px 0 4px;
+  /* left 10px aligns our icon with Gemini's native menu icons (measured: a plain
+     child of the nav list starts at x=6, native icon sits at x=16). */
+  padding: 4px 8px 8px 10px;
+  background: none;
+  border: none;
+  color: var(--ct-gm-text);
+  /* Match the font Gemini uses for menu item LABELS (not the list container's
+     Noto Sans KR): Google Sans Flex, with the same fallback chain. */
+  font-family: "Google Sans Flex", "Google Sans", "Helvetica Neue", "Noto Sans KR", Roboto, sans-serif;
+  font-size: 13px;
+  white-space: normal;
+  box-sizing: border-box;
+}
+
+/* Icon-rail (collapsed sidebar): hide the panel but keep its width measurable so
+   JS can detect re-expansion. max-height:0 collapses the vertical space so the rail
+   shows nothing; visibility:hidden + border/padding:0 removes all visible traces. */
+.ct-gm-panel.ct-gm-collapsed {
+  visibility: hidden;
+  max-height: 0;
+  margin: 0;
+  padding: 0;
+  border-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ct-gm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px; /* native icon→label gap: puts "사용량" at the same x as menu labels */
+  /* Behave like a native Gemini nav item: a full-width pill (negative margins cancel
+     the panel's h-padding so it spans the same box as menu rows) that highlights on
+     hover. Inner padding keeps the icon at x=16. */
+  height: 32px;
+  margin: 0 -8px 4px -10px;
+  padding: 0 8px 0 10px;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  outline: none;
+}
+.ct-gm-head:hover,
+.ct-gm-head:focus-visible {
+  /* Native Material hover state layer; falls back to our own token if Gemini's
+     variable ever goes away. */
+  background: var(--lumi-sys-color-states--hover-on-surface, var(--ct-gm-hover));
+}
+.ct-gm-logo { width: 20px; height: 20px; border-radius: 4px; display: block; flex-shrink: 0; } /* match native 20px icon */
+/* Match native menu-item labels (e.g. "라이브러리"): 13px, near-black. */
+.ct-gm-title { font-size: 13px; font-weight: 500; color: var(--ct-gm-text); }
+
+.ct-gm-content {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.ct-gm-message { font-size: 12px; padding: 2px 0; color: var(--ct-gm-text-muted); }
+
+.ct-gm-limit { display: flex; flex-direction: column; gap: 4px; }
+.ct-gm-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px; /* match native menu text size */
+  gap: 6px;
+}
+.ct-gm-label-left { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; }
+.ct-gm-name { color: var(--ct-gm-text-muted); }
+.ct-gm-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ct-gm-arrow { font-size: 10px; color: var(--ct-gm-text-muted); }
+.ct-gm-pred { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ct-gm-reset {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--ct-gm-text-muted);
+}
+
+.ct-gm-bar { position: relative; height: 4px; }
+.ct-gm-bar-track {
+  position: absolute; inset: 0;
+  background: var(--ct-gm-track);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ct-gm-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+.ct-gm-bar-pred-fill {
+  position: absolute; top: 0; height: 100%;
+  background: repeating-linear-gradient(90deg, rgba(127, 127, 127, 0.35) 0 2px, transparent 2px 4px);
+}
+.ct-gm-bar-marker {
+  position: absolute; top: -1px; width: 2px; height: 6px;
+  border-radius: 1px; transform: translateX(-1px);
+}
+
+.ct-gm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.ct-gm-plan { font-weight: 500; color: var(--ct-gm-text-muted); }
+.ct-gm-actions { display: inline-flex; align-items: center; gap: 2px; }
+.ct-gm-actions a, .ct-gm-settings-btn, .ct-gm-bell-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  padding: 0; margin: 0;
+  border: none; background: none; cursor: pointer;
+  color: var(--ct-gm-text-muted);
+  border-radius: 6px;
+}
+.ct-gm-actions a:hover, .ct-gm-settings-btn:hover, .ct-gm-bell-btn:hover {
+  background: var(--ct-gm-hover);
+  color: var(--ct-gm-text);
+}
+.ct-gm-actions svg { width: 14px; height: 14px; }
+.ct-gm-bell-badge {
+  position: absolute; top: 0; right: 0;
+  min-width: 13px; height: 13px; padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: #ef4444; color: #fff;
+  font-size: 9px; line-height: 13px; font-weight: 700;
+  text-align: center;
+}
+
+/* Inline announcement banner */
+.ct-gm-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--ct-gm-hover);
+  font-size: 12px;
+  color: var(--ct-gm-text);
+}
+.ct-gm-notice-icon { flex-shrink: 0; }
+.ct-gm-notice-text {
+  flex: 1; min-width: 0; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ct-gm-text);
+}
+.ct-gm-notice-text:hover { text-decoration: underline; }
+.ct-gm-notice-close {
+  flex-shrink: 0;
+  border: none; background: none; cursor: pointer;
+  font-size: 14px; line-height: 1; color: var(--ct-gm-text-muted);
+  padding: 0 2px;
+}

@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5h', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5h', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
+    en: { session: '5-hour usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 

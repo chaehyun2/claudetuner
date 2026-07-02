@@ -1,0 +1,105 @@
+/* Claude Tuner — Gemini input usage strip (self-contained styling).
+   A compact 1-line usage row rendered directly below the Gemini composer.
+   Theming is class-driven (.ct-gm-strip.theme-dark) because Gemini toggles dark
+   mode via <body class="dark-theme"> / <html dark> rather than a CSS media
+   query; a prefers-color-scheme fallback covers first paint before the JS
+   theme-sync runs. */
+
+/* Theme tokens — light defaults on the strip root. */
+.ct-gm-strip {
+  --ct-gm-text: #1f1f1f;
+  --ct-gm-text-muted: #5f6368;
+  --ct-gm-surface: rgba(0, 0, 0, 0.04);
+  --ct-gm-track: rgba(0, 0, 0, 0.1);
+  --ct-gm-border: rgba(0, 0, 0, 0.08);
+
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 2px 12px;
+  box-sizing: border-box;
+  font-family: "Google Sans", "Google Sans Text", Roboto, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+.ct-gm-strip.theme-dark {
+  --ct-gm-text: #e3e3e3;
+  --ct-gm-text-muted: #9aa0a6;
+  --ct-gm-surface: rgba(255, 255, 255, 0.06);
+  --ct-gm-track: rgba(255, 255, 255, 0.14);
+  --ct-gm-border: rgba(255, 255, 255, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ct-gm-strip:not(.theme-light) {
+    --ct-gm-text: #e3e3e3;
+    --ct-gm-text-muted: #9aa0a6;
+    --ct-gm-surface: rgba(255, 255, 255, 0.06);
+    --ct-gm-track: rgba(255, 255, 255, 0.14);
+    --ct-gm-border: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.ct-gm-strip-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ct-gm-text-muted);
+  flex-wrap: wrap;
+}
+
+/* The metrics/reset/plan are one clickable link → dashboard. */
+.ct-gm-strip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: inherit;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  flex-wrap: wrap;
+}
+.ct-gm-strip-main:hover { background: var(--ct-gm-surface); border-color: var(--ct-gm-border); }
+
+/* Settings gear (separate from the dashboard link). */
+.ct-gm-strip-gear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex-shrink: 0;
+  padding: 0; border: none; background: none; cursor: pointer;
+  color: var(--ct-gm-text-muted); border-radius: 6px;
+}
+.ct-gm-strip-gear:hover { background: var(--ct-gm-surface); color: var(--ct-gm-text); }
+.ct-gm-strip-gear svg { width: 13px; height: 13px; }
+
+.ct-gm-strip-logo { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
+.ct-gm-strip-seg { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Compact inline gauge bar (current fill + optional prediction marker). */
+.ct-gm-strip-bar {
+  position: relative;
+  display: inline-block;
+  width: 52px;
+  height: 4px;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+.ct-gm-strip-bar-track {
+  position: absolute; inset: 0;
+  background: var(--ct-gm-track);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ct-gm-strip-bar-fill { display: block; height: 100%; border-radius: 3px; }
+.ct-gm-strip-bar-marker {
+  position: absolute; top: -1px; width: 2px; height: 6px;
+  border-radius: 1px; transform: translateX(-1px);
+}
+
+.ct-gm-strip-muted { color: var(--ct-gm-text-muted); }
+.ct-gm-strip-reset { color: var(--ct-gm-text-muted); }
+.ct-gm-strip-dot { color: var(--ct-gm-text-muted); opacity: 0.5; }

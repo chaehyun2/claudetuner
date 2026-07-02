@@ -84,10 +84,64 @@ async function injectChatGPTOpenTabs() {
   } catch { /* tabs API may fail in some contexts */ }
 }
 
+// ── Gemini in-page usage panel (content scripts) ──
+// gemini.google.com is an OPTIONAL host permission — register/unregister its
+// content scripts dynamically, mirroring the ChatGPT block above. The panel
+// (gemini-sidebar.js) and input strip (gemini-input.js) share usage-shared.js.
+const GEMINI_INJECT = {
+  id: 'ct-gemini-usage',
+  matches: ['https://gemini.google.com/*'],
+  js: ['usage-shared.js', 'gemini-sidebar.js', 'gemini-input.js'],
+  css: ['gemini-usage.css', 'gemini-input.css'],
+  runAt: 'document_idle',
+};
+
+async function registerGeminiScripts() {
+  try {
+    if (!(await hasProviderPermission('gemini'))) return;
+    const existing = await chrome.scripting
+      .getRegisteredContentScripts({ ids: [GEMINI_INJECT.id] })
+      .catch(() => []);
+    // Update (not skip) when already registered: a persisted registration from an
+    // older build could otherwise keep injecting a stale js/css list after update.
+    if (existing.length > 0) {
+      await chrome.scripting.updateContentScripts([GEMINI_INJECT]);
+    } else {
+      await chrome.scripting.registerContentScripts([GEMINI_INJECT]);
+    }
+  } catch (e) {
+    console.warn('[Claude Tuner] registerGeminiScripts failed:', e.message);
+  }
+}
+
+async function unregisterGeminiScripts() {
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: [GEMINI_INJECT.id] });
+  } catch { /* not registered */ }
+}
+
+// Inject into already-open gemini.google.com tabs (registerContentScripts only
+// affects future navigations) — covers permission-grant and update/reload.
+async function injectGeminiOpenTabs() {
+  try {
+    if (!(await hasProviderPermission('gemini'))) return;
+    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    for (const tab of tabs) {
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: GEMINI_INJECT.js }).catch(() => {});
+      chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: GEMINI_INJECT.css }).catch(() => {});
+    }
+    if (tabs.length > 0) maybeCollectGeminiForTab(); // fill the freshly-injected panel
+  } catch { /* tabs API may fail in some contexts */ }
+}
+
 chrome.permissions.onAdded.addListener((perm) => {
   if (perm.origins?.some(o => o.includes('chatgpt.com'))) {
     registerChatGPTScripts();
     injectChatGPTOpenTabs();
+  }
+  if (perm.origins?.some(o => o.includes('gemini.google.com'))) {
+    registerGeminiScripts();
+    injectGeminiOpenTabs();
   }
 });
 chrome.permissions.onRemoved.addListener((perm) => {
@@ -96,6 +150,11 @@ chrome.permissions.onRemoved.addListener((perm) => {
     // Already-injected scripts in open chatgpt.com tabs can't be messaged by URL
     // once the host permission is gone. Instead they self-teardown: their next
     // GET_SIDEBAR_USAGE poll gets `{ revoked: true }` (handler checks permission).
+  }
+  if (perm.origins?.some(o => o.includes('gemini.google.com'))) {
+    unregisterGeminiScripts();
+    // Same self-teardown path as ChatGPT: open Gemini tabs' scripts get
+    // `{ revoked: true }` on their next GET_SIDEBAR_USAGE poll.
   }
 });
 
@@ -140,6 +199,8 @@ async function mergeChatGPTOrgs(force = false) {
 }
 
 // Merge Gemini orgs into collectedOrgs storage (independent of Claude collection)
+// Returns true when Gemini usage was actually collected + stored, false otherwise
+// (so callers can debounce only on success, not on a failed/empty attempt).
 async function mergeGeminiOrgs(force = false) {
   try {
     const result = await collectGemini(force);
@@ -161,9 +222,55 @@ async function mergeGeminiOrgs(force = false) {
       // usage, since the Claude path won't run to update it.
       const { accountCache } = await chrome.storage.local.get({ accountCache: null });
       if (!accountCache?.email) await updateBadgeForSelectedOrg(null);
+      return true;
     }
+    return false;
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection skipped:', e.message);
+    return false;
+  }
+}
+
+// Collect Gemini usage when a gemini.google.com tab loads/activates so the in-page
+// panel fills immediately, instead of waiting for the periodic alarm or a manual
+// re-collect. mergeGeminiOrgs() writes collectedOrgs → storage.onChanged →
+// pushSidebarUsage() tells the panel to re-fetch.
+//
+// Debounce design (mirrors Claude's persisted tab-collect throttle):
+//  - success debounce (_lastGeminiTabCollect, persisted): after a successful
+//    collect, skip further collects for 30s — survives MV3 worker restarts.
+//  - attempt floor (_lastGeminiTabAttempt, in-memory): after ANY attempt, wait 5s
+//    before retrying, so a failed first collect fills soon instead of being locked
+//    out for 30s, while still not hammering the RPC.
+let _lastGeminiTabCollect = 0;
+let _lastGeminiTabAttempt = 0;
+let _geminiCollectInFlight = false;
+const GEMINI_TAB_COLLECT_DEBOUNCE_MS = 30_000;
+const GEMINI_TAB_ATTEMPT_FLOOR_MS = 5_000;
+// Restore the persisted success timestamp; awaited inside maybeCollectGeminiForTab
+// so a very early tab event doesn't ignore a recent (persisted) collect.
+const _geminiCollectRestore = chrome.storage.local.get({ _lastGeminiTabCollect: 0 })
+  .then((r) => { _lastGeminiTabCollect = r._lastGeminiTabCollect || 0; })
+  .catch(() => {});
+async function maybeCollectGeminiForTab() {
+  if (_geminiCollectInFlight) return;                                        // serialize concurrent triggers
+  const now = Date.now();
+  if (now - _lastGeminiTabAttempt < GEMINI_TAB_ATTEMPT_FLOOR_MS) return;     // set BEFORE awaits so parallel calls can't all pass
+  _lastGeminiTabAttempt = now;
+  _geminiCollectInFlight = true;
+  try {
+    await _geminiCollectRestore;
+    if (Date.now() - _lastGeminiTabCollect < GEMINI_TAB_COLLECT_DEBOUNCE_MS) return; // recent success (persisted)
+    const { collectGemini: geminiEnabled = true } = await chrome.storage.sync.get({ collectGemini: true });
+    if (!geminiEnabled) return;
+    if (!(await hasProviderPermission('gemini'))) return;
+    const ok = await mergeGeminiOrgs(false).catch(() => false);
+    if (ok) {
+      _lastGeminiTabCollect = Date.now();
+      chrome.storage.local.set({ _lastGeminiTabCollect });
+    }
+  } finally {
+    _geminiCollectInFlight = false;
   }
 }
 
@@ -361,6 +468,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Register + inject ChatGPT panel scripts (no-op without the optional permission)
   await registerChatGPTScripts();
   await injectChatGPTOpenTabs();
+  // Register + inject Gemini panel scripts (no-op without the optional permission)
+  await registerGeminiScripts();
+  await injectGeminiOpenTabs();
 });
 
 // External connect listener (used to wake up the service worker)
@@ -518,9 +628,11 @@ chrome.runtime.onStartup.addListener(async () => {
   await setupAlarm();
   sendGAEvent('extension_loaded');
   await restoreSidePanelPreference();
-  // Re-register dynamic ChatGPT scripts on browser restart (registrations persist,
-  // but this self-heals if they were lost; no-op without the optional permission).
+  // Re-register dynamic ChatGPT/Gemini scripts on browser restart (registrations
+  // persist, but this self-heals if they were lost; no-op without the optional
+  // permission).
   await registerChatGPTScripts();
+  await registerGeminiScripts();
 });
 
 // Wake from sleep/lock: collect immediately when the system becomes active.
@@ -707,6 +819,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     tryTabCollect('tab-updated');
     tryAutoOpenSidePanel(tabId);
   }
+  // Gemini has no server-side polling here; collect on tab load so its panel fills.
+  if (changeInfo.status === 'complete' && tab.url?.startsWith('https://gemini.google.com')) {
+    maybeCollectGeminiForTab();
+  }
 });
 
 // Detect tab activation (when returning to a claude.ai tab)
@@ -721,6 +837,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
       const newState = claudeTabs.length > 0 ? ACTIVITY_STATES.BACKGROUND : ACTIVITY_STATES.IDLE;
       if (await setActivityState(newState)) await updatePollAlarm();
+      // Also refresh the Gemini panel when returning to its tab.
+      if (tab.url?.startsWith('https://gemini.google.com')) maybeCollectGeminiForTab();
     }
   } catch (_) { /* ignore tab query failure */ }
 });
@@ -1466,6 +1584,12 @@ async function pushSidebarUsage() {
       for (const tab of tabs) refresh(tab);
     }
   } catch { /* no permission / not ready */ }
+  try {
+    if (await hasProviderPermission('gemini')) {
+      const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+      for (const tab of tabs) refresh(tab);
+    }
+  } catch { /* no permission / not ready */ }
 }
 
 // Hook into storage changes to push sidebar updates after collection.
@@ -1476,8 +1600,9 @@ async function pushSidebarUsage() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.collectedOrgs) {
     // Push when any provider that has an in-page panel changed. pushSidebarUsage()
-    // notifies both claude.ai and chatgpt.com tabs; each re-fetches its own data.
-    const PANEL_PROVIDERS = ['claude', 'chatgpt'];
+    // notifies claude.ai, chatgpt.com and gemini.google.com tabs; each re-fetches
+    // its own data.
+    const PANEL_PROVIDERS = ['claude', 'chatgpt', 'gemini'];
     const oldVal = changes.collectedOrgs.oldValue || [];
     const newVal = changes.collectedOrgs.newValue || [];
     const changed = PANEL_PROVIDERS.some(p => {
