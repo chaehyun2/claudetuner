@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Claude Tuner — Input Area Usage Mockup v5 (with tooltips)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    gap: 60px;
+  }
+
+  .scenario { width: 700px; }
+  .scenario-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #888;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* Fake Claude.ai input area */
+  .claude-input-area {
+    border: 1px solid #d1d5db;
+    border-radius: 16px;
+    padding: 12px 16px;
+    background: #fff;
+    position: relative;
+  }
+  .claude-placeholder {
+    color: #9ca3af;
+    font-size: 15px;
+    padding: 4px 0 8px;
+  }
+  .claude-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 4px;
+  }
+  .claude-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #9ca3af;
+    font-size: 20px;
+  }
+  .claude-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: #6b7280;
+  }
+
+  /* ===== CT Input Usage Strip ===== */
+  .ct-input-usage {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 6px 0 2px;
+    font-size: 11px;
+    color: #6b7280;
+    user-select: none;
+  }
+
+  /* CT logo */
+  .ct-iu-logo {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    opacity: 0.45;
+    flex-shrink: 0;
+    margin-right: 6px;
+  }
+
+  /* Each info segment */
+  .ct-iu-seg {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    font-size: 11px;
+  }
+
+  .ct-iu-seg-label {
+    opacity: 0.55;
+    white-space: nowrap;
+  }
+
+  .ct-iu-seg-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Dot separator */
+  .ct-iu-dot {
+    margin: 0 8px;
+    opacity: 0.3;
+    font-size: 8px;
+  }
+
+  /* Progress bar */
+  .ct-iu-bar {
+    width: 100px;
+    height: 4px;
+    background: #e5e7eb;
+    border-radius: 2px;
+    position: relative;
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+  .ct-iu-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+  }
+  .ct-iu-bar-pred {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    opacity: 0.25;
+    background-image: repeating-linear-gradient(
+      -45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px
+    );
+  }
+  .ct-iu-bar-marker {
+    position: absolute;
+    top: -2px;
+    width: 2px;
+    height: 8px;
+    border-radius: 1px;
+  }
+
+  /* Extra usage bar */
+  .ct-iu-extra-bar {
+    width: 40px;
+    height: 4px;
+    background: #e5e7eb;
+    border-radius: 2px;
+    position: relative;
+    margin-left: 6px;
+    flex-shrink: 0;
+  }
+  .ct-iu-extra-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+  }
+
+  /* Right-aligned items */
+  .ct-iu-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  /* Settings icon */
+  .ct-iu-settings {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    opacity: 0.3;
+    transition: opacity 0.15s;
+    padding: 0;
+  }
+  .ct-iu-settings:hover {
+    opacity: 0.7;
+  }
+  .ct-iu-settings svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  /* PEAK badge — hoverable */
+  .ct-iu-peak {
+    color: #ef4444;
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    position: relative;
+    cursor: default;
+  }
+
+  /* ===== Tooltip ===== */
+  .ct-iu-tooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    background: #1f2937;
+    color: #f3f4f6;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: nowrap;
+    width: max-content;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 9999;
+    font-weight: 400;
+    letter-spacing: 0;
+  }
+
+  .ct-iu-peak:hover .ct-iu-tooltip {
+    opacity: 1;
+  }
+
+  .ct-iu-tooltip-title {
+    font-weight: 600;
+    font-size: 12px;
+    margin-bottom: 4px;
+    display: block;
+    color: #fca5a5;
+  }
+
+  .ct-iu-tooltip-body {
+    opacity: 0.85;
+  }
+
+  .ct-iu-tooltip-brand {
+    display: block;
+    margin-top: 6px;
+    font-size: 9px;
+    opacity: 0.4;
+    text-align: right;
+    font-weight: 500;
+  }
+
+  /* Dark mode tooltip */
+  .dark .ct-iu-tooltip {
+    background: #374151;
+  }
+
+  /* Dark mode */
+  .dark { background: #1a1a1a; }
+  .dark .claude-input-area {
+    background: #2a2a2a;
+    border-color: #444;
+  }
+  .dark .claude-placeholder { color: #666; }
+  .dark .claude-toolbar-left { color: #555; }
+  .dark .claude-toolbar-right { color: #888; }
+  .dark .ct-input-usage { color: #999; }
+  .dark .ct-iu-bar, .dark .ct-iu-extra-bar { background: #3a3a3a; }
+  .dark .scenario-title { color: #666; }
+
+  /* Footer text */
+  .claude-footer {
+    text-align: center;
+    font-size: 11px;
+    color: #9ca3af;
+    padding: 6px 0 0;
+  }
+  .dark .claude-footer { color: #555; }
+
+  /* Annotation arrow */
+  .annotation {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: #ef4444;
+    font-weight: 500;
+  }
+  .annotation-arrow {
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+
+<script>
+  // Compute local peak range from UTC 12:00-18:00
+  function getPeakLocalRange(locale) {
+    const now = new Date();
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 12));
+    const end   = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 18));
+    const fmt = d => d.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit', hour12: true });
+    return fmt(start) + '–' + fmt(end);
+  }
+
+  // Write tooltip content dynamically after page load
+  document.addEventListener('DOMContentLoaded', () => {
+    const koRange = getPeakLocalRange('ko-KR');
+    const enRange = getPeakLocalRange('en-US');
+    // Korean tooltips
+    document.querySelectorAll('.peak-tip-ko').forEach(el => {
+      el.querySelector('.ct-iu-tooltip-body').innerHTML =
+        '평일 ' + koRange + ' · 5h 한도가 더 빠르게 소진됩니다<br>7d 한도에는 영향 없음 · 주말은 오프피크';
+    });
+    // English tooltips
+    document.querySelectorAll('.peak-tip-en').forEach(el => {
+      el.querySelector('.ct-iu-tooltip-body').innerHTML =
+        'Weekdays ' + enRange + ' · The 5h limit drains faster<br>7d limit not affected · Weekends are off-peak';
+    });
+  });
+</script>
+
+<!-- Scenario 1: Normal (53%, pred 97%) — Korean -->
+<div class="scenario">
+  <div class="scenario-title">1. Normal — 53%, pred 97% (Korean)</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Opus 4.7 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#06b6d4">53%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:53%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:53%;width:44%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:97%;background:#f59e0b"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">2h 19m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">리셋 시 예상</span>
+        <span class="ct-iu-seg-value" style="color:#f59e0b">97%</span>
+      </div>
+      <div class="ct-iu-right">
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+</div>
+
+<!-- Scenario 1b: Normal — English -->
+<div class="scenario">
+  <div class="scenario-title">1b. Normal — English</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">Message Claude...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Opus 4.7 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5h usage</span>
+        <span class="ct-iu-seg-value" style="color:#06b6d4">53%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:53%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:53%;width:44%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:97%;background:#f59e0b"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱ resets in</span>
+        <span class="ct-iu-seg-value">2h 19m</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">est. at reset</span>
+        <span class="ct-iu-seg-value" style="color:#f59e0b">97%</span>
+      </div>
+      <div class="ct-iu-right">
+        <button class="ct-iu-settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude can make mistakes. Please double-check responses.</div>
+</div>
+
+<!-- Scenario 2: High usage + Peak (Korean) — HOVER TO SEE TOOLTIP -->
+<div class="scenario">
+  <div class="scenario-title">2. High usage (82%) + Peak — hover 🔥 PEAK for tooltip (Korean)</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Sonnet 4.5 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">82%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:82%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:82%;width:18%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:100%;background:#ef4444"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">47m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">리셋 시 예상</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">100%+</span>
+      </div>
+      <div class="ct-iu-right">
+        <span class="ct-iu-peak peak-tip-ko">🔥 PEAK
+          <div class="ct-iu-tooltip">
+            <span class="ct-iu-tooltip-title">🔥 피크 시간대</span>
+            <span class="ct-iu-tooltip-body">평일 ...</span>
+            <span class="ct-iu-tooltip-brand">Claude Tuner</span>
+          </div>
+        </span>
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+  <div class="annotation"><span class="annotation-arrow">↑</span> hover over 🔥 PEAK to see tooltip</div>
+</div>
+
+<!-- Scenario 2b: Peak — English tooltip -->
+<div class="scenario">
+  <div class="scenario-title">2b. Peak — English tooltip</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">Message Claude...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Sonnet 4.5 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5h usage</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">82%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:82%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:82%;width:18%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:100%;background:#ef4444"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱ resets in</span>
+        <span class="ct-iu-seg-value">47m</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">est. at reset</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">100%+</span>
+      </div>
+      <div class="ct-iu-right">
+        <span class="ct-iu-peak peak-tip-en">🔥 PEAK
+          <div class="ct-iu-tooltip">
+            <span class="ct-iu-tooltip-title">🔥 Peak Hours</span>
+            <span class="ct-iu-tooltip-body">Weekdays ...</span>
+            <span class="ct-iu-tooltip-brand">Claude Tuner</span>
+          </div>
+        </span>
+        <button class="ct-iu-settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude can make mistakes. Please double-check responses.</div>
+  <div class="annotation"><span class="annotation-arrow">↑</span> hover over 🔥 PEAK to see tooltip</div>
+</div>
+
+<!-- Scenario 3: Extra Usage -->
+<div class="scenario">
+  <div class="scenario-title">3. Extra Usage (Enterprise) — $2.30/$100</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Opus 4.7 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#f59e0b">65%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:65%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:65%;width:24%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:89%;background:#ef4444"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">1h 52m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">리셋 시 예상</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">89%</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">추가 사용</span>
+        <span class="ct-iu-seg-value" style="opacity:0.7">$2.30/$100</span>
+      </div>
+      <div class="ct-iu-extra-bar">
+        <div class="ct-iu-extra-bar-fill" style="width:2.3%;background:#f59e0b"></div>
+      </div>
+      <div class="ct-iu-right">
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+</div>
+
+<!-- Scenario 3b: Extra high + Peak + tooltip -->
+<div class="scenario">
+  <div class="scenario-title">3b. Extra $72/$100 + Peak + tooltip</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Opus 4.7 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">95%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:95%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:95%;width:5%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:100%;background:#ef4444"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">22m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">리셋 시 예상</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">100%+</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">추가 사용</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">$72/$100</span>
+      </div>
+      <div class="ct-iu-extra-bar">
+        <div class="ct-iu-extra-bar-fill" style="width:72%;background:#ef4444"></div>
+      </div>
+      <div class="ct-iu-right">
+        <span class="ct-iu-peak peak-tip-ko">🔥 PEAK
+          <div class="ct-iu-tooltip">
+            <span class="ct-iu-tooltip-title">🔥 피크 시간대</span>
+            <span class="ct-iu-tooltip-body">평일 ...</span>
+            <span class="ct-iu-tooltip-brand">Claude Tuner</span>
+          </div>
+        </span>
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+</div>
+
+<!-- Scenario 4: Low usage -->
+<div class="scenario">
+  <div class="scenario-title">4. Low usage (12%), no prediction</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Haiku 4.5 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#06b6d4">12%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:12%;background:#06b6d4"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">4h 3m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <div class="ct-iu-right">
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+</div>
+
+<!-- Scenario 5: Dark mode -->
+<div class="scenario dark" style="padding: 20px; border-radius: 12px;">
+  <div class="scenario-title">5. Dark mode — high + peak + extra</div>
+  <div class="claude-input-area">
+    <div class="claude-placeholder">메시지를 입력하세요...</div>
+    <div class="claude-toolbar">
+      <div class="claude-toolbar-left">+</div>
+      <div class="claude-toolbar-right">
+        <span>Opus 4.7 ∨</span>
+        <span>⎙</span>
+      </div>
+    </div>
+    <div class="ct-input-usage">
+      <img src="icons/icon16.png" class="ct-iu-logo" alt="CT">
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">5시간 사용률</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">91%</span>
+      </div>
+      <div class="ct-iu-bar">
+        <div class="ct-iu-bar-fill" style="width:91%;background:#06b6d4"></div>
+        <div class="ct-iu-bar-pred" style="left:91%;width:9%;color:#06b6d4"></div>
+        <div class="ct-iu-bar-marker" style="left:100%;background:#ef4444"></div>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">⏱</span>
+        <span class="ct-iu-seg-value">12m</span>
+        <span class="ct-iu-seg-label">뒤 리셋</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">리셋 시 예상</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">100%+</span>
+      </div>
+      <span class="ct-iu-dot">·</span>
+      <div class="ct-iu-seg">
+        <span class="ct-iu-seg-label">추가 사용</span>
+        <span class="ct-iu-seg-value" style="color:#ef4444">$8.50/$100</span>
+      </div>
+      <div class="ct-iu-extra-bar">
+        <div class="ct-iu-extra-bar-fill" style="width:8.5%;background:#f59e0b"></div>
+      </div>
+      <div class="ct-iu-right">
+        <span class="ct-iu-peak peak-tip-ko">🔥 PEAK
+          <div class="ct-iu-tooltip">
+            <span class="ct-iu-tooltip-title">🔥 피크 시간대</span>
+            <span class="ct-iu-tooltip-body">평일 ...</span>
+            <span class="ct-iu-tooltip-brand">Claude Tuner</span>
+          </div>
+        </span>
+        <button class="ct-iu-settings" title="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="claude-footer">Claude는 AI이며 실수할 수 있습니다. 응답을 다시 한번 확인해주세요.</div>
+</div>
+
+</body>
+</html>

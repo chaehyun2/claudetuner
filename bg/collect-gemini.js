@@ -95,6 +95,15 @@ export async function collectGemini(force = false) {
 
     const accountId = googleId || 'gemini-unknown';
 
+    // No-limit plans are detected by PLAN, not by null/empty windows. Google
+    // Workspace (Business) and Enterprise seats DO return 5h/7d windows, but the
+    // utilization stays pinned at 0% — they aren't metered like consumer plans —
+    // so a null-based check never fires and the popup would show a misleading 0%.
+    // Keying off the plan is also deterministic (no transient-empty-window false
+    // positives). Consumer plans (Free / AI Plus / Advanced / AI Pro / AI Ultra)
+    // keep showing real percentages.
+    const noLimits = /Business|Enterprise|Workspace/i.test(plan);
+
     const org = {
       uuid: accountId,
       name: email || 'Gemini',
@@ -106,6 +115,7 @@ export async function collectGemini(force = false) {
       d7,
       resetsAt5h,
       resetsAt7d,
+      noLimits,
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,

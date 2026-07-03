@@ -94,6 +94,9 @@ export function selectOrg(orgId, container) {
     const isClaudeOrg = providerKey === 'claude';
     const isEnterprise = /Enterprise/i.test(orgData.plan);
     const isUsageBased = isEnterprise && orgData.h5 == null && orgData.d7 == null;
+    // No-limit Gemini plan (Workspace/Business/Enterprise): flagged by the collector
+    // by plan (these seats report 0% windows). Show "no usage limits" not "0%".
+    const isNoLimitGemini = providerKey === 'gemini' && !!orgData.noLimits;
 
     // resets_at: prefer collectedOrgs, fallback to primary
     const resetsAt5h = orgData.resetsAt5h || (isPrimary ? state.currentSnapshot?.five_hour?.resets_at : null);
@@ -130,6 +133,13 @@ export function selectOrg(orgId, container) {
           + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('enterprise_unlimited') + '</div>'
           + '</div>';
       }
+    } else if (isNoLimitGemini) {
+      // No 5h/7d limits — mirror the Enterprise-unlimited layout with the plan name.
+      if (renewalGroup) renewalGroup.style.display = 'none';
+      gaugeSection.innerHTML = '<div style="text-align:center;padding:6px 0">'
+        + '<div style="font-size:13px;font-weight:600;color:var(--accent)">' + escHtml(_providerOrgLabel(orgData) || orgData.plan || 'Gemini') + '</div>'
+        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('gemini_no_limit') + '</div>'
+        + '</div>';
     } else {
       // 5h/7d gauge (common for Pro/Max/Team/Enterprise seat-based)
       if (isEnterprise || !isClaudeOrg || !isPrimary) {
@@ -291,24 +301,26 @@ export function selectOrg(orgId, container) {
       seven_day: { utilization: orgData.d7, resets_at: resetsAt7d },
       extra_usage: orgData.extraUsage || (orgData.spendLimit ? { used_credits: orgData.spendUsed, monthly_limit: orgData.spendLimit } : null),
     };
-    // Enterprise usage-based: no 5h/7d tab rolling needed, stop it. Restored on org switch
-    if (isUsageBased) {
+    // No 5h/7d limits (Enterprise usage-based or no-limit Gemini): no tab rolling
+    // needed, stop it. Restored on org switch.
+    if (isUsageBased || isNoLimitGemini) {
       _stopChartAutoRoll();
     } else if (isChartAutoRoll() && !isChartRolling()) {
       _startChartAutoRoll();
     }
     const chartSection = document.getElementById('chart-section');
-    if (hist.length >= 2 || isUsageBased) {
+    if ((hist.length >= 2 || isUsageBased) && !isNoLimitGemini) {
       if (chartSection) chartSection.style.display = '';
       drawCharts(hist, orgPlan, orgSnapshot);
     } else {
-      // Not enough data: hide chart to avoid showing stale data from another org
+      // Not enough data (or no-limit plan: all-null history → empty panes): hide
+      // the chart to avoid showing stale data from another org.
       if (chartSection) chartSection.style.display = 'none';
     }
 
     // === 9. Status banner ===
-    if (isUsageBased) {
-      // Enterprise usage-based: hide banner since no 5h/7d data
+    if (isUsageBased || isNoLimitGemini) {
+      // No 5h/7d data (usage-based Enterprise or no-limit Gemini): hide banner
       const banner = document.getElementById('status-banner');
       if (banner) banner.classList.add('hidden');
     } else if (isExternalProvider && hist.length < 3) {

@@ -1,0 +1,6 @@
+# Local / generated — never published (this repo is an auto-generated release mirror)
+.omc/
+.claude/
+.DS_Store
+CLAUDE.md
+AGENTS.md

@@ -39,14 +39,55 @@
   const I18N = {
     ko: {
       title: '사용량', session: '세션 (5h)', weekly: '주간', no_data: '데이터 수집 중...',
-      pred_tip: '리셋 시 예상 사용률', dashboard: '대시보드 열기', settings: '설정', notices: '공지사항',
+      dashboard: '대시보드 열기', settings: '설정', notices: '공지사항',
+      tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.',
+      tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.',
+      tip_pred: '현재 속도 기준,\n리셋 시점 예상 사용률.', tip_brand: 'Claude Tuner',
     },
     en: {
       title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...',
-      pred_tip: 'Estimated usage at reset', dashboard: 'Open dashboard', settings: 'Settings', notices: 'Notices',
+      dashboard: 'Open dashboard', settings: 'Settings', notices: 'Notices',
+      tip_5h: 'Usage in the last 5-hour window.\nResets periodically.',
+      tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.',
+      tip_pred: 'Estimated usage at reset\nbased on current pace.', tip_brand: 'Claude Tuner',
     },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
+
+  // ── Styled hover tooltip (mirrors claude.ai's sidebar): a single fixed element
+  // appended to <body>, repositioned under whatever row/span is hovered, with a
+  // brand footer. Replaces native title= so it renders instantly and on-brand. ──
+  let _tooltipEl = null;
+  function ensureTooltip() {
+    if (_tooltipEl && document.body.contains(_tooltipEl)) return _tooltipEl;
+    _tooltipEl = document.createElement('div');
+    _tooltipEl.className = 'ct-cg-tooltip';
+    _tooltipEl.id = 'ct-cg-tooltip';
+    document.body.appendChild(_tooltipEl);
+    return _tooltipEl;
+  }
+  function showTooltip(target, textOrKey, raw) {
+    const tip = ensureTooltip();
+    const text = raw ? textOrKey : t(textOrKey);
+    tip.textContent = text;
+    tip.appendChild(Object.assign(document.createElement('span'), {
+      className: 'ct-cg-tip-brand', textContent: t('tip_brand'),
+    }));
+    const rect = target.getBoundingClientRect();
+    tip.style.left = `${rect.left}px`;
+    tip.style.top = `${rect.bottom + 6}px`;
+    tip.classList.add('visible');
+  }
+  function hideTooltip() { if (_tooltipEl) _tooltipEl.classList.remove('visible'); }
+  function removeTooltip() { if (_tooltipEl) { _tooltipEl.remove(); _tooltipEl = null; } }
+  function attachTip(el, tipKey, stopProp, raw) {
+    if (!el) return;
+    el.addEventListener('mouseenter', (e) => {
+      if (stopProp) e.stopPropagation();
+      showTooltip(el, typeof tipKey === 'function' ? tipKey() : tipKey, raw);
+    });
+    el.addEventListener('mouseleave', hideTooltip);
+  }
 
   // ── Sidebar anchor: just below the "More" menu group ──
   // Preferred placement is inside the scrollable nav, right after the top-level
@@ -133,7 +174,7 @@
     if (showPred) {
       const predColor = CORE.gaugeColor(predUtil);
       const predText = predUtil >= 100 ? '100%+' : `${Math.round(predUtil)}%`;
-      predHtml = `<span class="ct-cg-arrow text-token-text-tertiary">→</span><span class="ct-cg-pred" style="color:${predColor}" title="${CORE.escapeHtml(t('pred_tip'))}">${predText}</span>`;
+      predHtml = `<span class="ct-cg-arrow text-token-text-tertiary">→</span><span class="ct-cg-pred" style="color:${predColor}">${predText}</span>`;
     }
 
     const resetText = resetAt ? CORE.formatCountdown(resetAt, _lang) : '';
@@ -145,7 +186,7 @@
         <span class="ct-cg-name text-token-text-secondary">${CORE.escapeHtml(label)}</span>
         <span class="ct-cg-pct" style="color:${color}">${pctText}</span>${predHtml}
       </span>
-      <span class="ct-cg-reset text-token-text-tertiary" data-reset="${resetAt || ''}" title="${resetAt ? CORE.escapeHtml(CORE.formatResetAbsolute(resetAt, _lang)) : ''}">${resetText}</span>
+      <span class="ct-cg-reset text-token-text-tertiary" data-reset="${resetAt || ''}">${resetText}</span>
     `;
     row.appendChild(labelRow);
 
@@ -155,13 +196,20 @@
     if (showPred) {
       const clampedPred = Math.min(predUtil, 100);
       const predColor = CORE.gaugeColor(predUtil);
-      barHtml += `<div class="ct-cg-bar-pred-fill" style="left:${clampedUtil}%;width:${clampedPred - clampedUtil}%"></div>`;
+      barHtml += `<div class="ct-cg-bar-pred-fill" style="left:${clampedUtil}%;width:${clampedPred - clampedUtil}%;color:${predColor}"></div>`;
       barHtml += `<div class="ct-cg-bar-marker" style="left:${clampedPred}%;background:${predColor}"></div>`;
     }
     const bar = document.createElement('div');
     bar.className = 'ct-cg-bar';
     bar.innerHTML = barHtml;
     row.appendChild(bar);
+
+    // Styled tooltips (mirror claude.ai): row → what the limit means, pred span →
+    // how the estimate is derived, reset span → absolute reset time (recalculated
+    // on each hover so it never goes stale between the 1s countdown ticks).
+    attachTip(row, id === '5h' ? 'tip_5h' : 'tip_7d');
+    attachTip(row.querySelector('.ct-cg-pred'), 'tip_pred', true);
+    if (resetAt) attachTip(row.querySelector('.ct-cg-reset'), () => CORE.formatResetAbsolute(resetAt, _lang), true, true);
 
     return row;
   }
@@ -210,6 +258,7 @@
     });
     frag.appendChild(footer);
 
+    hideTooltip(); // the old rows (tooltip owners) are about to be replaced
     content.innerHTML = '';
     content.appendChild(frag);
     updateBellBadge();
@@ -290,6 +339,7 @@
   function unmount() {
     const el = document.getElementById(PANEL_ID);
     if (el) el.remove();
+    hideTooltip(); // rows that owned the tooltip are gone — don't leave it hanging
     _mounted = false;
   }
 
@@ -306,6 +356,7 @@
   function teardown() {
     _enabled = false;
     unmount();
+    removeTooltip();
     _intervals.forEach(clearInterval);
     _intervals = [];
     if (_observer) { _observer.disconnect(); _observer = null; }

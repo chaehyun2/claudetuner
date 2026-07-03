@@ -1505,7 +1505,11 @@ async function buildSidebarUsageData(reqOrgId, provider) {
   // Language detection
   const lang = local.sidebarLang || (snapshot?.user_lang) || 'en';
 
-  return { plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang };
+  // No-limit plan (Gemini Workspace/Business/Enterprise): the collector sets this
+  // by plan (these seats report 0% windows, not null), so trust the stored flag.
+  const noLimits = !!orgData?.noLimits;
+
+  return { plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits };
 }
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)

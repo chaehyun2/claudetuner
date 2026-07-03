@@ -51,8 +51,8 @@
   let _email = '';
 
   const I18N = {
-    ko: { session: '5시간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5-hour usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
+    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'No usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -164,10 +164,17 @@
     const color = CORE.gaugeColor(util);
     const clamped = Math.min(util, 100);
     const showPred = predUtil != null && predUtil - util >= CORE.PRED_MIN_DELTA;
-    let bar = `<span class="ct-gm-strip-bar"><span class="ct-gm-strip-bar-track"><span class="ct-gm-strip-bar-fill" style="width:${clamped}%;background:${color}"></span></span>`;
+    const predColor = showPred ? CORE.gaugeColor(predUtil) : null;
+    const clampedPred = showPred ? Math.min(predUtil, 100) : 0;
+    // Prediction fill (diagonal stripe) lives inside the clipped track between the
+    // current fill and the predicted level; the marker sits on top of the bar.
+    let bar = `<span class="ct-gm-strip-bar"><span class="ct-gm-strip-bar-track"><span class="ct-gm-strip-bar-fill" style="width:${clamped}%;background:${color}"></span>`;
     if (showPred) {
-      const clampedPred = Math.min(predUtil, 100);
-      bar += `<span class="ct-gm-strip-bar-marker" style="left:${clampedPred}%;background:${CORE.gaugeColor(predUtil)}"></span>`;
+      bar += `<span class="ct-gm-strip-bar-pred-fill" style="left:${clamped}%;width:${clampedPred - clamped}%;color:${predColor}"></span>`;
+    }
+    bar += `</span>`;
+    if (showPred) {
+      bar += `<span class="ct-gm-strip-bar-marker" style="left:${clampedPred}%;background:${predColor}"></span>`;
     }
     bar += `</span>`;
     return seg(`${label} ${Math.round(util)}%`, color) + bar;
@@ -178,6 +185,14 @@
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
   function renderStripInto(strip) {
+    // No-limit plan (Workspace/Business/Enterprise): show "no usage limits · <plan>".
+    // Checked BEFORE the h5==null guard because these plans report a 0% window
+    // (h5 is 0, not null), so the collecting-guard would otherwise render "0%".
+    if (_data && _data.noLimits) {
+      const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'gemini')}` : '');
+      strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(msg)}</span></div>`;
+      return;
+    }
     if (!_data || _data.h5 == null) {
       strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(t('no_data'))}</span></div>`;
       return;
@@ -311,7 +326,7 @@
         clearEmptyRetry(); // got data — stop fast-polling
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
-            _data.plan === res.plan) return;
+            _data.plan === res.plan && _data.noLimits === res.noLimits) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang.
         renderStrip();

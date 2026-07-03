@@ -12,6 +12,10 @@
   --ct-gm-surface: rgba(0, 0, 0, 0.04);
   --ct-gm-track: rgba(0, 0, 0, 0.1);
   --ct-gm-border: rgba(0, 0, 0, 0.08);
+  /* Frosted-glass card for the pill (floats below the composer). */
+  --ct-gm-glass: rgba(255, 255, 255, 0.72);
+  --ct-gm-glass-border: rgba(0, 0, 0, 0.07);
+  --ct-gm-glass-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
 
   display: flex;
   justify-content: flex-start;
@@ -27,6 +31,9 @@
   --ct-gm-surface: rgba(255, 255, 255, 0.06);
   --ct-gm-track: rgba(255, 255, 255, 0.14);
   --ct-gm-border: rgba(255, 255, 255, 0.1);
+  --ct-gm-glass: rgba(48, 49, 52, 0.55);
+  --ct-gm-glass-border: rgba(255, 255, 255, 0.12);
+  --ct-gm-glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -36,6 +43,9 @@
     --ct-gm-surface: rgba(255, 255, 255, 0.06);
     --ct-gm-track: rgba(255, 255, 255, 0.14);
     --ct-gm-border: rgba(255, 255, 255, 0.1);
+    --ct-gm-glass: rgba(48, 49, 52, 0.55);
+    --ct-gm-glass-border: rgba(255, 255, 255, 0.12);
+    --ct-gm-glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
   }
 }
 
@@ -60,11 +70,20 @@
   border-radius: 999px;
   color: inherit;
   text-decoration: none;
+  /* Blends flat while idle (no background/border/shadow), so it never reads as a
+     stray box on the empty light space below the composer. On hover it lifts into
+     a frosted-glass card — the claude.ai polish, but only when reached for. */
   border: 1px solid transparent;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   flex-wrap: wrap;
 }
-.ct-gm-strip-main:hover { background: var(--ct-gm-surface); border-color: var(--ct-gm-border); }
+.ct-gm-strip-main:hover {
+  background: var(--ct-gm-glass);
+  border-color: var(--ct-gm-glass-border);
+  box-shadow: var(--ct-gm-glass-shadow);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  backdrop-filter: blur(10px) saturate(180%);
+}
 
 /* Settings gear (separate from the dashboard link). */
 .ct-gm-strip-gear {
@@ -83,8 +102,8 @@
 .ct-gm-strip-bar {
   position: relative;
   display: inline-block;
-  width: 52px;
-  height: 4px;
+  width: 56px;
+  height: 6px;
   vertical-align: middle;
   margin: 0 1px;
 }
@@ -94,10 +113,20 @@
   border-radius: 3px;
   overflow: hidden;
 }
-.ct-gm-strip-bar-fill { display: block; height: 100%; border-radius: 3px; }
+.ct-gm-strip-bar-fill {
+  display: block; height: 100%; border-radius: 3px;
+  transition: width 0.4s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.ct-gm-strip-bar-pred-fill {
+  position: absolute; top: 0; height: 100%;
+  opacity: 0.28;
+  background-image: repeating-linear-gradient(-45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px);
+}
 .ct-gm-strip-bar-marker {
-  position: absolute; top: -1px; width: 2px; height: 6px;
+  position: absolute; top: -1.5px; width: 2px; height: 9px;
   border-radius: 1px; transform: translateX(-1px);
+  transition: left 0.4s ease;
 }
 
 .ct-gm-strip-muted { color: var(--ct-gm-text-muted); }

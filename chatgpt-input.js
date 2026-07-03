@@ -114,10 +114,17 @@
     const color = CORE.gaugeColor(util);
     const clamped = Math.min(util, 100);
     const showPred = predUtil != null && predUtil - util >= CORE.PRED_MIN_DELTA;
-    let bar = `<span class="ct-cg-strip-bar"><span class="ct-cg-strip-bar-track"><span class="ct-cg-strip-bar-fill" style="width:${clamped}%;background:${color}"></span></span>`;
+    const predColor = showPred ? CORE.gaugeColor(predUtil) : null;
+    const clampedPred = showPred ? Math.min(predUtil, 100) : 0;
+    // Prediction fill (diagonal stripe) lives inside the clipped track between the
+    // current fill and the predicted level; the marker sits on top of the bar.
+    let bar = `<span class="ct-cg-strip-bar"><span class="ct-cg-strip-bar-track"><span class="ct-cg-strip-bar-fill" style="width:${clamped}%;background:${color}"></span>`;
     if (showPred) {
-      const clampedPred = Math.min(predUtil, 100);
-      bar += `<span class="ct-cg-strip-bar-marker" style="left:${clampedPred}%;background:${CORE.gaugeColor(predUtil)}"></span>`;
+      bar += `<span class="ct-cg-strip-bar-pred-fill" style="left:${clamped}%;width:${clampedPred - clamped}%;color:${predColor}"></span>`;
+    }
+    bar += `</span>`;
+    if (showPred) {
+      bar += `<span class="ct-cg-strip-bar-marker" style="left:${clampedPred}%;background:${predColor}"></span>`;
     }
     bar += `</span>`;
     return seg(`${label} ${Math.round(util)}%`, color) + bar;

@@ -116,6 +116,9 @@ function _renderCard(org) {
   const provider = org.provider || 'claude';
   const isEnterprise = /Enterprise/i.test(org.plan);
   const isUsageBased = isEnterprise && org.h5 == null && org.d7 == null;
+  // No-limit Gemini plan (Workspace/Business/Enterprise): flagged by the collector
+  // by plan (these seats report 0% windows). Show "no usage limits" not "0%".
+  const isNoLimitGemini = provider === 'gemini' && !!org.noLimits;
   // The brand logo identifies the provider, so the plan name no longer needs a
   // "GPT "/"Gemini " text prefix.
   const beta = (provider === 'chatgpt' || provider === 'gemini') ? '<span class="org-chip-beta">Beta</span>' : '';
@@ -130,6 +133,9 @@ function _renderCard(org) {
       ? _spendRow(org)
       // No spend cap configured: Enterprise unlimited fallback (mirrors selectOrg).
       : `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('enterprise_unlimited'))}</span></div>`;
+  } else if (isNoLimitGemini) {
+    // Gemini plan with no 5h/7d limits: single "no usage limits" row.
+    rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
     const hist = _orgHistory(org);
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);

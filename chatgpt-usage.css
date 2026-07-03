@@ -8,6 +8,13 @@
   --ct-cg-track: rgba(0, 0, 0, 0.1);
   --ct-cg-border: rgba(0, 0, 0, 0.08);
   --ct-cg-hover: rgba(0, 0, 0, 0.05);
+  /* Frosted-glass card for the input strip (floats below the composer). */
+  --ct-cg-glass: rgba(255, 255, 255, 0.72);
+  --ct-cg-glass-border: rgba(0, 0, 0, 0.07);
+  --ct-cg-glass-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  --ct-cg-tip-bg: #ffffff;
+  --ct-cg-tip-text: #0d0d0d;
+  --ct-cg-tip-border: rgba(0, 0, 0, 0.1);
 }
 html.dark, html.dark-oled {
   --ct-cg-text: #ececec;
@@ -16,6 +23,12 @@ html.dark, html.dark-oled {
   --ct-cg-track: rgba(255, 255, 255, 0.14);
   --ct-cg-border: rgba(255, 255, 255, 0.1);
   --ct-cg-hover: rgba(255, 255, 255, 0.08);
+  --ct-cg-glass: rgba(50, 50, 52, 0.55);
+  --ct-cg-glass-border: rgba(255, 255, 255, 0.12);
+  --ct-cg-glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+  --ct-cg-tip-bg: #2f2f2f;
+  --ct-cg-tip-text: #ececec;
+  --ct-cg-tip-border: rgba(255, 255, 255, 0.14);
 }
 
 /* ── Sidebar panel (no card — blends into the native nav) ── */
@@ -59,21 +72,28 @@ html.dark, html.dark-oled {
   flex-shrink: 0;
 }
 
-.ct-cg-bar { position: relative; height: 4px; }
+.ct-cg-bar { position: relative; height: 6px; }
 .ct-cg-bar-track {
   position: absolute; inset: 0;
   background: rgba(127, 127, 127, 0.22);
   border-radius: 3px;
   overflow: hidden;
 }
-.ct-cg-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+.ct-cg-bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width 0.4s ease, background-color 0.3s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
 .ct-cg-bar-pred-fill {
   position: absolute; top: 0; height: 100%;
-  background: repeating-linear-gradient(90deg, rgba(127, 127, 127, 0.35) 0 2px, transparent 2px 4px);
+  opacity: 0.28;
+  background-image: repeating-linear-gradient(-45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px);
+  transition: left 0.4s ease, width 0.4s ease;
 }
 .ct-cg-bar-marker {
-  position: absolute; top: -1px; width: 2px; height: 6px;
+  position: absolute; top: -1.5px; width: 2px; height: 9px;
   border-radius: 1px; transform: translateX(-1px);
+  transition: left 0.4s ease;
 }
 
 .ct-cg-footer {
@@ -130,6 +150,37 @@ html.dark, html.dark-oled {
   padding: 0 2px;
 }
 
+/* ── Styled hover tooltip (fixed, appended to <body>) ── */
+.ct-cg-tooltip {
+  position: fixed;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-line;
+  max-width: 240px;
+  z-index: 99999;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  background: var(--ct-cg-tip-bg);
+  color: var(--ct-cg-tip-text);
+  border: 1px solid var(--ct-cg-tip-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+.ct-cg-tooltip.visible { opacity: 1; }
+.ct-cg-tip-brand {
+  display: block;
+  margin-top: 4px;
+  font-size: 9px;
+  opacity: 0.55;
+  text-align: right;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+/* Hoverable rows/spans get a help cursor to signal the tooltip affordance. */
+.ct-cg-limit, .ct-cg-pred, .ct-cg-reset { cursor: default; }
+
 /* ── Input strip ── */
 .ct-cg-strip {
   display: flex;
@@ -184,14 +235,29 @@ html.dark, html.dark-oled {
   padding: 2px 12px 2px;
 }
 
+/* Blends flat while idle (no background/border/shadow), so it never reads as a
+   stray box on the empty light space below the composer. On hover it lifts into a
+   frosted-glass card (backdrop blur + translucent surface + soft border +
+   elevation) — the claude.ai polish, but only when the user reaches for it. */
+.ct-cg-strip-belowbox .ct-cg-strip-main {
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.ct-cg-strip-belowbox .ct-cg-strip-main:hover {
+  background: var(--ct-cg-glass);
+  border-color: var(--ct-cg-glass-border);
+  box-shadow: var(--ct-cg-glass-shadow);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  backdrop-filter: blur(10px) saturate(180%);
+}
+
 .ct-cg-strip-logo { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
 .ct-cg-strip-seg { font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Compact inline gauge bar (current fill + optional prediction marker). */
 .ct-cg-strip-bar {
   position: relative;
   display: inline-block;
-  width: 52px;
-  height: 4px;
+  width: 56px;
+  height: 6px;
   vertical-align: middle;
   margin: 0 1px;
 }
@@ -201,10 +267,20 @@ html.dark, html.dark-oled {
   border-radius: 3px;
   overflow: hidden;
 }
-.ct-cg-strip-bar-fill { display: block; height: 100%; border-radius: 3px; }
+.ct-cg-strip-bar-fill {
+  display: block; height: 100%; border-radius: 3px;
+  transition: width 0.4s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.ct-cg-strip-bar-pred-fill {
+  position: absolute; top: 0; height: 100%;
+  opacity: 0.28;
+  background-image: repeating-linear-gradient(-45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px);
+}
 .ct-cg-strip-bar-marker {
-  position: absolute; top: -1px; width: 2px; height: 6px;
+  position: absolute; top: -1.5px; width: 2px; height: 9px;
   border-radius: 1px; transform: translateX(-1px);
+  transition: left 0.4s ease;
 }
 .ct-cg-strip-muted { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-reset { color: var(--ct-cg-text-muted); }
