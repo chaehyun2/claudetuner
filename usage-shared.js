@@ -70,8 +70,36 @@
   const PRED_MIN_DELTA = 3;
 
   // ── Announcements (shared by the Claude + ChatGPT sidebars) ──
-  const ANNOUNCE_URL = 'https://api.claudetuner.com/api/announcements';
+  // Served as a static JSON straight from the Cloudflare CDN (cdn.claudetuner.com,
+  // an R2 custom domain) instead of the Worker route — so this high-frequency poll
+  // (every sidebar mount + SPA nav + 30-min interval) never invokes the Worker.
+  // The payload shape is identical to the old GET /api/announcements.
+  const ANNOUNCE_URL = 'https://cdn.claudetuner.com/announcements.json';
   const NOTICE_BASE = 'https://notice.claudetuner.com/';
+  // Client-side cache: announcements change a few times/week, so hold the raw
+  // payload in chrome.storage for an hour and skip the network on every mount.
+  const ANNOUNCE_CACHE_KEY = '__ct_announce_cache';
+  const ANNOUNCE_TTL_MS = 60 * 60 * 1000; // 1h
+
+  // Promisified chrome.storage.local access for the cached announcements payload.
+  // Resolve null on any error so a storage hiccup just falls through to a fetch.
+  function _getAnnounceCache() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(ANNOUNCE_CACHE_KEY, (o) => {
+          if (chrome.runtime?.lastError) return resolve(null);
+          resolve((o && o[ANNOUNCE_CACHE_KEY]) || null);
+        });
+      } catch { resolve(null); }
+    });
+  }
+  function _setAnnounceCache(list) {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ [ANNOUNCE_CACHE_KEY]: { at: Date.now(), list } }, () => resolve());
+      } catch { resolve(); }
+    });
+  }
 
   // Returns `true` if version `a` >= version `b` (dotted numeric compare).
   function compareVersions(a, b) {
@@ -89,12 +117,23 @@
   // Throws on network/parse error so callers can keep their last-known notices
   // (don't clear on a transient failure). Drops promo banners (own placement).
   async function fetchAnnouncements(lang, extVersion) {
-    const cacheBuster = Math.floor(Date.now() / 3600000);
-    const res = await fetch(ANNOUNCE_URL + '?t=' + cacheBuster);
-    if (!res.ok) throw new Error('fetchAnnouncements HTTP ' + res.status);
-    const list = await res.json();
-    // Throw (not []) on an unexpected shape so callers keep their last-known notices.
-    if (!Array.isArray(list)) throw new TypeError('fetchAnnouncements: unexpected shape');
+    // Serve from the client-side cache while it's fresh so mounts/SPA-nav/interval
+    // don't hit the network at all; a miss fetches the static CDN copy (never the
+    // Worker). Only the network path throws, so callers keep last-known notices on
+    // a transient CDN failure — a cache hit always succeeds.
+    let list = null;
+    const cached = await _getAnnounceCache();
+    if (cached && Array.isArray(cached.list) && (Date.now() - (cached.at || 0)) < ANNOUNCE_TTL_MS) {
+      list = cached.list;
+    }
+    if (!list) {
+      const res = await fetch(ANNOUNCE_URL);
+      if (!res.ok) throw new Error('fetchAnnouncements HTTP ' + res.status);
+      list = await res.json();
+      // Throw (not []) on an unexpected shape so callers keep their last-known notices.
+      if (!Array.isArray(list)) throw new TypeError('fetchAnnouncements: unexpected shape');
+      await _setAnnounceCache(list);
+    }
     return list.filter((n) => {
       if (n.type === 'promo') return false;
       if (n.min_version && !compareVersions(extVersion, n.min_version)) return false;
