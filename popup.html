@@ -77,6 +77,12 @@
     @keyframes btn-spin { to { transform: rotate(360deg); } }
     button.loading { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
     button.loading::before { content: ''; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: btn-spin .6s linear infinite; flex-shrink: 0; }
+    /* In-place spinner: hides text (keeps its space → no resize) and overlays a
+       centered spinner. For transparent/light buttons (spinner uses text color). */
+    button.spinning { color: transparent !important; position: relative; }
+    button.spinning::after { content: ''; position: absolute; top: 50%; left: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border: 2px solid rgba(128,128,128,.3); border-top-color: var(--text-secondary); border-radius: 50%; animation: btn-spin .6s linear infinite; }
+    /* White spinner variant for filled/primary buttons (colored bg, white text). */
+    button.btn-primary.spinning::after { border-color: rgba(255,255,255,.4); border-top-color: #fff; }
     .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); font-weight: 600; display: inline-flex; align-items: center; gap: 3px; border: 1px solid transparent; }
     .hdr-btn-link:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
     .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
@@ -151,7 +157,7 @@
     /* 5h/7d sit side by side inside each card, mirroring the detail gauge-card. */
     .ov-gauges { display: flex; gap: 10px; }
     .ov-gauges .gauge-row { flex: 1; min-width: 0; }
-    .ov-unlimited { font-size: 11px; font-weight: 600; color: var(--accent); padding: 4px 0; display: inline-block; }
+    .ov-unlimited { font-size: 11px; font-weight: 500; color: var(--text-secondary); padding: 4px 0; display: inline-block; }
 
     /* Top tab switcher (모아 보기 | 자세히) — always visible for multi-account users. */
     .view-tabs { display: flex; gap: 0; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
@@ -203,6 +209,13 @@
     .chart-tab { background: none; border: none; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
     .chart-tab.active { border-bottom-color: currentColor; }
     .chart-tab:not(.active) { opacity: 0.5; }
+    /* Y-axis toggle: a bordered chip (not a faded tab) so it reads as a clickable control */
+    .chart-yaxis-btn.chart-tab { border: 1px solid var(--border); border-radius: 6px; background: var(--bg-hover); color: var(--text-secondary); margin-left: 4px; }
+    .chart-yaxis-btn.chart-tab:not(.active) { opacity: 1; }
+    .chart-yaxis-btn.chart-tab:hover { border-color: var(--accent); color: var(--accent); }
+    .chart-yaxis-btn.chart-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* Dark theme --accent (#818CF8) is light, so white text on it fails contrast; use dark ink instead (~4.9:1) */
+    [data-theme="dark"] .chart-yaxis-btn.chart-tab.active { color: #1e1b4b; }
 
     /* 버튼 */
     button { padding: 8px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
@@ -490,6 +503,49 @@
     <div class="warn-hint">
       <a href="https://claude.ai" target="_blank" id="email-warn-link"></a> <span id="email-warn-hint"></span>
     </div>
+    <!-- Cross-email link (step C): link this claude.ai account to the Tuner account
+         via an emailed code, then the client substitutes user_email so ingest is
+         accepted. See docs/DESIGN-identity-email-auth-trap.md. -->
+    <div id="email-link-block" class="hidden" style="margin-top:8px">
+      <div id="email-link-step-request">
+        <button id="email-link-send" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
+      </div>
+      <div id="email-link-step-verify" class="hidden">
+        <input id="email-link-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+          style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;letter-spacing:3px;text-align:center" />
+        <button id="email-link-verify" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
+      </div>
+      <div id="email-link-status" class="warn-hint" role="status" aria-live="polite" style="margin-top:6px"></div>
+    </div>
+  </div>
+
+  <!-- Cross-email link "linked" state (step C): shown when a verified link exists
+       (claudeAliasLink in storage). Lets the user unlink self-service. -->
+  <!-- display toggled directly via style.display in render.js — an inline display
+       would override the .hidden class (no !important), so we don't use .hidden here. -->
+  <div id="claude-link-linked" style="display:none;align-items:center;gap:8px;padding:8px 10px;margin:8px 0;border:1px solid var(--border);border-radius:8px;font-size:12px">
+    <span id="claude-link-linked-text" role="status" aria-live="polite" style="flex:1;color:var(--text-secondary)"></span>
+    <button id="claude-link-unlink" style="padding:5px 10px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--text-secondary);cursor:pointer"></button>
+  </div>
+
+  <!-- Re-auth widget: an email (independent) account whose ext_token expired can't
+       use the shared-API_KEY fallback (server blocks it for email accounts), so
+       collection stalls with no self-recovery. Let them re-authenticate via the
+       magic-code flow to mint a fresh ext_token. Once collection resumes over the
+       new Bearer token, the server auto-upgrades the account email→claude
+       (/api/auth/link-claude) so this can't recur. -->
+  <div id="reauth-widget" class="warn-banner hidden">
+    <div class="warn-title" id="reauth-title"></div>
+    <div class="warn-msg" id="reauth-msg"></div>
+    <div id="reauth-step-request">
+      <button id="reauth-send" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
+    </div>
+    <div id="reauth-step-verify" class="hidden">
+      <input id="reauth-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+        style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;letter-spacing:3px;text-align:center" />
+      <button id="reauth-verify" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
+    </div>
+    <div id="reauth-status" class="warn-hint" style="margin-top:6px"></div>
   </div>
 
   <!-- 온보딩 가이드 -->
@@ -619,6 +675,7 @@
         <button class="chart-tab active" data-tab="5h" style="color:#06b6d4">5h</button>
         <button class="chart-tab" data-tab="7d" style="color:#7c3aed">7d</button>
         <button class="chart-tab chart-autoroll-btn" id="chart-autoroll-btn" title="Auto-rotate" style="font-size:9px;min-width:auto;padding:1px 5px">🔄</button>
+        <button class="chart-tab chart-yaxis-btn" id="chart-yaxis-btn" title="Y-axis: auto / 100%" style="font-size:9px;min-width:auto;padding:1px 6px">Y: auto</button>
       </div>
       <span class="chart-meta" id="chart-active-info"></span>
     </div>

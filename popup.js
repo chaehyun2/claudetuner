@@ -1,5 +1,5 @@
 // popup.js is the ES-module orchestrator (see popup.html). Domains live in ui/*.js.
-import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, isChartAutoRoll, isChartRolling } from './ui/charts.js';
+import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, _toggleChartYAxis, isChartAutoRoll, isChartRolling } from './ui/charts.js';
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory } from './ui/state.js';
 import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
@@ -10,6 +10,89 @@ import { _updateUICore } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
 
 
+
+// Re-auth widget for a trapped email (independent) account: its ext_token expired
+// and email accounts can't use the shared-API_KEY fallback, so collection stalls
+// with no self-recovery. Show a magic-code re-auth flow (mint a fresh ext_token);
+// once collection resumes over Bearer, the server auto-upgrades email→claude
+// (/api/auth/link-claude) so it can't recur. Also covers genuine provider-only
+// (ChatGPT/Gemini) independent accounts whose token expired.
+async function renderReauthWidget() {
+  const widget = document.getElementById('reauth-widget');
+  if (!widget) return;
+  const { independentAccount = null, extToken = null, claudeLinkDone = false } =
+    await chrome.storage.local.get({ independentAccount: null, extToken: null, claudeLinkDone: false });
+  // Trapped only when an email account has NO valid token (expired/cleared) AND
+  // hasn't already been upgraded to a Claude account (claudeLinkDone). After a
+  // link-claude upgrade the API_KEY fallback works, so a transient missing token
+  // is not a trap — don't flash the widget in that window.
+  if (!independentAccount?.email || extToken || claudeLinkDone) { widget.classList.add('hidden'); return; }
+
+  const email = independentAccount.email;
+  const stepReq = document.getElementById('reauth-step-request');
+  const stepVer = document.getElementById('reauth-step-verify');
+  const status = document.getElementById('reauth-status');
+  const codeInput = document.getElementById('reauth-code');
+  const sendBtn = document.getElementById('reauth-send');
+  const verifyBtn = document.getElementById('reauth-verify');
+
+  document.getElementById('reauth-title').textContent = t('reauth_title') || 'Reconnect to resume syncing';
+  document.getElementById('reauth-msg').textContent =
+    t('reauth_msg', email) || `Your session expired. Reconnect ${email} to keep syncing your usage.`;
+  sendBtn.textContent = t('reauth_send') || 'Send code';
+  verifyBtn.textContent = t('reauth_verify') || 'Verify & reconnect';
+  codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
+  widget.classList.remove('hidden');
+
+  if (!sendBtn.dataset.bound) {
+    sendBtn.dataset.bound = '1';
+    sendBtn.addEventListener('click', () => {
+      sendBtn.disabled = true; sendBtn.classList.add('loading'); status.textContent = '';
+      const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
+      chrome.runtime.sendMessage(
+        { type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang },
+        (res) => {
+          sendBtn.disabled = false; sendBtn.classList.remove('loading');
+          if (res && res.success) {
+            stepReq.classList.add('hidden');
+            stepVer.classList.remove('hidden');
+            status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
+            codeInput.focus();
+          } else if (res && res.error === 'rate_limited') {
+            status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
+          } else {
+            status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+          }
+        }
+      );
+    });
+  }
+
+  if (!verifyBtn.dataset.bound) {
+    verifyBtn.dataset.bound = '1';
+    const doVerify = () => {
+      if (verifyBtn.disabled) return; // guard against Enter double-submit
+      const code = (codeInput.value || '').trim();
+      if (!/^\d{6}$/.test(code)) { status.textContent = t('reauth_error_code') || 'Enter the 6-digit code.'; return; }
+      verifyBtn.disabled = true; verifyBtn.classList.add('loading'); status.textContent = '';
+      chrome.runtime.sendMessage({ type: 'VERIFY_MAGIC_CODE', email, code }, (res) => {
+        verifyBtn.disabled = false; verifyBtn.classList.remove('loading');
+        if (res && res.success) {
+          status.textContent = t('reauth_success') || 'Reconnected — syncing will resume shortly.';
+          // Nudge an immediate server POST with the fresh Bearer token so sync
+          // resumes now (and triggers the email→claude upgrade) instead of waiting
+          // for the next alarm. POPUP_OPENED only does a local-only collect.
+          chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+          setTimeout(() => location.reload(), 1200);
+        } else {
+          status.textContent = t('reauth_error_invalid') || 'Invalid or expired code. Request a new one.';
+        }
+      });
+    };
+    verifyBtn.addEventListener('click', doVerify);
+    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+  }
+}
 
 // Check optional provider permissions and show banner if needed
 async function checkProviderPermissions() {
@@ -182,6 +265,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     }
   }
+
+  renderReauthWidget();
 
   loadPopupAnnouncements();
   // Side panel persists across hide/show: if the initial fetch never populated
@@ -601,6 +686,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       tab.addEventListener('click', (e) => {
         e.stopPropagation();
         _toggleChartAutoRoll();
+      });
+    } else if (tab.id === 'chart-yaxis-btn') {
+      // Y-axis auto / 100% toggle button
+      tab.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _toggleChartYAxis();
       });
     } else {
       // 5h/7d tab manual click

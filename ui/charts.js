@@ -7,6 +7,8 @@ import { _isDark, _cGrid, _cLabel, gaugeColor, planToMultiplier, calcPaceTier } 
 let _activeChartTab = '5h';
 let _chartRollIntervalId = null;
 let _chartAutoRoll = true; // Default: auto-rolling enabled
+let _yFixed = false; // Default: auto-scale y-axis to data (shows over-100% spikes)
+let _lastDraw = null; // Last drawCharts args, cached so the y-axis toggle can re-render
 
 export function _switchChartTab(target) {
   if (target === _activeChartTab) return;
@@ -44,6 +46,24 @@ export function _toggleChartAutoRoll() {
   chrome.storage.local.set({ ct_chart_autoroll: _chartAutoRoll });
 }
 
+// Y-axis scale toggle: auto (data-driven, shows over-100%) ↔ fixed 100% (clean
+// reference view, over-100% clipped). Mirrors the dashboard's Y축 100%/자동 toggle.
+function _syncYAxisBtn() {
+  const btn = document.getElementById('chart-yaxis-btn');
+  if (!btn) return;
+  // Label shows the CURRENT mode (same convention as the dashboard button).
+  btn.textContent = _yFixed ? 'Y: 100%' : 'Y: auto';
+  btn.classList.toggle('active', _yFixed);
+}
+
+export function _toggleChartYAxis() {
+  _yFixed = !_yFixed;
+  _syncYAxisBtn();
+  chrome.storage.local.set({ ct_chart_yfixed: _yFixed });
+  // Re-render with the last data so the new scale takes effect immediately.
+  if (_lastDraw) drawCharts(_lastDraw.history, _lastDraw.plan, _lastDraw.snapshot);
+}
+
 // Load saved settings (only disable if explicitly set to false)
 chrome.storage.local.get('ct_chart_autoroll', (r) => {
   if (r.ct_chart_autoroll === false) {
@@ -54,6 +74,16 @@ chrome.storage.local.get('ct_chart_autoroll', (r) => {
     const btn = document.getElementById('chart-autoroll-btn');
     if (btn) { btn.textContent = '⏸'; btn.classList.add('active'); }
   }
+});
+
+// Load saved y-axis preference (only enable fixed if explicitly set to true).
+// storage.get is async: if the first drawCharts already ran with the default
+// (auto), re-render so the restored setting applies to the chart, not just the
+// button — otherwise the button could read 100% while the chart stayed auto.
+chrome.storage.local.get('ct_chart_yfixed', (r) => {
+  _yFixed = r.ct_chart_yfixed === true;
+  _syncYAxisBtn();
+  if (_yFixed && _lastDraw) drawCharts(_lastDraw.history, _lastDraw.plan, _lastDraw.snapshot);
 });
 
 // Clean up timers on popup unload
@@ -67,6 +97,8 @@ export function isChartRolling() { return _chartRollIntervalId != null; }
 
 // === Charts (5h / 7d split + prediction line) ===
 export function drawCharts(history, plan, snapshot) {
+  // Cache args so the y-axis toggle can re-render without popup.js re-plumbing state.
+  _lastDraw = { history, plan, snapshot };
   // Enterprise usage-based: spending summary instead of 5h/7d charts
   const isEnterprise = (plan || '').includes('Enterprise');
   const isUsageBasedEnt = isEnterprise && snapshot?.five_hour?.utilization == null && snapshot?.seven_day?.utilization == null;
@@ -241,10 +273,12 @@ export function drawCharts(history, plan, snapshot) {
     limitLines, now, paceTier: chartPace5h,
   });
 
-  // 7d chart
+  // 7d chart (last 2 windows = 14 days)
+  const cutoff7d = now - 14 * 86400000;
+  const sorted7d = sorted.filter((p) => p.t > cutoff7d);
   drawSingleChart({
     canvasId: 'chart-7d', infoId: 'chart-7d-info',
-    sorted, key: 'd7', color: '#7c3aed',
+    sorted: sorted7d.length >= 2 ? sorted7d : sorted, key: 'd7', color: '#7c3aed',
     rate: rate7d, lastVal: last7d, resetTime: reset7d,
     limitLines, now, paceTier: chartPace7d,
   });
@@ -315,8 +349,10 @@ function drawSingleChart(opts) {
   const dataMax = Math.max(...allVals, 10);
   // Limit line filter: only show within maxY range (re-filtered at draw stage)
   const visibleLimits = limitLines.filter((l) => l.value <= dataMax * 3 && l.value >= dataMax * 0.25);
-  // maxY based on data only — OK if budget/limit is clipped (uses canvas clip)
-  const maxY = dataMax * 1.15;
+  // maxY based on data only — OK if budget/limit is clipped (uses canvas clip).
+  // Fixed mode pins the axis at 100% (over-100% data is clipped by the canvas clip);
+  // auto mode scales to the data with 15% headroom (default, shows over-100% spikes).
+  const maxY = _yFixed ? 100 : dataMax * 1.15;
 
   // Canvas
   const dpr = window.devicePixelRatio || 1;
@@ -405,6 +441,16 @@ function drawSingleChart(opts) {
   // Release clipping
   ctx.restore();
 
+  // Clip the past-data pass to the chart box: when the y-axis is pinned to 100%
+  // (fixed mode) an over-100% value maps above pad.top, so without this clip the
+  // line/area/dot would draw outside the plot area. (The earlier reset/budget clip
+  // was already released above.) Prediction is drawn AFTER the matching restore
+  // below because predict.v is capped at 100, so its dot/label never escape.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad.left, pad.top, cw, ch);
+  ctx.clip();
+
   // Solid line (past data) — break line at collection gap intervals
   const valid = data.filter((d) => d.v !== null);
   const GAP_MS = 25 * 60000; // Gap if interval >= 25 min (collection cycle 10min x 2.5)
@@ -458,6 +504,9 @@ function drawSingleChart(opts) {
     ctx.beginPath(); ctx.arc(toX(lastV.x), toY(lastV.v), 2.5, 0, Math.PI * 2);
     ctx.fillStyle = color; ctx.fill();
   }
+
+  // Release the past-data clip (prediction below stays unclipped: predict.v ≤ 100).
+  ctx.restore();
 
   // Prediction dashed line
   if (predict && lastVal !== null) {

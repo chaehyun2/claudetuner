@@ -6,6 +6,7 @@ import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
 import { _providerOrgLabel } from './org-selector.js';
+import { _authedFetch } from './auth.js';
 
 function _applyTeamOnboarding(onboarding) {
   if (!state.onboardOrgName || !onboarding) return;
@@ -31,6 +32,7 @@ export function _updateUICore(status) {
   // it must show even for "provider-only" looking users, since the whole point is
   // that their Claude account never collected). Fire-and-forget; reads storage.
   renderEmailMismatchWarning();
+  renderClaudeLinkStatus();
 
   const onboarding = document.getElementById('onboarding');
 
@@ -489,10 +491,14 @@ export function _updateUICore(status) {
 export async function renderEmailMismatchWarning() {
   const banner = document.getElementById('claude-email-warn');
   if (!banner) return;
-  const { claudeEmailMismatch = null, claudeEmailMismatchDismissedTs = 0 } =
-    await chrome.storage.local.get({ claudeEmailMismatch: null, claudeEmailMismatchDismissedTs: 0 });
+  const { claudeEmailMismatch = null, claudeEmailMismatchDismissedTs = 0, claudeAliasLink = null } =
+    await chrome.storage.local.get({ claudeEmailMismatch: null, claudeEmailMismatchDismissedTs: 0, claudeAliasLink: null });
 
-  const active = claudeEmailMismatch && claudeEmailMismatch.ts > claudeEmailMismatchDismissedTs;
+  // If this same Claude email is already linked, the "linked" box (renderClaudeLinkStatus)
+  // owns the UI — don't also show the "not collecting, link it" banner (contradictory).
+  const alreadyLinked = claudeAliasLink && claudeEmailMismatch
+    && claudeAliasLink.claudeEmail === claudeEmailMismatch.claudeEmail;
+  const active = claudeEmailMismatch && claudeEmailMismatch.ts > claudeEmailMismatchDismissedTs && !alreadyLinked;
   if (!active) { banner.classList.add('hidden'); return; }
 
   const email = claudeEmailMismatch.claudeEmail;
@@ -509,6 +515,179 @@ export async function renderEmailMismatchWarning() {
     dismiss.addEventListener('click', async () => {
       banner.classList.add('hidden');
       await chrome.storage.local.set({ claudeEmailMismatchDismissedTs: Date.now() });
+    });
+  }
+
+  // Cross-email link (step C): when we know the claude.ai account email, offer a
+  // self-service link — email a code to that account (proving ownership), then the
+  // client substitutes user_email so ingest is accepted. Only shown when the email
+  // is known (needed to send the challenge and store the local mapping).
+  const linkBlock = document.getElementById('email-link-block');
+  if (linkBlock) {
+    if (email) { linkBlock.classList.remove('hidden'); _wireEmailLink(email); }
+    else linkBlock.classList.add('hidden');
+  }
+}
+
+function _linkCfg() {
+  return new Promise(r =>
+    chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
+  );
+}
+
+// Persist the verified mapping and nudge an immediate collection so the very next
+// snapshot carries the substituted (canonical) user_email and is accepted.
+// Returns true when the link was stored and a reload is scheduled (caller should
+// keep its spinner running until the page swaps), false on failure.
+async function _finishEmailLink(claudeEmail, canonicalEmail, status) {
+  if (!canonicalEmail) { status.textContent = t('email_link_err') || 'Could not link. Please try again.'; return false; }
+  await chrome.storage.local.set({ claudeAliasLink: { claudeEmail, canonicalEmail } });
+  await chrome.storage.local.remove('claudeEmailMismatch');
+  status.textContent = t('email_link_success') || 'Linked — Claude usage will start syncing shortly.';
+  chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+  // Short delay: keep the caller's spinner on until this reload swaps the page, so
+  // it doesn't stop and flash the button back to normal before refreshing.
+  setTimeout(() => location.reload(), 400);
+  return true;
+}
+
+// Wires the request/verify buttons for the cross-email link flow. Idempotent:
+// listeners are bound once per element (dataset.bound), safe to call on every render.
+function _wireEmailLink(claudeEmail) {
+  const stepReq = document.getElementById('email-link-step-request');
+  const stepVer = document.getElementById('email-link-step-verify');
+  const status = document.getElementById('email-link-status');
+  const codeInput = document.getElementById('email-link-code');
+  const sendBtn = document.getElementById('email-link-send');
+  const verifyBtn = document.getElementById('email-link-verify');
+  if (!sendBtn || !verifyBtn) return;
+
+  sendBtn.textContent = t('email_link_cta') || 'Link this Claude account';
+  verifyBtn.textContent = t('email_link_verify') || 'Verify & link';
+  codeInput.placeholder = t('email_link_code_ph') || '6-digit code';
+
+  if (!sendBtn.dataset.bound) {
+    sendBtn.dataset.bound = '1';
+    sendBtn.addEventListener('click', async () => {
+      sendBtn.disabled = true; sendBtn.classList.add('spinning'); status.textContent = '';
+      const restore = () => { sendBtn.disabled = false; sendBtn.classList.remove('spinning'); };
+      try {
+        const cfg = await _linkCfg();
+        const res = await _authedFetch(cfg, cfg.serverUrl + '/api/auth/claude-link/request', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ claude_email: claudeEmail }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.verified) {
+          // Already verified → _finishEmailLink reloads; keep the spinner until then.
+          if (!await _finishEmailLink(claudeEmail, data.canonical_email, status)) restore();
+        } else if (res.ok) {
+          stepReq.classList.add('hidden');
+          stepVer.classList.remove('hidden');
+          status.textContent = t('email_link_sent', claudeEmail) || `Verification code sent to ${claudeEmail}.`;
+          codeInput.focus();
+          restore();
+        } else if (res.status === 409) {
+          status.textContent = t('email_link_err_claimed') || 'This Claude account is linked to a different account.';
+          restore();
+        } else if (res.status === 401) {
+          status.textContent = t('email_link_err_auth') || 'Please sign in again first.';
+          restore();
+        } else {
+          status.textContent = t('email_link_err') || 'Could not send the code. Please try again.';
+          restore();
+        }
+      } catch {
+        status.textContent = t('email_link_err') || 'Could not send the code. Please try again.';
+        restore();
+      }
+    });
+  }
+
+  if (!verifyBtn.dataset.bound) {
+    verifyBtn.dataset.bound = '1';
+    const doVerify = async () => {
+      if (verifyBtn.disabled) return; // guard against Enter double-submit
+      const code = (codeInput.value || '').trim();
+      if (!/^\d{6}$/.test(code)) { status.textContent = t('email_link_err_code') || 'Enter the 6-digit code.'; return; }
+      verifyBtn.disabled = true; verifyBtn.classList.add('spinning'); status.textContent = '';
+      const restore = () => { verifyBtn.disabled = false; verifyBtn.classList.remove('spinning'); };
+      try {
+        const cfg = await _linkCfg();
+        const res = await _authedFetch(cfg, cfg.serverUrl + '/api/auth/claude-link/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ claude_email: claudeEmail, code }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.verified) {
+          // Success → _finishEmailLink reloads; keep the spinner on until the page
+          // swaps so it doesn't stop and flash the button back before refreshing.
+          if (!await _finishEmailLink(claudeEmail, data.canonical_email, status)) restore();
+        } else {
+          status.textContent = t('email_link_err_invalid') || 'Invalid or expired code. Request a new one.';
+          restore();
+        }
+      } catch {
+        status.textContent = t('email_link_err_invalid') || 'Invalid or expired code. Request a new one.';
+        restore();
+      }
+    };
+    verifyBtn.addEventListener('click', doVerify);
+    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+  }
+}
+
+// Renders the "linked" state (step C) when a verified cross-email link exists in
+// storage, with a self-service unlink button. Idempotent (dataset.bound).
+export async function renderClaudeLinkStatus() {
+  const box = document.getElementById('claude-link-linked');
+  if (!box) return;
+  const { claudeAliasLink = null } = await chrome.storage.local.get({ claudeAliasLink: null });
+  // Toggle style.display directly: the box carries an inline display, which would
+  // override the .hidden class (no !important), so .hidden can't hide it.
+  if (!claudeAliasLink || !claudeAliasLink.claudeEmail) { box.style.display = 'none'; return; }
+
+  const claudeEmail = claudeAliasLink.claudeEmail;
+  document.getElementById('claude-link-linked-text').textContent =
+    t('email_link_status', claudeEmail) || `Claude account ${claudeEmail} linked.`;
+  const unlinkBtn = document.getElementById('claude-link-unlink');
+  unlinkBtn.textContent = t('email_link_unlink') || 'Unlink';
+  box.style.display = 'flex';
+
+  if (!unlinkBtn.dataset.bound) {
+    unlinkBtn.dataset.bound = '1';
+    unlinkBtn.addEventListener('click', async () => {
+      // `.spinning` overlays a centered spinner and makes the text transparent (its
+      // space is kept), so the button shows a spinner without resizing.
+      unlinkBtn.disabled = true; unlinkBtn.classList.add('spinning');
+      const textEl = document.getElementById('claude-link-linked-text');
+      // Restore the button (used only on failure — on success the spinner keeps
+      // running until the reload replaces the page, so it never flashes back).
+      const restore = () => { unlinkBtn.disabled = false; unlinkBtn.classList.remove('spinning'); };
+      try {
+        const cfg = await _linkCfg();
+        const res = await _authedFetch(cfg, cfg.serverUrl + '/api/auth/claude-link', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ claude_email: claudeEmail }),
+        });
+        if (!res.ok) {
+          // Server delete failed (e.g. 401 expired token). Keep the local mapping so
+          // the user can retry, rather than silently diverging from the server row.
+          textEl.textContent = t('email_link_unlink_err') || 'Could not unlink. Please try again.';
+          restore();
+          return;
+        }
+        // Clear local mapping + any stale mismatch state, then reload. The spinner
+        // stays on until the reload swaps the page (no awkward gap where it stops
+        // and the button flashes back before refreshing). Short delay lets the
+        // MANUAL_COLLECT message dispatch before the popup context tears down.
+        await chrome.storage.local.remove(['claudeAliasLink', 'claudeEmailMismatch', 'claudeEmailMismatchDismissedTs']);
+        chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+        setTimeout(() => location.reload(), 250);
+      } catch {
+        textEl.textContent = t('email_link_unlink_err') || 'Could not unlink. Please try again.';
+        restore();
+      }
     });
   }
 }

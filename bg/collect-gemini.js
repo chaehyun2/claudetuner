@@ -8,14 +8,14 @@ import { gateProviderSnapshot } from './send-gate.js';
 const GEMINI_PLAN_MAP = {
   // Numeric planId (jSf9Qc response)
   1: 'Free',
-  2: 'Business',   // Google Workspace (bundled into Business Standard/Plus/Enterprise)
+  2: 'Work',       // Google Workspace seat (Google's own UI labels it "Work"; covers Business Standard/Plus/Enterprise — planId can't distinguish them)
   3: 'AI Plus',    // $7.99/mo — entry-level paid tier (post I/O 2026)
   4: 'Advanced',   // Google One AI Premium (legacy Gemini Advanced)
   5: 'AI Pro',     // $19.99/mo — full Gemini 3.1 Pro, 1M context
   6: 'AI Ultra',   // $99.99/mo — 5x Pro usage, developer tier
   // String variants (planId may arrive as string from some API paths)
   '1': 'Free',
-  '2': 'Business',
+  '2': 'Work',
   '3': 'AI Plus',
   '4': 'Advanced',
   '5': 'AI Pro',
@@ -24,7 +24,7 @@ const GEMINI_PLAN_MAP = {
   'Free': 'Free',
   'Plus': 'AI Pro',
   'Advanced': 'Advanced',
-  'Business': 'Business',
+  'Business': 'Work',
   'Ultra': 'AI Ultra',
 };
 
@@ -102,7 +102,9 @@ export async function collectGemini(force = false) {
     // Keying off the plan is also deterministic (no transient-empty-window false
     // positives). Consumer plans (Free / AI Plus / Advanced / AI Pro / AI Ultra)
     // keep showing real percentages.
-    const noLimits = /Business|Enterprise|Workspace/i.test(plan);
+    // 'Work' is the new label for planId 2 (was 'Business'); keep Business/Enterprise/
+    // Workspace as aliases so historical/alternate plan strings still resolve to no-limit.
+    const noLimits = /Business|Enterprise|Work/i.test(plan);
 
     const org = {
       uuid: accountId,

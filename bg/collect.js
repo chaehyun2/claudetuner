@@ -17,6 +17,46 @@ import {
 } from './plan.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
 
+// One-time server-side upgrade of an email (independent) account to a Claude
+// account, once Claude collection is confirmed working via a valid ext_token.
+//
+// An account created by magic-link login has auth_provider='email'. Email accounts
+// are barred from the shared-API_KEY fallback (impersonation guard), so when their
+// ext_token expires the extension can no longer authenticate and Claude collection
+// dies silently with no recovery path. This helper is called ONLY after a Claude
+// snapshot POST was accepted by the server (proof this account really is collecting
+// Claude), so we flip it to 'claude' via /api/auth/link-claude — the Bearer token
+// proves control of the account identity — and the API_KEY fallback then works so
+// collection survives future token expiry.
+//
+// Precise + cheap: only fires when (a) auth was via ext_token (Bearer, not API_KEY),
+// AND (b) this install carries an `independentAccount` (email login). Normal Claude
+// accounts have no `independentAccount`, so they never call it. Runs at most once
+// per install (claudeLinkDone guard). Off the ingest hot path; best-effort.
+async function maybeLinkClaudeAccount(config, sentToken) {
+  if (!sentToken || !config.serverUrl) return; // Bearer (ext_token) auth only
+  const { independentAccount = null, claudeLinkDone = false } =
+    await chrome.storage.local.get({ independentAccount: null, claudeLinkDone: false });
+  if (!independentAccount?.email || claudeLinkDone) return;
+  try {
+    const res = await fetch(`${config.serverUrl}/api/auth/link-claude`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${sentToken}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data && data.ok) {
+      // One-time reconcile: never call again. Keep `independentAccount` intact —
+      // the ChatGPT/Gemini collectors still read it as a server-email fallback
+      // (collect-chatgpt.js / collect-gemini.js), so removing it would fragment
+      // this user's multi-provider collection.
+      await chrome.storage.local.set({ claudeLinkDone: true });
+      console.log('[Claude Tuner] Email account linked to Claude — survives token expiry.');
+    }
+  } catch (e) {
+    // Best-effort — retried on the next successful Bearer collection cycle.
+  }
+}
+
 // Canonical plan label (accepts server labels or personal api-ids) → known label, or null
 // when absent/unrecognized so the stale-rec guard fires only on a confident mismatch.
 const _PLAN_CANON = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
@@ -604,6 +644,19 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       _timings['5_subscription'] = Math.round(performance.now() - _ts);
     }
 
+    // Cross-email link (step C): if this claude.ai account email has a verified
+    // link to a canonical Tuner account, tag the snapshot with the canonical email
+    // so /api/snapshots accepts it. The ext_token identity is the canonical (Tuner)
+    // email, not this claude.ai account email, so an unsubstituted user_email would
+    // be rejected (403 Email mismatch) and the data silently dropped.
+    // See docs/DESIGN-identity-email-auth-trap.md (step C).
+    {
+      const { claudeAliasLink } = await chrome.storage.local.get('claudeAliasLink');
+      if (claudeAliasLink && claudeAliasLink.claudeEmail === userEmail && claudeAliasLink.canonicalEmail) {
+        userEmail = claudeAliasLink.canonicalEmail;
+      }
+    }
+
     // 3. Build snapshot (resets_at normalized to minute precision)
     const extVersion = chrome.runtime.getManifest().version;
     const snapshot = {
@@ -797,6 +850,11 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       // Claude accepted (email matched the token identity) — clear any prior
       // email-mismatch warning so the popup banner disappears once collection works.
       await chrome.storage.local.remove('claudeEmailMismatch');
+
+      // Confirmed Claude collection via a valid ext_token → if this is an email
+      // (independent) account, upgrade it to 'claude' server-side (one-time) so it
+      // doesn't get stranded when the ext_token later expires.
+      await maybeLinkClaudeAccount(config, sentToken);
 
       // Store ext_token from server (TOFU issuance or refresh)
       if (result.ext_token) {
