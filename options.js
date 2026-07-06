@@ -2,6 +2,43 @@ let _prevSelectedOrgIds = [];
 let _saveTimer = null;
 let _lastInteractedCard = null;
 
+// ── Folders dark-launch flag (mirrors claude-folders.js) ──
+// Folders is gated behind a static CDN flag so it can ship to CWS dark and be
+// turned on later by flipping one file — no Worker, no CWS resubmit. The
+// options page has no guaranteed Claude tab open, so it does its own
+// fail-safe CORS fetch (same URL, same shape) in addition to reading the
+// cache claude-folders.js writes, and stays live via storage.onChanged.
+const FOLDERS_FLAGS_URL = 'https://cdn.claudetuner.com/flags.json';
+function _setFoldersRowVisible(available) {
+  const row = document.getElementById('folders-enabled-row');
+  if (row) row.style.display = available === true ? '' : 'none';
+}
+async function _refreshFoldersAvailability() {
+  try {
+    const res = await fetch(FOLDERS_FLAGS_URL);
+    if (!res.ok) { _setFoldersRowVisible(false); return; } // non-OK/404: hidden, don't touch cache
+    const json = await res.json();
+    if (!json || typeof json.folders !== 'boolean') {
+      _setFoldersRowVisible(false); // missing/invalid field: hidden, don't touch cache
+      return;
+    }
+    // Definitive 200 result with a real boolean — safe to self-heal storage, even
+    // when the definitive value is `false` (corrects a stale cached `true`).
+    const folders = json.folders === true;
+    _setFoldersRowVisible(folders);
+    try { chrome.storage.local.set({ foldersAvailable: folders }); } catch { /* noop */ }
+  } catch {
+    _setFoldersRowVisible(false); // fail-safe: network/parse error → hidden, keep last-known cache
+  }
+}
+// Keep the row in sync if claude-folders.js (or our own fetch above) updates
+// the cached flag while this options page stays open.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.foldersAvailable) {
+    _setFoldersRowVisible(changes.foldersAvailable.newValue === true);
+  }
+});
+
 // Check + display permission hints for optional providers
 async function _updateProviderPermHints() {
   const providers = [
@@ -141,6 +178,7 @@ function doSave() {
 
   const sidebarUsageEnabled = document.getElementById('sidebar-usage-enabled').checked;
   const inputUsageEnabled = document.getElementById('input-usage-enabled').checked;
+  const foldersEnabled = document.getElementById('folders-enabled').checked;
   const chatgptSidebarUsageEnabled = document.getElementById('chatgpt-sidebar-usage-enabled').checked;
   const chatgptInputUsageEnabled = document.getElementById('chatgpt-input-usage-enabled').checked;
   const geminiSidebarUsageEnabled = document.getElementById('gemini-sidebar-usage-enabled').checked;
@@ -154,7 +192,7 @@ function doSave() {
   const notifyPlanChange = document.getElementById('notify-plan-change').checked;
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -251,7 +289,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -280,6 +318,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       _updateProviderPermHints();
       document.getElementById('sidebar-usage-enabled').checked = config.sidebarUsageEnabled !== false;
       document.getElementById('input-usage-enabled').checked = config.inputUsageEnabled !== false;
+      document.getElementById('folders-enabled').checked = config.foldersEnabled !== false;
+      // Folders is dark-launched behind a CDN availability flag. claude-folders.js
+      // writes `foldersAvailable` to storage.local; keep the toggle row HIDDEN until
+      // the feature is available so users can't discover/toggle it pre-launch.
+      // 1) Default hidden immediately — never trust a possibly-stale cached `true`
+      // (avoids a flash of the row while still dark). Only a fresh CDN confirmation
+      // below is allowed to reveal it.
+      _setFoldersRowVisible(false);
+      // 2) Our own fail-safe CDN check — options.html has no dependency on a Claude
+      // tab having run. Reveals the row ONLY on a definitive folders===true; any
+      // non-OK/404/missing-field/parse-error keeps it hidden for this session.
+      _refreshFoldersAvailability();
       document.getElementById('chatgpt-sidebar-usage-enabled').checked = config.chatgptSidebarUsageEnabled !== false;
       document.getElementById('chatgpt-input-usage-enabled').checked = config.chatgptInputUsageEnabled !== false;
       document.getElementById('gemini-sidebar-usage-enabled').checked = config.geminiSidebarUsageEnabled !== false;
@@ -328,6 +378,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Page usage toggles (sidebar + input area)
   document.getElementById('sidebar-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('input-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('folders-enabled').addEventListener('change', autoSave);
   document.getElementById('chatgpt-sidebar-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('chatgpt-input-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('gemini-sidebar-usage-enabled').addEventListener('change', autoSave);

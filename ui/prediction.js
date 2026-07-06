@@ -3,6 +3,7 @@
 // (ui/state.js) and pure helpers (ui/util.js); i18n `t` is a global from i18n.js.
 import { state, _filteredHistory } from './state.js';
 import { calcPaceTier, _isDark } from './util.js';
+import { diurnalProject7dAdaptive } from './diurnal.js';
 
 // Used by both gauge prediction and banner evaluation (and the overview cards).
 export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
@@ -16,31 +17,24 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
   let rate, hoursDiff;
 
   if (key === 'd7') {
-    // 7d: based on local history r7(resets_at) — same logic as dashboard
-    // Sum only positive increments within the same resets_at window
-    const sixHoursAgo = now - 6 * 3600000;
-    const recent = history.filter(p => p.d7 != null && p.r7 && p.t > sixHoursAgo);
-    if (recent.length >= 2) {
-      let totalDelta = 0;
-      for (let i = 1; i < recent.length; i++) {
-        if (recent[i - 1].r7 === recent[i].r7) {
-          totalDelta += Math.max(0, recent[i].d7 - recent[i - 1].d7);
-        }
-      }
-      const timeDiffH = (recent[recent.length - 1].t - recent[0].t) / 3600000;
-      if (timeDiffH > 0) {
-        rate = totalDelta / timeDiffH;
-        hoursDiff = timeDiffH;
-      }
-    }
-    // Fallback when r7 data is insufficient: elapsed time based on resets_at window
-    if (rate == null) {
-      const windowH = 7 * 24;
-      const elapsed = windowH - hoursToReset;
-      if (elapsed < 1) return null;
-      rate = currentUtil / elapsed;
-      hoursDiff = elapsed;
-    }
+    // 7d: activity-normalized adaptive projection (docs/DESIGN-rate-estimator.md).
+    // Estimate the burn rate with a recency-weighted EWMA over ~48h of ACTIVITY time and
+    // project through the user's PERSONAL diurnal + weekly curve (global fallback when data
+    // is thin). Replaces the old thin/noisy last-6h flat window; the activity-mass model,
+    // discount-only clamp and remaining-mass floor are unchanged. Passing the full local
+    // history (extension keeps 30d) is what lets the personal curve be built.
+    const samples = history
+      .filter(p => p.d7 != null && p.r7)
+      .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
+    const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: resetTime, nowMs: now });
+    if (!dp) return null;
+    return {
+      rate: dp.rate,
+      predicted: dp.predicted,
+      hoursToReset: dp.hoursToReset,
+      hoursDiff: dp.hoursDiff,
+      hoursTo100: dp.hoursTo100,
+    };
   } else {
     // 5h: rate based on local history
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
@@ -122,7 +116,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     return;
   }
 
-  const { rate, predicted, hoursToReset, hoursDiff } = pred;
+  const { rate, predicted, hoursToReset, hoursDiff, hoursTo100: predHoursTo100 } = pred;
   const clampedPos = Math.min(predicted, 100);
   console.log(`[GaugePred:${id}] rate=${rate.toFixed(3)}/h, hoursDiff=${hoursDiff.toFixed(2)}h, predicted=${predicted.toFixed(1)}%`);
 
@@ -148,7 +142,8 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // Calculate estimated time to reach 100%
   let limitTimeStr = '';
   if (predicted >= 100 && rate > 0 && currentUtil < 100) {
-    const hoursTo100 = (100 - currentUtil) / rate;
+    // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
+    const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
     const limitDate = new Date(Date.now() + hoursTo100 * 3600000);
     const mo = limitDate.getMonth() + 1, da = limitDate.getDate();
     const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -175,7 +170,9 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     const obsTime = hoursDiff < 1 ? `${Math.round(hoursDiff * 60)}${t('min')}` : `${hoursDiff.toFixed(1)}${t('hours_short')}`;
     const resetTime2 = hoursToReset < 1 ? `${Math.round(hoursToReset * 60)}${t('min')}` : `${hoursToReset.toFixed(1)}${t('hours_short')}`;
     const tipLine3 = limitTimeStr ? t('predict_limit_at', limitTimeStr) : t('predict_tip_line3', predictText);
-    inlineEl.title = t('predict_tip_line1', obsTime, rate.toFixed(1)) + '\n' + t('predict_tip_line2', resetTime2) + '\n→ ' + tipLine3;
+    // 7d projection is diurnal-aware (discounts sleep/idle hours) — note it in the tip.
+    const diurnalNote = key === 'd7' ? '\n' + t('predict_tip_diurnal') : '';
+    inlineEl.title = t('predict_tip_line1', obsTime, rate.toFixed(1)) + '\n' + t('predict_tip_line2', resetTime2) + '\n→ ' + tipLine3 + diurnalNote;
     inlineEl.style.cursor = 'help';
   }
 

@@ -1,0 +1,448 @@
+/* Claude Tuner — Folders (sidebar tree). Reuses Claude's text-* classes for theme. */
+
+#ct-folders-panel.ct-folders {
+  margin: 8px 0 12px;
+  padding: 0 2px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.ct-folders .ct-fold-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+}
+.ct-folders .ct-fold-title {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+.ct-folders .ct-fold-add-btn,
+.ct-folders .ct-fold-sort-btn,
+.ct-folders .ct-fold-more-btn,
+.ct-folders .ct-fold-search-btn {
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background 0.12s, opacity 0.12s;
+}
+.ct-folders .ct-fold-add-btn:hover,
+.ct-folders .ct-fold-sort-btn:hover,
+.ct-folders .ct-fold-more-btn:hover,
+.ct-folders .ct-fold-search-btn:hover { background: rgba(127, 127, 127, 0.15); opacity: 1; }
+.ct-folders .ct-fold-sort-btn,
+.ct-folders .ct-fold-more-btn { font-size: 12px; }
+.ct-folders .ct-fold-search-btn { display: inline-flex; align-items: center; justify-content: center; }
+.ct-folders .ct-fold-search-btn.ct-active { opacity: 1; background: rgba(127, 127, 127, 0.18); }
+.ct-folders .ct-fold-add-btn.ct-disabled { opacity: 0.35; cursor: not-allowed; }
+
+.ct-folders .ct-fold-add-form { padding: 4px 6px; }
+.ct-folders .ct-fold-name-input,
+.ct-folders .ct-fold-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  outline: none;
+}
+.ct-folders .ct-fold-name-input:focus,
+.ct-folders .ct-fold-rename-input:focus {
+  border-color: #c96442; /* Claude accent */
+}
+
+/* Search box */
+.ct-folders .ct-fold-search-wrap { padding: 2px 6px 4px; }
+.ct-folders .ct-fold-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  outline: none;
+}
+.ct-folders .ct-fold-search:focus { border-color: #c96442; }
+.ct-folders .ct-fold-search-folder { cursor: pointer; }
+.ct-folders .ct-fold-chat-badge { font-size: 10px; opacity: 0.6; margin-left: 4px; }
+
+.ct-folders .ct-fold-list { margin-top: 2px; }
+.ct-folders .ct-fold-empty,
+.ct-folders .ct-fold-empty-body {
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.75;
+}
+
+.ct-folders .ct-fold-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.ct-folders .ct-fold-row:hover { background: rgba(127, 127, 127, 0.12); }
+/* Drag-and-drop: highlight a folder row when a chat/folder is dragged over it. */
+.ct-folders .ct-fold-row.ct-drop-hover {
+  background: rgba(201, 100, 66, 0.16); /* Claude accent tint */
+  box-shadow: inset 0 0 0 1.5px #c96442;
+}
+/* Sibling-reorder insertion line: drop above (before) / below (after) the row.
+   Inset box-shadow draws the line without shifting layout. */
+.ct-folders .ct-fold-row.ct-drop-before { box-shadow: inset 0 2px 0 0 #c96442; }
+.ct-folders .ct-fold-row.ct-drop-after { box-shadow: inset 0 -2px 0 0 #c96442; }
+/* The folder row currently being dragged (reparent). */
+.ct-folders .ct-fold-row.ct-dragging { opacity: 0.45; }
+
+/* Pointer-drag ghost that follows the cursor while dragging a Claude conversation
+   onto a folder. Rendered on <body>, so it is not scoped under .ct-folders. */
+.ct-drag-ghost {
+  position: fixed;
+  z-index: 2147483000;
+  top: 0;
+  left: 0;
+  max-width: 220px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1a1a1a;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  pointer-events: none; /* never intercept elementFromPoint hit-testing */
+}
+.ct-drag-ghost.ct-dark {
+  background: #2a2a2a;
+  color: #ececec;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+/* While a pointer drag is active, show a grabbing cursor and block text selection. */
+body.ct-ptr-dragging { cursor: grabbing !important; user-select: none !important; }
+.ct-folders .ct-fold-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 16px;
+  line-height: 1;
+  transition: transform 0.12s;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.ct-folders .ct-fold-caret:hover { opacity: 1; }
+.ct-folders .ct-fold-caret.open { transform: rotate(90deg); }
+.ct-folders .ct-fold-icon { font-size: 12px; }
+.ct-folders .ct-fold-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Per-folder count badges: subfolder count (folder glyph) + chat count (bubble glyph),
+   each shown only when > 0 — mirrors the competitor's "📁N 💬M" affordance. */
+.ct-folders .ct-fold-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.ct-folders .ct-fold-cnt {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  opacity: 0.55;
+}
+.ct-folders .ct-fold-cnt svg { opacity: 0.8; }
+.ct-folders .ct-fold-menu-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  opacity: 0;
+  padding: 0 2px;
+}
+.ct-folders .ct-fold-row:hover .ct-fold-menu-btn { opacity: 0.7; }
+.ct-folders .ct-fold-menu-btn:hover { opacity: 1; }
+/* Pin/favorite star: hidden until row hover for unpinned; always-visible gold when pinned. */
+.ct-folders .ct-fold-star {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0;
+  padding: 0 1px;
+  line-height: 1;
+}
+.ct-folders .ct-fold-row:hover .ct-fold-star { opacity: 0.55; }
+.ct-folders .ct-fold-star:hover { opacity: 1; }
+.ct-folders .ct-fold-star.on { opacity: 1; color: #f5b301; }
+
+/* No extra left padding here — per-depth indent comes solely from each row's inline
+   padding-left (6 + depth*8), so nesting steps stay tight and don't compound. */
+.ct-folders .ct-fold-body { padding: 0 0 4px 0; }
+.ct-folders .ct-fold-chat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+.ct-folders .ct-fold-chat:hover { background: rgba(127, 127, 127, 0.1); }
+.ct-folders .ct-fold-chat-icon { flex-shrink: 0; opacity: 0.4; }
+.ct-folders .ct-fold-chat-link {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+  color: inherit;
+  font-size: 11.5px;
+}
+.ct-folders .ct-fold-chat-link:hover { text-decoration: underline; }
+.ct-folders .ct-fold-chat-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0;
+  padding: 0 2px;
+}
+.ct-folders .ct-fold-chat:hover .ct-fold-chat-remove { opacity: 0.6; }
+.ct-folders .ct-fold-chat-remove:hover { opacity: 1; }
+
+/* Freemium gate */
+.ct-folders .ct-fold-gate { padding: 6px 8px; }
+.ct-folders .ct-fold-limit { font-size: 11px; opacity: 0.8; }
+.ct-folders .ct-fold-upgrade {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #c96442;
+  text-decoration: none;
+}
+.ct-folders .ct-fold-upgrade:hover { text-decoration: underline; }
+
+/* Floating row menu (rename / delete / add current) */
+.ct-fold-menu {
+  position: fixed;
+  z-index: 2147483000;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: 8px;
+  /* Opaque literal — Claude's --bg-000 token is translucent and let the sidebar
+     bars bleed through the menu. */
+  background: #ffffff;
+  color: #1a1a1a;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+/* Dark variant — applied in JS (positionMenu) to match Claude's active theme
+   exactly, so it never mismatches when the OS scheme differs from Claude's. */
+.ct-fold-menu.ct-dark {
+  background: #2a2a2a;
+  color: #ececec;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.ct-fold-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ct-fold-menu button:hover { background: rgba(127, 127, 127, 0.15); }
+.ct-fold-menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Folder color picker (Pro): swatch grid + clear option. Swatch bg is set inline so it
+   wins over the generic button:hover background. */
+.ct-fold-color-menu { padding: 8px; }
+.ct-fold-color-menu .ct-fold-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 22px);
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ct-fold-color-menu .ct-fold-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transition: transform 0.1s;
+}
+.ct-fold-color-menu .ct-fold-swatch:hover { transform: scale(1.15); }
+.ct-fold-color-menu .ct-fold-swatch.sel { outline-color: currentColor; }
+/* Folder emoji-icon picker (Pro): curated glyph grid + clear option. */
+.ct-fold-icon-menu { padding: 8px; }
+.ct-fold-icon-menu .ct-fold-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.ct-fold-icon-menu .ct-fold-emoji {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 26px;
+}
+.ct-fold-icon-menu .ct-fold-emoji:hover { background: rgba(127, 127, 127, 0.18); }
+.ct-fold-icon-menu .ct-fold-emoji.sel { background: rgba(201, 100, 66, 0.22); }
+
+/* ── Move-to-folder: top-bar button + picker modal (blends with Claude's UI) ── */
+/* Toolbar button, mimics Claude's header buttons: small, rounded, transparent,
+   inherits color, subtle hover. Lives inside Claude's own actions container. */
+#ct-mtf-btn.ct-mtf-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+#ct-mtf-btn.ct-mtf-btn:hover { background: rgba(127, 127, 127, 0.15); }
+#ct-mtf-btn .ct-mtf-btn-icon { font-size: 14px; line-height: 1; }
+#ct-mtf-btn .ct-mtf-btn-label { white-space: nowrap; }
+
+.ct-mtf-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Card — opaque literal (light) / .ct-dark (applied in JS to match Claude's theme). */
+.ct-mtf-modal {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #1a1a1a;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+}
+.ct-mtf-modal.ct-dark {
+  background: #2a2a2a;
+  color: #ececec;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.ct-mtf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ct-mtf-title { flex: 1; font-size: 14px; font-weight: 600; }
+.ct-mtf-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.ct-mtf-close:hover { background: rgba(127, 127, 127, 0.15); opacity: 1; }
+.ct-mtf-search {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 8px;
+}
+.ct-mtf-search:focus { border-color: #c96442; }
+.ct-mtf-list { overflow-y: auto; flex: 1; }
+.ct-mtf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ct-mtf-row:hover { background: rgba(127, 127, 127, 0.14); }
+.ct-mtf-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-mtf-empty { padding: 16px 10px; text-align: center; opacity: 0.7; font-size: 12px; }
+/* Confirmation toast after a one-shot add. */
+.ct-mtf-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483001;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #1a1a1a;
+  color: #ffffff;
+  font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+}
+.ct-mtf-toast.ct-dark { background: #ececec; color: #1a1a1a; }

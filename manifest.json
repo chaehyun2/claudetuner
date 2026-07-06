@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "1.28.3",
+  "version": "1.28.4",
   "description": "__MSG_appDescription__",
   "default_locale": "en",
   "permissions": [
@@ -51,8 +51,8 @@
   },
   "content_scripts": [{
     "matches": ["https://claude.ai/*"],
-    "css": ["sidebar-usage.css", "input-usage.css"],
-    "js": ["usage-shared.js", "sidebar-usage.js", "input-usage.js"],
+    "css": ["sidebar-usage.css", "input-usage.css", "claude-folders.css"],
+    "js": ["usage-shared.js", "sidebar-usage.js", "input-usage.js", "claude-folders.js"],
     "run_at": "document_idle"
   }],
   "web_accessible_resources": [{

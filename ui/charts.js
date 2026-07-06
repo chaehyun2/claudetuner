@@ -1,7 +1,7 @@
 // Chart rendering + 5h/7d tab state for the popup, extracted from popup.js (refactor/popup-charts).
 // Self-contained: no shared popup mutable state. Pure helpers come from ui/util.js;
 // i18n `t` is referenced as a global (i18n.js, a classic script that loads first).
-import { _isDark, _cGrid, _cLabel, gaugeColor, planToMultiplier, calcPaceTier } from './util.js';
+import { _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier, calcPaceTier } from './util.js';
 
 // === Chart tab state ===
 let _activeChartTab = '5h';
@@ -513,12 +513,33 @@ function drawSingleChart(opts) {
     ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
     ctx.moveTo(toX(nowX), toY(lastVal)); ctx.lineTo(toX(predict.x), toY(predict.v));
     ctx.stroke(); ctx.setLineDash([]);
-    // Prediction end dot + label
+    // Prediction end dot + filled badge — a solid pill keeps the % legible over the
+    // dashed line and gridlines (plain text got lost in the busy top-right corner).
     const pColor = predict.v >= 80 ? '#ef4444' : color;
-    ctx.beginPath(); ctx.arc(toX(predict.x), toY(predict.v), 2.5, 0, Math.PI * 2);
+    const _pdX = toX(predict.x), _pdY = toY(predict.v);
+    ctx.beginPath(); ctx.arc(_pdX, _pdY, 2.5, 0, Math.PI * 2);
     ctx.fillStyle = pColor; ctx.fill();
-    ctx.fillStyle = pColor; ctx.font = 'bold 7px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(`${Math.round(predict.v)}%`, toX(predict.x), toY(predict.v) - 4);
+
+    const _pLabel = `${Math.round(predict.v)}%`;
+    ctx.font = 'bold 8px sans-serif';
+    const _bPadX = 3.5, _bH = 13, _bR = 3;
+    const _bW = ctx.measureText(_pLabel).width + _bPadX * 2;
+    // Center over the dot, then clamp inside the plot so it never clips the edge.
+    let _bx = Math.max(pad.left, Math.min(_pdX - _bW / 2, w - pad.right - _bW));
+    // Above the dot by default; flip below if it would collide with the top.
+    let _by = _pdY - _bH - 5;
+    if (_by < pad.top) _by = _pdY + 5;
+    ctx.beginPath();
+    ctx.moveTo(_bx + _bR, _by);
+    ctx.arcTo(_bx + _bW, _by, _bx + _bW, _by + _bR, _bR);
+    ctx.arcTo(_bx + _bW, _by + _bH, _bx + _bW - _bR, _by + _bH, _bR);
+    ctx.arcTo(_bx, _by + _bH, _bx, _by + _bH - _bR, _bR);
+    ctx.arcTo(_bx, _by, _bx + _bR, _by, _bR);
+    ctx.closePath();
+    ctx.fillStyle = pColor; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(_pLabel, _bx + _bW / 2, _by + _bH / 2 + 0.5);
+    ctx.textBaseline = 'alphabetic';
   }
 
   // "Now" vertical line
@@ -535,13 +556,18 @@ function drawSingleChart(opts) {
     var hh = d.getHours(), mm = d.getMinutes();
     return (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
   };
+  var fmtDate = function(ts) { var d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate(); };
+  // 7d spans multiple days → label edges/resets by date (time is noise); 5h → by time.
+  var totalH = totalSpan / 3600000;
+  var is7d = totalH > 24;
+  var fmtEdge = is7d ? fmtDate : fmtTime;
 
   // Collect label candidates: { xN, label, priority, color }
   // priority: 0=reset, 1=now, 2=start/end, 3=intermediate tick
   var xLabels = [];
 
   // Start point
-  xLabels.push({ xN: 0, label: fmtTime(oldest), priority: 2, color: '#9ca3af' });
+  xLabels.push({ xN: 0, label: fmtEdge(oldest), priority: 2, color: _cTick() });
 
   // now
   if (hasFuture) {
@@ -553,29 +579,27 @@ function drawSingleChart(opts) {
     var _rp = allResetPoints[_ri];
     if (_rp >= oldest && _rp <= futureEnd) {
       var _rx = (_rp - oldest) / totalSpan;
-      xLabels.push({ xN: _rx, label: fmtTime(_rp), priority: 0, color: '#9ca3af' });
+      xLabels.push({ xN: _rx, label: fmtEdge(_rp), priority: 0, color: _cTick() });
     }
   }
 
   // End point (reset time if prediction exists, otherwise now)
   if (hasFuture) {
-    xLabels.push({ xN: 1, label: fmtTime(futureEnd), priority: 2, color: color });
+    xLabels.push({ xN: 1, label: fmtEdge(futureEnd), priority: 2, color: color });
   } else {
-    xLabels.push({ xN: 1, label: t('chart_now'), priority: 2, color: '#9ca3af' });
+    xLabels.push({ xN: 1, label: t('chart_now'), priority: 2, color: _cTick() });
   }
 
   // Intermediate ticks: date-based for 7d, hour-based for 5h
-  var totalH = totalSpan / 3600000;
-  if (totalH > 24) {
+  if (is7d) {
     // 7d: date (M/D) ticks — based on daily midnight
-    var fmtDate = function(ts) { var d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate(); };
     var dayStart = new Date(oldest);
     dayStart.setHours(0, 0, 0, 0);
     dayStart = dayStart.getTime() + 86400000;
     for (var dk = dayStart; dk < oldest + totalSpan; dk += 86400000) {
       if (dk <= oldest || dk >= oldest + totalSpan) continue;
       var dkX = (dk - oldest) / totalSpan;
-      xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: '#c9c9c9' });
+      xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: _cTick() });
     }
   } else {
     // 5h: time (HH:MM) ticks
@@ -586,7 +610,7 @@ function drawSingleChart(opts) {
     for (var tk = firstTick; tk < oldest + totalSpan; tk += tickInterval * 3600000) {
       if (tk <= oldest || tk >= oldest + totalSpan) continue;
       var tkX = (tk - oldest) / totalSpan;
-      xLabels.push({ xN: tkX, label: fmtTime(tk), priority: 3, color: '#c9c9c9' });
+      xLabels.push({ xN: tkX, label: fmtTime(tk), priority: 3, color: _cTick() });
     }
   }
 
@@ -897,7 +921,7 @@ function drawSpendingChart(opts) {
     if (dk <= monthStart || dk >= monthEnd) continue;
     if (dayCount % dayInterval !== 0) continue;
     const dkX = (dk - monthStart) / totalSpan;
-    xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: '#c9c9c9' });
+    xLabels.push({ xN: dkX, label: fmtDate(dk), priority: 3, color: _cTick() });
   }
 
   // Remove overlaps

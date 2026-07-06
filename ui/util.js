@@ -133,6 +133,9 @@ export function calcPaceTier(currentUtil, resetsAt, windowSeconds) {
 export function _isDark() { return document.documentElement.dataset.theme === 'dark'; }
 export function _cGrid() { return _isDark() ? '#2d3748' : '#f0f0f0'; }
 export function _cLabel() { return _isDark() ? '#718096' : '#d1d5db'; }
+// X-axis tick labels (dates/times). Darker than _cLabel so they stay legible
+// against the chart fill — the faint gray tick text was hard to read (see charts).
+export function _cTick() { return _isDark() ? '#94a3b8' : '#6b7280'; }
 
 // Dashboard URL deep-linked to a specific org (?org=<uuid>); plain dashboard when no
 // org. The dashboard resolves the uuid against its org list (provider included), so a

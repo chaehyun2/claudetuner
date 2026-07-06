@@ -10,6 +10,7 @@ import {
   SEND_MIN_INTERVAL_MS,
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
+import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
@@ -1321,6 +1322,54 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     buildSidebarUsageData(message.orgId, provider).then(sendResponse);
     return true;
   }
+  // Folder freemium gate: resolve our billing entitlement (server-authoritative).
+  // Returns { plan: 'pro' | 'free' } from /api/me's `billing` summary. Cache is
+  // scoped to the resolved account email and only trusted within a 24h TTL; on any
+  // failure (or a different/expired account) it fails CLOSED to 'free' so a lapsed
+  // or swapped account can never keep Pro-only capacity offline indefinitely.
+  if (message.type === 'GET_ENTITLEMENT') {
+    (async () => {
+      const CACHE_KEY = 'ct_entitlement';
+      const TTL_MS = 24 * 60 * 60 * 1000;
+      const config = await getConfig().catch(() => null);
+      const status = await getLastStatus().catch(() => null);
+      let email = status?.snapshot?.user_email;
+      if (!email) {
+        const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
+        email = independentAccount?.email || null;
+      }
+      // Cache is valid only when it belongs to the current account AND is within TTL.
+      const readFreshCache = async () => {
+        try {
+          const cached = (await chrome.storage.local.get(CACHE_KEY))[CACHE_KEY];
+          if (cached && cached.email === email && email &&
+              (Date.now() - (cached.at || 0) < TTL_MS)) return cached.plan === 'pro' ? 'pro' : 'free';
+        } catch { /* ignore */ }
+        return null; // no usable cache -> caller fails closed to 'free'
+      };
+      try {
+        if (!message.force) {
+          const cachedPlan = await readFreshCache();
+          if (cachedPlan) { sendResponse({ plan: cachedPlan, cached: true }); return; }
+        }
+        if (!config?.serverUrl || !email) { sendResponse({ plan: 'free', stale: true }); return; }
+        const resp = await authedFetch(config, `${config.serverUrl}/api/me`, {
+          headers: { 'X-User-Email': email },
+        });
+        // Fail CLOSED on any server error: never serve a Pro plan we couldn't
+        // confirm this call. (A fresh same-account cache is already returned by the
+        // non-force path above, so reaching here means we have no trustworthy Pro.)
+        if (!resp.ok) { sendResponse({ plan: 'free', stale: true }); return; }
+        const data = await resp.json();
+        const plan = data?.billing?.plan === 'pro' ? 'pro' : 'free';
+        await chrome.storage.local.set({ [CACHE_KEY]: { plan, at: Date.now(), email } });
+        sendResponse({ plan });
+      } catch (e) {
+        sendResponse({ plan: 'free', stale: true });
+      }
+    })();
+    return true;
+  }
   if (message.type === 'GET_ORGANIZATIONS') {
     fetchClaudeApi('/api/organizations').then(orgList => {
       if (!Array.isArray(orgList)) { sendResponse({ success: false, error: 'Invalid response' }); return; }
@@ -1387,6 +1436,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
         sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  // === M3 folder server sync (Pro-gated, KV-backed, whole-store LWW) ===
+  // The content script (claude-folders.js) cannot reach the API directly (that
+  // needs host_permissions, which are forbidden). It proxies all folder sync
+  // through here, reusing the same authed-fetch + ext_token path as snapshots.
+  // The authed email is resolved the same way GET_ENTITLEMENT does and echoed
+  // back so the content script can build the store without extra round-trips.
+  if (message.type === 'ct_folders_pull') {
+    (async () => {
+      try {
+        const config = await getConfig().catch(() => null);
+        const status = await getLastStatus().catch(() => null);
+        let email = status?.snapshot?.user_email;
+        if (!email) {
+          const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
+          email = independentAccount?.email || null;
+        }
+        if (!config?.serverUrl || !email) { sendResponse({ ok: false, status: 0, email: null }); return; }
+        const resp = await authedFetch(config, `${config.serverUrl}/api/folders?email=${encodeURIComponent(email)}`);
+        if (!resp.ok) { sendResponse({ ok: false, status: resp.status, email }); return; }
+        const data = await resp.json().catch(() => ({}));
+        sendResponse({ ok: true, store: data?.store ?? null, email });
+      } catch (e) {
+        sendResponse({ ok: false, status: -1, email: null });
+      }
+    })();
+    return true;
+  }
+  if (message.type === 'ct_folders_push') {
+    (async () => {
+      try {
+        const config = await getConfig().catch(() => null);
+        const status = await getLastStatus().catch(() => null);
+        let email = status?.snapshot?.user_email;
+        if (!email) {
+          const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
+          email = independentAccount?.email || null;
+        }
+        if (!config?.serverUrl || !email) { sendResponse({ ok: false, status: 0, email: null }); return; }
+        const resp = await authedFetch(config, `${config.serverUrl}/api/folders`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, store: message.store }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        // 409 = server copy newer (LWW loss); hand the server store back to adopt.
+        if (resp.status === 409) { sendResponse({ ok: false, conflict: true, store: data?.store ?? null, status: 409, email }); return; }
+        if (!resp.ok) { sendResponse({ ok: false, status: resp.status, email }); return; }
+        sendResponse({ ok: true, updatedAt: data?.updatedAt, email });
+      } catch (e) {
+        sendResponse({ ok: false, status: -1, email: null });
       }
     })();
     return true;
@@ -1532,24 +1636,17 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, pro
   let hoursDiff = 0;
 
   if (key === 'd7') {
-    const sixHoursAgo = now - 6 * 3600000;
-    const recent = orgHistory.filter(p => p.d7 != null && p.r7 && p.t > sixHoursAgo);
-    if (recent.length >= 2) {
-      let totalDelta = 0;
-      for (let i = 1; i < recent.length; i++) {
-        if (recent[i - 1].r7 === recent[i].r7) {
-          totalDelta += Math.max(0, recent[i].d7 - recent[i - 1].d7);
-        }
-      }
-      const timeDiffH = (recent[recent.length - 1].t - recent[0].t) / 3600000;
-      if (timeDiffH > 0) { rate = totalDelta / timeDiffH; hoursDiff = timeDiffH; }
-    }
-    if (rate == null) {
-      const elapsed = 7 * 24 - hoursToReset;
-      if (elapsed < 1) return null;
-      rate = currentUtil / elapsed;
-      hoursDiff = elapsed;
-    }
+    // 7d: activity-normalized adaptive projection. Mirrors ui/prediction.js calcPredictedAtReset —
+    // keep the CORE and this sidebar duplicate in sync (docs/DESIGN-rate-estimator.md).
+    // EWMA burn rate over ~48h of activity time, projected through the user's personal
+    // diurnal + weekly curve (global fallback when data is thin). Pass the org-scoped history
+    // so the personal curve is built from this org's own samples.
+    const samples = orgHistory
+      .filter(p => p.d7 != null && p.r7)
+      .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
+    const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: new Date(resetsAt).getTime(), nowMs: now });
+    if (!dp || dp.rate <= 0 || dp.predicted - currentUtil < 3) return null;
+    return Math.round(dp.predicted);
   } else {
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
     let valid = [];
