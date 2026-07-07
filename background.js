@@ -40,11 +40,18 @@ function hasProviderPermission(provider) {
 // chatgpt.com is an OPTIONAL host permission, so its content scripts can't be
 // declared statically in the manifest — register them dynamically once the
 // permission is granted, and unregister when revoked.
+// claude-folders.js registers the single canonical folders engine
+// (globalThis.__ctFoldersEngine) and self-mounts ONLY on claude.ai; here it is
+// injected purely to expose that engine, then chatgpt-folders.js mounts the
+// ChatGPT adapter against it — no duplicated folder logic. claude-folders.css is
+// provider-agnostic (neutral grays + brand accent + color:inherit; the theme text
+// tokens are swapped in JS via the adapter), so it is reused as-is — no ChatGPT CSS
+// fork. Order matters: claude-folders.js MUST precede chatgpt-folders.js.
 const CHATGPT_INJECT = {
   id: 'ct-chatgpt-usage',
   matches: ['https://chatgpt.com/*'],
-  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'chatgpt-input.js'],
-  css: ['chatgpt-usage.css'],
+  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
+  css: ['chatgpt-usage.css', 'claude-folders.css'],
   runAt: 'document_idle',
 };
 

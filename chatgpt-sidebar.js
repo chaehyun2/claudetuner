@@ -129,6 +129,12 @@
     return { parent: column, ref: footer };
   }
 
+  // Single canonical ChatGPT sidebar-anchor finder — also consumed by the folders
+  // panel (chatgpt-folders.js CHATGPT_ADAPTER) so this DOM logic lives in ONE place
+  // (no copy). This file is injected before chatgpt-folders.js, so the reference is
+  // set in time. Pure DOM read (no closure state), safe to share across instances.
+  globalThis.__ctCgFindSidebarAnchor = findSidebarAnchor;
+
   // ── Build ──
   function buildPanel() {
     const panel = document.createElement('div');

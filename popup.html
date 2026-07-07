@@ -262,6 +262,10 @@
     .promo-cta { flex-shrink: 0; background: #5B21B6; color: #fff; font-size: 10px; font-weight: 600; padding: 5px 9px; border-radius: 7px; text-decoration: none; white-space: nowrap; cursor: pointer; }
     [data-theme="dark"] .promo-cta { background: #7c3aed; }
     .notice-banner.nb-promo .notice-close { position: absolute; top: 6px; right: 8px; }
+    /* Badge promo (e.g. Product Hunt): full themed badge image, no card chrome */
+    .notice-banner.nb-promo.nb-badge { background: transparent; border: none; padding: 2px 0; text-align: center; }
+    .promo-badge { display: inline-block; line-height: 0; }
+    .promo-badge-img { max-width: 100%; height: auto; display: inline-block; vertical-align: middle; }
 
     /* 에러 배너 */
     .error-banner { position: relative; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 10px; margin-bottom: 10px; }

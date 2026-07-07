@@ -211,6 +211,21 @@ function renderPopupNotices() {
       const pImg = _safeUrl(n.image_url);
       const pUrl = _safeUrl(n.url);
       const safeId = escHtml(n.id || '');
+      // Badge promo (e.g. Product Hunt launch): render the official themed 250×54 badge
+      // instead of the logo+title+CTA layout. Keyed on campaign; older popup versions lack
+      // this branch and degrade to the logo+title layout below (same promo row). The badge
+      // asset is self-hosted (absolute URL — the popup has no page origin to resolve against).
+      if (n.campaign === 'producthunt') {
+        const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        const badge = 'https://claudetuner.com/producthunt-badge-' + (isDark ? 'dark' : 'light') + '.svg';
+        const img = '<img class="promo-badge-img" src="' + badge + '" width="250" height="54" alt="' + escHtml(n.title || 'Product Hunt') + '" />';
+        promoHtml += '<div class="notice-banner nb-promo nb-badge">';
+        promoHtml += pUrl
+          ? '<a class="promo-badge" data-url="' + escHtml(pUrl) + '" data-nid="' + safeId + '">' + img + '</a>'
+          : img;
+        promoHtml += '</div>';
+        continue;
+      }
       promoHtml += '<div class="notice-banner nb-promo">';
       promoHtml += '<div class="promo-row">';
       if (pImg) promoHtml += '<img class="promo-logo" src="' + escHtml(pImg) + '" alt="" />';
@@ -268,8 +283,8 @@ function renderPopupNotices() {
       });
     }));
 
-    // Promo CTA click: open partner URL in a new tab (target=_blank is unreliable in popups)
-    roots.forEach(root => root.querySelectorAll('.promo-cta[data-url]').forEach(cta => {
+    // Promo CTA / badge click: open partner URL in a new tab (target=_blank is unreliable in popups)
+    roots.forEach(root => root.querySelectorAll('.promo-cta[data-url], .promo-badge[data-url]').forEach(cta => {
       cta.addEventListener('click', (e) => {
         e.stopPropagation();
         const url = cta.dataset.url;

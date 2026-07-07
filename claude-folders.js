@@ -1,16 +1,110 @@
 // Claude Tuner — Folders (M1: local MVP)
-// Injects a folder tree into Claude.ai's left sidebar to organize conversations.
+// Injects a folder tree into the provider's left sidebar to organize conversations.
 // Folders live entirely in chrome.storage.local; conversations are referenced by
 // id (never mutated). Freemium: free = 2 folders total per account, Pro = unlimited.
+//
+// SINGLE CANONICAL ENGINE (DRY): the store/render/dnd/gate logic below is
+// provider-agnostic and lives ONLY here. Every host-coupled detail (org id, chat
+// id/URL, sidebar anchor, text token classes, title suffix, dark-launch pref/flag
+// keys) is supplied by a small provider ADAPTER. claude.ai auto-mounts the
+// CLAUDE_ADAPTER at the bottom of this file; chatgpt.com injects this file too
+// (via background.js CHATGPT_INJECT) purely to register the engine, then
+// chatgpt-folders.js mounts a thin CHATGPT_ADAPTER against the SAME engine — no
+// forked/duplicated logic.
 //
 // Design: docs/DESIGN-claude-folders.md
 
 (() => {
   'use strict';
 
-  const CT_PANEL_ID = 'ct-folders-panel';
+  // ── Provider adapter: everything host-coupled for claude.ai ──
+  // Implements the pinned adapter interface (see docs/DESIGN-claude-folders.md).
+  const CLAUDE_ADAPTER = {
+    provider: 'claude',
+    // Claude scopes folders per Anthropic org (lastActiveOrg cookie).
+    getActiveOrgId() {
+      return document.cookie.split('; ')
+        .find(r => r.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+    },
+    // Current conversation id from the URL, e.g. /chat/<uuid>
+    getCurrentChatId() {
+      const m = location.pathname.match(/\/chat\/([\w-]+)/);
+      return m ? m[1] : null;
+    },
+    // Sidebar conversation-link selector; specific when a chatId is given, else the
+    // generic form used for pointer-drag hit-testing.
+    getChatLinkSelector(chatId) {
+      return chatId ? `a[href*="/chat/${chatId}"]` : 'a[href*="/chat/"]';
+    },
+    // Extract a conversation id from an <a href> (pointer-drag import).
+    chatIdFromHref(href) {
+      const m = (href || '').match(/\/chat\/([\w-]+)/);
+      return m ? m[1] : null;
+    },
+    // Canonical conversation URL for a rendered folded-chat link.
+    chatUrl(id) { return `https://claude.ai/chat/${encodeURIComponent(id)}`; },
+    // Strip Claude's document.title suffix (" - Claude") to recover the bare title.
+    stripTitleSuffix(title) {
+      return String(title || '').replace(/\s*[-–|]\s*Claude.*$/i, '').trim();
+    },
+    // Claude's conversation top-bar actions container — host for the move button.
+    findMoveButtonBox() {
+      return document.querySelector('div[data-testid="wiggle-controls-actions"]');
+    },
+    // Sidebar mount anchor (mirrors sidebar-usage.js).
+    findSidebarAnchor() {
+      const dframeSidebar = document.querySelector('.dframe-sidebar-body');
+      if (dframeSidebar) {
+        const navScroll = dframeSidebar.querySelector('.dframe-nav-scroll');
+        if (navScroll) return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
+      }
+      const sidebarNav = document.querySelector('nav.flex');
+      if (!sidebarNav) return null;
+      const containerWrapper = sidebarNav.querySelector('.flex.flex-grow.flex-col.overflow-y-auto');
+      const containers = containerWrapper?.querySelectorAll('.flex-1.relative');
+      if (!containers || containers.length === 0) return null;
+      const lastContainer = containers[containers.length - 1];
+      const mainContainer = lastContainer.querySelector('.px-2.mt-4')
+        || lastContainer.querySelector('.px-2.pt-2');
+      if (!mainContainer) return null;
+      // Mount just after the usage panel if present, else at the top.
+      const usagePanel = mainContainer.querySelector('#ct-sidebar-usage');
+      const ref = usagePanel ? usagePanel.nextSibling : (mainContainer.firstChild || null);
+      return { parent: mainContainer, ref, type: 'web' };
+    },
+    // Claude's own Tailwind text tokens (theme-aware).
+    textClasses: { t300: 'text-text-300', t400: 'text-text-400', t500: 'text-text-500' },
+    // Dark-launch wiring (pref = chrome.storage.sync, flag = CDN flags.json field).
+    prefKey: 'foldersEnabled',
+    flagField: 'folders',
+    availableKey: 'foldersAvailable',
+    flagCacheKey: '__ct_folders_flag',
+  };
+
+  // ── The single canonical folders engine ──
+  // Provider-agnostic; ADAPTER supplies all host-coupled behaviour. Called once
+  // per page with the matching adapter (claude.ai below, chatgpt.com from
+  // chatgpt-folders.js). Each call is an isolated instance with its own closure
+  // state, so the two providers never share DOM/timers.
+  function createFoldersEngine(ADAPTER) {
+    // ── Idempotent (re)mount guard ──
+    // Claude's engine is a static content script (injected once). ChatGPT's is
+    // injected dynamically (background.js executeScript) and re-runs whenever the
+    // optional host permission is (re)granted or the extension updates while a
+    // chatgpt.com tab is open. Without a guard each re-run would stack a second
+    // engine — duplicate MutationObserver, RAF loop, storage listener and
+    // entitlement interval — in the same page. Tear down any prior instance for this
+    // provider before building a fresh one, then register this instance's teardown.
+    const _instanceReg = (globalThis.__ctFoldersInstances ||= {});
+    try { _instanceReg[ADAPTER.provider]?.(); } catch { /* prior teardown best-effort */ }
+    _instanceReg[ADAPTER.provider] = () => teardown();
+    const CT_PANEL_ID = 'ct-folders-panel';
   const SITE_URL = 'https://claudetuner.com';
   const MOUNT_INTERVAL_MS = 1000;
+  // Provider text-token classes (theme-aware). Claude: text-text-{300,400,500};
+  // ChatGPT: text-token-text-{primary,tertiary,secondary}. Used in render templates
+  // so panel text picks up the host's own theme colors.
+  const TC = ADAPTER.textClasses;
 
   // Storage keys
   const FOLDERS_KEY = 'ct_claude_folders';   // Folder[]
@@ -57,11 +151,11 @@
   // content-script fetch() works WITHOUT any host_permissions (like announcements).
   // Independent of the M3 FOLDER_SYNC_ENABLED worker flag (that only gates sync).
   const FLAGS_URL = 'https://cdn.claudetuner.com/flags.json';
-  const FOLDERS_FLAG_CACHE_KEY = '__ct_folders_flag'; // storage.local TTL cache
+  const FOLDERS_FLAG_CACHE_KEY = ADAPTER.flagCacheKey; // storage.local TTL cache (per-provider)
   const FOLDERS_FLAG_TTL_MS = 60 * 60 * 1000;         // 1h — matches announcements
   // Written to storage.local on every availability check so the OPTIONS page can
-  // read the current state without doing its own CDN fetch.
-  const FOLDERS_AVAILABLE_KEY = 'foldersAvailable';
+  // read the current state without doing its own CDN fetch (per-provider key).
+  const FOLDERS_AVAILABLE_KEY = ADAPTER.availableKey;
 
   // ── State ──
   let _enabled = null;      // effective gate = _available && _userPref
@@ -241,21 +335,16 @@
     if (html.getAttribute('data-mode') === 'dark') return true;
     return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   }
-  function getActiveOrgId() {
-    return document.cookie.split('; ')
-      .find(r => r.startsWith('lastActiveOrg='))?.split('=')[1] || null;
-  }
-  // Current conversation id from the URL, e.g. /chat/<uuid>
-  function getCurrentChatId() {
-    const m = location.pathname.match(/\/chat\/([\w-]+)/);
-    return m ? m[1] : null;
-  }
+  // Host-coupled reads route through the provider adapter (see CLAUDE_ADAPTER /
+  // chatgpt-folders.js CHATGPT_ADAPTER).
+  function getActiveOrgId() { return ADAPTER.getActiveOrgId(); }
+  function getCurrentChatId() { return ADAPTER.getCurrentChatId(); }
   // Best-effort title for a chat: active sidebar link text, else document.title.
   function getCurrentChatTitle(chatId) {
-    const link = document.querySelector(`a[href*="/chat/${chatId}"]`);
+    const link = document.querySelector(ADAPTER.getChatLinkSelector(chatId));
     const fromLink = link?.textContent?.trim();
     if (fromLink) return fromLink.slice(0, 120);
-    const dt = (document.title || '').replace(/\s*[-–|]\s*Claude.*$/i, '').trim();
+    const dt = ADAPTER.stripTitleSuffix(document.title || '');
     return dt || 'Untitled';
   }
   function genId() {
@@ -323,16 +412,34 @@
     try { chrome.storage.local.set({ [EXPANDED_KEY]: Array.from(_expanded) }); } catch { /* context dead */ }
   }
 
-  // Count of folders sharing a parent. Root (parent null) is counted account-wide
-  // across all orgs to prevent a multi-org bypass of the free root cap; a non-null
-  // parent is a single folder, so its children are naturally scoped already.
+  // ── Provider ownership (free-cap + visibility scoping) ──
+  // A folder's provider is derived from its orgUuid: the ChatGPT bucket uses the
+  // sentinel CHATGPT_ORG; every other value — a real Claude org uuid or the legacy
+  // null from before orgs were tracked — belongs to Claude. Centralizing the
+  // sentinel here keeps the adapters declaring only `provider` (no leaked literals).
+  const CHATGPT_ORG = 'chatgpt';
+  function providerOfOrg(orgUuid) { return orgUuid === CHATGPT_ORG ? 'chatgpt' : 'claude'; }
+  function ownsFolder(f) { return providerOfOrg(f.orgUuid) === ADAPTER.provider; }
+
+  // Count of folders sharing a parent, scoped to the FREE-CAP bucket.
+  // - Non-root (real parent): that folder's direct children — one subtree, already
+  //   org-homogeneous (createFolder/moveFolder keep a subtree in one bucket).
+  // - Root (parent null): roots THIS provider owns. Claude counts every Claude-owned
+  //   root account-wide (across all Claude orgs + legacy null) to preserve the
+  //   original anti-multi-org-bypass cap; ChatGPT counts only its own "chatgpt"
+  //   bucket. Both reduce to "roots this provider owns", so a full Claude bucket
+  //   never blocks creating a ChatGPT root, and vice versa.
   function siblingCount(parent) {
-    return _folders.filter(f => (f.parent || null) === (parent || null)).length;
+    if (parent) return _folders.filter(f => (f.parent || null) === parent).length;
+    return _folders.filter(f => !f.parent && ownsFolder(f)).length;
   }
+  // Folders visible in the active panel: only those THIS provider owns (never leak
+  // Claude's legacy null-org folders into the ChatGPT panel, or vice versa), then —
+  // for Claude — scoped to the active org (legacy null shown; everything shown while
+  // the org id isn't known yet). On ChatGPT the active org is always CHATGPT_ORG.
   function foldersForActiveOrg() {
     const org = getActiveOrgId();
-    // Folders created before an org was known (org=null) are always shown.
-    return _folders.filter(f => !f.orgUuid || !org || f.orgUuid === org);
+    return _folders.filter(f => ownsFolder(f) && (!f.orgUuid || !org || f.orgUuid === org));
   }
 
   // ── Tree helpers (nesting) ──
@@ -568,6 +675,13 @@
     // Target may have been deleted by another tab mid-drag (store refreshed but the
     // DOM row not yet re-rendered) — never persist a dangling parent / null org.
     if (target && !folderById(target)) return { ok: false, reason: 'gone' };
+    // Provider isolation: refuse to move a folder the active provider doesn't own, or
+    // to reparent under a target it doesn't own. Normal UI only surfaces owned folders,
+    // so this only rejects malformed/imported/server-adopted data whose parent/orgUuid
+    // links cross the Claude↔ChatGPT boundary — which would otherwise let a sibling
+    // reorder rewrite the dragged subtree into a hidden bucket's org (setSubtreeOrg).
+    if (!ownsFolder(f)) return { ok: false, reason: 'cross_provider' };
+    if (target && !ownsFolder(folderById(target))) return { ok: false, reason: 'cross_provider' };
     if (target === (f.parent || null)) return { ok: false, reason: 'noop' };
     if (target === id) return { ok: false, reason: 'self' };
     if (target && descendantIds(id).has(target)) return { ok: false, reason: 'descendant' };
@@ -667,27 +781,8 @@
     persistFolders();
   }
 
-  // ── Sidebar anchor detection (mirrors sidebar-usage.js) ──
-  function findSidebarAnchor() {
-    const dframeSidebar = document.querySelector('.dframe-sidebar-body');
-    if (dframeSidebar) {
-      const navScroll = dframeSidebar.querySelector('.dframe-nav-scroll');
-      if (navScroll) return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
-    }
-    const sidebarNav = document.querySelector('nav.flex');
-    if (!sidebarNav) return null;
-    const containerWrapper = sidebarNav.querySelector('.flex.flex-grow.flex-col.overflow-y-auto');
-    const containers = containerWrapper?.querySelectorAll('.flex-1.relative');
-    if (!containers || containers.length === 0) return null;
-    const lastContainer = containers[containers.length - 1];
-    const mainContainer = lastContainer.querySelector('.px-2.mt-4')
-      || lastContainer.querySelector('.px-2.pt-2');
-    if (!mainContainer) return null;
-    // Mount just after the usage panel if present, else at the top.
-    const usagePanel = mainContainer.querySelector('#ct-sidebar-usage');
-    const ref = usagePanel ? usagePanel.nextSibling : (mainContainer.firstChild || null);
-    return { parent: mainContainer, ref, type: 'web' };
-  }
+  // ── Sidebar anchor detection (provider-specific DOM, via adapter) ──
+  function findSidebarAnchor() { return ADAPTER.findSidebarAnchor(); }
 
   // ── Render ──
   function buildPanel() {
@@ -696,7 +791,7 @@
     panel.className = 'ct-folders';
     panel.innerHTML = `
       <div class="ct-fold-header">
-        <span class="ct-fold-title text-text-500">${escapeHtml(t('folders'))}</span>
+        <span class="ct-fold-title ${TC.t500}">${escapeHtml(t('folders'))}</span>
         <button class="ct-fold-search-btn" title="${escapeHtml(t('search'))}" aria-label="${escapeHtml(t('search'))}"><svg aria-hidden="true" focusable="false" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg></button>
         <button class="ct-fold-more-btn" title="${escapeHtml(t('backup'))}" aria-label="${escapeHtml(t('backup'))}">⋯</button>
         <button class="ct-fold-sort-btn" title="${escapeHtml(t('sort'))}" aria-label="${escapeHtml(t('sort'))}">⇅</button>
@@ -728,7 +823,7 @@
     if (_query) {
       renderSearchResults(list);
     } else if (!folders.length) {
-      list.innerHTML = `<div class="ct-fold-empty text-text-400">${escapeHtml(t('no_folders'))}</div>`;
+      list.innerHTML = `<div class="ct-fold-empty ${TC.t400}">${escapeHtml(t('no_folders'))}</div>`;
     } else {
       // Tree: roots = visible folders with no visible parent (parent null, or parent
       // hidden/missing → promote as root so nothing silently disappears), recurse.
@@ -747,7 +842,7 @@
     if (atLimit && _plan !== 'pro') {
       gate.style.display = '';
       gate.innerHTML = `
-        <div class="ct-fold-limit text-text-400">${escapeHtml(t('limit_reached'))}</div>
+        <div class="ct-fold-limit ${TC.t400}">${escapeHtml(t('limit_reached'))}</div>
         <a class="ct-fold-upgrade" href="${SITE_URL}/dashboard/?upgrade=folders&utm_source=folders" target="_blank" rel="noopener">${escapeHtml(t('upgrade_cta'))}</a>
       `;
       if (addBtn) { addBtn.disabled = true; addBtn.classList.add('ct-disabled'); }
@@ -767,7 +862,7 @@
     const count = f.chatIds.length;
 
     const head = document.createElement('div');
-    head.className = 'ct-fold-row text-text-300';
+    head.className = 'ct-fold-row ' + TC.t300;
     head.style.paddingLeft = `${6 + depth * 8}px`;
     // Folder rows are draggable (reparent via drop onto another folder row).
     head.draggable = true;
@@ -776,7 +871,7 @@
       <span class="ct-fold-caret ${isOpen ? 'open' : ''}"><svg aria-hidden="true" focusable="false" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>
       ${folderIconHtml(f)}
       <span class="ct-fold-label" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
-      <span class="ct-fold-counts text-text-500">${kids.length ? `<span class="ct-fold-cnt" title="${escapeHtml(t('subfolder_count'))}">${svgIcon(FOLDER_PATH, '', 11)}${kids.length}</span>` : ''}${count ? `<span class="ct-fold-cnt" title="${escapeHtml(t('chat_count'))}">${svgIcon(CHAT_PATH, '', 11)}${count}</span>` : ''}</span>
+      <span class="ct-fold-counts ${TC.t500}">${kids.length ? `<span class="ct-fold-cnt" title="${escapeHtml(t('subfolder_count'))}">${svgIcon(FOLDER_PATH, '', 11)}${kids.length}</span>` : ''}${count ? `<span class="ct-fold-cnt" title="${escapeHtml(t('chat_count'))}">${svgIcon(CHAT_PATH, '', 11)}${count}</span>` : ''}</span>
       <button class="ct-fold-star ${f.favorite ? 'on' : ''}" title="${escapeHtml(t(f.favorite ? 'unfavorite' : 'favorite'))}" aria-label="${escapeHtml(t(f.favorite ? 'unfavorite' : 'favorite'))}">${f.favorite ? '★' : '☆'}</button>
       <button class="ct-fold-menu-btn" title="${escapeHtml(t('rename'))}/${escapeHtml(t('delete'))}" aria-label="menu">⋯</button>
     `;
@@ -865,7 +960,7 @@
       for (const child of kids) body.appendChild(renderFolderRow(child, depth + 1));
 
       if (!count && !kids.length) {
-        body.innerHTML += `<div class="ct-fold-empty-body text-text-400" style="padding-left:${6 + (depth + 1) * 8}px">${escapeHtml(t('empty_folder'))}</div>`;
+        body.innerHTML += `<div class="ct-fold-empty-body ${TC.t400}" style="padding-left:${6 + (depth + 1) * 8}px">${escapeHtml(t('empty_folder'))}</div>`;
       }
       for (const cid of f.chatIds) {
         body.appendChild(renderChatItem(f.id, cid, depth + 1));
@@ -883,7 +978,7 @@
     if (depth != null) item.style.paddingLeft = `${6 + depth * 8}px`;
     item.innerHTML = `
       ${svgIcon(CHAT_PATH, 'ct-fold-chat-icon', 12)}
-      <a class="ct-fold-chat-link text-text-300" href="https://claude.ai/chat/${encodeURIComponent(cid)}" title="${escapeHtml(t('open_chat'))}">${escapeHtml(meta.title || cid)}</a>
+      <a class="ct-fold-chat-link ${TC.t300}" href="${ADAPTER.chatUrl(cid)}" title="${escapeHtml(t('open_chat'))}">${escapeHtml(meta.title || cid)}</a>
       <button class="ct-fold-chat-remove" title="${escapeHtml(t('remove_from_folder'))}" aria-label="remove">×</button>
     `;
     item.querySelector('.ct-fold-chat-remove').addEventListener('click', (e) => {
@@ -907,12 +1002,12 @@
       }
     }
     if (!matchFolders.length && !matchChats.length) {
-      list.innerHTML = `<div class="ct-fold-empty text-text-400">${escapeHtml(t('no_results'))}</div>`;
+      list.innerHTML = `<div class="ct-fold-empty ${TC.t400}">${escapeHtml(t('no_results'))}</div>`;
       return;
     }
     for (const f of matchFolders) {
       const row = document.createElement('div');
-      row.className = 'ct-fold-row ct-fold-search-folder text-text-300';
+      row.className = 'ct-fold-row ct-fold-search-folder ' + TC.t300;
       row.innerHTML = `${folderIconHtml(f)}<span class="ct-fold-label">${escapeHtml(f.name)}</span>`;
       // Clicking a matched folder clears search and reveals it expanded in the tree.
       row.addEventListener('click', () => { revealFolder(f.id); clearSearch(); });
@@ -921,7 +1016,7 @@
     for (const { folder, cid } of matchChats) {
       const item = renderChatItem(folder.id, cid, null);
       const badge = document.createElement('span');
-      badge.className = 'ct-fold-chat-badge text-text-500';
+      badge.className = 'ct-fold-chat-badge ' + TC.t500;
       badge.textContent = ` ${t('in_folder')} ${folder.name}`;
       item.querySelector('.ct-fold-chat-link')?.appendChild(badge);
       list.appendChild(item);
@@ -1274,7 +1369,9 @@
   // re-injects after Claude re-renders the top bar / on chat navigation.
   function injectMoveButton() {
     if (!_enabled) { removeMoveButton(); return; } // feature off: never (re)inject
-    const box = document.querySelector('div[data-testid="wiggle-controls-actions"]');
+    // Provider top-bar container (Claude only for v1; adapters without it — e.g.
+    // ChatGPT — simply never inject the top-bar button, panel DnD still works).
+    const box = ADAPTER.findMoveButtonBox ? ADAPTER.findMoveButtonBox() : null;
     if (!box) return;
     // Not on a chat page (e.g. /new): drop any stale button so it doesn't linger.
     if (!getCurrentChatId()) { removeMoveButton(); return; }
@@ -1552,7 +1649,7 @@
   }
   function onDocPointerDown(e) {
     if (_dead || _ptr || e.button !== 0 || !e.isPrimary) return; // primary pointer only
-    const link = e.target?.closest?.('a[href*="/chat/"]');
+    const link = e.target?.closest?.(ADAPTER.getChatLinkSelector());
     if (!link) return;
     // Two sources: a Claude sidebar link (import into a folder) OR one of our own folded
     // chat links (move it to another folder). srcFolderId != null => move, else import.
@@ -1562,11 +1659,11 @@
       if (!chatEl) return; // some other panel link (not a folded chat) — ignore
       srcFolderId = chatEl.getAttribute('data-folder-id');
     }
-    const m = (link.getAttribute('href') || '').match(/\/chat\/([\w-]+)/);
-    if (!m) return;
+    const chatId = ADAPTER.chatIdFromHref(link.getAttribute('href') || '');
+    if (!chatId) return;
     // Disable the link's native drag for this gesture so it can't compete with ours.
     _ptr = {
-      chatId: m[1],
+      chatId,
       title: (link.textContent || '').trim().slice(0, 120),
       srcFolderId,
       startX: e.clientX, startY: e.clientY,
@@ -1828,7 +1925,7 @@
       const res = await fetch(FLAGS_URL);
       if (!res.ok) { await _setFoldersFlagCache(false); return false; }
       const json = await res.json();
-      const folders = !!(json && json.folders === true);
+      const folders = !!(json && json[ADAPTER.flagField] === true);
       await _setFoldersFlagCache(folders);
       return folders;
     } catch {
@@ -1893,9 +1990,9 @@
     // Must run after both loads (folder.updatedAt + persisted version available)
     // and before refreshEntitlement() below.
     seedSyncVersion();
-    chrome.storage.sync.get({ lang: 'auto', foldersEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', [ADAPTER.prefKey]: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
-      _userPref = cfg.foldersEnabled !== false;
+      _userPref = cfg[ADAPTER.prefKey] !== false;
       // _available is still its initial `false` here (DARK) — this refreshEntitlement()
       // call resolves _plan only; its internal pullStore() is gated on _enabled, which is
       // false until the CDN flag check below resolves true, so a dark start does ZERO
@@ -1910,9 +2007,10 @@
     });
 
     chrome.storage.onChanged.addListener((changes, area) => {
+      if (_dead) return; // superseded/torn-down instance stays inert (can't removeListener an anon)
       if (area === 'sync') {
-        if (changes.foldersEnabled) {
-          _userPref = changes.foldersEnabled.newValue !== false;
+        if (changes[ADAPTER.prefKey]) {
+          _userPref = changes[ADAPTER.prefKey].newValue !== false;
           recomputeEnabled(); // effective gate still requires _available
         }
         if (changes.lang) {
@@ -1946,4 +2044,14 @@
   } else {
     init();
   }
+  } // end createFoldersEngine
+
+  // Register the single canonical engine so a thin per-provider bootstrap (e.g.
+  // chatgpt-folders.js) can mount it with its own adapter — zero duplicated logic.
+  globalThis.__ctFoldersEngine = createFoldersEngine;
+
+  // claude.ai auto-mounts the Claude adapter here. On chatgpt.com this file is
+  // injected only to register the engine above (this bootstrap is host-gated off);
+  // chatgpt-folders.js then performs the ChatGPT mount against the same engine.
+  if (location.hostname === 'claude.ai') createFoldersEngine(CLAUDE_ADAPTER);
 })();
