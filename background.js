@@ -15,7 +15,7 @@ import { bt } from './bg/i18n.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -409,6 +409,7 @@ if (chrome.runtime.getManifest().update_url === undefined) {
 // === Install / Startup ===
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('[Claude Tuner] Extension installed');
+  checkPromoPush(); // fire a pending server push on install/update too (best-effort)
   // v1.9.x → v1.10+ migration (skip if already completed)
   if (details.reason === 'update') {
     const { intervalExplicitlySet } = await chrome.storage.sync.get({ intervalExplicitlySet: undefined });
@@ -634,6 +635,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 
 chrome.runtime.onStartup.addListener(async () => {
   await setupAlarm();
+  checkPromoPush(); // server-signaled push, independent of collection success (best-effort)
   sendGAEvent('extension_loaded');
   await restoreSidePanelPreference();
   // Re-register dynamic ChatGPT/Gemini scripts on browser restart (registrations
@@ -979,6 +981,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await scheduleExpireAlarms(result.snapshot);
       await evaluateBoost(result.snapshot);
     }
+    // Server-signaled push: run every poll tick, independent of collection success, so a
+    // momentary collection failure never suppresses a launch push (throttled + deduped inside).
+    checkPromoPush();
   }
   // Weekly report
   if (alarm.name === ALARM_WEEKLY_REPORT) {
@@ -1504,8 +1509,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 });
 
+// Auto-dismiss timed promo push notifications when their TTL alarm fires. chrome.alarms
+// survives service-worker suspension (unlike setTimeout). Alarm name: 'promopushclear:<notifId>'.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name && alarm.name.startsWith('promopushclear:')) {
+    chrome.notifications.clear(alarm.name.slice('promopushclear:'.length));
+  }
+});
+
 // === Notification click handler ===
+// Promo push (e.g. Product Hunt launch): clicking the notification body opens the promo URL.
+chrome.notifications.onClicked.addListener(async (notifId) => {
+  if (!notifId.startsWith('promo-push-')) return;
+  const promoId = notifId.replace('promo-push-', '');
+  const { promoPushState = {} } = await chrome.storage.local.get({ promoPushState: {} });
+  const url = promoPushState[promoId]?.url;
+  if (url) chrome.tabs.create({ url });
+  chrome.notifications.clear(notifId);
+});
+
 chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
+  // Promo push (e.g. Product Hunt launch) → open the promo URL
+  if (notifId.startsWith('promo-push-') && btnIdx === 0) {
+    const promoId = notifId.replace('promo-push-', '');
+    const { promoPushState = {} } = await chrome.storage.local.get({ promoPushState: {} });
+    const url = promoPushState[promoId]?.url;
+    if (url) chrome.tabs.create({ url });
+    chrome.notifications.clear(notifId);
+    return;
+  }
   // Collection failure notification → open Claude.ai
   if (notifId.startsWith('collect-fail-') && btnIdx === 0) {
     chrome.tabs.create({ url: 'https://claude.ai' });

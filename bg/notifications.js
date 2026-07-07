@@ -1,5 +1,5 @@
 import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT } from './constants.js';
-import { bt } from './i18n.js';
+import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
 
 const NOTIF_LOG_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -176,6 +176,78 @@ export async function checkUsageAlerts(snapshot) {
   }
 
   await chrome.storage.local.set({ usageAlertState });
+}
+
+// === Server-signaled push (e.g. Product Hunt launch) ===
+// Fires a ONE-TIME OS notification driven by a static CDN signal file. Reuses the
+// already-granted `notifications` permission + the same dedup pattern as usage alerts —
+// no new permission, no extra infra. IMPORTANT: the signal is a plain R2/CDN object
+// (cdn.claudetuner.com, ACAO:*), NOT a Worker route — polling it never wakes the Worker
+// (mirrors the announcements.json CDN migration). Each signal carries its own [start,end)
+// window, so the push fires client-side at launch time without any cron/DB flip. Throttled
+// to ~1 fetch / 10 min and best-effort (a failure never disrupts the collection cycle).
+const PROMO_PUSH_URL = 'https://cdn.claudetuner.com/push.json';
+const PROMO_PUSH_THROTTLE_MS = 10 * 60 * 1000;
+
+export async function checkPromoPush() {
+  try {
+    const now = Date.now();
+    const { promoPushState = {}, _promoPushCheckedAt = 0 } = await chrome.storage.local.get({
+      promoPushState: {}, _promoPushCheckedAt: 0,
+    });
+    if (now - _promoPushCheckedAt < PROMO_PUSH_THROTTLE_MS) return;
+    await chrome.storage.local.set({ _promoPushCheckedAt: now });
+
+    const res = await fetch(PROMO_PUSH_URL); // pure CDN object — does NOT invoke the Worker
+    if (!res.ok) return;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data ? [data] : []);
+
+    const lang = await bgLang();
+    for (const p of list) {
+      if (!p || !p.id || promoPushState[p.id]) continue; // fire once per id (survives SW restart)
+      const start = p.start ? Date.parse(p.start) : 0;
+      const end = p.end ? Date.parse(p.end) : Infinity;
+      if (!(now >= start && now < end)) continue; // only within the signal's window
+      const loc = p[lang] || p.en || p; // localized block, fallback to en / flat shape
+      const url = /^https?:\/\//i.test(loc.url || '') ? loc.url : '';
+      const notifId = 'promo-push-' + p.id;
+      // Display lifetime (admin-controlled). `ttlSec` > 0: keep it visible for ~N seconds then
+      // auto-dismiss via a chrome.alarm (survives SW suspension; ~60s practical minimum in MV3,
+      // sub-30s is unreliable). Without ttlSec, `sticky` decides: true (default) stays until the
+      // user acts, false lets the OS auto-hide it after a few seconds.
+      const ttlSec = Number(p.ttlSec) > 0 ? Number(p.ttlSec) : 0;
+      // Persist url + dedup BEFORE showing so a click always resolves the url even if the SW is
+      // interrupted right after create(). Await create() and roll the dedup back if it actually
+      // throws, so a failed notification isn't permanently deduped (retries next cycle).
+      promoPushState[p.id] = { url };
+      await chrome.storage.local.set({ promoPushState });
+      try {
+        await chrome.notifications.create(notifId, {
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: loc.title || 'Claude Tuner',
+          message: loc.body || loc.title || '',
+          buttons: url ? [{ title: await bt('promo_push_btn') }] : [],
+          priority: 2,
+          // Hold it on screen for the ttl window (or until the user acts when sticky) rather than
+          // letting the OS auto-hide it after a few seconds.
+          requireInteraction: ttlSec > 0 ? true : (p.sticky !== false),
+        });
+      } catch (e) {
+        delete promoPushState[p.id]; // create failed → allow a retry on a later cycle
+        await chrome.storage.local.set({ promoPushState });
+        continue;
+      }
+      if (ttlSec > 0) {
+        // chrome.alarms clamps to ~1-min minimum granularity; it fires even if the SW slept.
+        chrome.alarms.create('promopushclear:' + notifId, { delayInMinutes: Math.max(ttlSec, 60) / 60 });
+      }
+      logNotification('promo-push');
+    }
+  } catch (e) {
+    // best-effort: a push failure must never disrupt the collection cycle
+  }
 }
 
 // === Weekly usage report ===

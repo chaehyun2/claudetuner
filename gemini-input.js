@@ -51,8 +51,8 @@
   let _email = '';
 
   const I18N = {
-    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'No usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '현재는 5시간·7일 사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
+    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'Currently no 5h/7d usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -185,15 +185,10 @@
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
   function renderStripInto(strip) {
-    // No-limit plan (Workspace/Business/Enterprise): show "no usage limits · <plan>".
-    // Checked BEFORE the h5==null guard because these plans report a 0% window
-    // (h5 is 0, not null), so the collecting-guard would otherwise render "0%".
-    if (_data && _data.noLimits) {
-      const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'gemini')}` : '');
-      strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(msg)}</span></div>`;
-      return;
-    }
-    if (!_data || _data.h5 == null) {
+    // Collecting guard: no data yet. Transient state, so no gear/contact —
+    // just the muted placeholder. Checked AFTER noLimits below because no-limit
+    // plans report a 0% window (h5 is 0, not null) and must not fall in here.
+    if (!(_data && _data.noLimits) && (!_data || _data.h5 == null)) {
       strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(t('no_data'))}</span></div>`;
       return;
     }
@@ -201,20 +196,29 @@
     try { logoUrl = chrome.runtime.getURL('icons/icon16.png'); } catch { /* context dead */ }
     const dot = '<span class="ct-gm-strip-dot">·</span>';
     let main = logoUrl ? `<img src="${logoUrl}" class="ct-gm-strip-logo" alt="CT">` : '';
-    // 5h current usage % + gauge bar (with prediction marker).
-    main += metric(t('session'), _data.h5, _data.pred5h);
-    // ⏱ N 뒤 리셋
-    if (_data.r5) {
-      main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-reset" data-reset="${_data.r5}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(_data.r5, _lang))}">${CORE.escapeHtml(resetLabel(_data.r5))}</span>`;
-    }
-    // 리셋 시 예상 N% — predicted util at reset, percent colored by status.
-    if (_data.pred5h != null) {
-      const predColor = CORE.gaugeColor(_data.pred5h);
-      const predText = _data.pred5h >= 100 ? '100%+' : `${Math.round(_data.pred5h)}%`;
-      main += `${dot}<span class="ct-gm-strip-seg"><span class="ct-gm-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
-    }
-    if (_data.plan) {
-      main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'gemini'))}</span>`;
+    if (_data && _data.noLimits) {
+      // No-limit plan (Workspace/Business/Enterprise 'Work' seat): these report a
+      // pinned 0% window and aren't consumer-metered, so show "no usage limits ·
+      // <plan>" instead of a gauge. Still falls through to the shared markup below
+      // so the settings + contact buttons stay available.
+      const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'gemini')}` : '');
+      main += `<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(msg)}</span>`;
+    } else {
+      // 5h current usage % + gauge bar (with prediction marker).
+      main += metric(t('session'), _data.h5, _data.pred5h);
+      // ⏱ N 뒤 리셋
+      if (_data.r5) {
+        main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-reset" data-reset="${_data.r5}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(_data.r5, _lang))}">${CORE.escapeHtml(resetLabel(_data.r5))}</span>`;
+      }
+      // 리셋 시 예상 N% — predicted util at reset, percent colored by status.
+      if (_data.pred5h != null) {
+        const predColor = CORE.gaugeColor(_data.pred5h);
+        const predText = _data.pred5h >= 100 ? '100%+' : `${Math.round(_data.pred5h)}%`;
+        main += `${dot}<span class="ct-gm-strip-seg"><span class="ct-gm-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
+      }
+      if (_data.plan) {
+        main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'gemini'))}</span>`;
+      }
     }
     strip.innerHTML =
       `<div class="ct-gm-strip-inner">` +

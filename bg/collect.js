@@ -10,7 +10,7 @@ import { getCadence, isCollectionPaused, applyServerCadence } from './cadence-co
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
-import { checkCollectFailNotification, checkUsageAlerts, logNotification } from './notifications.js';
+import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
@@ -1041,6 +1041,9 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
     } else {
       await checkUsageAlerts(snapshot);
     }
+
+    // Server-signaled promo push (e.g. Product Hunt launch) — best-effort, deduped, throttled
+    await checkPromoPush();
 
     sendGAEvent('collect_success', { plan: snapshot.plan, fetch_mode: fetchMode });
     // On success: reset heartbeat timer + clear error code + reset collect fail state

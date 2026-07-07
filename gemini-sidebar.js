@@ -45,7 +45,7 @@
   const I18N = {
     ko: {
       title: '사용량', session: '세션 (5h)', weekly: '주간', no_data: '데이터 수집 중...',
-      no_limit: '사용량 제한 없음',
+      no_limit: '현재는 5시간·7일 사용량 제한 없음',
       dashboard: '대시보드 열기', settings: '설정', notices: '공지사항',
       tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.',
       tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.',
@@ -53,7 +53,7 @@
     },
     en: {
       title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...',
-      no_limit: 'No usage limits',
+      no_limit: 'Currently no 5h/7d usage limits',
       dashboard: 'Open dashboard', settings: 'Settings', notices: 'Notices',
       tip_5h: 'Usage in the last 5-hour window.\nResets periodically.',
       tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.',

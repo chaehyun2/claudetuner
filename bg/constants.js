@@ -133,6 +133,7 @@ export const BG_I18N = {
     cf_firstrun_msg: 'Claude.ai에 로그인해야 사용량 데이터를 수집할 수 있습니다.',
     notif_settings_hint: '확장 설정에서 알림을 관리할 수 있습니다.',
     notif_settings_btn: '설정',
+    promo_push_btn: '자세히 보기',
   },
   en: {
     reset_soon_title: '{0} limit resetting soon',
@@ -169,5 +170,6 @@ export const BG_I18N = {
     cf_firstrun_msg: 'Please sign in to Claude.ai so the extension can collect your usage data.',
     notif_settings_hint: 'Manage alerts in extension settings.',
     notif_settings_btn: 'Settings',
+    promo_push_btn: 'View',
   },
 };
