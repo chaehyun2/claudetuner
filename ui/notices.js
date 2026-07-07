@@ -213,11 +213,14 @@ function renderPopupNotices() {
       const safeId = escHtml(n.id || '');
       // Badge promo (e.g. Product Hunt launch): render the official themed 250×54 badge
       // instead of the logo+title+CTA layout. Keyed on campaign; older popup versions lack
-      // this branch and degrade to the logo+title layout below (same promo row). The badge
-      // asset is self-hosted (absolute URL — the popup has no page origin to resolve against).
+      // this branch and degrade to the logo+title layout below (same promo row).
       if (n.campaign === 'producthunt') {
         const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-        const badge = 'https://claudetuner.com/producthunt-badge-' + (isDark ? 'dark' : 'light') + '.svg';
+        // Official Product Hunt embed badge — shows the live vote count. The popup CSP has
+        // no img-src restriction, so this external https image loads without host permissions.
+        // The `t` cache-buster keeps the vote count fresh on each popup open.
+        const PH_POST_ID = '1186963';
+        const badge = 'https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=' + PH_POST_ID + '&theme=' + (isDark ? 'dark' : 'light') + '&t=' + Date.now();
         const img = '<img class="promo-badge-img" src="' + badge + '" width="250" height="54" alt="' + escHtml(n.title || 'Product Hunt') + '" />';
         promoHtml += '<div class="notice-banner nb-promo nb-badge">';
         promoHtml += pUrl
