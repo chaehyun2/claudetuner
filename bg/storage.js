@@ -91,6 +91,26 @@ export async function getUsageHistory() {
   });
 }
 
+// --- Gemini metered-usage stickiness ---
+// planId=2 is returned for BOTH genuine Google Workspace seats (usage pinned at 0%,
+// truly unlimited) AND consumer paid accounts (e.g. AI Pro, real metered usage). The
+// plan label alone can't tell them apart, so a plan-based no-limits check wrongly hides
+// real usage for consumer accounts. Records, per provider account, whether we've EVER
+// observed real (>0) utilization; once seen, the account is metered forever. Returns
+// true if this account has ever been metered (so the caller can clear noLimits).
+export async function recordGeminiMetered(accountId, hasUsageNow) {
+  if (!accountId) return hasUsageNow;
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ geminiMeteredSeen: {} }, (result) => {
+      const seen = result.geminiMeteredSeen || {};
+      if (seen[accountId]) { resolve(true); return; }
+      if (!hasUsageNow) { resolve(false); return; }
+      seen[accountId] = true;
+      chrome.storage.local.set({ geminiMeteredSeen: seen }, () => resolve(true));
+    });
+  });
+}
+
 // --- ext_token management (per-user JWT for server auth) ---
 
 export async function getExtToken() {

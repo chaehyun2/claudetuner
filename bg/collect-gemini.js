@@ -1,10 +1,13 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId } from './storage.js';
+import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered } from './storage.js';
 import { gateProviderSnapshot } from './send-gate.js';
 
-// Gemini plan ID mapping (from jSf9Qc response first field)
-// otAQ7b returns policy names like "v3p2_plus_policy"
+// Gemini plan ID mapping (from jSf9Qc response first field).
+// FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
+// see docs/DESIGN-gemini-policy-detection.md). The authoritative tier signal is the
+// otAQ7b `v3p2_<tier>_policy` string (GEMINI_POLICY_LABEL below). This map is used only
+// when the otAQ7b policy RPC fails.
 const GEMINI_PLAN_MAP = {
   // Numeric planId (jSf9Qc response)
   1: 'Free',
@@ -27,6 +30,29 @@ const GEMINI_PLAN_MAP = {
   'Business': 'Work',
   'Ultra': 'AI Ultra',
 };
+
+// Authoritative tier signal: otAQ7b returns a "v3p2_<tier>_policy" string. Maps the tier
+// word → plan label. Unknown tier words fall back to a title-cased label so a NEW tier
+// (e.g. an Ultra variant) surfaces in the data without a code change. Workspace seats
+// return NO policy (empty) and are labeled 'Work'. See docs/DESIGN-gemini-policy-detection.md.
+const GEMINI_POLICY_LABEL = {
+  free: 'Free',
+  plus: 'AI Plus',
+  pro: 'AI Pro',
+  ultra: 'AI Ultra',
+  business: 'Work',
+};
+
+// Recursively collect every "v3p2_<tier>_policy" (or any "*_policy") string in a nested
+// otAQ7b response into acc (deduped, order-preserving).
+function extractGeminiPolicies(node, acc) {
+  if (typeof node === 'string') {
+    if (/_policy$/.test(node) && acc.indexOf(node) === -1) acc.push(node);
+  } else if (Array.isArray(node)) {
+    for (const v of node) extractGeminiPolicies(v, acc);
+  }
+  return acc;
+}
 
 // Convert [seconds, nanos] timestamp to ISO string, then normalize to minute precision
 function geminiTimestampToResetTime(ts) {
@@ -56,27 +82,34 @@ export async function collectGemini(force = false) {
 
     const planId = data[0];
     const windows = data[1];
-    const plan = GEMINI_PLAN_MAP[planId] || `Plan ${planId}`;
-    if (!GEMINI_PLAN_MAP[planId]) {
-      console.warn(`[Claude Tuner] Gemini: unknown planId ${planId}, using fallback "${plan}"`);
-    }
 
     // Parse windows: each entry is [used, percent, windowType, [[resetSec, resetNano]]]
     let h5 = null, d7 = null, resetsAt5h = null, resetsAt7d = null;
+    // Raw signals (used + unrounded percent) sent to the server for AE collection — used is
+    // present even when percent is 0 (Workspace), and limit = used/percent discriminates tiers.
+    let used5h = null, used7d = null, pct5hRaw = null, pct7dRaw = null;
+    // Metered detection uses the RAW percent (before display rounding) so a consumer
+    // account with usage too small to round above 0% is still recognized as metered.
+    let sawRawUsage = false;
     for (const w of windows) {
       if (!Array.isArray(w)) continue;
+      const used = w[0];
       const percent = w[1];
       const windowType = w[2];
       if (!Number.isFinite(percent)) continue;
+      if (percent > 0) sawRawUsage = true;
+      const usedVal = Number.isFinite(used) ? used : null;
       const resetTs = w[3]?.[0]; // [seconds, nanos]
 
       if (windowType === 1) {
         // 5-hour window
         h5 = Math.round(percent * 100);
+        used5h = usedVal; pct5hRaw = percent;
         resetsAt5h = geminiTimestampToResetTime(resetTs);
       } else if (windowType === 2) {
         // Weekly window
         d7 = Math.round(percent * 100);
+        used7d = usedVal; pct7dRaw = percent;
         resetsAt7d = geminiTimestampToResetTime(resetTs);
       }
     }
@@ -95,16 +128,56 @@ export async function collectGemini(force = false) {
 
     const accountId = googleId || 'gemini-unknown';
 
-    // No-limit plans are detected by PLAN, not by null/empty windows. Google
-    // Workspace (Business) and Enterprise seats DO return 5h/7d windows, but the
-    // utilization stays pinned at 0% — they aren't metered like consumer plans —
-    // so a null-based check never fires and the popup would show a misleading 0%.
-    // Keying off the plan is also deterministic (no transient-empty-window false
-    // positives). Consumer plans (Free / AI Plus / Advanced / AI Pro / AI Ultra)
-    // keep showing real percentages.
-    // 'Work' is the new label for planId 2 (was 'Business'); keep Business/Enterprise/
-    // Workspace as aliases so historical/alternate plan strings still resolve to no-limit.
-    const noLimits = /Business|Enterprise|Work/i.test(plan);
+    // Authoritative tier detection via the otAQ7b policy string. planId is unreliable
+    // (observed 2=Workspace, 4=AI Plus, null=AI Pro) so it is only a fallback when the
+    // policy RPC fails. See docs/DESIGN-gemini-policy-detection.md.
+    let otResponse = null;
+    let otOk = false;   // true only when otAQ7b returned a well-formed (array) response
+    try {
+      otResponse = await fetchGeminiRpc('otAQ7b', '[]');
+      otOk = Array.isArray(otResponse);
+    } catch (e) {
+      console.warn('[Claude Tuner] Gemini otAQ7b failed:', e.message);
+    }
+    const policies = otOk ? extractGeminiPolicies(otResponse, []) : [];
+    // Prefer the tier-bearing v3p2 policy; fall back to the first policy string for the
+    // raw value sent to AE.
+    const tierPolicy = policies.find(p => /v3p2_(\w+)_policy/.test(p)) || null;
+    const geminiPolicy = tierPolicy || policies[0] || '';   // raw policy string collected into AE
+    const tierWord = tierPolicy ? tierPolicy.match(/v3p2_(\w+)_policy/)[1] : null;
+
+    let plan, noLimits;
+    if (policies.length > 0) {
+      // A policy is present → metered consumer account (NEVER Workspace, even if the tier
+      // word is unrecognized). Label from the v3p2 tier word (unknown → title-cased so it
+      // surfaces in data); if a policy exists but names no v3p2 tier, use the planId label.
+      plan = tierWord
+        ? (GEMINI_POLICY_LABEL[tierWord] || (tierWord.charAt(0).toUpperCase() + tierWord.slice(1)))
+        : (GEMINI_PLAN_MAP[planId] || 'Gemini');
+      noLimits = false;
+    } else if (otOk) {
+      // Well-formed otAQ7b response with NO policy → Google Workspace seat (unmetered).
+      plan = 'Work';
+      noLimits = true;
+    } else {
+      // otAQ7b failed → fall back to the (unreliable) planId map + the sticky-metered guard:
+      // treat the account as metered the moment we ever see real (>0) usage, and remember it
+      // (sticky) so a later 0% window doesn't re-hide a consumer account. Genuine Workspace
+      // seats stay pinned at 0%, never get marked, and keep noLimits.
+      plan = GEMINI_PLAN_MAP[planId] || `Plan ${planId}`;
+      const planBasedNoLimits = /Business|Enterprise|Work/i.test(plan);
+      noLimits = planBasedNoLimits;
+      if (planBasedNoLimits) {
+        const meteredKey = googleId || email || null;
+        let usageEver = sawRawUsage;
+        if (!usageEver && meteredKey) {
+          const hist = await getUsageHistory().catch(() => []);
+          usageEver = hist.some(p => p.org === accountId && ((p.h5 > 0) || (p.d7 > 0)));
+        }
+        const everMetered = await recordGeminiMetered(meteredKey, usageEver);
+        noLimits = !everMetered;
+      }
+    }
 
     const org = {
       uuid: accountId,
@@ -121,6 +194,12 @@ export async function collectGemini(force = false) {
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
+      // Raw signals for server-side AE collection (not shown in the popup)
+      geminiPolicy,
+      used5h,
+      used7d,
+      pct5hRaw,
+      pct7dRaw,
     };
 
     // Append to local usage history (for chart display)
@@ -194,11 +273,17 @@ async function sendGeminiSnapshot(org, geminiEmail, plan) {
     five_hour: {
       utilization: org.h5,
       resets_at: org.resetsAt5h,
+      used_raw: org.used5h ?? null,
+      percent_raw: org.pct5hRaw ?? null,
     },
     seven_day: {
       utilization: org.d7,
       resets_at: org.resetsAt7d,
+      used_raw: org.used7d ?? null,
+      percent_raw: org.pct7dRaw ?? null,
     },
+    // Raw otAQ7b policy string (authoritative tier signal) — collected into AE.
+    gemini_policy: org.geminiPolicy || null,
     claude_org_uuid: org.uuid,
     provider: 'gemini',
     provider_email: geminiEmail || null,
