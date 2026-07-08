@@ -67,6 +67,9 @@ export function hasOrgUsageChanged(prev, current) {
   // A reset_at change (new window) is meaningful even when utilization is flat.
   // First comparison (prev absent) counts as a change so a real reset isn't missed.
   const resetChanged = (a, b) => b != null && a !== b;
+  // NOTE: a plan change is handled by shouldSendSnapshot (it bypasses the send floor), not here —
+  // this predicate stays about USAGE so the adaptive tier / heartbeat classification isn't
+  // perturbed by a pure relabel.
   return diff(prev.h5, current.h5) || diff(prev.d7, current.d7) || diff(prev.extraUsed, current.extraUsed)
     || resetChanged(prev.resetsAt5h, current.resetsAt5h) || resetChanged(prev.resetsAt7d, current.resetsAt7d);
 }
@@ -108,6 +111,17 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
       backwardReset(prevValues.resetsAt5h, currentValues.resetsAt5h)) {
     return { send: false, changed: false, reason: 'stale-reset' };
   }
+  // A plan change carries the token multiplier (e.g. Gemini 'AI Ultra 5x' → '20x'), so it must
+  // POST promptly — bypass the send floor (like force) so it isn't rate-limited into a later
+  // usage snapshot and zeroed by the server's plan-change delta guard. OPT-IN: only compared
+  // when both sides carry `plan` (Gemini does; Claude/ChatGPT gate values omit it).
+  // Bootstrap: gate state saved BEFORE this feature has no `plan`, so `prevValues.plan` is null
+  // for the first cycle(s) after upgrade — the guard makes this a no-op (no false or forced
+  // send). It self-heals on the first send (commit persists `plan`), which happens within one
+  // heartbeat floor (≤1h) via usage change or the floor, after which detection is fully active.
+  // This window is no worse than the pre-feature behaviour (plan changes weren't detected at all).
+  const planChanged = prevValues.plan != null && currentValues.plan != null && prevValues.plan !== currentValues.plan;
+  if (planChanged) return { send: true, changed: true, reason: 'plan-change' };
   const sinceSent = now - (lastSentAt || 0);
   if (changed && sinceSent >= sendFloorMs) return { send: true, changed, reason: 'changed' };
   if (sinceSent >= heartbeatFloorMs) return { send: true, changed, reason: 'floor' };

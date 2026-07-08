@@ -111,6 +111,25 @@ export async function recordGeminiMetered(accountId, hasUsageNow) {
   });
 }
 
+// --- Gemini Ultra sub-tier stickiness ---
+// AI Ultra 5x and 20x share one policy; the sub-tier is derived from the quota (remaining
+// window value). That quota signal is OPTIONAL and may go away — if it does, we must still
+// serve the right multiplier. So we remember the last resolved sub-tier per account: pass the
+// freshly-derived value to persist it, or pass null to look up the remembered one. Returns the
+// effective sub-tier ('AI Ultra 5x' | 'AI Ultra 20x' | null when never determined).
+export async function rememberGeminiUltraTier(accountId, freshSub) {
+  if (!accountId) return freshSub || null;
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ geminiUltraTier: {} }, (result) => {
+      const map = result.geminiUltraTier || {};
+      if (!freshSub) { resolve(map[accountId] || null); return; }        // no quota this cycle → remembered
+      if (map[accountId] === freshSub) { resolve(freshSub); return; }    // unchanged
+      map[accountId] = freshSub;
+      chrome.storage.local.set({ geminiUltraTier: map }, () => resolve(freshSub));
+    });
+  });
+}
+
 // --- ext_token management (per-user JWT for server auth) ---
 
 export async function getExtToken() {

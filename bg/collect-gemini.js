@@ -1,6 +1,6 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered } from './storage.js';
+import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier } from './storage.js';
 import { gateProviderSnapshot } from './send-gate.js';
 
 // Gemini plan ID mapping (from jSf9Qc response first field).
@@ -37,6 +37,7 @@ const GEMINI_PLAN_MAP = {
 // return NO policy (empty) and are labeled 'Work'. See docs/DESIGN-gemini-policy-detection.md.
 const GEMINI_POLICY_LABEL = {
   free: 'Free',
+  basic: 'Free',   // Free/entry tier — confirmed 2026-07-09 (known free acct: planId=1, v3p2_basic_policy). Maps to Free so planMultiplier() = 0.25x (was 1x via title-case fallback).
   plus: 'AI Plus',
   pro: 'AI Pro',
   ultra: 'AI Ultra',
@@ -52,6 +53,23 @@ function extractGeminiPolicies(node, acc) {
     for (const v of node) extractGeminiPolicies(v, acc);
   }
   return acc;
+}
+
+// Observed AI Pro per-window quota (the 1x baseline). full_quota = remaining/(1-percent) is a
+// tier constant; its ratio to Pro is the capacity multiplier. See docs/DESIGN §13–14.
+const GEMINI_PRO_QUOTA = { d7: 48384, h5: 2400 };
+
+// AI Ultra 5x and 20x share ONE policy (v3p2_ultra_policy) — only the quota tells them apart.
+// Returns 'AI Ultra 5x' / 'AI Ultra 20x' from the capacity ratio, or null (unknown → keep base
+// 'AI Ultra'). Prefers the 7d window; both windows yield the same ratio.
+function geminiUltraSubTier(rem7d, pct7d, rem5h, pct5h) {
+  let q = null;
+  if (Number.isFinite(rem7d) && Number.isFinite(pct7d) && pct7d < 0.99) q = (rem7d / (1 - pct7d)) / GEMINI_PRO_QUOTA.d7;
+  else if (Number.isFinite(rem5h) && Number.isFinite(pct5h) && pct5h < 0.99) q = (rem5h / (1 - pct5h)) / GEMINI_PRO_QUOTA.h5;
+  if (q == null) return null;
+  if (Math.abs(q - 20) <= 3) return 'AI Ultra 20x';     // 20x ± ~15%
+  if (Math.abs(q - 5) <= 0.75) return 'AI Ultra 5x';    // 5x ± ~15%
+  return null;
 }
 
 // Convert [seconds, nanos] timestamp to ISO string, then normalize to minute precision
@@ -83,33 +101,34 @@ export async function collectGemini(force = false) {
     const planId = data[0];
     const windows = data[1];
 
-    // Parse windows: each entry is [used, percent, windowType, [[resetSec, resetNano]]]
+    // Parse windows: each entry is [remaining, percent, windowType, [[resetSec, resetNano]]].
+    // NOTE: w[0] is the REMAINING quota (counts DOWN as used), NOT consumption — proven by a
+    // before/after capture. full_quota = remaining/(1-percent) is the tier constant.
     let h5 = null, d7 = null, resetsAt5h = null, resetsAt7d = null;
-    // Raw signals (used + unrounded percent) sent to the server for AE collection — used is
-    // present even when percent is 0 (Workspace), and limit = used/percent discriminates tiers.
-    let used5h = null, used7d = null, pct5hRaw = null, pct7dRaw = null;
+    // Raw per-window signal for AE collection: remaining quota + unrounded percent consumed.
+    let remaining5h = null, remaining7d = null, pct5hRaw = null, pct7dRaw = null;
     // Metered detection uses the RAW percent (before display rounding) so a consumer
     // account with usage too small to round above 0% is still recognized as metered.
     let sawRawUsage = false;
     for (const w of windows) {
       if (!Array.isArray(w)) continue;
-      const used = w[0];
+      const remaining = w[0];
       const percent = w[1];
       const windowType = w[2];
       if (!Number.isFinite(percent)) continue;
       if (percent > 0) sawRawUsage = true;
-      const usedVal = Number.isFinite(used) ? used : null;
+      const remainingVal = Number.isFinite(remaining) ? remaining : null;
       const resetTs = w[3]?.[0]; // [seconds, nanos]
 
       if (windowType === 1) {
         // 5-hour window
         h5 = Math.round(percent * 100);
-        used5h = usedVal; pct5hRaw = percent;
+        remaining5h = remainingVal; pct5hRaw = percent;
         resetsAt5h = geminiTimestampToResetTime(resetTs);
       } else if (windowType === 2) {
         // Weekly window
         d7 = Math.round(percent * 100);
-        used7d = usedVal; pct7dRaw = percent;
+        remaining7d = remainingVal; pct7dRaw = percent;
         resetsAt7d = geminiTimestampToResetTime(resetTs);
       }
     }
@@ -154,6 +173,15 @@ export async function collectGemini(force = false) {
       plan = tierWord
         ? (GEMINI_POLICY_LABEL[tierWord] || (tierWord.charAt(0).toUpperCase() + tierWord.slice(1)))
         : (GEMINI_PLAN_MAP[planId] || 'Gemini');
+      // Ultra 5x vs 20x share one policy — refine the label by quota so planMultiplier can
+      // apply 5x vs 20x (ChatGPT "Pro 5x"/"Pro 20x" pattern). The quota (remaining) signal is
+      // OPTIONAL: if it's unavailable this cycle (or Google drops it entirely) we reuse the
+      // last remembered sub-tier; if never determined, keep base 'AI Ultra' (multiplier 5).
+      if (tierWord === 'ultra') {
+        const freshSub = geminiUltraSubTier(remaining7d, pct7dRaw, remaining5h, pct5hRaw);
+        const sub = await rememberGeminiUltraTier(googleId || email || null, freshSub);
+        if (sub) plan = sub;
+      }
       noLimits = false;
     } else if (otOk) {
       // Well-formed otAQ7b response with NO policy → Google Workspace seat (unmetered).
@@ -196,8 +224,8 @@ export async function collectGemini(force = false) {
       extraUsage: null,
       // Raw signals for server-side AE collection (not shown in the popup)
       geminiPolicy,
-      used5h,
-      used7d,
+      remaining5h,
+      remaining7d,
       pct5hRaw,
       pct7dRaw,
     };
@@ -218,7 +246,10 @@ export async function collectGemini(force = false) {
     // Skip unchanged heartbeats the server would only dedup; local history above
     // is always kept so the popup chart stays continuous. Returned org is
     // unaffected, so popup/merge display is independent of the gate.
-    const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d };
+    // `plan` opts this gate into plan-change detection (send-gate.js): a Gemini tier change
+    // (incl. Ultra 5x↔20x, which carries a different multiplier) must POST promptly rather than
+    // batch with later usage and be zeroed by the server's plan-change delta guard.
+    const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d, plan: org.plan };
     const gate = await gateProviderSnapshot(org.uuid, gateValues, { force });
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
@@ -273,13 +304,13 @@ async function sendGeminiSnapshot(org, geminiEmail, plan) {
     five_hour: {
       utilization: org.h5,
       resets_at: org.resetsAt5h,
-      used_raw: org.used5h ?? null,
+      remaining_raw: org.remaining5h ?? null,
       percent_raw: org.pct5hRaw ?? null,
     },
     seven_day: {
       utilization: org.d7,
       resets_at: org.resetsAt7d,
-      used_raw: org.used7d ?? null,
+      remaining_raw: org.remaining7d ?? null,
       percent_raw: org.pct7dRaw ?? null,
     },
     // Raw otAQ7b policy string (authoritative tier signal) — collected into AE.
