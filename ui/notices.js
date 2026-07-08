@@ -3,7 +3,13 @@
 import { escHtml } from './util.js';
 import { state } from './state.js';
 
-const ANNOUNCEMENT_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/announcements';
+// Announcements FEED is served as a static object from the CDN (cdn.claudetuner.com,
+// ACAO:*), NOT a Worker route — polling it never wakes the Worker (mirrors the
+// dashboard shared/announcement.js + promo push.json CDN migrations). Shape is a
+// drop-in array identical to the old /api/announcements response.
+const ANNOUNCEMENT_URL = 'https://cdn.claudetuner.com/announcements.json';
+// Impression/click events still POST to the Worker (the CDN is read-only static).
+const ANNOUNCEMENT_EVENT_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/announcements/event';
 const PROMOS_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/promos';
 
 function _compareVersions(a, b) {
@@ -85,7 +91,7 @@ function _matchesTz(tzTarget) {
 const _evtSeen = new Set();
 function _sendEvent(id, kind) {
   try {
-    fetch(ANNOUNCEMENT_URL + '/event', {
+    fetch(ANNOUNCEMENT_EVENT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, kind }),

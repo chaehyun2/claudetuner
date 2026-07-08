@@ -15,7 +15,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, getExtToken, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -949,7 +949,11 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       if (needHistory) {
         if (result.recent_snapshots && result.recent_snapshots.length > 0) {
           await mergeServerSnapshots(result.recent_snapshots, plan, snapshot.claude_org_uuid);
-        } else {
+        } else if (await getExtToken()) {
+          // /api/me requires a Bearer session token (ext_token); the API_KEY
+          // fallback would always 401. Skip when tokenless to avoid wasted
+          // requests — a fresh ext_token is issued via the snapshot POST (TOFU),
+          // so the next cycle can bootstrap history once authed.
           try {
             const orgParam = snapshot.claude_org_uuid ? `?org=${encodeURIComponent(snapshot.claude_org_uuid)}` : '';
             const meResp = await authedFetch(config, `${config.serverUrl}/api/me${orgParam}`, {
@@ -1059,7 +1063,12 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
         const { selectedOrgsMigrated } = await chrome.storage.local.get({ selectedOrgsMigrated: false });
         if (!selectedOrgsMigrated) {
           const { selectedOrgIds } = await chrome.storage.sync.get({ selectedOrgIds: null });
-          if (Array.isArray(selectedOrgIds) && selectedOrgIds.length >= 1 && selectedOrgIds.length <= 3) {
+          const hasLegacy = Array.isArray(selectedOrgIds) && selectedOrgIds.length >= 1 && selectedOrgIds.length <= 3;
+          // /api/me/selected-orgs requires a Bearer session token; the API_KEY
+          // fallback always 401s. Only attempt the migration PATCH once we have an
+          // ext_token — otherwise skip WITHOUT marking migrated so it retries (once)
+          // after a token is issued, instead of hammering a guaranteed 401 every cycle.
+          if (hasLegacy && (await getExtToken())) {
             const payload = selectedOrgIds.map(uuid => ({ provider: 'claude', org_uuid: uuid }));
             const resp = await authedFetch(config, `${config.serverUrl}/api/me/selected-orgs`, {
               method: 'PATCH',
@@ -1069,8 +1078,15 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
             if (resp.ok) {
               await chrome.storage.sync.remove(['selectedOrgIds', 'orgAutoAll']);
               await chrome.storage.local.set({ selectedOrgsMigrated: true });
+            } else if (resp.status === 403) {
+              // 403 is terminal (email-mismatch / not authorized — won't recover),
+              // so mark done. 401 is NOT marked terminal: it's a stale token, and
+              // authedFetch already cleared it → next cycle is tokenless → the
+              // getExtToken() gate skips (no request) until a fresh token is issued
+              // via the snapshot POST (TOFU), which then retries the migration once.
+              await chrome.storage.local.set({ selectedOrgsMigrated: true });
             }
-          } else {
+          } else if (!hasLegacy) {
             // Nothing to migrate — still mark done so we don't retry every collect
             await chrome.storage.local.set({ selectedOrgsMigrated: true });
           }
