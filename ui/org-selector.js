@@ -156,6 +156,16 @@ export function selectOrg(orgId, container) {
         document.getElementById('gauge-5h-fill').style.background = gaugeColor(util5h);
         document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
         renderGaugePrediction('5h', hist, 'h5', util5h, resetsAt5h);
+      } else {
+        // Plan without a 5h window (e.g. ChatGPT Pro 5x 'prolite', which exposes
+        // only a weekly limit). Show N/A and clear any stale fill/prediction the
+        // DOM kept from a previously viewed org — _restoreGaugeHTML() is a no-op
+        // when the gauge element already exists, so we must reset it explicitly.
+        const g5Val = document.getElementById('gauge-5h-value');
+        if (g5Val) { g5Val.textContent = 'N/A'; g5Val.style.color = '#9ca3af'; }
+        const g5Fill = document.getElementById('gauge-5h-fill');
+        if (g5Fill) g5Fill.style.width = '0';
+        renderGaugePrediction('5h', hist, 'h5', null, resetsAt5h); // self-hides on null
       }
       if (util7d !== null && util7d !== undefined) {
         document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
@@ -173,15 +183,12 @@ export function selectOrg(orgId, container) {
         const g7dFill = document.getElementById('gauge-7d-fill');
         if (g7dFill) g7dFill.style.width = '0';
       }
-      // Display reset time
-      if (resetsAt5h) {
-        const r5h = document.getElementById('gauge-5h-reset');
-        if (r5h) r5h.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>`;
-      }
-      if (resetsAt7d) {
-        const r7d = document.getElementById('gauge-7d-reset');
-        if (r7d) r7d.innerHTML = `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>`;
-      }
+      // Display reset time. Clear (not skip) when absent, so a window that lost
+      // its limit doesn't keep a previously viewed org's stale countdown.
+      const r5h = document.getElementById('gauge-5h-reset');
+      if (r5h) r5h.innerHTML = resetsAt5h ? `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>` : '';
+      const r7d = document.getElementById('gauge-7d-reset');
+      if (r7d) r7d.innerHTML = resetsAt7d ? `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>` : '';
     }
 
     // === 3. Extra usage section (Claude Enterprise only) ===

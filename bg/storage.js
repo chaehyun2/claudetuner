@@ -241,6 +241,45 @@ export function bearerFromAuthHeaders(auth) {
 }
 
 /**
+ * POST JSON as a CORS "simple request" — NO custom headers (a string body defaults
+ * to Content-Type: text/plain), auth embedded in the body as `_auth` (ext_token if
+ * present, shared API key otherwise). Because no preflight-triggering header is
+ * set, the browser skips the OPTIONS round-trip entirely (~53k req/day on
+ * /api/snapshots — ~11% of all worker traffic). Server counterpart: authMiddleware
+ * scheme 3 (worker/src/middleware/auth.ts), which strips `_auth` before processing.
+ * Requires the worker deployed with body-auth support BEFORE this ships in a release.
+ *
+ * Returns { response, sentToken } — sentToken is the ext_token actually sent
+ * (null on API_KEY fallback) for race-safe clearExtTokenIfMatches on 401/403.
+ */
+export async function simplePost(config, url, payload) {
+  const extToken = await getExtToken();
+  const response = await fetch(url, {
+    method: 'POST',
+    body: JSON.stringify({ ...payload, _auth: extToken || config.apiKey }),
+  });
+  return { response, sentToken: extToken || null };
+}
+
+/**
+ * simplePost with authedFetch's 401 auto-clear semantics, for fire-and-forget
+ * callers that only inspect response.ok. Returns the Response.
+ */
+export async function simpleAuthedPost(config, url, payload) {
+  const { response, sentToken } = await simplePost(config, url, payload);
+  if (response.status === 401) {
+    const cleared = await clearExtTokenIfMatches(sentToken);
+    if (cleared) {
+      try {
+        const path = new URL(url).pathname;
+        console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
+      } catch { /* ignore URL parse errors */ }
+    }
+  }
+  return response;
+}
+
+/**
  * POST a snapshot to /api/snapshots with auth handling shared across all
  * collection paths (Claude, ChatGPT, Gemini). Mirrors the auth-recovery logic
  * the Claude path uses so that provider-only (independent) accounts — whose
@@ -259,14 +298,8 @@ export function bearerFromAuthHeaders(auth) {
  */
 export async function postSnapshot(config, payload) {
   if (!config.serverUrl) return null;
-  const authHeaders = await getAuthHeaders(config);
-  const sentToken = bearerFromAuthHeaders(authHeaders);
-
-  const response = await fetch(`${config.serverUrl}/api/snapshots`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify(payload),
-  });
+  // Preflight-free simple request (see simplePost) — auth rides in the body.
+  const { response, sentToken } = await simplePost(config, `${config.serverUrl}/api/snapshots`, payload);
 
   if (response.status === 401 || response.status === 403) {
     const cleared = await clearExtTokenIfMatches(sentToken);
@@ -301,8 +334,13 @@ export async function postSnapshot(config, payload) {
   const result = await response.json().catch(() => ({}));
   await noteServerSuccess(); // confirmed-healthy POST clears any backoff
   // Store any server-tunable cadence override here — the shared chokepoint for ALL
-  // POSTs (Claude + ChatGPT + Gemini), so provider-only accounts get cadence too.
-  await applyServerCadence(result);
+  // POSTs (Claude + ChatGPT + Gemini), so provider-only accounts get cadence too. The
+  // payload names the stream this response answers, so a per-stream standby verdict
+  // (design 안 B) lands on the right stream and nowhere else.
+  await applyServerCadence(result, Date.now(), {
+    uuid: payload && payload.claude_org_uuid,
+    provider: (payload && payload.provider) || 'claude',
+  });
   // Store ext_token from server (TOFU issuance or refresh)
   if (result.ext_token) {
     await setExtToken(result.ext_token);

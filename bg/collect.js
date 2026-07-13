@@ -6,7 +6,7 @@ import {
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
-import { getCadence, isCollectionPaused, applyServerCadence } from './cadence-config.js';
+import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
@@ -15,7 +15,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, getAuthHeaders, authedFetch, getExtToken, setExtToken, clearExtTokenIfMatches, bearerFromAuthHeaders, getOrCreateInstallId } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, clearExtTokenIfMatches, getOrCreateInstallId } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -748,7 +748,7 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
     // gate decides: changed (10min min-interval) OR the 1h heartbeat floor.
     // Primary reuses lastPollAt as "last sent" — updateOrgPollState below runs only
     // in this send branch, so lastValues/lastPollAt already track the last POST.
-    const primaryCadence = await getCadence();
+    const primaryCadence = await getCadence(Date.now(), { uuid: bestOrg?.uuid, provider: 'claude' });
     const { send: primaryDue, changed: primaryChanged, reason: primaryGateReason } = shouldSendSnapshot(
       primaryState.lastValues, primaryState.lastPollAt, primaryCurrentValues,
       { force: force || needHistory, sendFloorMs: primaryCadence.sendFloorMs, heartbeatFloorMs: primaryCadence.heartbeatFloorMs },
@@ -785,17 +785,9 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       }
 
     // === Server POST: fire-and-forget (don't wait for response) ===
-    // Send server save in background, proceed with local UI update first
-    const authHeaders = await getAuthHeaders(config);
-    const sentToken = bearerFromAuthHeaders(authHeaders);
-    fetch(`${config.serverUrl}/api/snapshots`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders,
-      },
-      body: JSON.stringify(body),
-    }).then(async (response) => {
+    // Send server save in background, proceed with local UI update first.
+    // Preflight-free simple request (storage.js simplePost) — auth in body.
+    simplePost(config, `${config.serverUrl}/api/snapshots`, body).then(async ({ response, sentToken }) => {
       if (response.status === 403) {
         // 403 = email mismatch: this Claude snapshot's account email differs from
         // the Tuner login identity bound to the ext_token, so the server rejects it.
@@ -880,7 +872,7 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
       // primary/extra paths POST via authedFetch directly (not postSnapshot), so they
       // need their own call — postSnapshot's call covers only ChatGPT/Gemini. Paths
       // are disjoint (Claude→authedFetch, providers→postSnapshot) so no double-apply.
-      await applyServerCadence(result);
+      await applyServerCadence(result, Date.now(), { uuid: bestOrg?.uuid, provider: 'claude' });
 
       // Save review nudge state
       if (result.review_nudge) {
@@ -1183,7 +1175,7 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
           // Send gate (shared with primary/ChatGPT/Gemini) uses change-vs-last-SENT
           // — pollState is the pre-update reference; its lastValues is bumped every
           // poll for the tier, so the gate reads the separate lastSent* fields.
-          const extraCadence = await getCadence();
+          const extraCadence = await getCadence(Date.now(), { uuid: extraOrg.uuid, provider: 'claude' });
           const { send: extraDue, changed: extraChanged, reason: extraGateReason } = shouldSendSnapshot(
             pollState.lastSentValues, pollState.lastSentAt, currentValues,
             { force, sendFloorMs: extraCadence.sendFloorMs, heartbeatFloorMs: extraCadence.heartbeatFloorMs },
@@ -1249,12 +1241,11 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
                 await chrome.storage.local.set({ orgPollState: cur });
               }
             };
-            // Server POST: fire-and-forget
-            authedFetch(config, `${config.serverUrl}/api/snapshots`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(force ? { ...extraSnapshot, force: true } : extraSnapshot),
-            }).then(r => {
+            // Server POST: fire-and-forget. Preflight-free simple request
+            // (auth in body) with authedFetch's 401 auto-clear semantics.
+            simpleAuthedPost(config, `${config.serverUrl}/api/snapshots`,
+              force ? { ...extraSnapshot, force: true } : extraSnapshot,
+            ).then(r => {
               // 5xx/network → transient, roll back to retry. 4xx (401/403/410) →
               // persistent; leave advanced so we back off, not hammer.
               if (r && !r.ok) {
@@ -1262,6 +1253,13 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
                 if (r.status >= 500) { rollbackExtra(); noteServerFailure().catch(() => {}); }
               } else if (r && r.ok) {
                 noteServerSuccess().catch(() => {}); // healthy POST clears backoff
+                // Extra-org responses used to be read for status ONLY, so an extra org could
+                // never receive a cadence override — and with per-stream standby (design 안 B)
+                // that would strand it at full cadence forever. Consume it here, scoped to
+                // THIS org's stream. Failure is non-fatal (cadence stays as-is).
+                r.json()
+                  .then(body => applyServerCadence(body, Date.now(), { uuid: extraOrg.uuid, provider: 'claude' }))
+                  .catch(() => {});
               }
             }).catch(e => {
               console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
@@ -1286,6 +1284,21 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
         if (!activeOrgIds.has(uuid)) delete orgPollState[uuid];
       }
       await chrome.storage.local.set({ orgPollState });
+      // Same cleanup for the per-stream cadence keys — an inert (TTL-expired) key is still a
+      // key, and a user who rotates through orgs would accumulate them until storage writes
+      // start failing silently. Only Claude streams are known here; ChatGPT/Gemini keys are
+      // left alone (their own collectors own those uuids), and a stale one still self-drops
+      // on its next read via the TTL sweep in getCadence.
+      await pruneStreamCadence([
+        ...[...activeOrgIds].filter(Boolean).map(uuid => ({ uuid, provider: 'claude' })),
+        // Never prune other providers' keys from the Claude cycle.
+        ...Object.keys(await chrome.storage.local.get(null))
+          .filter(k => k.startsWith('ctStreamCadence_') && !k.startsWith('ctStreamCadence_claude|'))
+          .map(k => {
+            const [provider, uuid] = k.slice('ctStreamCadence_'.length).split('|');
+            return { uuid, provider };
+          }),
+      ]);
 
       if (skippedOrgs.length > 0) {
         console.log(`[Claude Tuner] Adaptive skip: ${skippedOrgs.map(s => `${s.name}(${s.tier})`).join(', ')}`);

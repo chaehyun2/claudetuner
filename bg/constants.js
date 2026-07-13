@@ -75,6 +75,13 @@ export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid 
 export const SERVER_BACKOFF_BASE_MS = SEND_MIN_INTERVAL_MS; // 10min
 export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
 
+// === Ad impression/click counter flush cadence (design §5.4) ===
+// The background SW is the single owner of the ad counters; it flushes the batched
+// impression/click deltas to /api/event on this alarm. Default 60min; the server can
+// steer it fleet-wide via impression_flush_minutes (cadence-config.js), unclamped
+// (type-validated only, like the send floor).
+export const IMPRESSION_FLUSH_DEFAULT_MS = 60 * 60 * 1000; // 60min default
+
 // === Server-tunable cadence (cadence-config.js) ===
 // Collection (Claude/ChatGPT/Gemini fetch) and server POST cadence can be steered
 // fleet-wide by the server (faster than a CWS release) for provider incidents

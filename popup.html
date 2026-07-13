@@ -814,6 +814,10 @@
   <script src="config.js"></script>
   <script src="analytics.js"></script>
   <script src="i18n.js"></script>
+  <!-- usage-shared.js is the classic content-script core; loading it here lets the popup ES
+       modules reuse the SAME ad-serving logic (globalThis.__ctUsageCore) as the sidebars,
+       instead of duplicating it (single-source-of-truth rule). -->
+  <script src="usage-shared.js"></script>
   <!-- popup.js is an ES module; config/analytics/i18n stay classic globals (also used by content scripts) and load first. -->
   <script type="module" src="popup.js"></script>
 </body>

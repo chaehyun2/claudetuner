@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5-hour usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
+    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -135,23 +135,29 @@
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
   function renderStripInto(strip) {
-    if (!_data || _data.h5 == null) {
+    // Prefer the 5h window; fall back to the 7d window for plans that expose
+    // only a weekly limit (e.g. ChatGPT Pro 5x 'prolite', where h5 is null).
+    const use7d = _data && _data.h5 == null && _data.d7 != null;
+    if (!_data || (_data.h5 == null && _data.d7 == null)) {
       strip.innerHTML = `<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(t('no_data'))}</span>`;
       return;
     }
+    const win = use7d
+      ? { label: t('weekly'), util: _data.d7, reset: _data.r7, pred: _data.pred7d }
+      : { label: t('session'), util: _data.h5, reset: _data.r5, pred: _data.pred5h };
     const logoUrl = chrome.runtime.getURL('icons/icon16.png');
     const dot = '<span class="ct-cg-strip-dot">·</span>';
     let main = `<img src="${logoUrl}" class="ct-cg-strip-logo" alt="CT">`;
-    // 5h current usage % + gauge bar (with prediction marker).
-    main += metric(t('session'), _data.h5, _data.pred5h);
+    // current usage % + gauge bar (with prediction marker).
+    main += metric(win.label, win.util, win.pred);
     // ⏱ N 뒤 리셋
-    if (_data.r5) {
-      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-reset" data-reset="${_data.r5}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(_data.r5, _lang))}">${CORE.escapeHtml(resetLabel(_data.r5))}</span>`;
+    if (win.reset) {
+      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-reset" data-reset="${win.reset}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(win.reset, _lang))}">${CORE.escapeHtml(resetLabel(win.reset))}</span>`;
     }
     // 리셋 시 예상 N% — predicted util at reset, percent colored by status.
-    if (_data.pred5h != null) {
-      const predColor = CORE.gaugeColor(_data.pred5h);
-      const predText = _data.pred5h >= 100 ? '100%+' : `${Math.round(_data.pred5h)}%`;
+    if (win.pred != null) {
+      const predColor = CORE.gaugeColor(win.pred);
+      const predText = win.pred >= 100 ? '100%+' : `${Math.round(win.pred)}%`;
       main += `${dot}<span class="ct-cg-strip-seg"><span class="ct-cg-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
     }
     if (_data.plan) {

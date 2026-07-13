@@ -201,6 +201,16 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
   font-size: 12px;
   color: var(--ct-gm-text);
 }
+/* In-house ad banner container. Sits beside the notice as a direct panel child, so it
+   is outside .ct-gm-content's flex `gap` and needs its own top margin — without this it
+   butts straight against the panel above it. Same spacing as the notice. */
+.ct-gm-ad { margin-top: 8px; }
+/* Ad banner hover — reuse THIS surface's own hover token (the one the action buttons and
+   the panel head already use), so the ad slot doesn't feel like a foreign element. The
+   banner's inline styles set no background, so this rule applies without a specificity fight. */
+.ct-gm-ad .ct-ad-banner { transition: background-color .12s; }
+.ct-gm-ad .ct-ad-banner:hover { background-color: var(--ct-gm-hover); }
+
 .ct-gm-notice-icon { flex-shrink: 0; }
 .ct-gm-notice-text {
   flex: 1; min-width: 0; cursor: pointer;

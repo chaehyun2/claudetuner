@@ -144,14 +144,16 @@ const SEND_GATE_PREFIX = 'ctSendGate_';
  * gate unadvanced and the next cycle retries. Kept here so providers don't
  * duplicate the read/write.
  */
-export async function gateProviderSnapshot(uuid, currentValues, { force = false } = {}) {
+export async function gateProviderSnapshot(uuid, currentValues, { force = false, provider = null } = {}) {
   const key = SEND_GATE_PREFIX + uuid;
   const prev = (await chrome.storage.local.get({ [key]: null }))[key] || {};
   // ChatGPT/Gemini are collected outside the alarm's collectAndSend path, so the
   // background.js server-path gate doesn't cover them — honor the backoff here so
   // they also stop POSTing while the server is in a 5xx backoff window.
   if (await isServerBackedOff()) return { send: false, reason: 'server-backoff', commit: async () => {} };
-  const cadence = await getCadence();
+  // Per-stream cadence (design 안 B): a standby verdict is scoped to (uuid, provider), so
+  // throttling this provider can no longer slow the others down.
+  const cadence = await getCadence(Date.now(), { uuid, provider });
   const { send, reason } = shouldSendSnapshot(prev.lastValues, prev.lastSentAt, currentValues,
     { force, sendFloorMs: cadence.sendFloorMs, heartbeatFloorMs: cadence.heartbeatFloorMs });
   const commit = async () => {

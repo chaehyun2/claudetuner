@@ -307,6 +307,18 @@
   line-height: 18px;
 }
 
+/* In-house ad banner container — a direct panel child like the notice, so it carries
+   its own top margin rather than inheriting any list gap. Same spacing as the notice. */
+.ct-sb-ad { margin-top: 2px; }
+/* Ad banner hover. Claude.ai's own hover token (--button-hover-bg) is component-scoped, not
+   exposed on :root, so injected CSS cannot read it; and --bg-000 is WHITE in light mode, so
+   using it would make the row get brighter than the page on hover. A neutral translucent
+   overlay is the one thing that reads correctly in both themes (it darkens on light, lightens
+   on dark) — the same overlay the ChatGPT panel already uses. The banner's inline styles set
+   no background, so this rule applies without a specificity fight. */
+.ct-sb-ad .ct-ad-banner { transition: background-color .12s; }
+.ct-sb-ad .ct-ad-banner:hover { background-color: rgba(127, 127, 127, 0.16); }
+
 .ct-sb-notice-icon {
   flex-shrink: 0;
   font-size: 12px;

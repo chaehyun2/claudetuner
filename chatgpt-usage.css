@@ -150,6 +150,15 @@ html.dark, html.dark-oled {
   padding: 0 2px;
 }
 
+/* In-house ad banner — match the announcement's horizontal inset (12px) so it
+   doesn't run edge-to-edge; vertical spacing comes from the banner's own margin. */
+.ct-cg-ad { margin: 0 12px; }
+/* Ad banner hover — the SAME overlay the panel's other clickable rows use, so the ad slot
+   doesn't feel like a foreign element. The banner is drawn by the shared canonical builder
+   with inline styles that set no background, so this rule wins without a specificity fight. */
+.ct-cg-ad .ct-ad-banner { transition: background-color .12s; }
+.ct-cg-ad .ct-ad-banner:hover { background-color: rgba(127, 127, 127, 0.16); }
+
 /* ── Styled hover tooltip (fixed, appended to <body>) ── */
 .ct-cg-tooltip {
   position: fixed;

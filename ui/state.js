@@ -21,6 +21,7 @@ export const state = {
   lastRecommendation: null, // cached recommendation (restored when returning to primary org)
   planChangedTo: null, // plan we just changed to — suppresses same recommendation from re-rendering
   popupNoticeList: [],
+  popupAds: [], // selected in-house ad banners (design §3.2) rendered alongside promos
   updateUITimer: null,
   lastUpdateUIStatus: null,
 };

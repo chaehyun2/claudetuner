@@ -26,6 +26,43 @@ function unixToResetTime(ts) {
   return normalizeResetTime(new Date(ts * 1000).toISOString());
 }
 
+// Window lengths (seconds) used to classify a rate-limit window by its span
+// rather than by its position in the response. ChatGPT no longer guarantees
+// primary_window == 5h / secondary_window == 7d: some plans (e.g. Pro 5x
+// 'prolite') expose only the 7d window as `primary_window` with a null
+// secondary. Classifying by `limit_window_seconds` keeps 5h/7d correct
+// regardless of which slot each window arrives in.
+const WINDOW_5H_SECONDS = 5 * 60 * 60;   // 18000
+const WINDOW_7D_SECONDS = 7 * 24 * 60 * 60; // 604800
+// Halfway (in log space) between 5h and 7d — a window shorter than this is
+// treated as the 5h window, longer as the 7d window.
+const WINDOW_SPLIT_SECONDS = Math.round(Math.sqrt(WINDOW_5H_SECONDS * WINDOW_7D_SECONDS));
+
+// Pick the 5h and 7d windows out of the rate_limit object by their span.
+function classifyWindows(rateLimit) {
+  const primary = rateLimit?.primary_window || null;
+  const secondary = rateLimit?.secondary_window || null;
+  let w5h = null;
+  let w7d = null;
+  const spanless = [];
+  // First pass: classify every window that carries a usable span.
+  for (const w of [primary, secondary]) {
+    if (!w) continue;
+    const span = w.limit_window_seconds;
+    if (typeof span !== 'number') { spanless.push(w); continue; }
+    if (span < WINDOW_SPLIT_SECONDS) w5h = w;
+    else w7d = w;
+  }
+  // Second pass: fill still-empty slots from spanless windows using the legacy
+  // positional assumption (primary=5h, secondary=7d), without ever overwriting
+  // a span-classified result. Handles fully-legacy and mixed old/new shapes.
+  if (spanless.length) {
+    if (!w5h && primary && spanless.includes(primary)) w5h = primary;
+    if (!w7d && secondary && spanless.includes(secondary)) w7d = secondary;
+  }
+  return { w5h, w7d };
+}
+
 /**
  * Collect ChatGPT usage data.
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
@@ -45,8 +82,7 @@ export async function collectChatGPT(force = false) {
       return { success: false, orgs: [] };
     }
 
-    const primary = usage.rate_limit.primary_window;
-    const secondary = usage.rate_limit.secondary_window;
+    const { w5h, w7d } = classifyWindows(usage.rate_limit);
     const plan = chatgptPlanName(usage.plan_type);
     const accountId = usage.account_id || usage.user_id || 'unknown';
     const email = usage.email || null;
@@ -58,10 +94,10 @@ export async function collectChatGPT(force = false) {
       plan: plan,
       provider: 'chatgpt',
       isPrimary: false,
-      h5: primary?.used_percent ?? null,
-      d7: secondary?.used_percent ?? null,
-      resetsAt5h: unixToResetTime(primary?.reset_at),
-      resetsAt7d: unixToResetTime(secondary?.reset_at),
+      h5: w5h?.used_percent ?? null,
+      d7: w7d?.used_percent ?? null,
+      resetsAt5h: unixToResetTime(w5h?.reset_at),
+      resetsAt7d: unixToResetTime(w7d?.reset_at),
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
@@ -84,7 +120,7 @@ export async function collectChatGPT(force = false) {
     // is always kept so the popup chart stays continuous. Returned org is
     // unaffected, so popup/merge display is independent of the gate.
     const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d };
-    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force });
+    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'chatgpt' });
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).

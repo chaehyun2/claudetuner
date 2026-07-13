@@ -9,9 +9,21 @@
   const SITE_URL = 'https://claudetuner.com';
   const MOUNT_INTERVAL_MS = 1000;
   const COUNTDOWN_INTERVAL_MS = 1000;
-
   const NOTICE_BASE = 'https://notice.claudetuner.com/';
   const CORE = globalThis.__ctUsageCore;
+
+  // Zombie-instance guard (shared implementation — see usage-shared.js). Each
+  // (re)injection claims a new generation token; the superseded instance tears
+  // itself down instead of leaving its intervals firing (duplicate ad
+  // fetch/rotation and doubled impression counts). CORE is a soft dependency
+  // everywhere else in this file (the usage panel still works without it, just
+  // without notices/ads), so keep it soft here too rather than blanking the panel.
+  const _guard = CORE && CORE.createInstanceGuard
+    ? CORE.createInstanceGuard('__ctSbSidebarGen', releaseInstance)
+    : null;
+  const isCurrent = () => (_guard ? _guard.isCurrent() : isContextValid());
+  const ctSetInterval = (fn, ms) => (_guard ? _guard.setInterval(fn, ms) : setInterval(fn, ms));
+  function teardown() { if (_guard) _guard.teardown(); }
 
   // ── State ──
   let _enabled = null;    // null until storage read; controlled by options
@@ -21,6 +33,7 @@
   let _countdownTimer = null;
   let _notices = [];      // active announcements from server
   let _lastSeenId = null; // last seen notice ID (persisted)
+  let _ads = [];          // selected in-house ad banners for this placement
 
   // ── i18n (minimal, sidebar only) ──
   const I18N = {
@@ -225,6 +238,42 @@
     });
   }
 
+  // ── In-house ad banner (design §2.2/§3.2/§4) ──
+  async function fetchAds() {
+    if (!isCurrent()) return; // superseded instance — don't fetch or rotate
+    if (!CORE || !CORE.selectAds) return; // stale core without the ad module — skip
+    try {
+      const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CLAUDE_SIDEBAR, lang: _lang });
+      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+      _ads = fresh;
+      renderInlineAd();
+    } catch (e) { /* silent — no ads this round */ }
+  }
+
+  function renderInlineAd() {
+    const container = document.getElementById('ct-sb-ad');
+    if (!container || !CORE || !CORE.buildAdBannerHtml) return;
+    if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
+    container.style.display = '';
+    container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
+    const banners = container.querySelectorAll('.ct-ad-banner');
+    banners.forEach((el, i) => {
+      const ad = _ads[i];
+      // Count the serve toward the daily frequency cap (serving-side, not measurement).
+      CORE.noteAdServed(ad.campaign.campaign_id, ad.placement);
+      // Measurement seam: viewability-gated impression → message to the SW counter owner.
+      CORE.trackAdViewability(el, ad, _guard);
+      const url = el.getAttribute('data-ad-url');
+      if (url) el.addEventListener('click', (e) => {
+        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
+        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
+        CORE.trackAdClick(ad, e); // measurement seam: click → SW counter owner
+        const sep = url.includes('?') ? '&' : '?';
+        window.open(url + sep + 'utm_source=claude_sidebar', '_blank');
+      });
+    });
+  }
+
   function escapeHtml(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
@@ -293,6 +342,14 @@
     notice.id = 'ct-sb-notice';
     notice.style.display = 'none';
     panel.appendChild(notice);
+
+    // In-house ad banner container (below notice). Separate container so ads and
+    // dismissible notices don't interfere; ads are non-dismissible (design §6).
+    const ad = document.createElement('div');
+    ad.className = 'ct-sb-ad';
+    ad.id = 'ct-sb-ad';
+    ad.style.display = 'none';
+    panel.appendChild(ad);
 
     return panel;
   }
@@ -396,7 +453,21 @@
     return row;
   }
 
+  // The notice and ad containers are children of the PANEL, not of #ct-sb-content, so a
+  // body re-render never wipes them — but a re-MOUNT does: buildPanel() mints fresh empty
+  // ones. Both banners therefore have to be re-hydrated after any (re)build, and on EVERY
+  // exit of renderPanelBody(), including its early return for the no-data state.
+  function syncBanners() {
+    if (_notices.length > 0) renderInlineNotice();
+    if (_ads.length > 0) renderInlineAd();
+  }
+
   function renderContent() {
+    renderPanelBody();
+    syncBanners();
+  }
+
+  function renderPanelBody() {
     const content = document.getElementById('ct-sb-content');
     if (!content) return;
 
@@ -491,10 +562,6 @@
     content.innerHTML = '';
     content.appendChild(frag);
     updateBellBadge();
-    // Sync the inline banner on (re)mount — notices may have resolved before the
-    // panel existed (fetchNotices' renderInlineNotice then found no container),
-    // leaving the banner hidden until the next 30-min refresh.
-    if (_notices.length > 0) renderInlineNotice();
   }
 
   // ── Countdown update (every second) ──
@@ -557,11 +624,13 @@
   // ── Data communication with background ──
   let _reqSeq = 0; // sequence number to discard stale responses from concurrent calls
   function requestUsageData() {
-    if (!isContextValid()) return; // skip silently, panel stays with last data
+    // isCurrent(), not just isContextValid(): a superseded instance must not keep
+    // querying the background or render into the live instance's panel.
+    if (!isCurrent()) return; // skip silently, panel stays with last data
     const seq = ++_reqSeq;
     try {
       chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', orgId: getActiveOrgId() }, (res) => {
-        if (seq !== _reqSeq) return; // stale response — discard
+        if (seq !== _reqSeq || !isCurrent()) return; // stale response or superseded instance — discard
         if (chrome.runtime.lastError || !res) return;
         // Skip re-render if data hasn't changed (prevents flicker from non-Claude merges)
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
@@ -573,12 +642,15 @@
     } catch { /* context dead, skip silently */ }
   }
 
-  // Listen for refresh signal from background (re-fetch with current orgId)
-  chrome.runtime.onMessage.addListener((message) => {
+  // Listen for refresh signal from background (re-fetch with current orgId).
+  // Named so releaseInstance() can remove it — an anonymous listener would survive
+  // re-injection and keep waking a superseded instance.
+  function onRuntimeMessage(message) {
     if (message.type === 'SIDEBAR_USAGE_REFRESH') {
       requestUsageData();
     }
-  });
+  }
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
   // ── Org change detection ──
   let _lastOrgId = getActiveOrgId();
@@ -596,12 +668,25 @@
     try { return !!chrome.runtime?.id; } catch { return false; }
   }
 
-  let _intervals = [];
+  // Release everything this instance owns beyond its timers/observers (those are
+  // cleared by the guard, which calls this exactly once): DOM, tooltip, listeners —
+  // otherwise re-injection accumulates them.
+  function releaseInstance() {
+    _enabled = false;
+    unmount();
+    hideTooltip();
+    _countdownTimer = null;
+    _observer = null;
+    try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { /* context dead */ }
+    try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* context dead */ }
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  }
 
   // ── Main loop ──
   let _lastMountCheck = 0;
 
   function tick() {
+    if (!isCurrent()) { teardown(); return; } // superseded → stop the rAF loop
     try {
       const now = Date.now();
       if (now - _lastMountCheck >= MOUNT_INTERVAL_MS) {
@@ -619,13 +704,15 @@
   function startObserver() {
     if (_observer) return;
     _observer = new MutationObserver(() => {
-      if (!_enabled || !isContextValid()) return;
+      if (!isCurrent()) { teardown(); return; } // superseded → stop observing
+      if (!_enabled) return;
       if (!document.getElementById(CT_PANEL_ID)) {
         _mounted = false;
         mount();
         if (_mounted) renderContent();
       }
     });
+    if (_guard) _guard.addObserver(_observer);
     _observer.observe(document.body, { childList: true, subtree: true });
   }
 
@@ -646,48 +733,63 @@
       if (_enabled) {
         requestUsageData();
         fetchNotices();
+        fetchAds();
       }
     });
 
     // React to setting changes in real-time
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync') {
-        if (changes.sidebarUsageEnabled) {
-          _enabled = changes.sidebarUsageEnabled.newValue !== false;
-          if (!_enabled) unmount();
-          else requestUsageData();
-        }
-        if (changes.lang) {
-          const v = changes.lang.newValue;
-          _lang = v === 'auto' ? detectLang() : v;
-          renderContent();
-          fetchNotices();
-        }
-      }
-    });
+    chrome.storage.onChanged.addListener(onStorageChanged);
 
     requestAnimationFrame(tick);
     startObserver();
 
     // Countdown timer
-    _countdownTimer = setInterval(updateCountdowns, COUNTDOWN_INTERVAL_MS);
-    _intervals.push(_countdownTimer);
+    _countdownTimer = ctSetInterval(updateCountdowns, COUNTDOWN_INTERVAL_MS);
 
     // Refresh data periodically (every 60s)
-    _intervals.push(setInterval(requestUsageData, 60000));
+    ctSetInterval(requestUsageData, 60000);
 
     // Refresh notices periodically (every 30min)
-    _intervals.push(setInterval(fetchNotices, 30 * 60 * 1000));
+    ctSetInterval(fetchNotices, 30 * 60 * 1000);
+
+    // Re-run the 1-slot ad selection periodically so it rotates across advertisers and
+    // recovers if the first pick was empty (e.g. _ct_country not cached yet). The period
+    // is SERVER-TUNABLE (CORE.startAdRotation → getAdRefreshMs) — changing it needs no
+    // CWS release. Decoupled from the 30-min notice refresh.
+    CORE.startAdRotation(ctSetInterval, fetchAds);
+  }
+
+  function onStorageChanged(changes, area) {
+    if (!isCurrent()) return;
+    if (area !== 'sync') return;
+    if (changes.sidebarUsageEnabled) {
+      _enabled = changes.sidebarUsageEnabled.newValue !== false;
+      if (!_enabled) unmount();
+      else requestUsageData();
+    }
+    if (changes.lang) {
+      const v = changes.lang.newValue;
+      _lang = v === 'auto' ? detectLang() : v;
+      renderContent();
+      fetchNotices();
+      fetchAds(); // re-run targeting so ads re-filter by the new language (fetch is cached)
+    }
   }
 
   // Report tab visibility changes to background for activity-aware polling
-  document.addEventListener('visibilitychange', () => {
+  function onVisibilityChange() {
+    if (!isCurrent()) return;
     try {
       chrome.runtime.sendMessage({
         type: document.visibilityState === 'visible' ? 'TAB_VISIBLE' : 'TAB_HIDDEN',
       }).catch(() => {});
     } catch { /* context invalidated */ }
-  });
+    // Best-effort tail flush of ad counters when the tab hides (design §5.4).
+    if (document.visibilityState === 'hidden' && CORE && CORE.sendAdFlushHint) CORE.sendAdFlushHint();
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  // Flush ad counters on pagehide too (SPA teardown / navigation away).
+  window.addEventListener('pagehide', () => { if (CORE && CORE.sendAdFlushHint) CORE.sendAdFlushHint(); });
 
   // Wait for DOM ready
   if (document.readyState === 'loading') {

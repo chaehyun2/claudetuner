@@ -15,8 +15,13 @@
   // Generation token: each (re)injection bumps it. Only the newest instance is
   // "current"; older instances (after an extension update / dev reload) detect
   // the mismatch and tear themselves down, freeing the new instance to take over.
-  const _gen = (globalThis.__ctGmSidebarGen = (globalThis.__ctGmSidebarGen || 0) + 1);
-  const isCurrent = () => _gen === globalThis.__ctGmSidebarGen && CORE.isContextValid();
+  // Zombie-instance guard (shared implementation — see usage-shared.js). Each
+  // (re)injection claims a new generation token; the superseded instance tears
+  // itself down (clearing its intervals) instead of keeping the ad rotation alive.
+  const _guard = CORE.createInstanceGuard('__ctGmSidebarGen', releaseInstance);
+  const isCurrent = () => _guard.isCurrent();
+  const ctSetInterval = (fn, ms) => _guard.setInterval(fn, ms);
+  function teardown() { _guard.teardown(); }
 
   const PANEL_ID = 'ct-gm-sidebar';
   const SITE_URL = 'https://claudetuner.com';
@@ -27,6 +32,8 @@
   const UTM = 'gemini_sidebar';
 
   const NOTICE_REFRESH_MS = 30 * 60 * 1000;
+  // Ads rotate/retry on their own short cadence (not the 30-min notice refresh) so the
+  // 1-slot selection changes and recovers quickly if the first pick was empty.
   // Throttle the "mount anchor missing" warning so a persistently-changed DOM
   // doesn't flood the console on every observer/tick pass.
   const WARN_THROTTLE_MS = 30000;
@@ -36,9 +43,9 @@
   let _mounted = false;
   let _data = null; // { plan, h5, d7, r5, r7, pred5h, pred7d, lang }
   let _lang = 'en';
-  let _intervals = [];
   let _notices = [];      // active announcements (shared source as claude.ai)
   let _lastSeenId = null; // last seen notice id (persisted)
+  let _ads = [];          // selected in-house ad banners for this placement
   let _lastWarnAt = 0;
 
   // ── i18n (minimal) ──
@@ -193,6 +200,13 @@
     notice.style.display = 'none';
     panel.appendChild(notice);
 
+    // In-house ad banner container (below notice); non-dismissible (design §6).
+    const ad = document.createElement('div');
+    ad.className = 'ct-gm-ad';
+    ad.id = 'ct-gm-ad';
+    ad.style.display = 'none';
+    panel.appendChild(ad);
+
     return panel;
   }
 
@@ -249,7 +263,23 @@
     return row;
   }
 
+  // The notice and ad containers are children of the PANEL, not of #ct-gm-content, so a
+  // body re-render never wipes them — but a re-MOUNT does: buildPanel() mints fresh empty
+  // ones. Both banners therefore have to be re-hydrated after any (re)build, and on EVERY
+  // exit of renderPanelBody(), including its early returns for the no-limit / no-data
+  // states. (Gemini Workspace users sit in the no-limit branch permanently — miss this and
+  // they never see an ad until the next 3-min fetchAds tick.)
+  function syncBanners() {
+    if (_notices.length > 0) renderInlineNotice();
+    if (_ads.length > 0) renderInlineAd();
+  }
+
   function renderContent() {
+    renderPanelBody();
+    syncBanners();
+  }
+
+  function renderPanelBody() {
     const content = document.getElementById('ct-gm-content');
     if (!content) return;
 
@@ -304,9 +334,6 @@
     content.innerHTML = '';
     content.appendChild(frag);
     updateBellBadge();
-    // Sync the inline banner on (re)mount — notices may have resolved before the
-    // panel existed, leaving the container unrendered until the next refresh.
-    if (_notices.length > 0) renderInlineNotice();
   }
 
   // ── Announcements (shared source/logic with claude.ai) ──
@@ -319,6 +346,37 @@
       updateBellBadge();
       renderInlineNotice();
     } catch { /* silent — keep last-known notices */ }
+  }
+
+  // ── In-house ad banner (design §2.2/§3.2/§4) ──
+  async function fetchAds() {
+    if (!isCurrent() || !_enabled || !CORE.selectAds) return; // skip while disabled
+    try {
+      const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.GEMINI_SIDEBAR, lang: _lang });
+      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+      _ads = fresh;
+      renderInlineAd();
+    } catch { /* silent — no ads this round */ }
+  }
+
+  function renderInlineAd() {
+    const container = document.getElementById('ct-gm-ad');
+    if (!container || !CORE.buildAdBannerHtml) return;
+    if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
+    container.style.display = '';
+    container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
+    container.querySelectorAll('.ct-ad-banner').forEach((el, i) => {
+      const ad = _ads[i];
+      CORE.noteAdServed(ad.campaign.campaign_id, ad.placement); // daily frequency cap (serving-side)
+      CORE.trackAdViewability(el, ad, _guard); // measurement seam: viewability-gated impression → SW counter owner
+      const url = el.getAttribute('data-ad-url');
+      if (url) el.addEventListener('click', (e) => {
+        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
+        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
+        CORE.trackAdClick(ad, e); // measurement seam: click → SW counter owner
+        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=gemini_sidebar', '_blank');
+      });
+    });
   }
 
   function updateBellBadge() {
@@ -411,17 +469,17 @@
     applyRailVisibility(); // hide when the panel sits in the narrow icon-rail
   }
 
-  // Fully stop this instance: superseded by a newer injection, or the Gemini
-  // host permission was revoked. Removes DOM, clears timers, disconnects observer,
-  // and unregisters runtime/storage listeners (else reinjection accumulates them).
-  function teardown() {
+  // Release everything this instance owns beyond its timers/observers (those are
+  // cleared by the guard, which calls this exactly once): DOM, tooltip, the empty-
+  // data retry, and the runtime/storage listeners — else re-injection accumulates
+  // them. Reached both when a newer injection supersedes us and when the Gemini
+  // host permission is revoked (teardown() is called directly there).
+  function releaseInstance() {
     _enabled = false;
     unmount();
     removeTooltip();
     clearEmptyRetry();
-    _intervals.forEach(clearInterval);
-    _intervals = [];
-    if (_observer) { _observer.disconnect(); _observer = null; }
+    _observer = null;
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* context dead */ }
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { /* context dead */ }
     document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -488,6 +546,7 @@
       _lang = changes.lang.newValue === 'auto' ? CORE.detectLang() : changes.lang.newValue;
       renderContent();
       fetchNotices();
+      fetchAds(); // re-run targeting so ads re-filter by the new language (fetch is cached)
     }
   }
 
@@ -523,6 +582,7 @@
       mount();
       applyRailVisibility();
     });
+    _guard.addObserver(_observer);
     _observer.observe(document.body, { childList: true, subtree: true });
   }
 
@@ -534,7 +594,7 @@
     chrome.storage.sync.get({ lang: 'auto', geminiSidebarUsageEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
       _enabled = cfg.geminiSidebarUsageEnabled !== false;
-      if (_enabled) { requestUsageData(); fetchNotices(); }
+      if (_enabled) { requestUsageData(); fetchNotices(); fetchAds(); }
     });
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
@@ -542,9 +602,11 @@
 
     requestAnimationFrame(tick);
     startObserver();
-    _intervals.push(setInterval(updateCountdowns, COUNTDOWN_INTERVAL_MS));
-    _intervals.push(setInterval(requestUsageData, REFRESH_INTERVAL_MS));
-    _intervals.push(setInterval(fetchNotices, NOTICE_REFRESH_MS));
+    ctSetInterval(updateCountdowns, COUNTDOWN_INTERVAL_MS);
+    ctSetInterval(requestUsageData, REFRESH_INTERVAL_MS);
+    ctSetInterval(fetchNotices, NOTICE_REFRESH_MS);
+    // Rotation period is server-tunable (CORE.getAdRefreshMs) — no CWS release to change it.
+    CORE.startAdRotation(ctSetInterval, fetchAds);
   }
 
   function onVisibilityChange() {
@@ -554,8 +616,11 @@
         type: document.visibilityState === 'visible' ? 'TAB_VISIBLE' : 'TAB_HIDDEN',
       }).catch(() => {});
     } catch { /* context invalidated */ }
+    // Best-effort tail flush of ad counters when the tab hides (design §5.4).
+    if (document.visibilityState === 'hidden' && CORE.sendAdFlushHint) CORE.sendAdFlushHint();
   }
   document.addEventListener('visibilitychange', onVisibilityChange);
+  window.addEventListener('pagehide', () => { if (CORE.sendAdFlushHint) CORE.sendAdFlushHint(); });
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

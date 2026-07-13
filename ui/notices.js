@@ -3,6 +3,14 @@
 import { escHtml } from './util.js';
 import { state } from './state.js';
 
+// The popup loads usage-shared.js (see popup.html), so the ad-serving core is
+// available as a global here — the SAME canonical logic the sidebars use (no copy).
+const CORE = globalThis.__ctUsageCore;
+
+// Best-effort tail flush of ad counters when the popup closes (design §5.4). The
+// popup has no visibilitychange lifecycle, but pagehide fires on close/navigation.
+try { window.addEventListener('pagehide', () => { if (CORE && CORE.sendAdFlushHint) CORE.sendAdFlushHint(); }); } catch { /* no window (unexpected) */ }
+
 // Announcements FEED is served as a static object from the CDN (cdn.claudetuner.com,
 // ACAO:*), NOT a Worker route — polling it never wakes the Worker (mirrors the
 // dashboard shared/announcement.js + promo push.json CDN migrations). Shape is a
@@ -168,6 +176,13 @@ export async function loadPopupAnnouncements(attempt = 0) {
       if (!_matchesTz(n.tz)) return false;
       return true;
     });
+    // In-house ads (design §3.2) — fetched/filtered by the shared core, rendered
+    // alongside promos. Independent of announcements; a failure here never blocks notices.
+    if (CORE && CORE.selectAds) {
+      try {
+        state.popupAds = await CORE.selectAds({ placement: CORE.PLACEMENTS.POPUP, lang: userLang });
+      } catch { state.popupAds = []; }
+    }
     renderPopupNotices();
   } catch (e) {
     // The side panel can open before the network/SW is ready, so the first fetch
@@ -267,9 +282,35 @@ function renderPopupNotices() {
       if (!nUrl && hasBody) html += '<div class="notice-body" id="nbody-' + safeId + '">' + _sanitizeNoticeHtml(n.body) + '</div>';
       html += '</div>';
     }
-    if (promosEl) promosEl.innerHTML = promoHtml;
+    // In-house ad banners render above the partner promos in the always-visible
+    // promos container. Built by the shared core (same markup as the sidebars).
+    let adHtml = '';
+    const ads = (CORE && CORE.buildAdBannerHtml) ? (state.popupAds || []) : [];
+    for (const ad of ads) adHtml += CORE.buildAdBannerHtml(ad, getLang());
+    if (promosEl) promosEl.innerHTML = adHtml + promoHtml;
     container.innerHTML = html;
     const roots = [promosEl, container].filter(Boolean);
+
+    // Wire ad banners: count the serve (frequency cap, serving-side) + fire the
+    // measurement seam (viewability-gated impression / click → SW counter owner),
+    // and open the URL on click.
+    if (promosEl) {
+      promosEl.querySelectorAll('.ct-ad-banner').forEach((el, i) => {
+        const ad = ads[i];
+        if (!ad) return;
+        CORE.noteAdServed(ad.campaign.campaign_id, ad.placement);
+        CORE.trackAdViewability(el, ad);
+        const url = el.getAttribute('data-ad-url');
+        if (url) el.addEventListener('click', (e) => {
+          // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
+          if (e.target.closest && e.target.closest('.ct-ad-label')) return;
+          e.stopPropagation();
+          CORE.trackAdClick(ad, e);
+          const sep = url.includes('?') ? '&' : '?';
+          chrome.tabs.create({ url: url + sep + 'utm_source=popup' });
+        });
+      });
+    }
 
     // Header click: open Notion page if URL exists, otherwise toggle body
     roots.forEach(root => root.querySelectorAll('.notice-header').forEach(hdr => {
