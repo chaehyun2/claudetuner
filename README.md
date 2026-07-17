@@ -5,7 +5,7 @@
 <h1 align="center">Claude Tuner</h1>
 
 <p align="center">
-  Track your Claude usage limits in real time — across Chat, Code, Cowork, and Design.
+  Track your Claude, ChatGPT & Gemini usage limits in real time — one extension, every AI, personal and team.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  Trusted by thousands of Claude Pro, Max, Team, and Enterprise users worldwide.
+  Trusted by thousands of Claude, ChatGPT, and Gemini users — from solo Pro subscribers to Enterprise teams worldwide.
 </p>
 
 ---
@@ -27,12 +27,12 @@
 
 ## Why Claude Tuner?
 
-Claude's rate limits are opaque — you don't know how much you've used, when it resets, or whether your plan is right for you. Claude Tuner fixes that.
+AI rate limits are opaque — you don't know how much you've used, when it resets, or whether your plan is right for you. And most people now juggle more than one AI. Claude Tuner fixes that.
 
-- **See your limits** — live 5h / 7d usage gauges with reset countdowns
-- **Predict resets** — know if you'll hit the cap before the window rolls over
-- **Find the right plan** — "what if" simulations across Pro, Max 5x, and Max 20x
-- **Monitor your team** — free dashboard with per-member analytics, breach tracking, and group comparisons
+- **See every limit** — live 5h / 7d usage gauges with reset countdowns for Claude, ChatGPT (Codex), and Gemini, all in one popup
+- **Predict resets** — know if you'll hit the cap before the window rolls over, with sharpened 7-day projection accuracy
+- **Find the right plan** — "what if" simulations across Pro, Max 5x, and Max 20x, with independent 5h / 7d evaluation
+- **Monitor your team** — free dashboard covering Claude, ChatGPT & Gemini, with per-member analytics, breach tracking, group comparisons, and access controls for who sees what
 
 ## Screenshots
 
@@ -49,18 +49,19 @@ Claude's rate limits are opaque — you don't know how much you've used, when it
 <details open>
 <summary><b>Real-Time Usage Monitoring</b></summary>
 
-- Live 5-hour and 7-day usage gauges
+- Live 5-hour and 7-day usage gauges — for **Claude, ChatGPT (Codex), and Gemini** side by side
+- In-page usage gauge injected right into Claude, ChatGPT, and Gemini — no popup needed
 - Reset countdown timers
 - Toolbar badge showing current usage level
 - 6-tier pace indicator (safe → critical)
 - Sparkline charts for usage trends
-- Multi-organization support (auto-detect or pin)
+- Multi-organization & multi-account support (auto-detect or pin, drag to reorder)
 </details>
 
 <details open>
 <summary><b>Smart Alerts & Predictions</b></summary>
 
-- Usage prediction at reset based on consumption rate
+- Usage prediction at reset based on consumption rate — with a redesigned, more accurate 7-day projection (diurnal re-weighting + adaptive smoothing)
 - Configurable threshold notifications (80%, 95%)
 - Weekly usage reports via email
 - Estimated token breakdown (Opus / Sonnet / Haiku)
@@ -96,6 +97,8 @@ Claude's rate limits are opaque — you don't know how much you've used, when it
 <details>
 <summary><b>Team Dashboard</b> — free for all members</summary>
 
+- **Multi-service** — track Claude, ChatGPT, and Gemini usage for the whole team in one dashboard
+- **Access controls** — admins decide which members can see whose usage, per member
 - Per-member usage analytics and rate limit tracking
 - Token usage leaderboard and cost analytics
 - Breach tracking with plan upgrade/downgrade recommendations
@@ -103,10 +106,13 @@ Claude's rate limits are opaque — you don't know how much you've used, when it
 - Daily team reports and weekly personal reports
 - Training data policy monitoring
 - Domain-based auto-invite and group management (admin)
+- Per-organization usage opt-out (hide specific orgs from the shared view)
 - CSV / Excel export
 </details>
 
 ## Supported Plans
+
+Full analytics for every Claude.ai paid plan. ChatGPT (Free / Go / Plus / Pro / Team) and Gemini (Free / AI Plus / Pro / Ultra / Workspace) are also tracked in the popup and dashboard (beta).
 
 | Plan | 5h Limit | 7d Limit | Extras |
 |------|----------|----------|--------|
@@ -139,15 +145,15 @@ git clone https://github.com/chaehyun2/claudetuner.git
 ## How It Works
 
 ```
-You ──→ Claude.ai ──→ Claude Tuner extension ──→ Claude Tuner API server
-                        (reads usage data)         (stores history & analytics)
-                              │
-                              ▼
-                        Extension popup          Web dashboard
-                       (gauges & alerts)     (charts, team, insights)
+You ──→ Claude.ai / ChatGPT / Gemini ──→ Claude Tuner extension ──→ Claude Tuner API server
+                                            (reads usage data)         (stores history & analytics)
+                                                  │
+                                                  ▼
+                                            Extension popup          Web dashboard
+                                           (gauges & alerts)     (charts, team, insights)
 ```
 
-1. **Collect** — The extension reads your usage data from Claude.ai (no conversation content, ever)
+1. **Collect** — The extension reads your usage data from Claude.ai, ChatGPT, and Gemini (no conversation content, ever)
 2. **Analyze** — Snapshots are sent to the API server, which stores history and computes analytics
 3. **Display** — View real-time gauges in the popup, or dive deep on the [web dashboard](https://claudetuner.com/dashboard)
 
