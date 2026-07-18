@@ -6,6 +6,25 @@ export function escHtml(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Render the "renewal-group" row (next-billing date) shared by the base view
+// (render.js) and the per-org selected view (org-selector.js). Pass a null/empty
+// date to hide the row. Returns true when the row is shown. Single source of truth
+// for the date formatting + urgency color so the two call sites can't drift.
+export function setRenewalDisplay(renewalDate) {
+  const renewalGroup = document.getElementById('renewal-group');
+  const renewalEl = document.getElementById('renewal-date');
+  if (!renewalDate || !renewalGroup || !renewalEl) {
+    if (renewalGroup) renewalGroup.style.display = 'none';
+    return false;
+  }
+  const d = new Date(renewalDate);
+  const daysLeft = Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  renewalEl.textContent = `${d.getMonth() + 1}/${d.getDate()} (${daysLeft}${t('renewal_days_later')})`;
+  renewalEl.style.color = daysLeft <= 3 ? '#ef4444' : (daysLeft <= 7 ? '#eab308' : '');
+  renewalGroup.style.display = 'flex';
+  return true;
+}
+
 export function _fmIcon(level) {
   const map = {
     exceeded:     { cls: 'fm-exceeded', label: 'fm_lv_exceeded', icon: '✕' },

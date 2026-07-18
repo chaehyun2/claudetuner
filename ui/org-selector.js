@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks } from './util.js';
+import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay } from './util.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -141,12 +141,17 @@ export function selectOrg(orgId, container) {
         + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('gemini_no_limit') + '</div>'
         + '</div>';
     } else {
-      // 5h/7d gauge (common for Pro/Max/Team/Enterprise seat-based)
-      if (isEnterprise || !isClaudeOrg || !isPrimary) {
-        if (renewalGroup) renewalGroup.style.display = 'none';
-      } else if (state.currentSnapshot?.subscription?.renewal_date && renewalGroup) {
-        renewalGroup.style.display = 'flex';
-      }
+      // 5h/7d gauge (common for Pro/Max/Team/Enterprise seat-based).
+      // Renewal date source differs by provider: Claude exposes it only on the
+      // primary personal org's snapshot (state.currentSnapshot.subscription);
+      // non-Claude orgs (e.g. ChatGPT) carry a per-org renewalDate from their own
+      // collector. Enterprise (seat-billed) never shows a personal renewal date.
+      const orgRenewal = isEnterprise
+        ? null
+        : (isClaudeOrg
+            ? (isPrimary ? state.currentSnapshot?.subscription?.renewal_date : null)
+            : orgData.renewalDate);
+      setRenewalDisplay(orgRenewal);
       _restoreGaugeHTML(gaugeSection);
       const util5h = orgData.h5;
       const util7d = orgData.d7;
@@ -250,8 +255,9 @@ export function selectOrg(orgId, container) {
         if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
       }
     } else {
-      // non-primary: no subscription info available
-      if (renewalGroup) renewalGroup.style.display = 'none';
+      // non-primary / non-Claude: no pending-plan info. The renewal date is NOT
+      // touched here — it is fully managed by the gauge section above (§2), which
+      // shows a non-Claude org's own renewalDate. Re-hiding it here would clobber that.
       if (pendingRow) pendingRow.classList.add('hidden');
       if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
     }

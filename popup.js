@@ -439,6 +439,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (isOverviewActive()) renderOverview();
         loadFitnessMatrix();
       });
+      // Notices and ads are LANGUAGE-TARGETED, not merely translated: a notice carries a
+      // `lang` field and an ad campaign targets a lang, so switching language changes WHICH
+      // items are eligible — re-rendering the ones already picked is not enough.
+      // loadPopupAnnouncements re-reads getLang() (setLang above already updated it) and
+      // re-runs both selections. The three sidebars already do this via fetchAds() on the
+      // same event; the popup was the one that didn't, so its ad stayed in the previous
+      // language until the popup was reopened.
+      loadPopupAnnouncements();
     }
   });
 

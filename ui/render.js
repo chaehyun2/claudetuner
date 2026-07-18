@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatCountdown, formatResetAbsolute, formatTimeAgo } from './util.js';
+import { gaugeColor, formatCountdown, formatResetAbsolute, formatTimeAgo, setRenewalDisplay } from './util.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
@@ -429,16 +429,9 @@ export function _updateUICore(status) {
       chrome.storage.local.remove('hiddenPrivacyBanner');
     }
 
-    if (s.subscription?.renewal_date) {
-      const renewalGroup = document.getElementById('renewal-group');
-      const renewalEl = document.getElementById('renewal-date');
-      renewalGroup.style.display = 'flex';
-      const d = new Date(s.subscription.renewal_date);
-      const daysLeft = Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-      renewalEl.textContent = `${d.getMonth() + 1}/${d.getDate()} (${daysLeft}${t('renewal_days_later')})`;
-      if (daysLeft <= 3) renewalEl.style.color = '#ef4444';
-      else if (daysLeft <= 7) renewalEl.style.color = '#eab308';
-    }
+    // Pass null when absent so a previously-shown renewal (e.g. before the
+    // subscription was cancelled) is hidden rather than left stale.
+    setRenewalDisplay(s.subscription?.renewal_date || null);
 
     if (s.subscription?.pending_plan) {
       const pendingRow = document.getElementById('pending-row');

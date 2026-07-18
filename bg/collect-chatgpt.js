@@ -26,6 +26,51 @@ function unixToResetTime(ts) {
   return normalizeResetTime(new Date(ts * 1000).toISOString());
 }
 
+// Next-billing ("renewal") date is exposed only on ChatGPT's accounts/check
+// endpoint — /wham/usage does not carry it — and changes at most monthly. So
+// fetch it at most once per day per account and cache it, instead of on every
+// ~10min collection cycle.
+const RENEWAL_TTL_MS = 24 * 60 * 60 * 1000;
+const RENEWAL_CACHE_KEY = 'chatgptRenewalCache';
+const RENEWAL_CACHE_MAX = 20; // bound growth for profiles that sign into many accounts
+
+// Keep only the most-recently-fetched accounts so the cache can't grow unbounded.
+function pruneRenewalCache(store) {
+  const keys = Object.keys(store);
+  if (keys.length <= RENEWAL_CACHE_MAX) return store;
+  const keep = keys
+    .sort((a, b) => (store[b]?.fetchedAt || 0) - (store[a]?.fetchedAt || 0))
+    .slice(0, RENEWAL_CACHE_MAX);
+  const pruned = {};
+  for (const k of keep) pruned[k] = store[k];
+  return pruned;
+}
+
+async function getChatGPTRenewalDate(accountId) {
+  if (!accountId || accountId === 'unknown') return null;
+  const store = (await chrome.storage.local.get({ [RENEWAL_CACHE_KEY]: {} }))[RENEWAL_CACHE_KEY] || {};
+  const cached = store[accountId];
+  if (cached && (Date.now() - cached.fetchedAt) < RENEWAL_TTL_MS) {
+    return cached.renewal_date;
+  }
+  try {
+    const data = await fetchChatGPTApi('/backend-api/accounts/check/v4-2023-04-27');
+    // `accounts.default` is ChatGPT's canonical currently-active account — the same
+    // one /wham/usage is scoped to, since both follow the session's active-account
+    // selection. (accounts/check keys are account UUIDs, so we can't match by the
+    // user-id-shaped usage.account_id directly; `default` is the reliable anchor.)
+    // `renews_at` is the next charge date; null when it won't renew (cancelled/expired).
+    const ent = data?.accounts?.default?.entitlement || null;
+    const renewal = ent?.renews_at || null;
+    store[accountId] = { renewal_date: renewal, fetchedAt: Date.now() };
+    await chrome.storage.local.set({ [RENEWAL_CACHE_KEY]: pruneRenewalCache(store) });
+    return renewal;
+  } catch (e) {
+    console.warn('[Claude Tuner] ChatGPT renewal fetch failed:', e.message);
+    return cached?.renewal_date ?? null; // fall back to a stale value if present
+  }
+}
+
 // Window lengths (seconds) used to classify a rate-limit window by its span
 // rather than by its position in the response. ChatGPT no longer guarantees
 // primary_window == 5h / secondary_window == 7d: some plans (e.g. Pro 5x
@@ -86,6 +131,7 @@ export async function collectChatGPT(force = false) {
     const plan = chatgptPlanName(usage.plan_type);
     const accountId = usage.account_id || usage.user_id || 'unknown';
     const email = usage.email || null;
+    const renewalDate = await getChatGPTRenewalDate(accountId);
 
     const org = {
       uuid: accountId,
@@ -98,6 +144,7 @@ export async function collectChatGPT(force = false) {
       d7: w7d?.used_percent ?? null,
       resetsAt5h: unixToResetTime(w5h?.reset_at),
       resetsAt7d: unixToResetTime(w7d?.reset_at),
+      renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
@@ -187,6 +234,13 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
   };
+
+  // Attach the next-billing date so the server persists it on this org's snapshot
+  // row (same `subscription` shape the Claude collector uses). The server keeps
+  // `users.renewal_date` Claude-only, so this never overwrites a Claude renewal.
+  if (org.renewalDate) {
+    payload.subscription = { renewal_date: org.renewalDate };
+  }
 
   // Shared helper handles auth recovery (401/403), account deletion (410),
   // and ext_token rotation — critical for independent accounts whose provider
