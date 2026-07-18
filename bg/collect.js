@@ -153,8 +153,59 @@ function buildHistoryPoint(snapshot, plan) {
   };
 }
 
+/**
+ * Resolve the two model-scoped weekly slots from the usage response.
+ *
+ * Anthropic moved the per-model weekly limit out of the top-level
+ * `seven_day_<model>` fields (now null) into the generic `limits[]` array:
+ * entries with `kind === 'weekly_scoped'` carry `scope.model.display_name`
+ * (e.g. "Fable") and a 0-100 `percent` on the same scale as the old
+ * `.utilization`. We map each scoped entry into the two legacy numeric slots
+ * (omelette / sonnet) so the entire server + chart pipeline keeps working
+ * unchanged. The `model` sub-field is transient metadata: the server's epoch
+ * observer reads it to label the slot; snapshot storage ignores it.
+ *
+ * Slot assignment is deterministic (sorted by model name) so a given model keeps
+ * a stable slot — a single active scoped model always lands in the omelette slot.
+ * Falls back to the legacy top-level fields when `limits[]` is absent/empty
+ * (older API shape or a slot with no active scoped model).
+ */
+function resolveScopedWeeklySlots(usageData) {
+  const scoped = Array.isArray(usageData.limits)
+    ? usageData.limits
+        .filter((l) => l && l.kind === 'weekly_scoped' && l.scope?.model?.display_name)
+        .map((l) => ({
+          model: l.scope.model.display_name,
+          utilization: l.percent ?? null,
+          resets_at: l.resets_at ?? null,
+        }))
+        // Locale-independent (code-unit) order so slot assignment is deterministic
+        // across browser locales — localeCompare could otherwise order two model names
+        // differently per user and swap their slots.
+        .sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0))
+    : [];
+
+  const slotFrom = (entry, legacy) => entry
+    ? {
+        utilization: entry.utilization,
+        resets_at: normalizeResetTime(entry.resets_at),
+        model: entry.model,
+      }
+    : {
+        utilization: legacy?.utilization ?? null,
+        resets_at: normalizeResetTime(legacy?.resets_at),
+        model: null,
+      };
+
+  return {
+    omelette: slotFrom(scoped[0], usageData.seven_day_omelette),
+    sonnet: slotFrom(scoped[1], usageData.seven_day_sonnet),
+  };
+}
+
 /** Build common usage window fields shared by primary & extra org snapshots */
 async function buildUsageFields(usageData, config) {
+  const scopedSlots = resolveScopedWeeklySlots(usageData);
   return {
     five_hour: {
       utilization: usageData.five_hour?.utilization ?? null,
@@ -164,14 +215,8 @@ async function buildUsageFields(usageData, config) {
       utilization: usageData.seven_day?.utilization ?? null,
       resets_at: normalizeResetTime(usageData.seven_day?.resets_at),
     },
-    seven_day_omelette: {
-      utilization: usageData.seven_day_omelette?.utilization ?? null,
-      resets_at: normalizeResetTime(usageData.seven_day_omelette?.resets_at),
-    },
-    seven_day_sonnet: {
-      utilization: usageData.seven_day_sonnet?.utilization ?? null,
-      resets_at: normalizeResetTime(usageData.seven_day_sonnet?.resets_at),
-    },
+    seven_day_omelette: scopedSlots.omelette,
+    seven_day_sonnet: scopedSlots.sonnet,
     extra_usage: normalizeExtraUsage(usageData.extra_usage),
     user_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     user_language: await bgLang(),

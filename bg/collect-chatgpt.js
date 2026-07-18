@@ -20,54 +20,119 @@ function chatgptPlanName(code) {
   return CHATGPT_PLAN_NAMES[(code || 'free').toLowerCase()] || capitalizeFirst(code || 'free');
 }
 
+// Map account-level plan codes from accounts/check to display names. These differ
+// from /wham/usage's `plan_type`: workspaces carry an `entitlement.subscription_plan`
+// (e.g. 'chatgptteamplan') and an account `plan_type` that can be a billing-shape
+// code (e.g. 'self_serve_business_usage_based') rather than a plain tier code.
+const CHATGPT_SUBSCRIPTION_PLAN_NAMES = {
+  chatgptfreeplan: 'Free', chatgptfreeworkspaceplan: 'Free', chatgptgoplan: 'Go',
+  chatgptplusplan: 'Plus', chatgptprolite: 'Pro 5x', chatgptpro: 'Pro 20x',
+  chatgptteamplan: 'Team', chatgptbusinessplan: 'Business', chatgptenterpriseplan: 'Enterprise',
+};
+const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
+  self_serve_business_usage_based: 'Business',
+};
+
+// Derive a workspace's display plan without a per-workspace /wham/usage call:
+// prefer the entitlement's subscription_plan, then the account plan_type, then
+// fall back to the generic tier-code mapping.
+export function chatgptWorkspacePlan(entitlement, accountPlanType) {
+  const sub = entitlement?.subscription_plan;
+  if (sub && CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub]) return CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub];
+  const pt = (accountPlanType || '').toLowerCase();
+  if (CHATGPT_ACCOUNT_PLAN_TYPE_NAMES[pt]) return CHATGPT_ACCOUNT_PLAN_TYPE_NAMES[pt];
+  return chatgptPlanName(accountPlanType);
+}
+
 // Convert Unix timestamp (seconds) to ISO string, then normalize to minute precision
 function unixToResetTime(ts) {
   if (!ts) return null;
   return normalizeResetTime(new Date(ts * 1000).toISOString());
 }
 
-// Next-billing ("renewal") date is exposed only on ChatGPT's accounts/check
-// endpoint — /wham/usage does not carry it — and changes at most monthly. So
-// fetch it at most once per day per account and cache it, instead of on every
-// ~10min collection cycle.
-const RENEWAL_TTL_MS = 24 * 60 * 60 * 1000;
-const RENEWAL_CACHE_KEY = 'chatgptRenewalCache';
-const RENEWAL_CACHE_MAX = 20; // bound growth for profiles that sign into many accounts
+// accounts/check exposes the full multi-workspace roster (one entry per account
+// UUID plus a `default` alias for the session's active account) — and it's the
+// only source of the next-billing ("renewal") date, which /wham/usage omits. It
+// changes at most daily, so we fetch it once per day and cache the parsed roster,
+// instead of on every ~10min collection cycle.
+const ROSTER_TTL_MS = 24 * 60 * 60 * 1000;
+const ROSTER_CACHE_KEY = 'chatgptAccountsRoster';
+// Bound how many extra workspaces we enumerate/send, so a profile signed into many
+// accounts can't fan out unboundedly.
+const MAX_EXTRA_WORKSPACES = 5;
 
-// Keep only the most-recently-fetched accounts so the cache can't grow unbounded.
-function pruneRenewalCache(store) {
-  const keys = Object.keys(store);
-  if (keys.length <= RENEWAL_CACHE_MAX) return store;
-  const keep = keys
-    .sort((a, b) => (store[b]?.fetchedAt || 0) - (store[a]?.fetchedAt || 0))
-    .slice(0, RENEWAL_CACHE_MAX);
-  const pruned = {};
-  for (const k of keep) pruned[k] = store[k];
-  return pruned;
+/**
+ * Parse an accounts/check response into a roster the collector can act on.
+ *
+ * ChatGPT's `/wham/usage` is scoped to a single account (the JWT's active
+ * account), so per-workspace usage needs per-account tokens — deferred. What we
+ * CAN enumerate cheaply from accounts/check is every workspace's plan + renewal.
+ *
+ * Returns { defaultAccountId, defaultRenewal, workspaces: [...] } where
+ * `workspaces` excludes:
+ *   - the active/default account (already collected with usage via /wham/usage),
+ *   - deactivated accounts (expired/left workspaces — "unused orgs" we skip),
+ *   - accounts the current session can't access.
+ */
+export function parseAccountsRoster(data) {
+  const accounts = data?.accounts || {};
+  const def = accounts.default || null;
+  // The `default` alias carries the real account UUID of the active account, which
+  // lets us exclude it from the extra-workspace list (its usage comes from /wham/usage).
+  const defaultAccountId = def?.account?.account_id || null;
+  const defaultRenewal = def?.entitlement?.renews_at || null;
+
+  const order = Array.isArray(data?.account_ordering) && data.account_ordering.length
+    ? data.account_ordering
+    : Object.keys(accounts).filter((k) => k !== 'default');
+
+  const workspaces = [];
+  for (const id of order) {
+    const a = accounts[id];
+    const acc = a?.account;
+    if (!acc) continue;
+    if (acc.account_id === defaultAccountId) continue; // active account → /wham/usage handles it
+    if (acc.is_deactivated) continue;                  // expired/left workspace → skip (unused)
+    if (a.can_access_with_session === false) continue; // session can't read this account
+    workspaces.push({
+      accountId: acc.account_id,
+      name: acc.name || null,
+      structure: acc.structure || null, // 'workspace' | 'personal'
+      plan: chatgptWorkspacePlan(a.entitlement, acc.plan_type),
+      renewal: a.entitlement?.renews_at || null,
+      hasActiveSubscription: !!a.entitlement?.has_active_subscription,
+    });
+  }
+  return { defaultAccountId, defaultRenewal, workspaces };
 }
 
-async function getChatGPTRenewalDate(accountId) {
-  if (!accountId || accountId === 'unknown') return null;
-  const store = (await chrome.storage.local.get({ [RENEWAL_CACHE_KEY]: {} }))[RENEWAL_CACHE_KEY] || {};
-  const cached = store[accountId];
-  if (cached && (Date.now() - cached.fetchedAt) < RENEWAL_TTL_MS) {
-    return cached.renewal_date;
+// The roster's `defaultAccountId`/`defaultRenewal` and its active-account exclusion
+// are all relative to whichever account was active when accounts/check was fetched.
+// If the user switches ChatGPT account/workspace within the TTL, a cache keyed only
+// by time would be stale: the now-active account (fresh in /wham/usage) would still
+// be listed as an "extra" workspace (→ duplicate null-usage snapshot) and the primary
+// org would carry the previous account's renewal date. So bust the cache whenever the
+// active-account fingerprint (usage account id + plan) changes, not just on TTL.
+async function getChatGPTAccountsRoster(activeAccountId, activePlanType) {
+  const cached = (await chrome.storage.local.get({ [ROSTER_CACHE_KEY]: null }))[ROSTER_CACHE_KEY];
+  if (cached?.roster
+      && cached.activeAccountId === activeAccountId
+      && cached.activePlanType === activePlanType
+      && (Date.now() - cached.fetchedAt) < ROSTER_TTL_MS) {
+    return cached.roster;
   }
   try {
     const data = await fetchChatGPTApi('/backend-api/accounts/check/v4-2023-04-27');
-    // `accounts.default` is ChatGPT's canonical currently-active account — the same
-    // one /wham/usage is scoped to, since both follow the session's active-account
-    // selection. (accounts/check keys are account UUIDs, so we can't match by the
-    // user-id-shaped usage.account_id directly; `default` is the reliable anchor.)
-    // `renews_at` is the next charge date; null when it won't renew (cancelled/expired).
-    const ent = data?.accounts?.default?.entitlement || null;
-    const renewal = ent?.renews_at || null;
-    store[accountId] = { renewal_date: renewal, fetchedAt: Date.now() };
-    await chrome.storage.local.set({ [RENEWAL_CACHE_KEY]: pruneRenewalCache(store) });
-    return renewal;
+    const roster = parseAccountsRoster(data);
+    await chrome.storage.local.set({
+      [ROSTER_CACHE_KEY]: { roster, fetchedAt: Date.now(), activeAccountId, activePlanType },
+    });
+    return roster;
   } catch (e) {
-    console.warn('[Claude Tuner] ChatGPT renewal fetch failed:', e.message);
-    return cached?.renewal_date ?? null; // fall back to a stale value if present
+    console.warn('[Claude Tuner] ChatGPT accounts roster fetch failed:', e.message);
+    // Reuse a stale roster if we have one; otherwise report an empty roster so the
+    // active account (collected separately via /wham/usage) still goes through.
+    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, workspaces: [] };
   }
 }
 
@@ -108,6 +173,54 @@ function classifyWindows(rateLimit) {
   return { w5h, w7d };
 }
 
+// Bound how many extra limit buckets we surface, so a future response with many
+// metered features can't bloat the popup.
+const MAX_ADDITIONAL_LIMITS = 5;
+
+// ChatGPT exposes per-feature rate-limit buckets alongside the main plan window in
+// `usage.additional_rate_limits[]` — e.g. Codex's own weekly limit
+// ({ limit_name:'GPT-5.3-Codex-Spark', metered_feature:'codex_bengalfox',
+//    rate_limit:{ primary_window:{ used_percent, reset_at, limit_window_seconds } } }).
+// Each bucket is shaped like a usage window; surface the meaningful window's
+// percent + reset so the popup can render a gauge per bucket. Pure — no I/O.
+export function parseAdditionalLimits(usage) {
+  const arr = Array.isArray(usage?.additional_rate_limits) ? usage.additional_rate_limits : [];
+  const out = [];
+  for (const item of arr) {
+    const rl = item?.rate_limit;
+    const w = rl?.primary_window || rl?.secondary_window || null;
+    const used = w?.used_percent;
+    if (typeof used !== 'number') continue; // skip buckets without a usable window
+    out.push({
+      name: item.limit_name || item.metered_feature || 'Limit',
+      feature: item.metered_feature || null,
+      used,
+      resetsAt: unixToResetTime(w.reset_at),
+      windowSeconds: typeof w.limit_window_seconds === 'number' ? w.limit_window_seconds : null,
+    });
+    if (out.length >= MAX_ADDITIONAL_LIMITS) break;
+  }
+  return out;
+}
+
+// Select the model-scoped WEEKLY bucket (e.g. Codex 'GPT-5.3-Codex-Spark') from the
+// per-feature limits and shape it like Claude's weekly_scoped slot
+// ({ utilization, resets_at, model }) so it can ride the shared `seven_day_omelette`
+// slot. Prefer a 7d-span bucket; fall back to the first bucket when spans are absent.
+// Returns null when there is no usable scoped weekly bucket. Pure — no I/O.
+function pickScopedWeekly(additionalLimits) {
+  if (!Array.isArray(additionalLimits) || !additionalLimits.length) return null;
+  const weekly = additionalLimits.find((b) => typeof b.windowSeconds === 'number'
+    && b.windowSeconds >= WINDOW_SPLIT_SECONDS);
+  // Fall back to the first bucket ONLY when NO bucket carries span metadata (legacy
+  // shape). If spans exist but none is weekly, there is no weekly bucket → return null;
+  // never mis-persist a 5h bucket into the 7d (omelette) slot.
+  const hasSpans = additionalLimits.some((b) => typeof b.windowSeconds === 'number');
+  const chosen = weekly || (hasSpans ? null : additionalLimits[0]);
+  if (!chosen || typeof chosen.used !== 'number') return null;
+  return { utilization: chosen.used, resets_at: chosen.resetsAt || null, model: chosen.name || null };
+}
+
 /**
  * Collect ChatGPT usage data.
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
@@ -131,7 +244,12 @@ export async function collectChatGPT(force = false) {
     const plan = chatgptPlanName(usage.plan_type);
     const accountId = usage.account_id || usage.user_id || 'unknown';
     const email = usage.email || null;
-    const renewalDate = await getChatGPTRenewalDate(accountId);
+
+    // One accounts/check fetch (cached ~daily, but busted when the active account
+    // changes) gives both the active account's renewal date and the full workspace
+    // roster for multi-org enumeration.
+    const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type);
+    const renewalDate = roster.defaultRenewal;
 
     const org = {
       uuid: accountId,
@@ -148,6 +266,8 @@ export async function collectChatGPT(force = false) {
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
+      // Per-feature limit buckets (e.g. Codex weekly) — display-only, popup gauges.
+      additionalLimits: parseAdditionalLimits(usage),
     };
 
     // Append to local usage history (for chart display)
@@ -180,7 +300,46 @@ export async function collectChatGPT(force = false) {
       console.log(`[Claude Tuner] ChatGPT delta-gate skip (${gate.reason})`);
     }
 
-    return { success: true, orgs: [org] };
+    // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
+    // user belongs to beyond the active account. Per-workspace usage needs a
+    // per-account token (/wham/usage is scoped to the JWT's active account), so
+    // these carry plan + renewal only — usage stays null until a later phase.
+    const extraOrgs = roster.workspaces.slice(0, MAX_EXTRA_WORKSPACES).map((ws) => ({
+      uuid: ws.accountId,
+      name: ws.name || 'ChatGPT Workspace',
+      email: email || null,
+      plan: ws.plan,
+      provider: 'chatgpt',
+      isPrimary: false,
+      h5: null,
+      d7: null,
+      resetsAt5h: null,
+      resetsAt7d: null,
+      renewalDate: ws.renewal,
+      spendUsed: null,
+      spendLimit: null,
+      extraUsage: null,
+    }));
+
+    for (const ex of extraOrgs) {
+      // Gate per workspace uuid so unchanged workspaces only re-send on the
+      // heartbeat floor (with usage null there's never a "changed" trigger).
+      const exGate = await gateProviderSnapshot(
+        ex.uuid,
+        { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null },
+        { force, provider: 'chatgpt' },
+      );
+      if (!exGate.send) continue;
+      // A workspace is never the user's primary data source, so force is_extra_org
+      // even for ChatGPT-only users (must not overwrite the users row's plan).
+      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true }).catch((e) => {
+        console.warn('[Claude Tuner] ChatGPT workspace snapshot send failed:', e.message);
+        return null;
+      });
+      if (res) await exGate.commit();
+    }
+
+    return { success: true, orgs: [org, ...extraOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
     return { success: false, orgs: [] };
@@ -190,7 +349,7 @@ export async function collectChatGPT(force = false) {
 // Send ChatGPT snapshot to server (same /api/snapshots endpoint)
 // Uses ext_token email (Claude email) as user_email for server identity,
 // preserves ChatGPT email in provider_email for reference.
-async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
+async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -211,7 +370,8 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
   // When there is no Claude account, this provider is the user's primary data,
   // so the snapshot must maintain the users row (current_plan, last_seen_at).
   // For Claude users it's an "extra org" that must not overwrite current_plan.
-  const isExtraOrg = !!accountCache?.email;
+  // Extra ChatGPT workspaces are never primary data, so callers force this true.
+  const isExtraOrg = forceExtraOrg || !!accountCache?.email;
 
   const extVersion = chrome.runtime.getManifest().version;
 
@@ -234,6 +394,14 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
   };
+
+  // Model-scoped weekly limit (e.g. Codex 'GPT-5.3-Codex-Spark') rides the shared
+  // `seven_day_omelette` slot — same slot Claude reuses for its weekly_scoped model.
+  // The `model` name is transient (server epoch metadata keys it by provider; the
+  // snapshot row stores only utilization/resets_at). Only the primary org carries
+  // additionalLimits; extra workspaces have none → slot stays unset.
+  const scopedWeekly = pickScopedWeekly(org.additionalLimits);
+  if (scopedWeekly) payload.seven_day_omelette = scopedWeekly;
 
   // Attach the next-billing date so the server persists it on this org's snapshot
   // row (same `subscription` shape the Claude collector uses). The server keeps

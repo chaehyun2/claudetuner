@@ -8,11 +8,13 @@ import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPe
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 
-// Human-readable label for a provider org (e.g. "Gemini Advanced", "ChatGPT Plus")
+// Human-readable label for a provider org, provider-qualified across all providers
+// (e.g. "Claude Max 20x", "ChatGPT Pro 5x", "Gemini Advanced"). Provider defaults to
+// 'claude' when absent (Claude orgs may omit the field), matching the chip's `pv` default.
 export function _providerOrgLabel(org) {
   if (!org) return '';
-  const PROVIDER_LABELS = { chatgpt: 'ChatGPT', gemini: 'Gemini' };
-  return [PROVIDER_LABELS[org.provider] || '', org.plan || ''].filter(Boolean).join(' ').trim();
+  const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
+  return [PROVIDER_LABELS[org.provider || 'claude'] || '', org.plan || ''].filter(Boolean).join(' ').trim();
 }
 
 export function loadOrgSelector() {
@@ -77,6 +79,12 @@ export function selectOrg(orgId, container) {
   }
 
   state.selectedOrgId = orgId;
+  // Persist the viewed org so reopening the popup restores this selection — including a
+  // non-Claude provider. This is the popup VIEW only: it writes storage.LOCAL and never
+  // touches the pinned org / toolbar badge (storage.sync.selectedOrgId, set only by the
+  // 📌 pin handler). Every selectOrg() caller passes the currently-viewed org, so this
+  // stays in sync; popup.js init reads it back and prefers it when seeding the selection.
+  if (orgId) chrome.storage.local.set({ lastViewedOrgId: orgId });
   refreshDashboardLinks(orgId); // keep static dashboard anchors pointed at the viewed org
 
   // Look up selected org data from collectedOrgs (+ lastStatus for recommendation restore)
@@ -225,6 +233,41 @@ export function selectOrg(orgId, container) {
         });
       } else {
         extraSection.style.display = 'none';
+      }
+    }
+
+    // === 3b. Additional per-feature limits (e.g. ChatGPT Codex weekly) ===
+    // The active ChatGPT account org carries `additionalLimits` (parsed from
+    // /wham/usage's additional_rate_limits). Other providers/orgs lack the field,
+    // so this naturally shows only where relevant. Display-only (not persisted).
+    const addlSection = document.getElementById('additional-limits-section');
+    if (addlSection) {
+      const limits = Array.isArray(orgData.additionalLimits) ? orgData.additionalLimits : [];
+      if (limits.length) {
+        const windowLabel = (sec) => {
+          if (typeof sec !== 'number' || sec <= 0) return '';
+          if (sec % 86400 === 0) return (sec / 86400) + 'd';
+          if (sec % 3600 === 0) return (sec / 3600) + 'h';
+          return Math.round(sec / 60) + 'm';
+        };
+        addlSection.style.display = '';
+        addlSection.innerHTML = limits.map((lim) => {
+          const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
+          const color = gaugeColor(lim.used);
+          const win = windowLabel(lim.windowSeconds);
+          const label = escHtml(lim.name) + (win ? ` <span style="color:var(--text-muted);font-weight:400">(${win})</span>` : '');
+          const reset = lim.resetsAt
+            ? `<div class="gauge-sub" style="margin-top:3px">↻ ${escHtml(formatResetAbsolute(lim.resetsAt))}</div>`
+            : '';
+          return '<div class="gauge-row">'
+            + '<div class="gauge-header"><span class="gauge-label">' + label + '</span>'
+            + '<span class="gauge-value" style="color:' + color + '">' + pct + '%</span></div>'
+            + '<div class="gauge-bar"><div class="gauge-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+            + reset + '</div>';
+        }).join('');
+      } else {
+        addlSection.style.display = 'none';
+        addlSection.innerHTML = '';
       }
     }
 
@@ -418,10 +461,11 @@ export function showMultiOrgBadges(collectedOrgs) {
     }
 
     const pv = org.provider || 'claude';
-    const providerLabel = pv === 'gemini' ? 'Gemini ' : pv === 'chatgpt' ? 'GPT ' : '';
+    // Provider-qualified plan label (e.g. "ChatGPT Pro 5x", "Claude Max 20x"). Reuse the
+    // single _providerOrgLabel() source rather than a second inline provider→prefix map.
     const betaBadge = (pv === 'chatgpt' || pv === 'gemini') ? '<span class="org-chip-beta">Beta</span>' : '';
     chip.innerHTML =
-      '<span class="org-chip-plan">' + providerLabel + escHtml(org.plan) + '</span>' +
+      '<span class="org-chip-plan">' + escHtml(_providerOrgLabel(org)) + '</span>' +
       betaBadge +
       '<span class="org-chip-name">' + escHtml(org.name) + '</span>' +
       '<span class="org-chip-usage">' + usageText + '</span>';

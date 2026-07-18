@@ -319,7 +319,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false }, (result) => {
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null }, (result) => {
       state.onboardOrgName = result.onboardOrgName || null;
       state.usageHistory = result.usageHistory || [];
       state.historyLoaded = true;
@@ -332,7 +332,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       const cOrgs = result.collectedOrgs || [];
       if (cOrgs.length >= 1) {
         state.collectedOrgs = cOrgs;
-        if (syncCfg.selectedOrgId) {
+        // Restore the user's last-viewed org (persisted by selectOrg) so reopening the
+        // popup keeps their selection — including a non-Claude provider — instead of
+        // snapping back to the pinned/primary (Claude) org. This is the popup VIEW only;
+        // the toolbar badge / background still follow the pinned org (storage.sync).
+        // Falls back to pinned → primary when there's no valid last-viewed org (e.g. that
+        // org is gone, or first run).
+        const lastViewed = result.lastViewedOrgId && cOrgs.find(o => o.uuid === result.lastViewedOrgId);
+        if (lastViewed) {
+          state.selectedOrgId = lastViewed.uuid;
+        } else if (syncCfg.selectedOrgId) {
           const pinned = cOrgs.find(o => o.uuid === syncCfg.selectedOrgId);
           state.selectedOrgId = pinned ? pinned.uuid : (cOrgs.find(o => o.isPrimary)?.uuid || cOrgs[0]?.uuid || null);
         } else {

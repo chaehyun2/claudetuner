@@ -120,6 +120,7 @@
     body.ct-view-overview #predict-headline,
     body.ct-view-overview #gauge-section,
     body.ct-view-overview #extra-usage-section,
+    body.ct-view-overview #additional-limits-section,
     body.ct-view-overview #fitness-section,
     body.ct-view-overview #status-banner,
     body.ct-view-overview #chart-section,
@@ -663,6 +664,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Additional per-feature limits (e.g. ChatGPT Codex weekly). Filled by org-selector.js. -->
+  <div id="additional-limits-section" class="gauge-card" style="display:none;margin-bottom:10px"></div>
 
   <!-- 플랜 적합도 매트릭스 -->
   <div id="fitness-section" class="fm-card hidden">
