@@ -57,15 +57,9 @@ function unixToResetTime(ts) {
 // instead of on every ~10min collection cycle.
 const ROSTER_TTL_MS = 24 * 60 * 60 * 1000;
 const ROSTER_CACHE_KEY = 'chatgptAccountsRoster';
-
-// ChatGPT collects only the ACTIVE account (/wham/usage is scoped to the session's
-// active account; multi-login is HttpOnly + server-mediated, not switchable). So one
-// user gets exactly ONE ChatGPT slot = "the current active account", keyed by this
-// stable provider constant (NOT the per-account id, which is unstable and fragments
-// one account into many rows). Switching accounts updates this same row. The constant
-// is non-empty and >=10 chars so it passes the cap gate, dashboard save validation,
-// team-reader `<> ''` filters, and `?org=` length checks. See docs/DESIGN.
-const CHATGPT_ORG_KEY = 'chatgpt-current';
+// Bound how many extra workspaces we enumerate/send, so a profile signed into many
+// accounts can't fan out unboundedly.
+const MAX_EXTRA_WORKSPACES = 5;
 
 /**
  * Parse an accounts/check response into a roster the collector can act on.
@@ -258,7 +252,7 @@ export async function collectChatGPT(force = false) {
     const renewalDate = roster.defaultRenewal;
 
     const org = {
-      uuid: CHATGPT_ORG_KEY, // stable "current active ChatGPT" slot (not per-account id)
+      uuid: accountId,
       name: email || 'ChatGPT',
       email: email || null, // provider account email (shown in the popup footer)
       plan: plan,
@@ -306,11 +300,46 @@ export async function collectChatGPT(force = false) {
       console.log(`[Claude Tuner] ChatGPT delta-gate skip (${gate.reason})`);
     }
 
-    // Non-active workspaces are NOT enumerated as separate orgs: only the active
-    // account is collectable (see CHATGPT_ORG_KEY), and multiple non-Claude rows
-    // would fragment the single-slot model + waste cap slots. The active account's
-    // plan/renewal above is all we keep.
-    return { success: true, orgs: [org] };
+    // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
+    // user belongs to beyond the active account. Per-workspace usage needs a
+    // per-account token (/wham/usage is scoped to the JWT's active account), so
+    // these carry plan + renewal only — usage stays null until a later phase.
+    const extraOrgs = roster.workspaces.slice(0, MAX_EXTRA_WORKSPACES).map((ws) => ({
+      uuid: ws.accountId,
+      name: ws.name || 'ChatGPT Workspace',
+      email: email || null,
+      plan: ws.plan,
+      provider: 'chatgpt',
+      isPrimary: false,
+      h5: null,
+      d7: null,
+      resetsAt5h: null,
+      resetsAt7d: null,
+      renewalDate: ws.renewal,
+      spendUsed: null,
+      spendLimit: null,
+      extraUsage: null,
+    }));
+
+    for (const ex of extraOrgs) {
+      // Gate per workspace uuid so unchanged workspaces only re-send on the
+      // heartbeat floor (with usage null there's never a "changed" trigger).
+      const exGate = await gateProviderSnapshot(
+        ex.uuid,
+        { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null },
+        { force, provider: 'chatgpt' },
+      );
+      if (!exGate.send) continue;
+      // A workspace is never the user's primary data source, so force is_extra_org
+      // even for ChatGPT-only users (must not overwrite the users row's plan).
+      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true }).catch((e) => {
+        console.warn('[Claude Tuner] ChatGPT workspace snapshot send failed:', e.message);
+        return null;
+      });
+      if (res) await exGate.commit();
+    }
+
+    return { success: true, orgs: [org, ...extraOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
     return { success: false, orgs: [] };
@@ -320,7 +349,7 @@ export async function collectChatGPT(force = false) {
 // Send ChatGPT snapshot to server (same /api/snapshots endpoint)
 // Uses ext_token email (Claude email) as user_email for server identity,
 // preserves ChatGPT email in provider_email for reference.
-async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
+async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -341,7 +370,8 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan) {
   // When there is no Claude account, this provider is the user's primary data,
   // so the snapshot must maintain the users row (current_plan, last_seen_at).
   // For Claude users it's an "extra org" that must not overwrite current_plan.
-  const isExtraOrg = !!accountCache?.email;
+  // Extra ChatGPT workspaces are never primary data, so callers force this true.
+  const isExtraOrg = forceExtraOrg || !!accountCache?.email;
 
   const extVersion = chrome.runtime.getManifest().version;
 
