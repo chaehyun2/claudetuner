@@ -6,6 +6,18 @@
   padding: 4px 4px 4px 0;
   margin-bottom: 4px;
   user-select: none;
+  /* Establish an adaptive text color at the root (like the Gemini panel's root does)
+     so any child using color:inherit — notably the shared ad banner markup — resolves
+     to a readable color instead of Claude's DOM default, which is dark on the dark theme
+     (black text on a dark background = invisible). Individual elements below still set
+     their own explicit colors; this is only the fallback for inheriting children. */
+  color: rgb(55, 55, 52);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ct-sidebar-usage {
+    color: rgb(195, 194, 183);
+  }
 }
 
 /* Header row — match native sidebar item style */
@@ -308,7 +320,8 @@
 }
 
 /* In-house ad banner container — a direct panel child like the notice, so it carries
-   its own top margin rather than inheriting any list gap. Same spacing as the notice. */
+   its own top margin rather than inheriting any list gap. Same spacing as the notice.
+   Text color comes from the .ct-sidebar-usage root (adaptive), inherited by the banner. */
 .ct-sb-ad { margin-top: 2px; }
 /* Ad banner hover. Claude.ai's own hover token (--button-hover-bg) is component-scoped, not
    exposed on :root, so injected CSS cannot read it; and --bg-000 is WHITE in light mode, so

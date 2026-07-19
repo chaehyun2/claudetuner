@@ -3,6 +3,12 @@ import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier } from './storage.js';
 import { gateProviderSnapshot } from './send-gate.js';
 
+// One user gets exactly ONE Gemini slot = "the current active account", keyed by this
+// stable provider constant (not the per-account Google id, which fragments one user's
+// data across account switches). Mirrors CHATGPT_ORG_KEY in collect-chatgpt.js.
+// Non-empty + >=10 chars so it passes cap-gate / dashboard-save / team-reader / ?org= checks.
+const GEMINI_ORG_KEY = 'gemini-current';
+
 // Gemini plan ID mapping (from jSf9Qc response first field).
 // FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
 // see docs/DESIGN-gemini-policy-detection.md). The authoritative tier signal is the
@@ -200,7 +206,9 @@ export async function collectGemini(force = false) {
         let usageEver = sawRawUsage;
         if (!usageEver && meteredKey) {
           const hist = await getUsageHistory().catch(() => []);
-          usageEver = hist.some(p => p.org === accountId && ((p.h5 > 0) || (p.d7 > 0)));
+          // Match both the new provider-constant key and the legacy per-account key
+          // (pre-migration history points) so the metered-ever heuristic survives the switch.
+          usageEver = hist.some(p => (p.org === GEMINI_ORG_KEY || p.org === accountId) && ((p.h5 > 0) || (p.d7 > 0)));
         }
         const everMetered = await recordGeminiMetered(meteredKey, usageEver);
         noLimits = !everMetered;
@@ -208,7 +216,7 @@ export async function collectGemini(force = false) {
     }
 
     const org = {
-      uuid: accountId,
+      uuid: GEMINI_ORG_KEY, // stable "current active Gemini" slot (not per-account id)
       name: email || 'Gemini',
       email: email || null, // provider account email (shown in the popup footer)
       plan,
