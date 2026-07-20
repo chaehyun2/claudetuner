@@ -135,9 +135,13 @@ async function checkProviderPermissions() {
 
 // Check if selected org is NOT the Claude primary org (used to skip Claude-only rendering)
 
-// Hide all Claude-only UI elements (recommendation, fitness, privacy, pending plan, renewal)
+// Hide provider-specific UI (fitness, privacy, pending plan, renewal) for an org that cannot
+// support it. NOTE: currently unreferenced — the live gating lives in ui/org-selector.js §4-§7.
+// Kept in sync with that policy so a future caller does not silently reintroduce a stale rule.
+// recommendation-row / smart-rec-detail are deliberately NOT listed: recommendations now exist for
+// ChatGPT too (docs/SPEC-chatgpt-plan-rec.md), and org-selector decides per provider.
 function _hideClaudeOnlyUI() {
-  const ids = ['recommendation-row', 'smart-rec-detail', 'fitness-section', 'privacy-row', 'pending-row'];
+  const ids = ['fitness-section', 'privacy-row', 'pending-row'];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (el) el.classList.add('hidden');
@@ -754,6 +758,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Smart recommendation execute button — show confirmation modal
   document.getElementById('smart-rec-btn').addEventListener('click', () => {
+    // Plan-change execution is Claude-only. The button is already hidden for other providers
+    // (ui/recommend.js); this second check makes a stale/injected click a no-op rather than a
+    // claude.ai plan change triggered by a ChatGPT recommendation.
+    if ((state.recProvider || 'claude') !== 'claude') return;
     chrome.storage.local.get({ lastStatus: {} }, (result) => {
       const recommendation = result.lastStatus?.recommendation;
       if (!recommendation?.type) return;

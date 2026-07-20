@@ -6,6 +6,28 @@ export function escHtml(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// THE canonical way to read a recommendation's type. Every consumer must go through this —
+// reading `rec.type` directly is a live bug, not a style preference.
+//
+// Why: the server ships the SAME rec in two shapes. getChatgptSmartRec() returns the raw spec
+// shape with `type` intact, but everything that reaches the EXTENSION goes through
+// formatForExtension() (worker/src/services/snapshot-service.ts), a back-compat shim for old
+// popup builds that DELETES `type` and re-emits it as `rec_type` for every non-action rec.
+// insufficient_data has no to_plan, so it always takes that branch and always arrives here as
+// `rec_type`. A bare `rec.type` therefore yields undefined for exactly the recs the spec says
+// must render NO card — `undefined !== 'insufficient_data'` passes every guard and shows the
+// "data 부족" card to the users who must see nothing (docs/SPEC-chatgpt-plan-rec.md).
+//
+// The shim is NOT the thing to fix: old builds branch on `type` being present to choose their
+// structured UI, so leaving `type` on a to_plan-less rec would make them render an actionable
+// card with no action. The lossiness is deliberate and is pinned by test/chatgpt-rec-guard.mjs
+// section 9. The client absorbs it — in ONE place, so the third consumer can't repeat it (this
+// same bug already shipped once on the dashboard, commit 2ee04bf0, and was fixed only there).
+export function recType(rec) {
+  if (!rec) return null;
+  return rec.type || rec.rec_type || null;
+}
+
 // Render the "renewal-group" row (next-billing date) shared by the base view
 // (render.js) and the per-org selected view (org-selector.js). Pass a null/empty
 // date to hide the row. Returns true when the row is shown. Single source of truth

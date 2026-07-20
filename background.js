@@ -12,7 +12,7 @@ import {
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken } from './bg/storage.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush } from './bg/notifications.js';
@@ -182,6 +182,13 @@ async function hasClaudeSession() {
 async function mergeChatGPTOrgs(force = false) {
   try {
     const result = await collectChatGPT(force);
+    // Reconcile the stored recs against what we just OBSERVED, on both branches — the empty one is
+    // the whole point. collectChatGPT() returns no orgs when the user is signed out of ChatGPT (or
+    // it is unreadable), and the merge below deliberately leaves the previously-collected orgs in
+    // place, so without this the popup keeps rendering a rec whose signal is gone. Runs after the
+    // collection (which POSTs and may store a FRESH rec), so a just-written rec is reconciled
+    // against the very orgs it was computed from and survives.
+    await reconcileProviderRecs('chatgpt', result.orgs);
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonChatGPT = collectedOrgs.filter(o => o.provider !== 'chatgpt');
     if (result.orgs.length > 0) {
@@ -212,6 +219,10 @@ async function mergeChatGPTOrgs(force = false) {
 async function mergeGeminiOrgs(force = false) {
   try {
     const result = await collectGemini(force);
+    // Gemini has no rec engine today, so this normally finds nothing to do. It is wired anyway
+    // because the map is provider-GENERIC: the day a provider is added, the invalidation is
+    // already here rather than waiting to be rediscovered as a stale-rec bug.
+    await reconcileProviderRecs('gemini', result.orgs);
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonGemini = collectedOrgs.filter(o => o.provider !== 'gemini');
     if (result.orgs.length > 0) {

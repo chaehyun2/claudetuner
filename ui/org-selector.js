@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay } from './util.js';
+import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType } from './util.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -305,24 +305,49 @@ export function selectOrg(orgId, container) {
       if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
     }
 
-    // === 5. Recommendation & 6. Privacy — Claude only (no logic for external providers yet) ===
+    // === 5. Recommendation — Claude and ChatGPT. Gemini has no rec engine (utilization is
+    // near-zero for everyone, so "idle" is indistinguishable from "we cannot see it").
     const recRow = document.getElementById('recommendation-row');
     const recDetail = document.getElementById('smart-rec-detail');
-    if (isClaudeOrg) {
-      // Restore recommendation from cache or from lastStatus
-      const rec = state.lastRecommendation || local.lastStatus?.recommendation;
-      if (rec && !_shouldSuppressRec(rec, state.currentSnapshot?.subscription?.pending_plan)) {
-        state.lastRecommendation = rec;
-        if (recRow) recRow.classList.remove('hidden');
-        _renderRecommendation(rec);
-      } else {
-        if (recRow) recRow.classList.add('hidden');
-        if (recDetail) recDetail.classList.add('hidden');
-      }
+    const isChatgptOrg = providerKey === 'chatgpt';
+    // === EXT REC READ (per provider AND org): BEGIN (pinned by test/rec-delivery-guard.mjs) ===
+    // Claude reads the legacy single slot; other providers read their own entry so a ChatGPT rec
+    // can never render on the Claude org (see postSnapshot in bg/storage.js).
+    //
+    // The non-Claude lookup is keyed (provider, ORG) — orgId is the org being rendered right now.
+    // Provider alone would serve whichever of the member's ChatGPT orgs POSTed most recently, which
+    // is how org A's row ends up showing org B's downgrade. A miss renders NOTHING: the stored rec
+    // describes a different org's 14-day window, and no card is always better than a card about
+    // the wrong seat.
+    const rec = isClaudeOrg
+      ? (state.lastRecommendation || local.lastStatus?.recommendation)
+      : ((local.lastStatus?.recommendations_by_provider || {})[providerKey] || {})[orgId || '-'];
+    // === EXT REC READ (per provider AND org): END ===
+    // insufficient_data means the signal is missing, not that the plan fits: show NO card. A 0%
+    // 7d window is unreported for ~38% of active ChatGPT Plus users — treating it as idle would
+    // advise a downgrade to hundreds of paying users (docs/SPEC-chatgpt-plan-rec.md).
+    // Read the type via recType(): everything reaching the popup passes through the server's
+    // formatForExtension() shim, which deletes `type` and re-emits it as `rec_type` for every
+    // rec without a to_plan — i.e. for insufficient_data, always. A bare `rec.type` is undefined
+    // here, `undefined !== 'insufficient_data'` is true, and the card renders to exactly the
+    // users the spec says must see none.
+    // === POPUP REC RENDER GATE: BEGIN (pinned by test/rec-reachability-guard.mjs) ===
+    const recRenderable = !!rec && recType(rec) !== 'insufficient_data';
+    if ((isClaudeOrg || isChatgptOrg) && recRenderable
+        && !_shouldSuppressRec(rec, state.currentSnapshot?.subscription?.pending_plan)) {
+      if (isClaudeOrg) state.lastRecommendation = rec;
+      if (recRow) recRow.classList.remove('hidden');
+      // Pass THIS org's plan as the stale-plan basis. state.currentPlan tracks the primary Claude
+      // snapshot only, so a ChatGPT rec compared against it looks stale and gets degraded to
+      // "current plan ok". Claude orgs keep the previous basis (state.currentPlan).
+      _renderRecommendation(rec, providerKey, isClaudeOrg ? undefined : orgData.plan);
     } else {
       if (recRow) recRow.classList.add('hidden');
       if (recDetail) recDetail.classList.add('hidden');
     }
+    // === POPUP REC RENDER GATE: END ===
+
+    // === 6. Privacy — Claude only ===
 
     const privacyRow = document.getElementById('privacy-row');
     if (isClaudeOrg && state.currentSnapshot?.grove_enabled === true) {

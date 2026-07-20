@@ -96,7 +96,12 @@ export function _updateUICore(status) {
     return;
   }
 
-  if (!status) {
+  // `!status.snapshot && !status.error` is not defensive padding: bg/storage.js now SEEDS a bare
+  // lastStatus ({recommendations_by_provider} only) for ChatGPT-only users, so their rec has a
+  // container even though no Claude collection ever ran. The code below dereferences
+  // status.snapshot.plan unconditionally, so a seeded status must render exactly like no status
+  // at all rather than throw. Error statuses still fall through to the error branch below.
+  if (!status || (!status.snapshot && !status.error)) {
     indicator.className = 'status-dot gray';
     statusText.textContent = t('no_data');
     if (onboarding) { onboarding.classList.remove('hidden'); _applyTeamOnboarding(onboarding); }

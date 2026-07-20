@@ -2,7 +2,7 @@
 // Leaf domain (does not call org-selector/prediction). Imports shared state + selectors, pure
 // helpers, and the auth fetch wrapper; i18n `t` and CT_CONFIG are globals from classic scripts.
 import { state, _isNonClaudePrimarySelected } from './state.js';
-import { escHtml, _fmIcon, dashboardUrl } from './util.js';
+import { escHtml, _fmIcon, dashboardUrl, recType } from './util.js';
 import { _authedFetch } from './auth.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
@@ -11,7 +11,11 @@ const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_
 // to a known canonical label, or null when absent/unrecognized. Returning null for unknown
 // strings means the stale-plan guard only fires on a CONFIDENT mismatch (both sides are known
 // labels and differ) — an unrecognized/new tier never causes a valid rec to be suppressed.
-const _KNOWN_PLANS = ['Free', 'Pro', 'Team Standard', 'Team Premium', 'Max 5x', 'Max 20x', 'Enterprise'];
+// ChatGPT tiers are included so the guard actually fires for ChatGPT recs too. 'Pro' is shared
+// with Claude, which is harmless: both sides of a comparison always come from the same org, so a
+// ChatGPT 'Pro' is only ever compared against another ChatGPT plan.
+const _KNOWN_PLANS = ['Free', 'Pro', 'Team Standard', 'Team Premium', 'Max 5x', 'Max 20x', 'Enterprise',
+  'Go', 'Plus', 'Pro 5x', 'Pro 20x', 'Team', 'Business'];
 const _canonPlan = (p) => {
   if (p == null) return null;
   const v = _planApiToLabel[p] || p;
@@ -256,10 +260,27 @@ export function showRecFeedback(recType) {
   });
 }
 
-export function _renderRecommendation(rec) {
+// provider: which org's rec this is. Plan-change EXECUTION is Claude-only (bg/plan.js drives
+// claude.ai's subscription API), so a non-Claude rec renders as advice with no action button.
+export function _renderRecommendation(rec, provider, basisPlan) {
   if (!rec) return;
+  const recProvider = provider || rec.provider || 'claude';
+  state.recProvider = recProvider;
   const recEl = document.getElementById('recommendation');
   if (!recEl) return;
+
+  // insufficient_data is a distinct state from "adequate": the utilization signal is missing, so
+  // there is nothing to advise. Hide the row entirely rather than implying the plan is a good fit
+  // — and never let it reach the actionable branch (docs/SPEC-chatgpt-plan-rec.md).
+  // Read via recType(): this rec arrives from the extension shim, which moves `type` to
+  // `rec_type` for exactly the to_plan-less recs — a bare rec.type is undefined here.
+  if (recType(rec) === 'insufficient_data') {
+    const row = document.getElementById('recommendation-row');
+    if (row) row.classList.add('hidden');
+    const detail = document.getElementById('smart-rec-detail');
+    if (detail) detail.classList.add('hidden');
+    return;
+  }
 
   // Stale-plan guard: a cached actionable rec whose basis plan no longer matches the
   // user's current plan (e.g. they changed plans since the rec was computed; server
@@ -267,8 +288,15 @@ export function _renderRecommendation(rec) {
   // otherwise e.g. a Max 20x user sees a stale "upgrade to Max 5x" card. Only suppress
   // on a confident mismatch (both sides resolve to known canonical labels and differ);
   // if either is unknown we render as before (no regression).
+  // ⚠️ The basis plan must come from the SAME org/provider the rec was computed for.
+  // state.currentPlan is refreshed from the PRIMARY (Claude) snapshot in render.js and is NOT
+  // updated when a non-Claude org is selected — org-selector only swaps the displayed plan text.
+  // Comparing a ChatGPT rec against it made a Claude Pro + ChatGPT Plus user's real
+  // Plus→Go recommendation look "stale" ('Plus' !== 'Pro'), silently degrading it to
+  // "current plan ok". Callers that render a specific org pass that org's plan explicitly;
+  // the Claude/primary path passes nothing and keeps the original behaviour.
   const _recFromPlan = _canonPlan(rec.from_plan || rec.fromPlan);
-  const _curPlan = _canonPlan(state.currentPlan);
+  const _curPlan = _canonPlan(basisPlan != null ? basisPlan : state.currentPlan);
   const _planStale = _recFromPlan != null && _curPlan != null && _recFromPlan !== _curPlan;
   if (_planStale) {
     recEl.textContent = t('current_plan_ok');
@@ -278,9 +306,10 @@ export function _renderRecommendation(rec) {
     return;
   }
 
-  const isActionable = (rec.type === 'upgrade' || rec.type === 'downgrade') && rec.to_plan;
+  const _type = recType(rec);
+  const isActionable = (_type === 'upgrade' || _type === 'downgrade') && rec.to_plan;
   if (isActionable) {
-    const isUpgrade = rec.type === 'upgrade';
+    const isUpgrade = _type === 'upgrade';
     const titleText = t(isUpgrade ? 'opt_upgrade' : 'opt_downgrade');
     recEl.textContent = titleText;
     recEl.style.color = isUpgrade
@@ -315,9 +344,15 @@ export function _renderRecommendation(rec) {
 
     const btn = document.getElementById('smart-rec-btn');
     if (btn) {
-      btn.classList.remove('hidden');
-      btn.textContent = t(isUpgrade ? 'opt_upgrade_btn' : 'opt_downgrade_btn', rec.to_plan);
-      btn.style.background = isUpgrade ? '#d97706' : '#059669';
+      // Only Claude can be changed from here. Showing this button for a ChatGPT rec would fire a
+      // claude.ai plan change from a ChatGPT recommendation — wrong provider, wrong plan.
+      if (recProvider === 'claude') {
+        btn.classList.remove('hidden');
+        btn.textContent = t(isUpgrade ? 'opt_upgrade_btn' : 'opt_downgrade_btn', rec.to_plan);
+        btn.style.background = isUpgrade ? '#d97706' : '#059669';
+      } else {
+        btn.classList.add('hidden');
+      }
     }
 
     const dismissBtn = document.getElementById('smart-rec-dismiss');
@@ -335,9 +370,9 @@ export function _renderRecommendation(rec) {
     }
     recEl.textContent = displayText;
 
-    const recType = rec.rec_type || rec.type;
+    // Was an inline `rec.rec_type || rec.type` — the sprinkled form the shared helper replaces.
     const typeColors = { upgrade: '#d97706', downgrade: '#059669', high: '#ef4444', adequate: '#854d0e', good: 'var(--text-primary)', collecting: '#6b7280', nodata: '#6b7280' };
-    recEl.style.color = typeColors[recType] || 'var(--text-primary)';
+    recEl.style.color = typeColors[_type] || 'var(--text-primary)';
     const detail = document.getElementById('smart-rec-detail');
     if (detail) detail.classList.add('hidden');
   }

@@ -18,7 +18,9 @@ export const state = {
   dashNudgeEvaluated: false, // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
   isIndependent: false, // signed in via email (no Claude account) — suppress all Claude-centric status/errors
   independentEmail: '', // independent account email (shown in the footer)
-  lastRecommendation: null, // cached recommendation (restored when returning to primary org)
+  lastRecommendation: null, // cached Claude recommendation (restored when returning to primary org)
+  recProvider: 'claude', // provider of the rec currently ON SCREEN — gates plan-change execution,
+                         // which only Claude supports (see ui/recommend.js)
   planChangedTo: null, // plan we just changed to — suppresses same recommendation from re-rendering
   popupNoticeList: [],
   popupAds: [], // selected in-house ad banners (design §3.2) rendered alongside promos

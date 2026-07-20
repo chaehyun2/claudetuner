@@ -18,7 +18,28 @@ export async function getConfig() {
   });
 }
 
+// `lastStatus` is the CLAUDE collector's status object, but it is also the only container the
+// per-provider recommendation map (`recommendations_by_provider`, written by postSnapshot below)
+// has ever lived in. Several Claude paths in bg/collect.js rewrite lastStatus as a FRESH object
+// literal — carrying `recommendation` forward by hand but not the map — so every Claude alarm tick
+// silently deleted the ChatGPT/Gemini recs that a provider POST had just stored.
+//
+// Preserving the map HERE, at the single choke point, rather than at each call site, is the point:
+// patching the writers that exist today leaves the NEXT writer to rediscover the bug, which is
+// exactly how this defect class kept recurring. A caller that genuinely means to drop the map can
+// pass it explicitly (an own `recommendations_by_provider` key wins, including `undefined` via
+// hasOwnProperty), and `setStatus(null)` still clears everything — background.js relies on that.
+// Pinned by test/rec-delivery-guard.mjs.
 export async function setStatus(status) {
+  if (status && typeof status === 'object'
+      && !Object.prototype.hasOwnProperty.call(status, 'recommendations_by_provider')) {
+    const prev = await getLastStatus();
+    if (prev && prev.recommendations_by_provider) {
+      status = Object.assign({}, status, {
+        recommendations_by_provider: prev.recommendations_by_provider,
+      });
+    }
+  }
   return chrome.storage.local.set({ lastStatus: status });
 }
 
@@ -29,6 +50,75 @@ export async function getLastStatus() {
     });
   });
 }
+
+// Org-less bucket key. Must equal REC_ORG_NONE in worker/src/services/snapshot-service.ts and the
+// literal in ui/org-selector.js — a runtime boundary, so the guard asserts the three agree.
+export const REC_ORG_NONE = '-';
+
+// === EXT REC INVALIDATION: BEGIN (pinned by test/rec-delivery-guard.mjs) ===
+// setStatus() preserves `recommendations_by_provider` across every ordinary status write. That
+// fixed rec LOSS (a Claude alarm tick used to wipe the ChatGPT rec), but preservation with no
+// expiry is the opposite failure: a rec can outlive the signal it was computed from.
+//
+// Concretely: sign out of ChatGPT and collectChatGPT() returns no orgs, mergeChatGPTOrgs() leaves
+// the previously-collected orgs in place, and the popup happily renders yesterday's downgrade —
+// a confident recommendation with nothing behind it. That is THE invariant of this feature broken
+// in slow motion: the current signal is MISSING, and missing means insufficient_data, never "keep
+// showing the old answer" (docs/SPEC-chatgpt-plan-rec.md).
+//
+// So preservation must survive an ordinary status write but NOT a lost signal. This reconciles the
+// stored map against what a provider collection just observed, at the one place that observation
+// lands. Deliberately a reconciler rather than invalidation calls sprinkled at each call site: the
+// same reasoning that put preservation in setStatus(). A new collector inherits the behaviour.
+//
+// Three ways a rec becomes stale, all handled here:
+//   1. provider signed out / unreadable  → NO orgs observed → drop the provider's whole map
+//   2. org no longer collected           → drop that org's entry
+//   3. plan changed under the rec        → drop it; it judged a plan the user no longer holds
+//
+// Claude is exempt: it does not use this map (it writes the legacy single `recommendation` slot),
+// and its own staleness is handled by setStatus(null) on the auth-failure paths in background.js.
+export async function reconcileProviderRecs(provider, orgs) {
+  if (!provider || provider === 'claude') return;
+  const cur = await getLastStatus();
+  const byProv = cur && cur.recommendations_by_provider;
+  if (!byProv || !byProv[provider]) return; // nothing stored for this provider
+
+  const observed = Array.isArray(orgs) ? orgs : [];
+  const next = Object.assign({}, byProv);
+
+  if (!observed.length) {
+    // (1) The signal is gone, not merely quiet. Note this is the case where collectedOrgs still
+    // holds the stale org, so the popup WOULD still render a row for it — dropping the rec is the
+    // only thing standing between the user and a stale downgrade.
+    delete next[provider];
+  } else {
+    const livePlanByOrg = new Map(observed.map((o) => [(o && o.uuid) || REC_ORG_NONE, o && o.plan]));
+    const kept = {};
+    for (const [orgKey, rec] of Object.entries(byProv[provider])) {
+      if (!livePlanByOrg.has(orgKey)) continue;                          // (2)
+      if (!_recMatchesPlan(rec, livePlanByOrg.get(orgKey))) continue;    // (3)
+      kept[orgKey] = rec;
+    }
+    if (Object.keys(kept).length) next[provider] = kept;
+    else delete next[provider];
+  }
+
+  // An OWN `recommendations_by_provider` key wins over setStatus()'s preservation — that escape
+  // hatch is documented above and is exactly what a deliberate drop needs.
+  await setStatus(Object.assign({}, cur, { recommendations_by_provider: next }));
+}
+
+// Did this rec judge the plan the org currently holds? The rec carries the plan it was computed
+// against (`current_plan`, preserved through the server's formatForExtension shim on both
+// branches). An UNKNOWN basis is not evidence of change, so it is kept — invalidating on missing
+// information would silently delete good recs, which is the bug this whole area started with.
+function _recMatchesPlan(rec, livePlan) {
+  const basis = rec && rec.current_plan;
+  if (!basis || !livePlan) return true;
+  return String(basis).trim().toLowerCase() === String(livePlan).trim().toLowerCase();
+}
+// === EXT REC INVALIDATION: END ===
 
 // Usage history (kept for 30 days; sparkline only shows 24h)
 export async function appendUsageHistory(point) {
@@ -347,5 +437,39 @@ export async function postSnapshot(config, payload) {
     // A fresh token arrived — clear any stale re-auth flag.
     await chrome.storage.local.remove('needsReauth');
   }
+  // === EXT REC PERSIST (per provider AND org): BEGIN (pinned by test/rec-delivery-guard.mjs) ===
+  // Per-provider recommendation. lastStatus.recommendation is a SINGLE slot written by the Claude
+  // path, so writing a ChatGPT rec there would make the Claude org show ChatGPT's advice (and vice
+  // versa) for anyone using both. Keep providers in their own map and leave the legacy slot alone.
+  // insufficient_data is stored as-is; the popup treats it as "show nothing", not as a rec.
+  //
+  // ⚠️ The map is keyed (provider, ORG), not provider alone. The server computes this rec over the
+  // 14-day window of THIS POST's org, and a member with two ChatGPT orgs POSTs for both on the same
+  // ~10-minute cadence. A provider-only slot means each POST overwrites the other, and the popup
+  // then renders whichever landed last against whichever org is SELECTED — org A's row showing
+  // org B's downgrade. That is the same defect as the team dashboard's email-only lookup, one
+  // runtime over. REC_ORG_NONE is '-' here too (worker/src/services/snapshot-service.ts); an
+  // org-less POST gets its own bucket rather than matching a real org.
+  const _recProvider = (payload && payload.provider) || 'claude';
+  const _recOrg = (payload && payload.claude_org_uuid) || '-';
+  if (_recProvider !== 'claude' && result.recommendation) {
+    // ⚠️ `|| {}` SEEDS the container — do NOT reintroduce an `if (cur)` gate here.
+    // lastStatus is created only by the CLAUDE collector, so a ChatGPT-only user (no Claude org,
+    // or signed out of Claude) has none at all: gating the write on it dropped their rec outright,
+    // on the delivery path that is supposed to be the ONLY one they have. Hanging a provider's
+    // data off another provider's status object is the underlying mistake; seeding is the minimal
+    // fix that does not restructure storage. A seeded status carries no `snapshot`, and the popup
+    // renderer treats a status without one as no-data (ui/render.js), so it shows nothing new.
+    const cur = (await getLastStatus()) || {};
+    {
+      const _byProv = Object.assign({}, cur.recommendations_by_provider);
+      _byProv[_recProvider] = Object.assign({}, _byProv[_recProvider], {
+        [_recOrg]: result.recommendation,
+      });
+      cur.recommendations_by_provider = _byProv;
+      await setStatus(cur);
+    }
+  }
+  // === EXT REC PERSIST (per provider AND org): END ===
   return result;
 }

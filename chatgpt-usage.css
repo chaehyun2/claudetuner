@@ -36,6 +36,10 @@ html.dark, html.dark-oled {
   margin: 2px 0 8px;
   font-family: inherit;
   white-space: normal;
+  /* Establish an adaptive text color so color:inherit children (e.g. the shared
+     ad banner) stay readable instead of depending on the host nav's inherited
+     color. Parity with the Claude/Gemini panels. */
+  color: var(--ct-cg-text);
 }
 
 /* Header reuses ChatGPT's __menu-item layout; just size our bits + disable hover cursor. */
