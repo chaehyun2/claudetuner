@@ -280,7 +280,7 @@ export function selectOrg(orgId, container) {
       }
     }
 
-    // === 4. Subscription / Pending plan (Claude only) ===
+    // === 4. Subscription / Pending plan (Claude + ChatGPT) ===
     const pendingRow = document.getElementById('pending-row');
     const cancelDowngradeWrap = document.getElementById('cancel-downgrade-wrap');
     if (isClaudeOrg && isPrimary) {
@@ -294,6 +294,10 @@ export function selectOrg(orgId, container) {
           if (cancelDowngradeWrap && state.currentSnapshot.subscription.pending_plan !== 'cancel') {
             // Check if user dismissed this specific pending plan
             chrome.storage.local.get({ hiddenDowngradePlan: null }, (s) => {
+              // Guard a stale async result: if the user switched orgs before this resolved,
+              // don't touch the shared cancel-downgrade wrapper — it may now belong to a
+              // ChatGPT org, which must never show the Claude-only cancel button.
+              if (state.selectedOrgId !== orgId) return;
               if (s.hiddenDowngradePlan === state.currentSnapshot.subscription.pending_plan) {
                 cancelDowngradeWrap.style.display = 'none';
               } else {
@@ -306,9 +310,26 @@ export function selectOrg(orgId, container) {
         if (pendingRow) pendingRow.classList.add('hidden');
         if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
       }
+    } else if (providerKey === 'chatgpt' && orgData.pendingPlan) {
+      // ChatGPT carries its scheduled plan change on the org object itself (from
+      // accounts/check entitlement.scheduled_plan_change; the collector maps plan_type
+      // to a display label like 'Plus'), so read it from orgData — mirrors the Claude
+      // pending row above. Cancel-downgrade is a Claude-only API flow, so keep it hidden.
+      if (pendingRow) {
+        pendingRow.classList.remove('hidden');
+        const pendingEl = document.getElementById('pending-plan');
+        if (pendingEl) pendingEl.textContent = orgData.pendingPlan;
+        // The pending row lives inside #info-section, which is `info-card hidden` by
+        // default and only revealed by render.js for the Claude/provider PRIMARY snapshot.
+        // A selected non-primary ChatGPT org never triggers that, so reveal the parent
+        // card here too — otherwise the row shows but the whole section stays invisible.
+        const infoSection = document.getElementById('info-section');
+        if (infoSection) infoSection.classList.remove('hidden');
+      }
+      if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';
     } else {
-      // non-primary / non-Claude: no pending-plan info. The renewal date is NOT
-      // touched here — it is fully managed by the gauge section above (§2), which
+      // non-primary / non-Claude with no pending: no pending-plan info. The renewal date
+      // is NOT touched here — it is fully managed by the gauge section above (§2), which
       // shows a non-Claude org's own renewalDate. Re-hiding it here would clobber that.
       if (pendingRow) pendingRow.classList.add('hidden');
       if (cancelDowngradeWrap) cancelDowngradeWrap.style.display = 'none';

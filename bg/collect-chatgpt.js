@@ -45,15 +45,16 @@ export function chatgptWorkspacePlan(entitlement, accountPlanType) {
 }
 
 // Parse a scheduled plan change ("plan changes to X on date Y") from an accounts/check
-// account object. ChatGPT exposes it under `subscription_status.scheduled_plan_change`:
-// `plan_type` is the target tier code (e.g. 'plus') and `changes_at` is the effective
-// date — the same pair the ChatGPT UI renders as "플랜이 <date>에 <plan>(으)로 변경됩니다".
-// Mirrors the Claude collector's `scheduled_downgrade` handling (bg/plan.js) so the
-// server/dashboard treat both providers' pending plan changes identically. Returns the
-// plan as a mapped display label (e.g. 'Plus') so it passes through the dashboard's
+// account object. ChatGPT exposes it under `entitlement.scheduled_plan_change` (the same
+// per-account object that carries `renews_at`): `plan_type` is the target tier code (e.g.
+// 'plus') and `changes_at` is the effective date — the pair the ChatGPT UI renders as
+// "플랜이 <date>에 <plan>(으)로 변경됩니다". Verified against a live accounts/check response
+// (2026-07-21). Mirrors the Claude collector's `scheduled_downgrade` handling (bg/plan.js)
+// so the server/dashboard treat both providers' pending plan changes identically. Returns
+// the plan as a mapped display label (e.g. 'Plus') so it passes through the dashboard's
 // Claude-only PLAN_LABEL unchanged.
 export function parseChatGPTScheduledChange(acc) {
-  const spc = acc?.subscription_status?.scheduled_plan_change;
+  const spc = acc?.entitlement?.scheduled_plan_change;
   // Defensive: a non-string plan_type would throw in chatgptPlanName().toLowerCase(),
   // dropping the whole roster parse; a malformed-but-truthy changes_at would be stored and
   // render as "NaN/NaN" on the dashboard. Validate both — plan_type gates the whole change,
@@ -297,7 +298,7 @@ export async function collectChatGPT(force = false, userManual = false) {
       resetsAt5h: unixToResetTime(w5h?.reset_at),
       resetsAt7d: unixToResetTime(w7d?.reset_at),
       renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
-      // Scheduled plan change from accounts/check subscription_status.scheduled_plan_change
+      // Scheduled plan change from accounts/check entitlement.scheduled_plan_change
       // (e.g. "changes to Plus on 7/22"); null when no downgrade/change is scheduled.
       pendingPlan: roster.defaultPendingPlan || null,
       pendingChangeDate: roster.defaultPendingChangeDate || null,

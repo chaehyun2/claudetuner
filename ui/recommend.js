@@ -2,7 +2,7 @@
 // Leaf domain (does not call org-selector/prediction). Imports shared state + selectors, pure
 // helpers, and the auth fetch wrapper; i18n `t` and CT_CONFIG are globals from classic scripts.
 import { state, _isNonClaudePrimarySelected } from './state.js';
-import { escHtml, _fmIcon, dashboardUrl, recType } from './util.js';
+import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util.js';
 import { _authedFetch } from './auth.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
@@ -310,14 +310,45 @@ export function _renderRecommendation(rec, provider, basisPlan) {
   const isActionable = (_type === 'upgrade' || _type === 'downgrade') && rec.to_plan;
   if (isActionable) {
     const isUpgrade = _type === 'upgrade';
-    const titleText = t(isUpgrade ? 'opt_upgrade' : 'opt_downgrade');
-    recEl.textContent = titleText;
-    recEl.style.color = isUpgrade
+    // Non-Claude recs (ChatGPT) surface the target plan in the row itself
+    // ("Plus로 다운그레이드 추천"): their #smart-rec-detail carries no working execute/dismiss
+    // buttons and no cost line, only a reason that duplicates the target — so the row is the only
+    // place the plan should appear. Claude keeps the plain title + its actionable detail block.
+    let _target = null;
+    if (recProvider !== 'claude' && rec.to_plan) {
+      const _label = planDisplayName(rec.to_plan, recProvider);
+      _target = _label ? _label.charAt(0).toUpperCase() + _label.slice(1) : null;
+    }
+    const _recColor = isUpgrade
       ? (rec.urgency === 'urgent' ? '#dc2626' : '#d97706')
       : '#059669';
+    if (_target) {
+      // Highlight the target plan as a filled chip so it stands out in the row
+      // ("[Plus] 으로 다운그레이드 추천"). Split the localized template on a private-use sentinel
+      // substituted for {0}, then rebuild with an escaped chip span (template + target both escaped).
+      const SENT = String.fromCharCode(0xE000); // unique sentinel, never in i18n text
+      const _parts = t(isUpgrade ? 'opt_upgrade_to' : 'opt_downgrade_to', SENT).split(SENT);
+      const _chip = '<span style="background:' + _recColor + ';color:#fff;padding:0 6px;border-radius:4px;font-weight:700">' + escHtml(_target) + '</span>';
+      let _recHtml = _parts.map(escHtml).join(_chip);
+      // ChatGPT plan changes can't be executed from the extension (no API, unlike Claude), so
+      // append a link to ChatGPT's subscription page instead of a Claude-style execute button.
+      if (recProvider === 'chatgpt') {
+        _recHtml += ' <a href="https://chatgpt.com/#pricing" target="_blank" rel="noopener" style="color:' + _recColor + ';font-weight:600;white-space:nowrap">' + escHtml(t('rec_change_link')) + '</a>';
+      }
+      recEl.innerHTML = _recHtml;
+    } else {
+      recEl.textContent = t(isUpgrade ? 'opt_upgrade' : 'opt_downgrade');
+    }
+    recEl.style.color = _recColor;
 
     const detail = document.getElementById('smart-rec-detail');
-    if (detail) detail.classList.remove('hidden');
+    if (detail) {
+      // Claude: show the actionable detail (reason + execute/dismiss buttons). Non-Claude: the
+      // target plan is already in the row and the detail has no working buttons/cost — showing it
+      // would only render a redundant reason line + empty padding, so hide it.
+      if (recProvider === 'claude') detail.classList.remove('hidden');
+      else detail.classList.add('hidden');
+    }
 
     const reasonEl = document.getElementById('smart-rec-reason');
     if (reasonEl) {
