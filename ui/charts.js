@@ -7,16 +7,23 @@ import { _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier, calcPac
 let _activeChartTab = '5h';
 let _chartRollIntervalId = null;
 let _chartAutoRoll = true; // Default: auto-rolling enabled
+let _no5hMode = false; // True when the current org has no 5h window (e.g. ChatGPT): 5h tab/pane hidden, pinned to 7d
 let _yFixed = false; // Default: auto-scale y-axis to data (shows over-100% spikes)
 let _lastDraw = null; // Last drawCharts args, cached so the y-axis toggle can re-render
 
 export function _switchChartTab(target) {
   if (target === _activeChartTab) return;
+  // No 5h window (ChatGPT): the 5h tab is hidden, so never switch to it — this also
+  // makes the auto-roll a no-op (it stays on 7d) without needing to stop the timer.
+  if (target === '5h' && _no5hMode) return;
   // Don't switch 5h/7d when Enterprise spending chart is displayed
   const spendPane = document.getElementById('chart-pane-spend');
   if (spendPane && spendPane.style.display !== 'none') return;
   _activeChartTab = target;
-  document.querySelectorAll('.chart-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === target));
+  // Scope to the real 5h/7d tabs — the auto-roll and Y-axis buttons ALSO carry
+  // `.chart-tab` (popup.html) and own their own `.active` state, so a bare
+  // `.chart-tab` selector would wrongly clear them on every tab switch.
+  document.querySelectorAll('.chart-tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === target));
   document.getElementById('chart-pane-5h').style.display = target === '5h' ? '' : 'none';
   document.getElementById('chart-pane-7d').style.display = target === '7d' ? '' : 'none';
   _syncChartInfo();
@@ -102,6 +109,10 @@ export function drawCharts(history, plan, snapshot) {
   // Enterprise usage-based: spending summary instead of 5h/7d charts
   const isEnterprise = (plan || '').includes('Enterprise');
   const isUsageBasedEnt = isEnterprise && snapshot?.five_hour?.utilization == null && snapshot?.seven_day?.utilization == null;
+  // No 5h window (ChatGPT): 5h null but 7d present. Set the module flag first so the
+  // tab-switch guard / auto-roll respect it even on the early returns below.
+  const no5h = snapshot?.five_hour?.utilization == null && snapshot?.seven_day?.utilization != null;
+  _no5hMode = no5h;
   const chartSection = document.getElementById('chart-section');
   const tabsRow = chartSection?.querySelector('.chart-tabs')?.parentElement;
 
@@ -176,6 +187,15 @@ export function drawCharts(history, plan, snapshot) {
   const paneSpendHide = document.getElementById('chart-pane-spend');
   if (paneSpendHide) paneSpendHide.style.display = 'none';
   if (tabsRow) tabsRow.style.display = '';
+  // No-5h org (ChatGPT): hide the 5h tab button and pin the chart to 7d. Show the tab
+  // again for 5h orgs so a prior no-5h org doesn't leave it hidden. Runs before the
+  // early return below so the tab state is correct even without enough history to draw.
+  const tab5hBtn = chartSection?.querySelector('.chart-tab[data-tab="5h"]');
+  if (tab5hBtn) tab5hBtn.style.display = no5h ? 'none' : '';
+  // Pin to 7d by reusing the tab-switch helper (handles active class + pane display
+  // consistently). The `_switchChartTab('5h' && _no5hMode)` guard above blocks any
+  // later roll back to the hidden 5h pane.
+  if (no5h) _switchChartTab('7d');
   if (history.length < 2) return;
 
   const now = Date.now();
@@ -263,15 +283,17 @@ export function drawCharts(history, plan, snapshot) {
   const chartPace5h = calcPaceTier(last5h, reset5h, 5 * 3600);
   const chartPace7d = calcPaceTier(last7d, reset7d, 7 * 24 * 3600);
 
-  // 5h chart (last 3 windows = 15 hours)
-  const cutoff5h = now - 15 * 3600000;
-  const sorted5h = sorted.filter((p) => p.t > cutoff5h);
-  drawSingleChart({
-    canvasId: 'chart-5h', infoId: 'chart-5h-info',
-    sorted: sorted5h.length >= 2 ? sorted5h : sorted, key: 'h5', color: '#06b6d4',
-    rate: rate5h, lastVal: last5h, resetTime: reset5h,
-    limitLines, now, paceTier: chartPace5h,
-  });
+  // 5h chart (last 3 windows = 15 hours) — skipped for no-5h orgs (pane is hidden).
+  if (!no5h) {
+    const cutoff5h = now - 15 * 3600000;
+    const sorted5h = sorted.filter((p) => p.t > cutoff5h);
+    drawSingleChart({
+      canvasId: 'chart-5h', infoId: 'chart-5h-info',
+      sorted: sorted5h.length >= 2 ? sorted5h : sorted, key: 'h5', color: '#06b6d4',
+      rate: rate5h, lastVal: last5h, resetTime: reset5h,
+      limitLines, now, paceTier: chartPace5h,
+    });
+  }
 
   // 7d chart (last 2 windows = 14 days)
   const cutoff7d = now - 14 * 86400000;

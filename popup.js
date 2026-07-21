@@ -734,6 +734,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Smart recommendation dismiss button
   document.getElementById('smart-rec-dismiss').addEventListener('click', () => {
+    // Dismiss/mute are Claude-only (the button is hidden for other providers in ui/recommend.js).
+    // Guard the handler too, like the execute button below: a synthetic click, or a delayed
+    // DISMISS callback landing after the user switched to a ChatGPT org, must not stamp
+    // "current_plan_ok" onto the now-visible ChatGPT rec.
+    if ((state.recProvider || 'claude') !== 'claude') return;
     chrome.runtime.sendMessage({ type: 'DISMISS_RECOMMENDATION' }, () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');
@@ -748,6 +753,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Smart recommendation permanent mute button
   document.getElementById('smart-rec-mute').addEventListener('click', () => {
+    if ((state.recProvider || 'claude') !== 'claude') return; // Claude-only, same as dismiss above
     chrome.runtime.sendMessage({ type: 'MUTE_RECOMMENDATION' }, () => {
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');

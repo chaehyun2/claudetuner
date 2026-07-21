@@ -355,10 +355,20 @@ export function _renderRecommendation(rec, provider, basisPlan) {
       }
     }
 
+    // Dismiss/mute persist through the Claude-only /api/snapshots/dismiss cooldown. The ChatGPT
+    // engine has no dismiss state (getChatgptRecommendation), so for a ChatGPT/Gemini rec these
+    // buttons were no-ops: clicking one showed a misleading "current plan ok" and the rec came
+    // straight back on the next collection. Show them only where they actually work — like the
+    // execute button above, which is already Claude-gated.
     const dismissBtn = document.getElementById('smart-rec-dismiss');
-    if (dismissBtn) { dismissBtn.classList.remove('hidden'); dismissBtn.textContent = t('opt_dismiss'); }
     const muteBtn = document.getElementById('smart-rec-mute');
-    if (muteBtn) { muteBtn.classList.remove('hidden'); muteBtn.textContent = t('rec_mute'); }
+    if (recProvider === 'claude') {
+      if (dismissBtn) { dismissBtn.classList.remove('hidden'); dismissBtn.textContent = t('opt_dismiss'); }
+      if (muteBtn) { muteBtn.classList.remove('hidden'); muteBtn.textContent = t('rec_mute'); }
+    } else {
+      if (dismissBtn) dismissBtn.classList.add('hidden');
+      if (muteBtn) muteBtn.classList.add('hidden');
+    }
   } else {
     let displayText = rec.text || '';
     if (rec.text_key) {

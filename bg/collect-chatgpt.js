@@ -44,6 +44,32 @@ export function chatgptWorkspacePlan(entitlement, accountPlanType) {
   return chatgptPlanName(accountPlanType);
 }
 
+// Parse a scheduled plan change ("plan changes to X on date Y") from an accounts/check
+// account object. ChatGPT exposes it under `subscription_status.scheduled_plan_change`:
+// `plan_type` is the target tier code (e.g. 'plus') and `changes_at` is the effective
+// date — the same pair the ChatGPT UI renders as "플랜이 <date>에 <plan>(으)로 변경됩니다".
+// Mirrors the Claude collector's `scheduled_downgrade` handling (bg/plan.js) so the
+// server/dashboard treat both providers' pending plan changes identically. Returns the
+// plan as a mapped display label (e.g. 'Plus') so it passes through the dashboard's
+// Claude-only PLAN_LABEL unchanged.
+export function parseChatGPTScheduledChange(acc) {
+  const spc = acc?.subscription_status?.scheduled_plan_change;
+  // Defensive: a non-string plan_type would throw in chatgptPlanName().toLowerCase(),
+  // dropping the whole roster parse; a malformed-but-truthy changes_at would be stored and
+  // render as "NaN/NaN" on the dashboard. Validate both — plan_type gates the whole change,
+  // an unparseable date is nulled (plan still shows, just without a date).
+  if (!spc || typeof spc.plan_type !== 'string' || !spc.plan_type) {
+    return { pendingPlan: null, pendingChangeDate: null };
+  }
+  const changesAt = typeof spc.changes_at === 'string' && !Number.isNaN(Date.parse(spc.changes_at))
+    ? spc.changes_at
+    : null;
+  return {
+    pendingPlan: chatgptPlanName(spc.plan_type),
+    pendingChangeDate: changesAt,
+  };
+}
+
 // Convert Unix timestamp (seconds) to ISO string, then normalize to minute precision
 function unixToResetTime(ts) {
   if (!ts) return null;
@@ -81,6 +107,7 @@ export function parseAccountsRoster(data) {
   // lets us exclude it from the extra-workspace list (its usage comes from /wham/usage).
   const defaultAccountId = def?.account?.account_id || null;
   const defaultRenewal = def?.entitlement?.renews_at || null;
+  const defaultPending = parseChatGPTScheduledChange(def);
 
   const order = Array.isArray(data?.account_ordering) && data.account_ordering.length
     ? data.account_ordering
@@ -101,9 +128,16 @@ export function parseAccountsRoster(data) {
       plan: chatgptWorkspacePlan(a.entitlement, acc.plan_type),
       renewal: a.entitlement?.renews_at || null,
       hasActiveSubscription: !!a.entitlement?.has_active_subscription,
+      ...parseChatGPTScheduledChange(a),
     });
   }
-  return { defaultAccountId, defaultRenewal, workspaces };
+  return {
+    defaultAccountId,
+    defaultRenewal,
+    defaultPendingPlan: defaultPending.pendingPlan,
+    defaultPendingChangeDate: defaultPending.pendingChangeDate,
+    workspaces,
+  };
 }
 
 // The roster's `defaultAccountId`/`defaultRenewal` and its active-account exclusion
@@ -132,7 +166,7 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType) {
     console.warn('[Claude Tuner] ChatGPT accounts roster fetch failed:', e.message);
     // Reuse a stale roster if we have one; otherwise report an empty roster so the
     // active account (collected separately via /wham/usage) still goes through.
-    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, workspaces: [] };
+    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, defaultPendingPlan: null, defaultPendingChangeDate: null, workspaces: [] };
   }
 }
 
@@ -263,6 +297,10 @@ export async function collectChatGPT(force = false) {
       resetsAt5h: unixToResetTime(w5h?.reset_at),
       resetsAt7d: unixToResetTime(w7d?.reset_at),
       renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
+      // Scheduled plan change from accounts/check subscription_status.scheduled_plan_change
+      // (e.g. "changes to Plus on 7/22"); null when no downgrade/change is scheduled.
+      pendingPlan: roster.defaultPendingPlan || null,
+      pendingChangeDate: roster.defaultPendingChangeDate || null,
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
@@ -316,6 +354,8 @@ export async function collectChatGPT(force = false) {
       resetsAt5h: null,
       resetsAt7d: null,
       renewalDate: ws.renewal,
+      pendingPlan: ws.pendingPlan || null,
+      pendingChangeDate: ws.pendingChangeDate || null,
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
@@ -403,11 +443,18 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   const scopedWeekly = pickScopedWeekly(org.additionalLimits);
   if (scopedWeekly) payload.seven_day_omelette = scopedWeekly;
 
-  // Attach the next-billing date so the server persists it on this org's snapshot
-  // row (same `subscription` shape the Claude collector uses). The server keeps
-  // `users.renewal_date` Claude-only, so this never overwrites a Claude renewal.
-  if (org.renewalDate) {
-    payload.subscription = { renewal_date: org.renewalDate };
+  // Attach the next-billing date and any scheduled plan change so the server persists
+  // them on this org's snapshot row (same `subscription` shape the Claude collector
+  // uses). The server keeps `users.renewal_date`/`users.pending_plan` Claude-only, so
+  // these never overwrite a Claude renewal/pending; the per-(org,provider) snapshot row
+  // is what the dashboards read for ChatGPT.
+  if (org.renewalDate || org.pendingPlan) {
+    payload.subscription = {};
+    if (org.renewalDate) payload.subscription.renewal_date = org.renewalDate;
+    if (org.pendingPlan) {
+      payload.subscription.pending_plan = org.pendingPlan;
+      payload.subscription.pending_change_date = org.pendingChangeDate || null;
+    }
   }
 
   // Shared helper handles auth recovery (401/403), account deletion (410),

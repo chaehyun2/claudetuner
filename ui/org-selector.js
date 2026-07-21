@@ -105,6 +105,11 @@ export function selectOrg(orgId, container) {
     // No-limit Gemini plan (Workspace/Business/Enterprise): flagged by the collector
     // by plan (these seats report 0% windows). Show "no usage limits" not "0%".
     const isNoLimitGemini = providerKey === 'gemini' && !!orgData.noLimits;
+    // No 5h window (e.g. ChatGPT after the 5h limit was removed): h5 is null but 7d
+    // is still reported. Hide the 5h gauge row entirely instead of showing "N/A".
+    // Data-driven (not provider-gated) so a ChatGPT plan that DOES expose a 5h window
+    // keeps it, and any future provider that drops 5h is handled the same way.
+    const no5h = orgData.h5 == null && orgData.d7 != null;
 
     // resets_at: prefer collectedOrgs, fallback to primary
     const resetsAt5h = orgData.resetsAt5h || (isPrimary ? state.currentSnapshot?.five_hour?.resets_at : null);
@@ -161,6 +166,10 @@ export function selectOrg(orgId, container) {
             : orgData.renewalDate);
       setRenewalDisplay(orgRenewal);
       _restoreGaugeHTML(gaugeSection);
+      // Hide the whole 5h gauge row for no-5h orgs (ChatGPT); show it otherwise so a
+      // prior no-5h org's hide is reset when switching back to a Claude/5h org.
+      const row5h = document.getElementById('gauge-row-5h');
+      if (row5h) row5h.style.display = no5h ? 'none' : '';
       const util5h = orgData.h5;
       const util7d = orgData.d7;
       if (util5h !== null && util5h !== undefined) {
