@@ -260,7 +260,7 @@ function pickScopedWeekly(additionalLimits) {
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
  * Fails silently (returns empty orgs) if user is not logged into ChatGPT.
  */
-export async function collectChatGPT(force = false) {
+export async function collectChatGPT(force = false, userManual = false) {
   const loggedIn = await isChatGPTLoggedIn();
   if (!loggedIn) {
     return { success: false, orgs: [] };
@@ -325,7 +325,7 @@ export async function collectChatGPT(force = false) {
     // is always kept so the popup chart stays continuous. Returned org is
     // unaffected, so popup/merge display is independent of the gate.
     const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d };
-    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'chatgpt' });
+    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'chatgpt', userManual });
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).
@@ -367,7 +367,7 @@ export async function collectChatGPT(force = false) {
       const exGate = await gateProviderSnapshot(
         ex.uuid,
         { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null },
-        { force, provider: 'chatgpt' },
+        { force, provider: 'chatgpt', userManual },
       );
       if (!exGate.send) continue;
       // A workspace is never the user's primary data source, so force is_extra_org

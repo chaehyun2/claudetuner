@@ -333,7 +333,7 @@ export function collectAndSend(opts = {}) {
   return p;
 }
 
-async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
+async function collectAndSendImpl({ force = false, skipServer = false, userManual = false } = {}) {
   const _t0 = performance.now();
   const _timings = {};
   // Skip collection if account is deleted
@@ -359,9 +359,11 @@ async function collectAndSendImpl({ force = false, skipServer = false } = {}) {
   // all the local collection/UI work but skip the server POST (primary + extra
   // orgs). Done here — not at the alarm/tab gate — so every collectAndSend caller
   // (force collect, idle wake, 429 retry, reset/expire, manual, plan-order) is
-  // covered, not just the two periodic gates. force does NOT bypass: the server is
-  // down, so forcing only adds load (mirrors gateProviderSnapshot for ChatGPT/Gemini).
-  if (!skipServer && await isServerBackedOff()) {
+  // covered, not just the two periodic gates. Automatic force does NOT bypass: the
+  // server is down, so forcing only adds load (mirrors gateProviderSnapshot for
+  // ChatGPT/Gemini). A USER-initiated collect (userManual: popup "수집" / onboarding)
+  // DOES bypass — the person explicitly asked for fresh data now, one request is fine.
+  if (!skipServer && !userManual && await isServerBackedOff()) {
     skipServer = true;
   }
 

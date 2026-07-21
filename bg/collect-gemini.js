@@ -84,7 +84,7 @@ function geminiTimestampToResetTime(ts) {
  *   windowType 1 = 5-hour, windowType 2 = weekly
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
  */
-export async function collectGemini(force = false) {
+export async function collectGemini(force = false, userManual = false) {
   const loggedIn = await isGeminiLoggedIn();
   if (!loggedIn) {
     return { success: false, orgs: [] };
@@ -250,7 +250,7 @@ export async function collectGemini(force = false) {
     // (incl. Ultra 5x↔20x, which carries a different multiplier) must POST promptly rather than
     // batch with later usage and be zeroed by the server's plan-change delta guard.
     const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d, plan: org.plan };
-    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'gemini' });
+    const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'gemini', userManual });
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).

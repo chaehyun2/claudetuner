@@ -1,7 +1,7 @@
 // === ES Module Imports ===
 import { sendGAEvent } from './bg/analytics.js';
 import {
-  ALARM_NAME, ALARM_EXPIRE_PREFIX, ALARM_BOOST, ALARM_WEEKLY_REPORT,
+  ALARM_NAME, ALARM_EXPIRE_PREFIX, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   LOCAL_ACTIVE_INTERVAL_MINUTES, LOCAL_BACKGROUND_INTERVAL_MINUTES,
   VISIBILITY_THROTTLE_MS, POPUP_COLLECT_THROTTLE_MS,
@@ -25,6 +25,7 @@ import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/coll
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { collectGemini } from './bg/collect-gemini.js';
+import { fetchRecommendations } from './bg/rec-fetch.js';
 
 // Check if optional host permission is granted for a provider
 function hasProviderPermission(provider) {
@@ -179,9 +180,9 @@ async function hasClaudeSession() {
 }
 
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
-async function mergeChatGPTOrgs(force = false) {
+async function mergeChatGPTOrgs(force = false, userManual = false) {
   try {
-    const result = await collectChatGPT(force);
+    const result = await collectChatGPT(force, userManual);
     // Reconcile the stored recs against what we just OBSERVED, on both branches — the empty one is
     // the whole point. collectChatGPT() returns no orgs when the user is signed out of ChatGPT (or
     // it is unreadable), and the merge below deliberately leaves the previously-collected orgs in
@@ -216,9 +217,9 @@ async function mergeChatGPTOrgs(force = false) {
 // Merge Gemini orgs into collectedOrgs storage (independent of Claude collection)
 // Returns true when Gemini usage was actually collected + stored, false otherwise
 // (so callers can debounce only on success, not on a failed/empty attempt).
-async function mergeGeminiOrgs(force = false) {
+async function mergeGeminiOrgs(force = false, userManual = false) {
   try {
-    const result = await collectGemini(force);
+    const result = await collectGemini(force, userManual);
     // Gemini has no rec engine today, so this normally finds nothing to do. It is wired anyway
     // because the map is provider-GENERIC: the day a provider is added, the invalidation is
     // already here rather than waiting to be rediscovered as a stale-rec bug.
@@ -355,18 +356,18 @@ async function collectAndSend(opts) {
     // (not parallel) keeps peak load minimal on low-spec machines; .catch keeps
     // each provider independent so one failure doesn't block the other.
     if (collectChatGPT && await hasProviderPermission('chatgpt')) {
-      await mergeChatGPTOrgs(opts?.force).catch(() => {});
+      await mergeChatGPTOrgs(opts?.force, opts?.userManual).catch(() => {});
     }
     if (collectGemini && await hasProviderPermission('gemini')) {
-      await mergeGeminiOrgs(opts?.force).catch(() => {});
+      await mergeGeminiOrgs(opts?.force, opts?.userManual).catch(() => {});
     }
     return result;
   } catch (e) {
     // Claude failed — still try ChatGPT/Gemini independently if enabled.
     // Await (sequentially) so the SW isn't terminated mid-request.
     const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
-    if (collectChatGPT && await hasProviderPermission('chatgpt')) await mergeChatGPTOrgs(opts?.force).catch(() => {});
-    if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs(opts?.force).catch(() => {});
+    if (collectChatGPT && await hasProviderPermission('chatgpt')) await mergeChatGPTOrgs(opts?.force, opts?.userManual).catch(() => {});
+    if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs(opts?.force, opts?.userManual).catch(() => {});
     throw e;
   } finally {
     _collecting = false;
@@ -555,7 +556,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   if (message && message.type === 'force_collect') {
     (async () => {
       try {
-        const result = await collectAndSend({ force: true });
+        // userManual: onboarding is a user-initiated collect — bypass the server-backoff gate.
+        const result = await collectAndSend({ force: true, userManual: true });
         sendResponse({ ok: true, success: result?.success || false });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
@@ -690,7 +692,19 @@ chrome.idle.onStateChanged.addListener(async (newState) => {
 async function setupAlarm() {
   await updatePollAlarm();
   await scheduleWeeklyReport();
+  await scheduleRecFetch();
   await updateAdFlushAlarm(); // periodic ad impression/click counter flush (design §5.4)
+}
+
+// Plan recommendation fetch alarm (~6h). Recs now arrive via GET /api/recommendations rather than
+// the ingest POST response, so this slow timer keeps them fresh. Guarded so it isn't recreated on
+// every startup (which would reset its period), mirroring scheduleWeeklyReport's precedent. A short
+// initial delay does the first fetch so the user doesn't wait a full 6h after install/startup.
+async function scheduleRecFetch() {
+  const existing = await chrome.alarms.get(ALARM_REC);
+  if (existing) return; // already scheduled
+  chrome.alarms.create(ALARM_REC, { delayInMinutes: 1, periodInMinutes: 360 });
+  console.log('[rec-fetch] Recommendation alarm scheduled (initial 1m, then every 6h)');
 }
 
 // Adaptive poll alarm: adjusts interval based on activity state.
@@ -1002,6 +1016,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await sendWeeklyReport();
     return;
   }
+  // Plan recommendation refresh (~6h): the ingest POST response no longer carries recs, so
+  // pull them from the worker on a slow timer. Best-effort — never throws.
+  if (alarm.name === ALARM_REC) {
+    const config = await getConfig();
+    await fetchRecommendations(config);
+    return;
+  }
   // Ad counter flush (flushAdCounters already serializes through _adEnqueue).
   if (alarm.name === AD_FLUSH_ALARM) {
     flushAdCounters();
@@ -1220,7 +1241,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'MANUAL_COLLECT') {
-    collectAndSend({ force: true }).then((result) => sendResponse(result));
+    // userManual: the user pressed the popup "수집" button — bypass the server-backoff
+    // gate so a manual collect isn't silently no-op'd during a backoff window.
+    collectAndSend({ force: true, userManual: true }).then((result) => sendResponse(result));
     return true;
   }
   if (message.type === 'SET_SIDE_PANEL_MODE') {

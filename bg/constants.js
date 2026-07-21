@@ -8,6 +8,7 @@ export const ALARM_NAME = 'claude-usage-poll';
 export const ALARM_EXPIRE_PREFIX = 'claude-expire-';
 export const ALARM_BOOST = 'claude-boost-poll';
 export const ALARM_WEEKLY_REPORT = 'weekly-report';
+export const ALARM_REC = 'claude-rec-poll';
 
 export const DEFAULT_INTERVAL_MINUTES = 10;
 export const FREE_PLAN_INTERVAL_MINUTES = 60;
