@@ -114,18 +114,51 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
   // A plan change carries the token multiplier (e.g. Gemini 'AI Ultra 5x' → '20x'), so it must
   // POST promptly — bypass the send floor (like force) so it isn't rate-limited into a later
   // usage snapshot and zeroed by the server's plan-change delta guard. OPT-IN: only compared
-  // when both sides carry `plan` (Gemini does; Claude/ChatGPT gate values omit it).
+  // when both sides carry `plan` (Gemini and ChatGPT gate values do; Claude's omit it).
   // Bootstrap: gate state saved BEFORE this feature has no `plan`, so `prevValues.plan` is null
   // for the first cycle(s) after upgrade — the guard makes this a no-op (no false or forced
   // send). It self-heals on the first send (commit persists `plan`), which happens within one
   // heartbeat floor (≤1h) via usage change or the floor, after which detection is fully active.
   // This window is no worse than the pre-feature behaviour (plan changes weren't detected at all).
   const planChanged = prevValues.plan != null && currentValues.plan != null && prevValues.plan !== currentValues.plan;
-  if (planChanged) return { send: true, changed: true, reason: 'plan-change' };
+  // A scheduled plan change — its target (pendingPlan) OR effective date (pendingChangeDate), its
+  // appearance, or its cancellation — carries NO usage delta, so without this it would only ride
+  // the heartbeat AND be dropped by the server's usage-only dedup (keys on h5/d7/r7, not pending).
+  // Treat it like planChanged: POST promptly, and the caller marks it force so the server STORES it.
+  //   - knownDiff: both sides recorded and differ — covers value↔value, a value→null cancellation,
+  //     and a date-only reschedule (same target, new changes_at).
+  //   - pendingAppearedAtBootstrap: gate state predates the field (prev === undefined) but a pending
+  //     is ALREADY set at upgrade (cur is a real value) — capture it once so it force-posts instead
+  //     of riding a droppable non-force heartbeat (which, once the client commits on the 200, would
+  //     leave the change never stored). `cur != null` is false for BOTH null and undefined, so "no
+  //     pending" and "unknown" (roster fetch failed → undefined) never fabricate a store/cancellation.
+  const knownDiff = (a, b) => a !== undefined && b !== undefined && a !== b;
+  const pendingAppearedAtBootstrap = prevValues.pendingPlan === undefined && currentValues.pendingPlan != null;
+  const pendingChanged = knownDiff(prevValues.pendingPlan, currentValues.pendingPlan)
+    || knownDiff(prevValues.pendingChangeDate, currentValues.pendingChangeDate)
+    || pendingAppearedAtBootstrap;
+  // Return the COMPUTED `changed` (usage truth), not a hardcoded true: a pure relabel with flat
+  // usage must not tell the adaptive tier / is_heartbeat classifier that usage moved.
+  if (planChanged || pendingChanged) return { send: true, changed, reason: 'plan-change' };
   const sinceSent = now - (lastSentAt || 0);
   if (changed && sinceSent >= sendFloorMs) return { send: true, changed, reason: 'changed' };
   if (sinceSent >= heartbeatFloorMs) return { send: true, changed, reason: 'floor' };
   return { send: false, changed, reason: changed ? 'rate-limited' : 'unchanged' };
+}
+
+// Whether a ChatGPT/Gemini snapshot POST must set `payload.force` so the SERVER stores it instead
+// of dropping it via its usage-only dedup (the in-memory sig cache / D1 dedup key on h5/d7/r7 —
+// NOT plan, pending, or renewal; the sig-cache skip is gated by `!payload.force`). TRUE when:
+//   - userManual: the user pressed "수집" (or onboarding) — an explicit "refresh every provider
+//     now" that must land even with flat usage; OR
+//   - reason === 'plan-change': THIS provider's own subscription changed (plan or scheduled change).
+// Deliberately NOT triggered by a bare automatic `force` (reason 'force'): for these providers a
+// global force originates from an UNRELATED Claude trigger (e.g. a Claude 429 → collectAndSend({
+// force:true }) fans out to every provider), and force-storing a flat, unchanged ChatGPT/Gemini
+// snapshot on each such event is pointless write amplification. The Claude collector still sets
+// force from its own `force` arg (collect.js) — this predicate governs only the provider paths.
+export function shouldForceProviderPost(reason, userManual) {
+  return userManual === true || reason === 'plan-change';
 }
 
 // Per-uuid send-gate state for collectors that have no adaptive poll-state of

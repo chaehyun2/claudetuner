@@ -1,7 +1,7 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier } from './storage.js';
-import { gateProviderSnapshot } from './send-gate.js';
+import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 
 // Gemini plan ID mapping (from jSf9Qc response first field).
 // FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
@@ -254,7 +254,11 @@ export async function collectGemini(force = false, userManual = false) {
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).
-      const res = await sendGeminiSnapshot(org, email, plan).catch(e => {
+      // A plan change (incl. Ultra 5x↔20x, different multiplier) or a user-manual collect marks the
+      // POST force so the server stores it instead of dropping it via usage-only dedup (which keys
+      // on h5/d7/r7, not plan). Mirrors the ChatGPT collector; an unrelated Claude-triggered global
+      // force does NOT force-store a flat Gemini snapshot (shouldForceProviderPost).
+      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual) }).catch(e => {
         console.warn('[Claude Tuner] Gemini snapshot send failed:', e.message);
         return null;
       });
@@ -271,7 +275,7 @@ export async function collectGemini(force = false, userManual = false) {
 }
 
 // Send Gemini snapshot to server (same /api/snapshots endpoint)
-async function sendGeminiSnapshot(org, geminiEmail, plan) {
+async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -320,6 +324,9 @@ async function sendGeminiSnapshot(org, geminiEmail, plan) {
     provider_email: geminiEmail || null,
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
+    // Force = "store, don't dedup": the server's usage-only dedup keys on h5/d7/r7, so a plan
+    // change with flat usage would otherwise be dropped. Set only on force/plan-change sends.
+    ...(force ? { force: true } : {}),
   };
 
   // Shared helper handles auth recovery (401/403), account deletion (410),

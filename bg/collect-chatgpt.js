@@ -1,7 +1,7 @@
 import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId } from './storage.js';
-import { gateProviderSnapshot } from './send-gate.js';
+import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -79,10 +79,17 @@ function unixToResetTime(ts) {
 
 // accounts/check exposes the full multi-workspace roster (one entry per account
 // UUID plus a `default` alias for the session's active account) — and it's the
-// only source of the next-billing ("renewal") date, which /wham/usage omits. It
-// changes at most daily, so we fetch it once per day and cache the parsed roster,
-// instead of on every ~10min collection cycle.
-const ROSTER_TTL_MS = 24 * 60 * 60 * 1000;
+// only source of the next-billing ("renewal") date and any scheduled plan change,
+// which /wham/usage omits.
+//
+// TTL is 1h (the send heartbeat floor), NOT the former 24h. That staleness bit us in
+// practice (2026-07-22): the cache stores the PARSED roster, so it pinned a
+// pre-scheduling / pre-parser-fix null-pending parse for a full day — every automatic
+// send carried pending=null while the popup showed the change from an earlier good
+// parse, and the scheduled change was never stored server-side before it applied.
+// One authenticated GET per hour per browser is trivial (the ChatGPT webapp itself
+// calls accounts/check far more often), so keep the roster no staler than a heartbeat.
+const ROSTER_TTL_MS = 60 * 60 * 1000; // 1h — matches SEND_HEARTBEAT_FLOOR_MS
 const ROSTER_CACHE_KEY = 'chatgptAccountsRoster';
 // Bound how many extra workspaces we enumerate/send, so a profile signed into many
 // accounts can't fan out unboundedly.
@@ -148,9 +155,23 @@ export function parseAccountsRoster(data) {
 // be listed as an "extra" workspace (→ duplicate null-usage snapshot) and the primary
 // org would carry the previous account's renewal date. So bust the cache whenever the
 // active-account fingerprint (usage account id + plan) changes, not just on TTL.
-async function getChatGPTAccountsRoster(activeAccountId, activePlanType) {
+//
+// `forceRefresh` (a user-manual "수집" click) bypasses the cache entirely so a
+// just-scheduled plan change — which does NOT move the account/plan fingerprint and so
+// wouldn't otherwise bust the cache — is picked up on the same cycle instead of waiting
+// out the TTL.
+//
+// The cache entry is stamped with the extension version (`extVer`): what's cached is the
+// PARSED roster, so without the stamp a parser fix keeps serving the OLD code's output
+// until the TTL expires — exactly how the scheduled-plan-change parse fix (PR#623) sat
+// invisible behind a cached null-pending parse (2026-07-22 incident). A version mismatch
+// forces a refetch so new parser code always takes effect on its first cycle.
+async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRefresh = false) {
+  const extVer = chrome.runtime.getManifest().version;
   const cached = (await chrome.storage.local.get({ [ROSTER_CACHE_KEY]: null }))[ROSTER_CACHE_KEY];
-  if (cached?.roster
+  if (!forceRefresh
+      && cached?.roster
+      && cached.extVer === extVer
       && cached.activeAccountId === activeAccountId
       && cached.activePlanType === activePlanType
       && (Date.now() - cached.fetchedAt) < ROSTER_TTL_MS) {
@@ -159,15 +180,22 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType) {
   try {
     const data = await fetchChatGPTApi('/backend-api/accounts/check/v4-2023-04-27');
     const roster = parseAccountsRoster(data);
+    // One line per (at most hourly) refresh: what the LIVE response carried. This is the
+    // signal that was missing while diagnosing the null-pending incident — it separates
+    // "the API didn't return a scheduled change" from "we parsed/sent it wrong" at a glance.
+    console.log(`[Claude Tuner] ChatGPT roster refreshed: pending=${roster.defaultPendingPlan || 'none'}${roster.defaultPendingChangeDate ? ` @ ${roster.defaultPendingChangeDate}` : ''}, renewal=${roster.defaultRenewal || 'none'}, workspaces=${roster.workspaces.length}`);
     await chrome.storage.local.set({
-      [ROSTER_CACHE_KEY]: { roster, fetchedAt: Date.now(), activeAccountId, activePlanType },
+      [ROSTER_CACHE_KEY]: { roster, fetchedAt: Date.now(), extVer, activeAccountId, activePlanType },
     });
     return roster;
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT accounts roster fetch failed:', e.message);
     // Reuse a stale roster if we have one; otherwise report an empty roster so the
-    // active account (collected separately via /wham/usage) still goes through.
-    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, defaultPendingPlan: null, defaultPendingChangeDate: null, workspaces: [] };
+    // active account (collected separately via /wham/usage) still goes through. Pending is
+    // `undefined` (UNKNOWN), NOT null: we couldn't read accounts/check, so we must not let the
+    // send gate read a fetch failure as "pending cancelled" and force-store a spurious NULL over a
+    // real scheduled change (send-gate.js treats undefined as unknown → no trigger).
+    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, defaultPendingPlan: undefined, defaultPendingChangeDate: undefined, workspaces: [] };
   }
 }
 
@@ -282,8 +310,11 @@ export async function collectChatGPT(force = false, userManual = false) {
 
     // One accounts/check fetch (cached ~daily, but busted when the active account
     // changes) gives both the active account's renewal date and the full workspace
-    // roster for multi-org enumeration.
-    const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type);
+    // roster for multi-org enumeration. A user-manual "수집" refetches it now, so a
+    // just-scheduled plan change lands on this cycle rather than waiting out the 24h roster TTL.
+    // Only userManual busts the cache — NOT an automatic `force`, which for this provider comes
+    // from an unrelated Claude trigger (e.g. a Claude 429) and shouldn't hit accounts/check.
+    const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type, userManual);
     const renewalDate = roster.defaultRenewal;
 
     const org = {
@@ -325,16 +356,27 @@ export async function collectChatGPT(force = false, userManual = false) {
     // Skip unchanged heartbeats the server would only dedup; local history above
     // is always kept so the popup chart stays continuous. Returned org is
     // unaffected, so popup/merge display is independent of the gate.
-    const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d };
+    // `plan` + `pendingPlan` + `pendingChangeDate` opt this gate into plan/pending-change detection
+    // (send-gate.js): a scheduled plan change carries no usage delta, so without these it would only
+    // ride the heartbeat and could be dropped by the server's usage-only dedup. The pending fields
+    // come from the RAW roster (not org.*, which coerces `|| null`) so a fetch-failure roster's
+    // `undefined` stays UNKNOWN and the gate doesn't read it as a cancellation.
+    const gateValues = { h5: org.h5, d7: org.d7, extraUsed: null, resetsAt5h: org.resetsAt5h, resetsAt7d: org.resetsAt7d, plan: org.plan, pendingPlan: roster.defaultPendingPlan, pendingChangeDate: roster.defaultPendingChangeDate };
     const gate = await gateProviderSnapshot(org.uuid, gateValues, { force, provider: 'chatgpt', userManual });
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).
-      const res = await sendChatGPTSnapshot(org, email, plan).catch(e => {
+      const res = await sendChatGPTSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual) }).catch(e => {
         console.warn('[Claude Tuner] ChatGPT snapshot send failed:', e.message);
         return null;
       });
-      if (res) await gate.commit();
+      if (res) {
+        await gate.commit();
+        // Mirror the skip log for the sent case, WITH the subscription fields the payload
+        // carried — a successful send being silent is what made the null-pending incident
+        // undiagnosable from the SW console.
+        console.log(`[Claude Tuner] ChatGPT snapshot sent (${gate.reason}, pending=${org.pendingPlan || 'none'})`);
+      }
     } else {
       console.log(`[Claude Tuner] ChatGPT delta-gate skip (${gate.reason})`);
     }
@@ -367,13 +409,15 @@ export async function collectChatGPT(force = false, userManual = false) {
       // heartbeat floor (with usage null there's never a "changed" trigger).
       const exGate = await gateProviderSnapshot(
         ex.uuid,
-        { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null },
+        { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null, plan: ex.plan, pendingPlan: ex.pendingPlan, pendingChangeDate: ex.pendingChangeDate },
         { force, provider: 'chatgpt', userManual },
       );
       if (!exGate.send) continue;
       // A workspace is never the user's primary data source, so force is_extra_org
-      // even for ChatGPT-only users (must not overwrite the users row's plan).
-      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true }).catch((e) => {
+      // even for ChatGPT-only users (must not overwrite the users row's plan). A
+      // plan/pending change (or a user-manual collect) marks the POST force so the server
+      // stores it rather than deduping this usage-null workspace heartbeat.
+      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true, force: shouldForceProviderPost(exGate.reason, userManual) }).catch((e) => {
         console.warn('[Claude Tuner] ChatGPT workspace snapshot send failed:', e.message);
         return null;
       });
@@ -390,7 +434,7 @@ export async function collectChatGPT(force = false, userManual = false) {
 // Send ChatGPT snapshot to server (same /api/snapshots endpoint)
 // Uses ext_token email (Claude email) as user_email for server identity,
 // preserves ChatGPT email in provider_email for reference.
-async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false } = {}) {
+async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false, force = false } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -434,6 +478,10 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     provider_email: chatgptEmail || null,
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
+    // Force = "store, don't dedup": the server's usage-only dedup (sig cache / D1) keys on
+    // h5/d7/r7, so a plan/pending change with flat usage would otherwise be dropped. Set only on
+    // plan/pending-change or user-manual sends (shouldForceProviderPost) — flat heartbeats stay dedupable.
+    ...(force ? { force: true } : {}),
   };
 
   // Model-scoped weekly limit (e.g. Codex 'GPT-5.3-Codex-Spark') rides the shared

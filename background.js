@@ -522,6 +522,32 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return;
   }
 
+  // Get the account the extension is currently collecting for (read-only, no token
+  // minted — unlike GET_CLAUDE_LOGIN). The dashboard uses this to detect an
+  // account mismatch: when the signed-in dashboard account has no data but the
+  // extension is collecting under a DIFFERENT email, it can point the user to the
+  // right account instead of showing a misleading "collection stopped" banner.
+  if (message && message.type === 'GET_ACCOUNT_EMAIL') {
+    (async () => {
+      try {
+        const { accountCache, independentAccount } = await chrome.storage.local.get({
+          accountCache: null,
+          independentAccount: null,
+        });
+        let email = accountCache?.email || null;
+        let name = accountCache?.name || '';
+        if (!email && independentAccount?.email) {
+          email = independentAccount.email;
+          name = independentAccount.name || '';
+        }
+        sendResponse({ success: !!email, email, name });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // async sendResponse
+  }
+
   // Get collection status (for welcome page onboarding checklist).
   // Returns per-provider collection state so the welcome page can drive a
   // multi-provider checklist (Claude / ChatGPT / Gemini). `success` and
