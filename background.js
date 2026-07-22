@@ -578,6 +578,36 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true; // async sendResponse
   }
 
+  // Return every org the extension has locally detected (Claude + ChatGPT + Gemini),
+  // read-only. The dashboard's "active orgs" selector uses this so a user can pick a
+  // provider org the SERVER hasn't ingested yet — e.g. one being dropped at the 3-org
+  // cap, which otherwise never appears server-side (deadlock). The extension is the
+  // ground truth for "which orgs this account has"; the server only knows what it
+  // ingested (minus the cap filter). Returns a minimal shape (no usage) — the selector
+  // only needs identity + label. Degrades gracefully: an older extension without this
+  // handler simply doesn't respond and the dashboard falls back to server data.
+  if (message && message.type === 'GET_COLLECTED_ORGS') {
+    (async () => {
+      try {
+        const { collectedOrgs = [], accountCache, independentAccount } = await chrome.storage.local.get({
+          collectedOrgs: [], accountCache: null, independentAccount: null,
+        });
+        const orgs = (collectedOrgs || [])
+          .filter(o => o && o.uuid)
+          .map(o => ({ provider: o.provider || 'claude', uuid: o.uuid, name: o.name || '', plan: o.plan || '' }));
+        // The account this extension is collecting for — the dashboard compares it to the
+        // displayed account and only trusts these orgs when they match, so an admin viewing
+        // another user (viewAs) or a switched/shared machine never injects the wrong user's
+        // orgs into the settings selector.
+        const email = accountCache?.email || independentAccount?.email || null;
+        sendResponse({ success: true, orgs, email });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // async sendResponse
+  }
+
   // Trigger immediate collection (for welcome page onboarding)
   if (message && message.type === 'force_collect') {
     (async () => {
