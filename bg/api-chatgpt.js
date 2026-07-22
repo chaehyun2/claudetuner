@@ -136,10 +136,28 @@ async function fetchChatGPTWithCookies(url) {
 }
 
 // === Check if user is logged into ChatGPT ===
+// Two independent signals, EITHER of which counts as "plausibly logged in":
+//   1. the session cookie is enumerable via chrome.cookies.getAll, OR
+//   2. a chatgpt.com tab is open.
+// The cookie (`__Secure-` prefixed, httpOnly) is not always enumerable in every
+// Chromium build/profile — some browsers (e.g. Dia) intermittently return an empty
+// set for it, which made this pre-check a false negative that silently aborted
+// collection (collectChatGPT returns early with no log) even though the in-page
+// tab fetch could read usage fine. This is only a cheap PRE-CHECK: the actual auth
+// is validated authoritatively by the subsequent /api/auth/session fetch (tab path
+// preferred, cookie path as fallback), so a genuinely logged-out session still
+// yields no snapshot. Treating an open tab as a positive signal keeps collection
+// working whenever the page itself can authenticate, regardless of cookie visibility.
 export async function isChatGPTLoggedIn() {
   try {
     const cookies = await chrome.cookies.getAll({ url: 'https://chatgpt.com' });
-    return cookies.some(c => c.name.startsWith(CHATGPT_SESSION_COOKIE));
+    if (cookies.some(c => c.name.startsWith(CHATGPT_SESSION_COOKIE))) return true;
+  } catch {
+    // cookie enumeration unavailable — fall through to the tab signal
+  }
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    return tabs.length > 0;
   } catch {
     return false;
   }

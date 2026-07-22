@@ -729,8 +729,14 @@ async function setupAlarm() {
 async function scheduleRecFetch() {
   const existing = await chrome.alarms.get(ALARM_REC);
   if (existing) return; // already scheduled
-  chrome.alarms.create(ALARM_REC, { delayInMinutes: 1, periodInMinutes: 360 });
-  console.log('[rec-fetch] Recommendation alarm scheduled (initial 1m, then every 6h)');
+  // De-sync jitter on the first fire, same rationale as updatePollAlarm's: Chrome fires periodic
+  // alarms relative to creation, and a CWS auto-update recreates the fleet's alarms within a short
+  // window — without jitter the whole fleet then hits GET /api/recommendations on the same 6h grid
+  // (each fetch is a D1+Timescale read on a KV miss). A 0-59min random phase spreads that grid; the
+  // rec is advisory, so the first fetch landing within the hour (not at 1m) costs nothing visible.
+  const jitterMin = Math.random() * 59;
+  chrome.alarms.create(ALARM_REC, { delayInMinutes: 1 + jitterMin, periodInMinutes: 360 });
+  console.log(`[rec-fetch] Recommendation alarm scheduled (initial ${Math.round(1 + jitterMin)}m, then every 6h)`);
 }
 
 // Adaptive poll alarm: adjusts interval based on activity state.
