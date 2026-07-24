@@ -15,7 +15,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, clearExtTokenIfMatches, getOrCreateInstallId } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -731,9 +731,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       await chrome.storage.local.remove('ref_source');
     }
 
-    // 4. Send to server (local save only when skipServer is true)
-    if (skipServer) {
-      console.log('[Claude Tuner] Local-only collection (boost mode)');
+    // Phase 2 단계 4 login-first gate: a FRESH (non-grandfathered) install that has not
+    // logged in shows usage LOCALLY but never POSTs to the server via the shared api_key —
+    // server sync requires a login-proven token (so no ingest-token TOFU is minted for new
+    // users). Existing users (grandfathered on update) and any logged-in user (extToken
+    // present) are unaffected. We surface the login CTA once so the popup/welcome can nudge.
+    const blockServerNewUser = await isServerSyncGated();
+    if (blockServerNewUser) await chrome.storage.local.set({ showLoginPrompt: true });
+
+    // 4. Send to server (local save only when skipServer/boost, or gated new user)
+    if (skipServer || blockServerNewUser) {
+      console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? 'login required for server sync' : 'boost mode'})`);
       await setStatus({
         success: true,
         timestamp: Date.now(),
@@ -842,12 +850,20 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // Tuner login (ChatGPT/Gemini keep the token bound to the Tuner email, so
         // Claude silently never collects). Surface a popup warning explaining why.
         const errData = await response.json().catch(() => ({}));
+        // Phase 2 scope_insufficient: /api/snapshots is NOT scope-gated today (an ingest token
+        // is meant to write snapshots, §4.1.1) so this cannot fire now, but if a future contract
+        // scope-gates it, the valid ingest token must NOT be cleared (clearing → api_key re-TOFU
+        // → ingest loop). Raise needsFullLogin and return without clearing (Codex review).
+        if (errData.code === 'scope_insufficient' && sentToken) {
+          await chrome.storage.local.set({ needsFullLogin: true });
+          return;
+        }
         if (errData.error === 'Email mismatch') {
           await chrome.storage.local.set({
             claudeEmailMismatch: { claudeEmail: snapshot.user_email || null, ts: Date.now() },
           });
         }
-        // Keep existing token-clear fallback (race-safe: only clears if unchanged).
+        // Keep existing token-clear behavior (race-safe: only clears if unchanged).
         const cleared = await clearExtTokenIfMatches(sentToken);
         if (cleared) {
           console.log('[Claude Tuner] ext_token cleared (403). Will re-auth on next cycle.');
@@ -895,9 +911,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // doesn't get stranded when the ext_token later expires.
       await maybeLinkClaudeAccount(config, sentToken);
 
-      // Store ext_token from server (TOFU issuance or refresh)
+      // Store ext_token from server (TOFU issuance or refresh). No-downgrade: a refresh that
+      // returns 'ingest' must not strip a logged-in user's 'full' token (Phase 2 단계 4).
       if (result.ext_token) {
-        await setExtToken(result.ext_token);
+        await setExtTokenNoDowngrade(result.ext_token);
       }
 
       // Apply server-provided poll_interval

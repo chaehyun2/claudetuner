@@ -20,13 +20,18 @@ import { loadPopupAnnouncements } from './ui/notices.js';
 async function renderReauthWidget() {
   const widget = document.getElementById('reauth-widget');
   if (!widget) return;
-  const { independentAccount = null, extToken = null, claudeLinkDone = false } =
-    await chrome.storage.local.get({ independentAccount: null, extToken: null, claudeLinkDone: false });
+  const { independentAccount = null, extToken = null, claudeLinkDone = false, serverSyncGrandfathered = undefined } =
+    await chrome.storage.local.get({ independentAccount: null, extToken: null, claudeLinkDone: false, serverSyncGrandfathered: undefined });
   // Trapped only when an email account has NO valid token (expired/cleared) AND
   // hasn't already been upgraded to a Claude account (claudeLinkDone). After a
   // link-claude upgrade the API_KEY fallback works, so a transient missing token
   // is not a trap — don't flash the widget in that window.
-  if (!independentAccount?.email || extToken || claudeLinkDone) { widget.classList.add('hidden'); return; }
+  // EXCEPTION (Phase 2 단계 4, Fable review HIGH): on a GATED install (fresh regime,
+  // serverSyncGrandfathered===false) the api_key fallback is deliberately blocked, so a linked
+  // user whose token later expired has NO working sync and NO other login UI. Keep showing the
+  // reauth widget in that case so they can re-mint a `full` token (login re-opens the gate).
+  const gated = serverSyncGrandfathered === false;
+  if (!independentAccount?.email || extToken || (claudeLinkDone && !gated)) { widget.classList.add('hidden'); return; }
 
   const email = independentAccount.email;
   const stepReq = document.getElementById('reauth-step-request');
@@ -91,6 +96,165 @@ async function renderReauthWidget() {
     };
     verifyBtn.addEventListener('click', doVerify);
     codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+  }
+}
+
+// Phase 2 단계 4 login-first CTA — shown to a FRESH, not-logged-in install (showLoginPrompt set
+// by the gated collection). Additive: usage already renders locally; logging in unlocks the
+// server-backed features (multi-browser merge, plan rec, trends, Wrapped, team). Unlike the
+// re-auth widget it has no known email, so it collects one (pre-filled from the detected
+// provider email when available). Dismiss = stay local-only (still gated, just no more nag).
+async function renderLoginCta() {
+  const widget = document.getElementById('login-cta');
+  if (!widget) return;
+  const { showLoginPrompt = false, extToken = null, independentAccount = null, loginCtaCollapsed = false, accountCache = null, needsFullLogin = false, scopeCtaShownFor = null } =
+    await chrome.storage.local.get({ showLoginPrompt: false, extToken: null, independentAccount: null, loginCtaCollapsed: false, accountCache: null, needsFullLogin: false, scopeCtaShownFor: null });
+
+  // Phase 2 단계 5 consumer: a `ingest`-scoped token that hit a `full`-only endpoint gets a 403
+  // scope_insufficient, which raises needsFullLogin (ui/auth.js, bg/storage.js, bg/collect.js).
+  // Those users HOLD a token — and often an independentAccount too — so both guards below would
+  // hide every login entry point and leave them with no way out of the block (the reauth widget
+  // also requires !extToken). Treat needsFullLogin as an OVERRIDE: same verify flow, different
+  // copy ("this feature is locked" rather than "turn on sync"). Requires the token to still be
+  // present so a stale flag can't double up with the reauth widget after a 401 cleared it.
+  const scopeBlocked = needsFullLogin === true && !!extToken;
+
+  // The CTA (verify prompt) — trapped independent accounts go to renderReauthWidget; this is the
+  // new-user path. NEVER fully dismissed: "Use locally only" COLLAPSES to a persistent mini
+  // reminder (like the permission card) so verify is always one tap away, just small.
+  if (!scopeBlocked && (!showLoginPrompt || extToken || independentAccount?.email)) { widget.classList.add('hidden'); return; }
+  widget.classList.remove('hidden');
+
+  const full = document.getElementById('login-cta-full');
+  const mini = document.getElementById('login-cta-mini');
+
+  // An earlier "Use locally only" must not silently swallow a NEW scope block: auto-expand once
+  // per blocked token, then honor further collapses as usual. The marker is the token's signature
+  // tail (not the token — no second copy of a credential at rest) and self-clears: a fresh token
+  // that gets blocked expands again.
+  let collapsed = loginCtaCollapsed;
+  const scopeMarker = scopeBlocked ? extToken.slice(-16) : null;
+  if (scopeBlocked && scopeCtaShownFor !== scopeMarker) {
+    collapsed = false;
+    await chrome.storage.local.set({ scopeCtaShownFor: scopeMarker, loginCtaCollapsed: false });
+  }
+
+  // Collapsed → show only the compact reminder bar with a login button that re-expands.
+  // NOTE: mini uses style.display (not .hidden) — its inline display would otherwise override the
+  // .hidden class and leave BOTH mini + full visible in expanded mode (Codex re-review LOW).
+  if (collapsed) {
+    full.classList.add('hidden');
+    mini.style.display = 'flex';
+    document.getElementById('login-cta-mini-msg').textContent = scopeBlocked
+      ? (t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more')
+      : (t('login_cta_mini') || 'Log in for multi-device sync & more');
+    const miniBtn = document.getElementById('login-cta-mini-login');
+    miniBtn.textContent = t('login_cta_mini_btn') || 'Log in';
+    if (!miniBtn.dataset.bound) {
+      miniBtn.dataset.bound = '1';
+      miniBtn.addEventListener('click', async () => { await chrome.storage.local.set({ loginCtaCollapsed: false }); renderLoginCta(); });
+    }
+    return;
+  }
+  mini.style.display = 'none';
+  full.classList.remove('hidden');
+
+  const emailInput = document.getElementById('login-cta-email');
+  const codeInput = document.getElementById('login-cta-code');
+  const sendBtn = document.getElementById('login-cta-send');
+  const verifyBtn = document.getElementById('login-cta-verify');
+  const dismissBtn = document.getElementById('login-cta-dismiss');
+  const stepEmail = document.getElementById('login-cta-step-email');
+  const stepVerify = document.getElementById('login-cta-step-verify');
+  const status = document.getElementById('login-cta-status');
+
+  // Scope-blocked users already sync (they hold an ingest token) — the pitch is the LOCKED
+  // feature, not "turn on sync". Same verify flow underneath, so only the copy differs.
+  document.getElementById('login-cta-title').textContent = scopeBlocked
+    ? (t('login_cta_scope_title') || 'Log in to unlock this feature')
+    : (t('login_cta_title') || 'Turn on server sync');
+  document.getElementById('login-cta-msg').textContent = scopeBlocked
+    ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
+    : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
+  const feats = [t('login_cta_feat1'), t('login_cta_feat2'), t('login_cta_feat3')].filter(Boolean);
+  const featsBox = document.getElementById('login-cta-feats');
+  featsBox.textContent = ''; // build via DOM (no innerHTML sink)
+  for (const f of feats) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:7px;align-items:flex-start;font-size:11.5px;line-height:1.4;color:var(--text-secondary)';
+    const check = document.createElement('span');
+    check.textContent = '✓';
+    check.style.cssText = 'color:#22c55e;font-weight:800;flex-shrink:0';
+    const txt = document.createElement('span');
+    txt.textContent = f;
+    row.appendChild(check); row.appendChild(txt);
+    featsBox.appendChild(row);
+  }
+  document.getElementById('login-cta-prompt').textContent = t('login_cta_prompt') || 'Verify your email to start';
+  emailInput.placeholder = t('login_cta_email_ph') || 'you@email.com';
+  // Scope-blocked users usually already have a known identity (independentAccount) — prefill from
+  // it when the provider cache is empty so re-login is one tap.
+  const prefill = accountCache?.email || independentAccount?.email || '';
+  if (!emailInput.value && prefill) emailInput.value = prefill;
+  sendBtn.textContent = t('login_cta_send') || 'Send code';
+  verifyBtn.textContent = t('login_cta_verify') || 'Verify & log in';
+  codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
+  dismissBtn.textContent = t('login_cta_dismiss') || 'Use locally only';
+
+  if (!sendBtn.dataset.bound) {
+    sendBtn.dataset.bound = '1';
+    sendBtn.addEventListener('click', () => {
+      const email = (emailInput.value || '').trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { status.textContent = t('login_cta_bad_email') || 'Enter a valid email.'; return; }
+      sendBtn.disabled = true; sendBtn.classList.add('loading'); status.textContent = '';
+      const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
+      chrome.runtime.sendMessage({ type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang }, (res) => {
+        sendBtn.disabled = false; sendBtn.classList.remove('loading');
+        if (res && res.success) {
+          widget.dataset.email = email;
+          stepEmail.classList.add('hidden'); stepVerify.classList.remove('hidden');
+          status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
+          codeInput.focus();
+        } else if (res && res.error === 'rate_limited') {
+          status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
+        } else {
+          status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+        }
+      });
+    });
+  }
+
+  if (!verifyBtn.dataset.bound) {
+    verifyBtn.dataset.bound = '1';
+    const doVerify = () => {
+      if (verifyBtn.disabled) return;
+      const code = (codeInput.value || '').trim();
+      if (!/^\d{6}$/.test(code)) { status.textContent = t('reauth_error_code') || 'Enter the 6-digit code.'; return; }
+      verifyBtn.disabled = true; verifyBtn.classList.add('loading'); status.textContent = '';
+      chrome.runtime.sendMessage({ type: 'VERIFY_MAGIC_CODE', email: widget.dataset.email, code }, (res) => {
+        verifyBtn.disabled = false; verifyBtn.classList.remove('loading');
+        if (res && res.success) {
+          status.textContent = t('login_cta_success') || 'Logged in — server sync will start shortly.';
+          // Kick an immediate server POST now that we hold a full Bearer token (the gate is open).
+          chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+          setTimeout(() => location.reload(), 1200);
+        } else {
+          status.textContent = t('reauth_error_invalid') || 'Invalid or expired code. Request a new one.';
+        }
+      });
+    };
+    verifyBtn.addEventListener('click', doVerify);
+    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+  }
+
+  if (!dismissBtn.dataset.bound) {
+    dismissBtn.dataset.bound = '1';
+    dismissBtn.addEventListener('click', async () => {
+      // "Use locally only" = keep the gate (no server send) AND collapse to the persistent mini
+      // reminder — never fully hidden, so login stays one tap away and keeps nudging.
+      await chrome.storage.local.set({ loginCtaCollapsed: true });
+      renderLoginCta();
+    });
   }
 }
 
@@ -268,9 +432,43 @@ document.addEventListener('DOMContentLoaded', async () => {
         location.reload();
       });
     }
+  } else {
+    // Phase 2 단계 4: a login-first (gated-regime) user who VERIFIED has a provider account, so
+    // isIndependent is false — but they still need a subtle "인증 해제" (de-verify → local-only) in
+    // the footer next to their email. Scoped to serverSyncGrandfathered===false so existing/
+    // grandfathered users are untouched. No prominent banner (user feedback).
+    const { serverSyncGrandfathered: _gf, extToken: _tok } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined, extToken: null });
+    if (_gf === false && !!_ia?.email && !!_tok) {
+      const signOut = document.getElementById('independent-signout');
+      if (signOut) {
+        signOut.textContent = t('login_cta_deauth') || 'Disconnect';
+        signOut.classList.remove('hidden');
+        if (!signOut.dataset.deauthBound) {
+          signOut.dataset.deauthBound = '1';
+          signOut.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed']);
+            await chrome.storage.local.set({ showLoginPrompt: true });
+            location.reload();
+          });
+        }
+      }
+    }
   }
 
   renderReauthWidget();
+  renderLoginCta();
+  // showLoginPrompt is written by the first gated collect cycle, which can land AFTER this
+  // initial render (POPUP_OPENED → collect). Re-render the CTA when it flips so the login
+  // control appears on the FIRST popup open, not only the second (Fable review LOW).
+  if (!window._loginCtaWatch) {
+    window._loginCtaWatch = true;
+    chrome.storage.onChanged.addListener((changes, area) => {
+      // needsFullLogin lands the same way (a 403 from a background collect or an in-popup
+      // /fitness read), so it must re-render too or the CTA waits for the next popup open.
+      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin)) renderLoginCta();
+    });
+  }
 
   loadPopupAnnouncements();
   // Side panel persists across hide/show: if the initial fetch never populated
@@ -423,6 +621,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (area === 'sync' && changes.lang) {
       setLang(changes.lang.newValue);
+      // These set text imperatively via t() (not data-i18n), so re-render them on a live lang
+      // switch (checkProviderPermissions rebuilds the banner via innerHTML='' — no double-bind).
+      renderReauthWidget();
+      renderLoginCta();
+      checkProviderPermissions();
       // Full UI re-render including dynamically generated text
       chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         state.usageHistory = r.usageHistory || [];

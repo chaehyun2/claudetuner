@@ -261,6 +261,40 @@ export async function setExtToken(token) {
   return chrome.storage.local.set({ extToken: token });
 }
 
+/**
+ * Read the provenance `scope` claim from an ext_token WITHOUT verifying it (Phase 2).
+ * The token is a JWT (header.payload.sig); we only peek the payload's `scope` for
+ * client-side UX decisions — the server is the sole authority that verifies the HMAC.
+ * Returns 'ingest' | 'full' | undefined (legacy tokens, or any parse failure).
+ */
+export function extTokenScope(token) {
+  try {
+    let b64 = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes)).scope;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist a server-issued ext_token, but NEVER downgrade a login-proven `full` token
+ * to an `ingest` one (Phase 2 단계 4, Fable review defense-in-depth). The server already
+ * preserves scope on piggyback refresh (단계 2), but a client guard means a single stray
+ * `ingest` refresh can't silently strip a logged-in user's `full` scope — which would
+ * defeat the 단계-4 adoption gate. Use this for TOFU/refresh persists; the login flow
+ * (verify-code) uses plain setExtToken since it is the authoritative `full` issuer.
+ */
+export async function setExtTokenNoDowngrade(token) {
+  const current = await getExtToken();
+  if (current && extTokenScope(current) === 'full' && extTokenScope(token) === 'ingest') {
+    console.log('[Claude Tuner] kept full ext_token (refresh returned ingest — no downgrade)');
+    return;
+  }
+  return setExtToken(token);
+}
+
 export async function clearExtToken() {
   return chrome.storage.local.remove('extToken');
 }
@@ -278,6 +312,20 @@ export async function clearExtTokenIfMatches(sentToken) {
   if (currentToken !== sentToken) return false;
   await clearExtToken();
   return true;
+}
+
+/**
+ * Phase 2 단계 4 login-first gate. True when this is a FRESH install (grandfathered === false,
+ * set on 'install') that has NOT logged in (no extToken). Such installs show usage LOCALLY but
+ * do NOT POST to the server via the shared api_key — so no ingest-token TOFU is minted for new
+ * users (closing the oracle at the source for the growing population). Existing users are
+ * grandfathered on 'update' (=== true) and any extToken (login OR a prior token) opens the gate,
+ * so real/existing users' server sync is never withheld. `undefined` (never initialized) is
+ * treated as NOT gated — favouring existing users during the brief update-time window.
+ */
+export async function isServerSyncGated() {
+  const { serverSyncGrandfathered, extToken } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined, extToken: null });
+  return serverSyncGrandfathered === false && !extToken;
 }
 
 /**
@@ -301,10 +349,13 @@ export async function getAuthHeaders(config) {
  *    (only clears if the stored token still matches the one we actually sent).
  *  - API_KEY fallback paths receiving a 401 (no Bearer was sent → never clear).
  *
- * 403 is intentionally NOT handled here: today the server uses 403 for
- * email-mismatch (stale token), but it's a generic "forbidden" status and
- * future endpoints may use it for non-auth reasons. The main snapshot POST
- * acts as the canary and clears explicitly on its own 401/403.
+ * Generic 403 is intentionally NOT treated as a stale token (the server uses it for
+ * email-mismatch and other non-auth reasons; the snapshot POST is the canary that clears
+ * on its own 401/403). The ONE 403 handled here is the Phase 2 `scope_insufficient` case:
+ * an `ingest`-scoped token hit a full-required endpoint under enforce. That token is VALID,
+ * so we must NOT clear it (clearing → API_KEY re-TOFU → another `ingest` token → loop). We
+ * only raise `needsFullLogin` so the UI can surface the login CTA; the feature degrades to a
+ * login prompt instead of a frozen/looping call.
  */
 export async function authedFetch(config, url, options = {}) {
   const auth = await getAuthHeaders(config);
@@ -321,8 +372,28 @@ export async function authedFetch(config, url, options = {}) {
         console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
       } catch { /* ignore URL parse errors */ }
     }
+  } else if (response.status === 403 && sentToken) {
+    await noteScopeInsufficient(response, url);
   }
   return response;
+}
+
+/**
+ * Peek a 403 body (via clone, so the caller can still read it) for the Phase 2
+ * `scope_insufficient` code and, if present, raise the needsFullLogin flag. Never clears
+ * the token (it is valid — just insufficient scope) and never throws.
+ */
+export async function noteScopeInsufficient(response, url) {
+  try {
+    const body = await response.clone().json();
+    if (body && body.code === 'scope_insufficient') {
+      await chrome.storage.local.set({ needsFullLogin: true });
+      try {
+        const path = new URL(url).pathname;
+        console.log(`[Claude Tuner] scope_insufficient at ${path} — full login needed for this feature`);
+      } catch { /* ignore URL parse errors */ }
+    }
+  } catch { /* not JSON / no code — leave the response untouched */ }
 }
 
 /** Extract the Bearer token from a getAuthHeaders() result, or null if API_KEY. */
@@ -365,6 +436,8 @@ export async function simpleAuthedPost(config, url, payload) {
         console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
       } catch { /* ignore URL parse errors */ }
     }
+  } else if (response.status === 403 && sentToken) {
+    await noteScopeInsufficient(response, url);
   }
   return response;
 }
@@ -388,9 +461,27 @@ export async function simpleAuthedPost(config, url, payload) {
  */
 export async function postSnapshot(config, payload) {
   if (!config.serverUrl) return null;
+  // Phase 2 단계 4 login-first gate (ChatGPT/Gemini path — Claude is gated in collect.js). A
+  // fresh, non-grandfathered, not-logged-in install shows usage locally (the caller already
+  // appended history) but does NOT send via the shared api_key. Surface the login CTA once.
+  if (await isServerSyncGated()) {
+    await chrome.storage.local.set({ showLoginPrompt: true });
+    return null;
+  }
   // Preflight-free simple request (see simplePost) — auth rides in the body.
   const { response, sentToken } = await simplePost(config, `${config.serverUrl}/api/snapshots`, payload);
 
+  // Phase 2 scope_insufficient: /api/snapshots is NOT scope-gated today (an ingest token is
+  // MEANT to write snapshots, §4.1.1), so this cannot fire now — but if a future contract ever
+  // scope-gates the ingest POST, a valid ingest token must NOT be cleared here (clearing →
+  // api_key re-TOFU → ingest loop). Peek first and raise needsFullLogin instead (Codex review).
+  if (response.status === 403 && sentToken) {
+    const body = await response.clone().json().catch(() => null);
+    if (body && body.code === 'scope_insufficient') {
+      await chrome.storage.local.set({ needsFullLogin: true });
+      return null;
+    }
+  }
   if (response.status === 401 || response.status === 403) {
     const cleared = await clearExtTokenIfMatches(sentToken);
     if (cleared) {
@@ -431,9 +522,10 @@ export async function postSnapshot(config, payload) {
     uuid: payload && payload.claude_org_uuid,
     provider: (payload && payload.provider) || 'claude',
   });
-  // Store ext_token from server (TOFU issuance or refresh)
+  // Store ext_token from server (TOFU issuance or refresh). No-downgrade: a refresh that
+  // returns 'ingest' must not strip a logged-in user's 'full' token (Phase 2 단계 4).
   if (result.ext_token) {
-    await setExtToken(result.ext_token);
+    await setExtTokenNoDowngrade(result.ext_token);
     // A fresh token arrived — clear any stale re-auth flag.
     await chrome.storage.local.remove('needsReauth');
   }

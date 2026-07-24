@@ -294,6 +294,18 @@
     [data-theme="dark"] .warn-banner .warn-msg { color: #fcd34d; }
     [data-theme="dark"] .warn-banner .warn-hint { color: var(--text-muted); }
     [data-theme="dark"] .warn-banner a { color: var(--accent); }
+    /* Verify CTA — unified with the permission banner (saturated amber, eye-catching). */
+    #login-cta { background: #fef3c7; border-color: #fbbf24; border-left-color: #fbbf24; }
+    #login-cta .cta-strong { color: #92400e; }
+    #login-cta .cta-sub { color: #b45309; }
+    #login-cta .cta-arrow { color: #b45309; }
+    #login-cta .btn-primary { background: #b45309; }
+    #login-cta .btn-primary:hover { background: #92400e; }
+    [data-theme="dark"] #login-cta { background: #422006; border-color: #b45309; border-left-color: #b45309; }
+    [data-theme="dark"] #login-cta .cta-strong { color: #fde68a; }
+    [data-theme="dark"] #login-cta .cta-sub { color: #fcd34d; }
+    [data-theme="dark"] #login-cta .cta-arrow { color: #fcd34d; }
+    [data-theme="dark"] #login-cta .btn-primary { background: #d97706; }
 
     /* 온보딩 가이드 */
     .onboarding { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
@@ -467,6 +479,39 @@
   <div id="ct-popup-promos"></div>
   <div id="ct-popup-notices" style="display:none"></div>
   <div id="perm-banner" class="perm-banner hidden"></div>
+
+  <!-- Login CTA (Phase 2 단계 4): shown to a fresh, not-logged-in install (showLoginPrompt).
+       Additive — usage still works locally; login unlocks server-backed features. New users
+       have no known email, so this collects one (pre-filled from the detected provider email). -->
+  <div id="login-cta" class="warn-banner hidden">
+    <!-- Collapsed mini reminder — persistent (never fully dismissed): "로컬만 사용" collapses to
+         this compact login bar (like the permission card) so the nudge stays but small. -->
+    <div id="login-cta-mini" style="display:none;align-items:center;gap:8px">
+      <span id="login-cta-mini-msg" class="cta-strong" style="flex:1;font-size:11px;line-height:1.4"></span>
+      <button id="login-cta-mini-login" class="btn-primary" style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:600;border:none;cursor:pointer;white-space:nowrap"></button>
+    </div>
+    <!-- Expanded full CTA: benefits (✓) → down arrow → verify action -->
+    <div id="login-cta-full">
+      <div id="login-cta-title" class="cta-strong" style="font-size:13px;font-weight:700;line-height:1.35;margin-bottom:3px"></div>
+      <div id="login-cta-msg" class="cta-sub" style="font-size:11.5px;line-height:1.45;margin-bottom:10px"></div>
+      <div id="login-cta-feats" style="display:flex;flex-direction:column;gap:7px;margin-bottom:10px"></div>
+      <div class="cta-arrow" style="text-align:center;line-height:1;margin:0 0 8px"><span style="font-size:15px">↓</span></div>
+      <div id="login-cta-prompt" class="cta-sub" style="font-size:11px;font-weight:600;text-align:center;margin-bottom:7px"></div>
+      <div id="login-cta-step-email">
+        <input id="login-cta-email" type="email" autocomplete="email" inputmode="email"
+          style="width:100%;box-sizing:border-box;padding:9px 10px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;font-size:13px;text-align:center" />
+        <button id="login-cta-send" class="btn-primary" style="width:100%;padding:9px;border-radius:8px;font-size:12.5px;font-weight:700;border:none;cursor:pointer"></button>
+        <button id="login-cta-dismiss" style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
+      </div>
+      <div id="login-cta-step-verify" class="hidden">
+        <input id="login-cta-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+          style="width:100%;box-sizing:border-box;padding:9px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;font-size:15px;letter-spacing:4px;text-align:center" />
+        <button id="login-cta-verify" class="btn-primary" style="width:100%;padding:9px;border-radius:8px;font-size:12.5px;font-weight:700;border:none;cursor:pointer"></button>
+      </div>
+      <div id="login-cta-status" class="warn-hint" style="margin-top:7px;text-align:center"></div>
+    </div>
+  </div>
+
 
   <div class="status-row">
     <div id="status-indicator" class="status-dot gray"></div>

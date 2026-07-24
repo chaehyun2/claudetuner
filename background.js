@@ -432,6 +432,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   // Open welcome page on fresh install (captures ref_source)
   if (details.reason === 'install') {
+    // Phase 2 단계 4 login-first: a FRESH install is NOT grandfathered → its usage is shown
+    // locally, but it does NOT send to the server via the shared api_key. Server sync (and the
+    // ingest-token TOFU it would mint) is gated behind login. Existing users are grandfathered
+    // in the 'update' branch so their fallback is never broken.
+    // 🔴 Set this FIRST — before opening the welcome tab or ANY awaited work — so a fast
+    // force_collect from the welcome page can't observe an uninitialized flag (which reads as
+    // NOT gated) and leak one api_key POST → an ingest token (Codex review HIGH).
+    await chrome.storage.local.set({ serverSyncGrandfathered: false });
     // Only force the welcome page's language when the user has *explicitly* set
     // the extension language. On 'auto' (the default), pass no param and let the
     // welcome page self-detect via navigator.language — the same signal the popup
@@ -453,6 +461,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: undefined });
     if (sidePanelAutoOpened === undefined) {
       await chrome.storage.local.set({ sidePanelAutoOpened: true });
+    }
+    // Grandfather EXISTING users so login-first never breaks their current server sync
+    // (many sync via the api_key fallback today). Only set if never set — a fresh install
+    // under this regime already wrote `false` and must stay gated across future updates.
+    const { serverSyncGrandfathered } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined });
+    if (serverSyncGrandfathered === undefined) {
+      await chrome.storage.local.set({ serverSyncGrandfathered: true });
     }
     // v1.24→1.25 migration: re-request previously-required host permissions
     // that moved to optional_host_permissions (Chrome may not auto-retain them)
@@ -1546,11 +1561,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ success: false, error: data.error || 'invalid_code' });
           return;
         }
-        // Store independent account + ext_token
+        // Store independent account + login-proven ext_token (scope:'full'). This opens the
+        // Phase 2 단계 4 server-sync gate (extToken now present) and clears the login CTA flags
+        // so the popup/welcome nudge disappears and scope_insufficient degradation resets.
         await chrome.storage.local.set({
           independentAccount: { email: data.email, name: data.name || '' },
           extToken: data.ext_token,
         });
+        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
         sendResponse({ success: false, error: e.message });
