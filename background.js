@@ -12,6 +12,7 @@ import {
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
+import { extTokenEmail } from './bg/ext-token-claims.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
@@ -514,6 +515,36 @@ chrome.runtime.onConnectExternal.addListener((port) => {
   // Used to wake up the service worker via connect → disconnect, no further handling needed
 });
 
+// THE answer to "which Tuner account does this install sync into". Every consumer must go
+// through this — the dashboard's account-mismatch banner (GET_ACCOUNT_EMAIL) and its settings
+// org selector (GET_COLLECTED_ORGS) compare the result against the account on screen, and if
+// the two handlers could disagree, a dashboard would pass one guard while the other named a
+// different account. The server does not verify org ownership when selected_orgs is saved
+// (worker/src/routes/me.ts), so that guard is the only thing standing there.
+//
+// Priority: the ext_token's own `email` claim, because that IS the account the server files
+// snapshots under. accountCache is the provider profile behind an 8-hour TTL — bg/collect.js now
+// refreshes it when the observed address changes, but the token remains the more direct answer.
+// Fall back to the cache and then the magic-link account only when there is no usable token
+// (gated install, fresh install, or an expired one).
+async function resolveSyncIdentity() {
+  const { accountCache, independentAccount, extToken } = await chrome.storage.local.get({
+    accountCache: null,
+    independentAccount: null,
+    extToken: null,
+  });
+  const email = extTokenEmail(extToken)
+    || accountCache?.email
+    || independentAccount?.email
+    || null;
+  // Display names are stored next to their own address; attach one only when it is actually the
+  // name for `email`, never just because it happens to be cached.
+  let name = '';
+  if (email && email === accountCache?.email) name = accountCache.name || '';
+  else if (email && email === independentAccount?.email) name = independentAccount.name || '';
+  return { email, name };
+}
+
 // Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'set_ref_source' && message.ref_source) {
@@ -537,24 +568,23 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return;
   }
 
-  // Get the account the extension is currently collecting for (read-only, no token
-  // minted — unlike GET_CLAUDE_LOGIN). The dashboard uses this to detect an
-  // account mismatch: when the signed-in dashboard account has no data but the
-  // extension is collecting under a DIFFERENT email, it can point the user to the
-  // right account instead of showing a misleading "collection stopped" banner.
+  // Get the Tuner account this install syncs INTO (read-only, no token minted — unlike
+  // GET_CLAUDE_LOGIN). The dashboard uses this to detect an account mismatch: when its
+  // signed-in account differs from the one the extension feeds, it can point the user to the
+  // right account instead of showing a misleading "collection stopped" / "no data" banner.
+  //
+  // The ext_token's own `email` claim is the authority, NOT accountCache. accountCache is the
+  // provider profile behind an 8-hour TTL that is only refreshed on force/expiry or an org-uuid
+  // change (bg/collect.js) — and changing your provider account email changes neither. So right
+  // after the migration this feature exists to explain (server re-mints the token against the
+  // new address), accountCache still names the OLD account, and reporting it made the dashboard
+  // conclude "same account" and clear the very warning it was supposed to raise.
+  // Fall back to accountCache / independentAccount when there is no token yet (gated or fresh
+  // install), where they are the best available answer.
   if (message && message.type === 'GET_ACCOUNT_EMAIL') {
     (async () => {
       try {
-        const { accountCache, independentAccount } = await chrome.storage.local.get({
-          accountCache: null,
-          independentAccount: null,
-        });
-        let email = accountCache?.email || null;
-        let name = accountCache?.name || '';
-        if (!email && independentAccount?.email) {
-          email = independentAccount.email;
-          name = independentAccount.name || '';
-        }
+        const { email, name } = await resolveSyncIdentity();
         sendResponse({ success: !!email, email, name });
       } catch (e) {
         sendResponse({ success: false, error: e.message });
@@ -604,17 +634,17 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   if (message && message.type === 'GET_COLLECTED_ORGS') {
     (async () => {
       try {
-        const { collectedOrgs = [], accountCache, independentAccount } = await chrome.storage.local.get({
-          collectedOrgs: [], accountCache: null, independentAccount: null,
-        });
+        const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
         const orgs = (collectedOrgs || [])
           .filter(o => o && o.uuid)
           .map(o => ({ provider: o.provider || 'claude', uuid: o.uuid, name: o.name || '', plan: o.plan || '' }));
-        // The account this extension is collecting for — the dashboard compares it to the
-        // displayed account and only trusts these orgs when they match, so an admin viewing
-        // another user (viewAs) or a switched/shared machine never injects the wrong user's
-        // orgs into the settings selector.
-        const email = accountCache?.email || independentAccount?.email || null;
+        // The account this extension syncs into — the dashboard compares it to the displayed
+        // account and only trusts these orgs when they match, so an admin viewing another user
+        // (viewAs) or a switched/shared machine never injects the wrong user's orgs into the
+        // settings selector. MUST be the same resolution GET_ACCOUNT_EMAIL uses: if the two
+        // disagreed, a dashboard could pass one handler's guard while the other names a
+        // different account, and the server does not check org ownership on save.
+        const { email } = await resolveSyncIdentity();
         sendResponse({ success: true, orgs, email });
       } catch (e) {
         sendResponse({ success: false, error: e.message });

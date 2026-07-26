@@ -852,6 +852,10 @@
     <a id="independent-signout" href="#" class="hidden" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none" data-i18n="sign_out">Sign out</a>
   </div>
 
+  <!-- Which Tuner account the data actually lands in. Hidden unless it differs from the
+       provider account shown above (see renderSyncAccountNote in ui/render.js). -->
+  <div id="sync-account-note" class="user-info hidden" style="margin-top:4px"></div>
+
   <!-- Plan change confirmation modal -->
   <div id="smart-rec-confirm-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center">
     <div style="width:320px;max-width:90%;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 4px 24px rgba(0,0,0,0.3)">

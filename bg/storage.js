@@ -1,3 +1,4 @@
+import { extTokenScope, extTokenEmail } from './ext-token-claims.js';
 import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME } from './constants.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
 import { applyServerCadence } from './cadence-config.js';
@@ -261,22 +262,11 @@ export async function setExtToken(token) {
   return chrome.storage.local.set({ extToken: token });
 }
 
-/**
- * Read the provenance `scope` claim from an ext_token WITHOUT verifying it (Phase 2).
- * The token is a JWT (header.payload.sig); we only peek the payload's `scope` for
- * client-side UX decisions — the server is the sole authority that verifies the HMAC.
- * Returns 'ingest' | 'full' | undefined (legacy tokens, or any parse failure).
- */
-export function extTokenScope(token) {
-  try {
-    let b64 = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-    while (b64.length % 4) b64 += '=';
-    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    return JSON.parse(new TextDecoder().decode(bytes)).scope;
-  } catch {
-    return undefined;
-  }
-}
+// Token claim readers live in a leaf module (bg/ext-token-claims.js) so the popup can use
+// them without importing this file's dependency chain. Re-exported so existing importers of
+// storage.js keep working; imported too because setExtTokenNoDowngrade() calls extTokenScope
+// locally (a bare `export ... from` would NOT create that local binding).
+export { extTokenScope, extTokenEmail };
 
 /**
  * Persist a server-issued ext_token, but NEVER downgrade a login-proven `full` token
@@ -396,6 +386,56 @@ export async function noteScopeInsufficient(response, url) {
   } catch { /* not JSON / no code — leave the response untouched */ }
 }
 
+/**
+ * Server contract: the 401 code returned by the email-provider guard
+ * (worker/src/routes/snapshots.ts, resolveEmailProviderGuard). An account whose
+ * auth_provider is 'email' may NOT authenticate with the shared api_key (shared-key
+ * impersonation guard, 문의 #179/#180 / PR #464) — the snapshot is rejected AND not
+ * stored. Those installs hold no ext_token, so the generic 401 path below can only
+ * call clearExtTokenIfMatches(null) → nothing cleared, nothing flagged, and the block
+ * is completely invisible: usage keeps rendering locally while the server never
+ * receives a row. This code is what makes that case machine-detectable client-side.
+ */
+export const AUTH_BLOCKED_CODE = 'login_required';
+
+/**
+ * Peek a 401 body (via clone, so the caller can still read it) for the email-provider
+ * guard's `login_required` code and, if present, raise the `authBlocked` flag that the
+ * popup CTA consumes (popup.js renderLoginCta). Mirrors noteScopeInsufficient: never
+ * throws, never clears the token.
+ *
+ * Only fires when NO Bearer was sent (sentToken === null): the guard rejects api_key
+ * auth specifically, so a 401 that carried a token is an ordinary stale-token 401 and
+ * belongs to the clear-and-reauth path instead.
+ *
+ * Returns true when the flag was raised, so callers can return early without running
+ * the stale-token clear.
+ */
+export async function noteAuthBlocked(response, sentToken, url) {
+  if (sentToken) return false;
+  try {
+    const body = await response.clone().json();
+    if (body && body.code === AUTH_BLOCKED_CODE) {
+      await chrome.storage.local.set({ authBlocked: true });
+      try {
+        const path = new URL(url).pathname;
+        console.log(`[Claude Tuner] login_required at ${path} — email account cannot use the shared key; log in to sync`);
+      } catch { /* ignore URL parse errors */ }
+      return true;
+    }
+  } catch { /* not JSON / no code — leave the response untouched */ }
+  return false;
+}
+
+/**
+ * Drop the authBlocked flag after a POST the server actually accepted. Without this the
+ * CTA would survive the login that fixed it (same reason background.js clears
+ * showLoginPrompt/needsFullLogin on VERIFY_MAGIC_CODE).
+ */
+export async function clearAuthBlocked() {
+  await chrome.storage.local.remove('authBlocked');
+}
+
 /** Extract the Bearer token from a getAuthHeaders() result, or null if API_KEY. */
 export function bearerFromAuthHeaders(auth) {
   return auth?.Authorization?.startsWith('Bearer ') ? auth.Authorization.slice(7) : null;
@@ -482,6 +522,11 @@ export async function postSnapshot(config, payload) {
       return null;
     }
   }
+  // email-provider guard (401 login_required, api_key auth only): the reject is intended and
+  // stays, but it must not be silent — raise authBlocked so the popup can ask for a login.
+  if (response.status === 401 && await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`)) {
+    return null;
+  }
   if (response.status === 401 || response.status === 403) {
     const cleared = await clearExtTokenIfMatches(sentToken);
     if (cleared) {
@@ -514,6 +559,13 @@ export async function postSnapshot(config, payload) {
 
   const result = await response.json().catch(() => ({}));
   await noteServerSuccess(); // confirmed-healthy POST clears any backoff
+  // Drop the CTA flag once auth demonstrably works again — but ONLY on evidence of a
+  // TOKEN, not on any 2xx. A plain accepted api_key POST does not prove recovery: when the
+  // [C1] guard's D1 read times out it fails open on ingest (extTokenAllowed=false, NO 401,
+  // worker snapshots.ts resolveEmailProviderGuard), so a still-blocked account gets a 200
+  // during a primary stall and would flicker its CTA off for the whole stall window.
+  // A Bearer we sent, or a token the server minted, is the real proof (Codex review).
+  if (sentToken || result?.ext_token) await clearAuthBlocked();
   // Store any server-tunable cadence override here — the shared chokepoint for ALL
   // POSTs (Claude + ChatGPT + Gemini), so provider-only accounts get cadence too. The
   // payload names the stream this response answers, so a per-stream standby verdict

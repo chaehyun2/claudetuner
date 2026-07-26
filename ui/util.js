@@ -242,6 +242,13 @@ export function _cTick() { return _isDark() ? '#94a3b8' : '#6b7280'; }
 // Dashboard URL deep-linked to a specific org (?org=<uuid>); plain dashboard when no
 // org. The dashboard resolves the uuid against its org list (provider included), so a
 // single org param covers Claude/ChatGPT/Gemini.
+//
+// Deliberately carries NO account identity. An earlier attempt appended the synced account as
+// a `#sync=` fragment so the dashboard could spot an account divergence; that was the wrong
+// rail. The dashboard can just ASK the extension (site/shared/ext-detect.js
+// getCollectingAccountEmail via externally_connectable), which works from bookmarks and typed
+// URLs too instead of only from links the extension rewrote — and keeps the address out of the
+// URL entirely, which matters because the dashboard forwards location.href to analytics.
 export function dashboardUrl(orgId) {
   return orgId
     ? `https://claudetuner.com/dashboard/?org=${encodeURIComponent(orgId)}`

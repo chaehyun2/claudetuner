@@ -85,14 +85,11 @@ export function _updateUICore(status) {
     // no magic-link signup) fall back to the provider org's own email. The name
     // check keeps it backward-compatible with orgs collected before the `email`
     // field existed (name held the email, or 'Gemini'/'ChatGPT' when unknown).
+    const provEmail = provOrg
+      && (provOrg.email || (/@/.test(provOrg.name || '') ? provOrg.name : ''));
+    const footerEmail = state.independentEmail || provEmail || '';
     const userInfoEl = document.getElementById('user-info');
-    if (userInfoEl) {
-      const ver = 'v' + chrome.runtime.getManifest().version;
-      const provEmail = provOrg
-        && (provOrg.email || (/@/.test(provOrg.name || '') ? provOrg.name : ''));
-      const footerEmail = state.independentEmail || provEmail || '';
-      userInfoEl.textContent = footerEmail ? `${footerEmail} | ${ver}` : ver;
-    }
+    if (userInfoEl) _setFooterText(userInfoEl, footerEmail, 'v' + chrome.runtime.getManifest().version);
     return;
   }
 
@@ -483,11 +480,63 @@ export function _updateUICore(status) {
     renderPeakBanner();
 
     // User info + version (last collection time removed to save footer space)
-    const parts = [];
-    if (s.user_email !== 'unknown') parts.push(s.user_email);
-    parts.push('v' + chrome.runtime.getManifest().version);
-    document.getElementById('user-info').textContent = parts.join(' | ');
+    _setFooterText(
+      document.getElementById('user-info'),
+      s.user_email !== 'unknown' ? s.user_email : '',
+      'v' + chrome.runtime.getManifest().version,
+    );
   }
+}
+
+// Footer note naming the Tuner account collected data actually lands in — shown ONLY when it
+// differs from the provider account above it.
+//
+// Why it can differ, and why the difference is otherwise invisible: changing your provider
+// account email (e.g. on claude.ai) makes the next snapshot carry the new address. The server
+// rejects it against the old token (403 Email mismatch), the token is cleared, and the next
+// cycle re-mints against the NEW address — so the install migrates to a different Tuner
+// account on its own. The amber mismatch banner that could have explained this is REMOVED the
+// moment collection succeeds again (bg/collect.js), so by the time the user looks, everything
+// reads "fine" while the dashboard they open still shows the old account's data.
+//
+// Kept silent when the two match so the common case gains no clutter.
+// Records the address the footer is showing, so the sync note compares against exactly what the
+// user sees. Called by every branch that writes #user-info; the value is stashed on the element
+// instead of in `state` on purpose (see _footerAccountEmail).
+function _setFooterText(el, email, ver) {
+  el.dataset.email = email || '';
+  el.textContent = email ? `${email} | ${ver}` : ver;
+}
+
+// The address the footer is ACTUALLY showing.
+//
+// Deliberately not recomputed from state: _updateUICore has six early returns whose footer
+// precedence differs (independent email / provider org email / Claude snapshot email), and on
+// the error and no-data paths it leaves whatever the PREVIOUS render wrote in place. A
+// state-derived copy of that precedence disagreed with the DOM in exactly those cases — a
+// transient Claude error cleared currentSnapshot, so the note vanished while the stale email it
+// was explaining stayed on screen. Since the value is stored when the footer is written, it
+// survives those paths together with the text it describes.
+//
+// Read from a data attribute rather than parsed back out of the text: the rendered form is
+// "email | vX.Y.Z", and splitting on '|' mangles addresses that legitimately contain one
+// (the server's address validation permits it), either dropping a real warning or inventing one.
+function _footerAccountEmail() {
+  return document.getElementById('user-info')?.dataset.email || '';
+}
+
+export function renderSyncAccountNote() {
+  const el = document.getElementById('sync-account-note');
+  if (!el) return;
+  const sync = state.syncEmail;
+  const provider = (_footerAccountEmail() || '').trim().toLowerCase();
+  if (!sync || !provider || provider === 'unknown' || sync === provider) {
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  el.textContent = t('sync_account_note', sync);
+  el.classList.remove('hidden');
 }
 
 // Renders the amber "Claude account email mismatch" banner from storage.

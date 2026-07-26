@@ -109,6 +109,7 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Claude 사용량 수집만 일시 중단되었습니다. 메인 프로바이더는 정상 추적 중입니다.',
     'error_banner_hint': '에서 로그인 상태를 확인해주세요.',
     'open_claude': 'Claude.ai 열기',
+    'sync_account_note': '↪ 수집된 데이터는 {0} 계정에 쌓입니다',
     'email_mismatch_title': '⚠️ Claude 사용량이 수집되지 않고 있어요',
     'email_mismatch_msg': 'Claude.ai 로그인 계정({0})이 Claude Tuner 로그인 계정과 달라 Claude 사용량이 수집되지 않습니다.',
     'email_mismatch_msg_noemail': 'Claude.ai 로그인 계정이 Claude Tuner 로그인 계정과 달라 Claude 사용량이 수집되지 않습니다.',
@@ -158,6 +159,12 @@ const TRANSLATIONS = {
     'login_cta_scope_title': '이 기능은 이메일 인증이 필요합니다',
     'login_cta_scope_msg': '이 브라우저는 사용량 수집 전용으로 연결되어 있어 플랜 추천 등 일부 기능이 잠겨 있습니다. 이메일 인증 한 번으로 아래 기능이 켜집니다.',
     'login_cta_scope_mini': '🔒 인증하면 플랜 추천 등 잠긴 기능이 켜집니다',
+    // Auth-blocked variant: an email-login account cannot authenticate with the shared key, so the
+    // server drops its snapshots. Sync has STOPPED (local collection still works) — say that, don't
+    // pitch a feature. Copy sits in the same widget as the two variants above.
+    'login_cta_authblocked_title': '인증하고 서버 동기화 다시 켜기',
+    'login_cta_authblocked_msg': '사용량은 이 브라우저에 계속 기록되고 있지만, 서버에는 더 이상 저장되지 않고 있습니다. 이 계정은 이제 로그인이 필요합니다. 이메일 인증 한 번으로 다시 연결됩니다.',
+    'login_cta_authblocked_mini': '🔒 인증 필요 — 지금 이 브라우저의 사용량이 서버에 저장되지 않고 있습니다',
     // Status banner (6-tier pace)
     'pace_comfortable': '여유 — 마음껏 사용하세요!',
     'pace_ontrack': '순조로움 — 적절한 페이스입니다',
@@ -558,6 +565,7 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Only Claude usage tracking is paused. Your primary provider is still being tracked normally.',
     'error_banner_hint': 'to check your login status.',
     'open_claude': 'Open Claude.ai',
+    'sync_account_note': '↪ Collected data is syncing to {0}',
     'email_mismatch_title': '⚠️ Claude usage isn\'t being collected',
     'email_mismatch_msg': 'Your Claude.ai account ({0}) is different from your Claude Tuner account, so Claude usage cannot be collected.',
     'email_mismatch_msg_noemail': 'Your Claude.ai account is different from your Claude Tuner account, so Claude usage cannot be collected.',
@@ -607,6 +615,12 @@ const TRANSLATIONS = {
     'login_cta_scope_title': 'This feature needs email verification',
     'login_cta_scope_msg': 'This browser is connected for usage collection only, so features like plan recommendations are locked. One email verification enables everything below.',
     'login_cta_scope_mini': '🔒 Verify to unlock plan recommendations & more',
+    // Auth-blocked variant: an email-login account cannot authenticate with the shared key, so the
+    // server drops its snapshots. Sync has STOPPED (local collection still works) — say that, don't
+    // pitch a feature. Copy sits in the same widget as the two variants above.
+    'login_cta_authblocked_title': 'Verify to resume server sync',
+    'login_cta_authblocked_msg': 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires a login. One email verification restores it.',
+    'login_cta_authblocked_mini': '🔒 Verification needed — this browser\'s usage is not reaching the server',
     // Status banner (6-tier pace)
     'pace_comfortable': 'Comfortable — use freely!',
     'pace_ontrack': 'On Track — sustainable pace',

@@ -18,6 +18,9 @@ export const state = {
   dashNudgeEvaluated: false, // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
   isIndependent: false, // signed in via email (no Claude account) — suppress all Claude-centric status/errors
   independentEmail: '', // independent account email (shown in the footer)
+  syncEmail: null, // Tuner account the ext_token binds to = where collected data actually LANDS.
+                   // Diverges from the provider email after a provider account-email change
+                   // (see bg/ext-token-claims.js). null until a token exists.
   lastRecommendation: null, // cached Claude recommendation (restored when returning to primary org)
   recProvider: 'claude', // provider of the rec currently ON SCREEN — gates plan-change execution,
                          // which only Claude supports (see ui/recommend.js)

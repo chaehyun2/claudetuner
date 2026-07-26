@@ -2,13 +2,18 @@
 import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, _toggleChartYAxis, isChartAutoRoll, isChartRolling } from './ui/charts.js';
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
+import { extTokenEmail } from './bg/ext-token-claims.js';
 import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
-import { _updateUICore } from './ui/render.js';
+import { _updateUICore, renderSyncAccountNote } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
 
+// True once the storage.onChanged listener has reported an ext_token, which makes state.syncEmail
+// authoritative. The startup storage read then leaves it alone — the two are independent async
+// operations and the read can return an OLDER token after a rotation has already been notified.
+let _syncEmailLive = false;
 
 
 // Re-auth widget for a trapped email (independent) account: its ext_token expired
@@ -104,11 +109,15 @@ async function renderReauthWidget() {
 // server-backed features (multi-browser merge, plan rec, trends, Wrapped, team). Unlike the
 // re-auth widget it has no known email, so it collects one (pre-filled from the detected
 // provider email when available). Dismiss = stay local-only (still gated, just no more nag).
+// scopeCtaShownFor value used by the email-provider block (see below): a fixed marker, because
+// that block is defined by the ABSENCE of a token and so has no token tail to fingerprint.
+const AUTH_BLOCKED_MARKER = 'auth-blocked';
+
 async function renderLoginCta() {
   const widget = document.getElementById('login-cta');
   if (!widget) return;
-  const { showLoginPrompt = false, extToken = null, independentAccount = null, loginCtaCollapsed = false, accountCache = null, needsFullLogin = false, scopeCtaShownFor = null } =
-    await chrome.storage.local.get({ showLoginPrompt: false, extToken: null, independentAccount: null, loginCtaCollapsed: false, accountCache: null, needsFullLogin: false, scopeCtaShownFor: null });
+  const { showLoginPrompt = false, extToken = null, independentAccount = null, loginCtaCollapsed = false, accountCache = null, needsFullLogin = false, scopeCtaShownFor = null, authBlocked = false } =
+    await chrome.storage.local.get({ showLoginPrompt: false, extToken: null, independentAccount: null, loginCtaCollapsed: false, accountCache: null, needsFullLogin: false, scopeCtaShownFor: null, authBlocked: false });
 
   // Phase 2 단계 5 consumer: a `ingest`-scoped token that hit a `full`-only endpoint gets a 403
   // scope_insufficient, which raises needsFullLogin (ui/auth.js, bg/storage.js, bg/collect.js).
@@ -119,10 +128,20 @@ async function renderLoginCta() {
   // present so a stale flag can't double up with the reauth widget after a 401 cleared it.
   const scopeBlocked = needsFullLogin === true && !!extToken;
 
+  // email-provider block (bg/storage.js AUTH_BLOCKED_CODE): an auth_provider='email' account
+  // POSTing with the shared api_key gets a 401 and its snapshot is DROPPED. The mirror image of
+  // scopeBlocked — these users hold NO token (that is exactly why the api_key was used), so the
+  // condition is !extToken. Every existing path left them invisible: showLoginPrompt is only set
+  // by the fresh-install gate and these are old installs (serverSyncGrandfathered === true), and
+  // the independentAccount?.email guard hides the widget from precisely the multi-provider users
+  // most likely to be blocked (Codex). So this is an OVERRIDE too, for both guards.
+  const authIsBlocked = authBlocked === true && !extToken;
+  const blocked = scopeBlocked || authIsBlocked;
+
   // The CTA (verify prompt) — trapped independent accounts go to renderReauthWidget; this is the
   // new-user path. NEVER fully dismissed: "Use locally only" COLLAPSES to a persistent mini
   // reminder (like the permission card) so verify is always one tap away, just small.
-  if (!scopeBlocked && (!showLoginPrompt || extToken || independentAccount?.email)) { widget.classList.add('hidden'); return; }
+  if (!blocked && (!showLoginPrompt || extToken || independentAccount?.email)) { widget.classList.add('hidden'); return; }
   widget.classList.remove('hidden');
 
   const full = document.getElementById('login-cta-full');
@@ -132,9 +151,11 @@ async function renderLoginCta() {
   // per blocked token, then honor further collapses as usual. The marker is the token's signature
   // tail (not the token — no second copy of a credential at rest) and self-clears: a fresh token
   // that gets blocked expands again.
+  // The email-provider block has no token to fingerprint (that is its defining trait), so it uses
+  // a fixed marker in the same slot — it is a per-account state, not a per-token one.
   let collapsed = loginCtaCollapsed;
-  const scopeMarker = scopeBlocked ? extToken.slice(-16) : null;
-  if (scopeBlocked && scopeCtaShownFor !== scopeMarker) {
+  const scopeMarker = scopeBlocked ? extToken.slice(-16) : (authIsBlocked ? AUTH_BLOCKED_MARKER : null);
+  if (blocked && scopeCtaShownFor !== scopeMarker) {
     collapsed = false;
     await chrome.storage.local.set({ scopeCtaShownFor: scopeMarker, loginCtaCollapsed: false });
   }
@@ -145,9 +166,11 @@ async function renderLoginCta() {
   if (collapsed) {
     full.classList.add('hidden');
     mini.style.display = 'flex';
-    document.getElementById('login-cta-mini-msg').textContent = scopeBlocked
-      ? (t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more')
-      : (t('login_cta_mini') || 'Log in for multi-device sync & more');
+    document.getElementById('login-cta-mini-msg').textContent = authIsBlocked
+      ? (t('login_cta_authblocked_mini') || 'Log in — this browser\'s usage is no longer being saved to the server')
+      : scopeBlocked
+        ? (t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more')
+        : (t('login_cta_mini') || 'Log in for multi-device sync & more');
     const miniBtn = document.getElementById('login-cta-mini-login');
     miniBtn.textContent = t('login_cta_mini_btn') || 'Log in';
     if (!miniBtn.dataset.bound) {
@@ -170,12 +193,19 @@ async function renderLoginCta() {
 
   // Scope-blocked users already sync (they hold an ingest token) — the pitch is the LOCKED
   // feature, not "turn on sync". Same verify flow underneath, so only the copy differs.
-  document.getElementById('login-cta-title').textContent = scopeBlocked
-    ? (t('login_cta_scope_title') || 'Log in to unlock this feature')
-    : (t('login_cta_title') || 'Turn on server sync');
-  document.getElementById('login-cta-msg').textContent = scopeBlocked
-    ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
-    : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
+  // Three audiences, one verify flow — only the pitch differs. authBlocked users are NOT being
+  // onboarded and are not missing an extra feature: their server sync has STOPPED, so the copy
+  // says that plainly (local usage still renders, which is why nothing looked wrong to them).
+  document.getElementById('login-cta-title').textContent = authIsBlocked
+    ? (t('login_cta_authblocked_title') || 'Log in to resume server sync')
+    : scopeBlocked
+      ? (t('login_cta_scope_title') || 'Log in to unlock this feature')
+      : (t('login_cta_title') || 'Turn on server sync');
+  document.getElementById('login-cta-msg').textContent = authIsBlocked
+    ? (t('login_cta_authblocked_msg') || 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires a login. One email verification restores it:')
+    : scopeBlocked
+      ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
+      : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
   const feats = [t('login_cta_feat1'), t('login_cta_feat2'), t('login_cta_feat3')].filter(Boolean);
   const featsBox = document.getElementById('login-cta-feats');
   featsBox.textContent = ''; // build via DOM (no innerHTML sink)
@@ -466,7 +496,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.storage.onChanged.addListener((changes, area) => {
       // needsFullLogin lands the same way (a 403 from a background collect or an in-popup
       // /fitness read), so it must re-render too or the CTA waits for the next popup open.
-      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin)) renderLoginCta();
+      // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
+      // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
+      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      // A token rotation IS the event this note exists for: a provider account-email change
+      // gets the old token rejected and a new one minted against the NEW address. The panel can
+      // sit open across that, so re-read the account — otherwise the footer keeps naming the
+      // previous account (or nothing) for the rest of the session, which is exactly the wrong
+      // answer at exactly the wrong moment.
+      if (area === 'local' && changes.extToken) {
+        state.syncEmail = extTokenEmail(changes.extToken.newValue);
+        // Mark the value as live so the startup read below can't roll it back: that read and
+        // this notification are independent async operations, and POPUP_OPENED triggers a
+        // collection that can rotate the token while the initial storage.get is still in
+        // flight — landing an older token after the newer one.
+        _syncEmailLive = true;
+        renderSyncAccountNote();
+      }
     });
   }
 
@@ -581,7 +627,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null }, (result) => {
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null }, (result) => {
+      // Which Tuner account this install actually syncs into (see bg/ext-token-claims.js).
+      // Skipped once the onChanged listener has already reported a token: this read was issued
+      // earlier, so applying it now would replace a newer token with an older one.
+      if (!_syncEmailLive) state.syncEmail = extTokenEmail(result.extToken);
       state.onboardOrgName = result.onboardOrgName || null;
       state.usageHistory = result.usageHistory || [];
       state.historyLoaded = true;
@@ -686,6 +736,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderReauthWidget();
       renderLoginCta();
       checkProviderPermissions();
+      // Same reason: the sync-account note is imperative t() text with no data-i18n attribute.
+      // It can't wait for the updateUI() below either — that only runs when lastStatus exists,
+      // and provider-only (ChatGPT/Gemini) installs render from collectedOrgs with a null
+      // lastStatus, so their note would keep the previous language until some other event.
+      renderSyncAccountNote();
       // Full UI re-render including dynamically generated text
       chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
         state.usageHistory = r.usageHistory || [];
@@ -1309,7 +1364,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 function updateUI(status) {
   state.lastUpdateUIStatus = status;
   if (state.updateUITimer) clearTimeout(state.updateUITimer);
-  state.updateUITimer = setTimeout(() => { state.updateUITimer = null; _updateUICore(state.lastUpdateUIStatus); }, 50);
+  state.updateUITimer = setTimeout(() => {
+    state.updateUITimer = null;
+    _updateUICore(state.lastUpdateUIStatus);
+    // Single call site on purpose: _updateUICore has six early returns (independent /
+    // provider-only / no-data / error paths), so calling this from inside it would need a call
+    // per branch and the next branch added would silently strand a stale note on screen.
+    // Derives the account itself and hides itself when there is nothing to say.
+    renderSyncAccountNote();
+  }, 50);
 }
 
 

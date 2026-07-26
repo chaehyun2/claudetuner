@@ -15,7 +15,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -467,6 +467,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         }
       }
     }
+    // Snapshot the org-derived address before /api/account can overwrite userEmail below. Used
+    // to notice a provider account-email change: it is the only email signal we get on a cached
+    // cycle, so a change in it is our cue that accountCache needs re-fetching.
+    const orgDerivedEmail = userEmail === 'unknown' ? null : userEmail;
     // Fetch email + seat_tier from /api/account (cached 8 hours)
     // grove_enabled has separate cache (30 min) — may change more frequently
     let seatTier = null;
@@ -480,7 +484,25 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       const groveC = cached.groveCache;
 
       // --- account (email, seatTier) ---
-      const acctCacheValid = !force && cache && (Date.now() - cache.ts) < ACCOUNT_CACHE_TTL && cache.orgUuid === bestOrg?.uuid;
+      // Changing your provider account email moves neither the org uuid nor the clock, so the
+      // TTL/org checks alone would keep serving the OLD address for up to 8 hours. That is not
+      // cosmetic: the provider collectors (bg/collect-{chatgpt,gemini}.js) send accountCache's
+      // address as their server identity, and the server mints the ext_token from whatever a
+      // successful POST carried — so a stale cache makes ChatGPT/Gemini re-mint a token for the
+      // OLD account every cycle, rolling the migration back until the TTL finally expires.
+      //
+      // Detect it by CHANGE in the org-derived address, not by disagreement with cache.email:
+      // those two legitimately differ forever for a team member (the org list can only offer the
+      // owner's address), and comparing them would refetch /api/account on every single cycle.
+      // Comparing against the org-derived value recorded when the cache was written is stable —
+      // it only trips when the signal itself moves. Entries written before this field existed
+      // have no recorded value, so they keep the old behaviour until their next natural refresh.
+      const acctOrgEmailChanged = !!cache?.orgEmail && !!orgDerivedEmail && cache.orgEmail !== orgDerivedEmail;
+      const acctCacheValid = !force && cache && (Date.now() - cache.ts) < ACCOUNT_CACHE_TTL
+        && cache.orgUuid === bestOrg?.uuid && !acctOrgEmailChanged;
+      if (acctOrgEmailChanged) {
+        console.log('[Claude Tuner] account email changed:', cache.orgEmail, '->', orgDerivedEmail, '— refreshing accountCache');
+      }
       if (acctCacheValid) {
         if (userEmail === 'unknown' && cache.email) userEmail = cache.email;
         seatTier = cache.seatTier || null;
@@ -505,7 +527,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             if (mOrgUuid && m.seat_tier) allSeatTiers[mOrgUuid] = m.seat_tier;
           }
           const acctName = acct?.full_name || acct?.display_name || '';
-          await chrome.storage.local.set({ accountCache: { email: acctEmail, name: acctName, seatTier, orgUuid: bestOrgUuid, allSeatTiers, ts: Date.now() } });
+          // orgEmail = the org-derived address seen alongside this fetch. It is the baseline the
+          // cached branch compares against to notice an account-email change (see above); it is
+          // NOT the identity — `email` from /api/account is.
+          await chrome.storage.local.set({ accountCache: { email: acctEmail, name: acctName, seatTier, orgUuid: bestOrgUuid, allSeatTiers, orgEmail: orgDerivedEmail, ts: Date.now() } });
           console.log('[Claude Tuner] Account API:', acctEmail, 'seat:', seatTier, 'org:', bestOrgUuid);
           // Parse grove_enabled from the same response (no extra API call needed)
           const groveNeedsFresh = force || !groveC || (Date.now() - groveC.ts) >= GROVE_CACHE_TTL;
@@ -862,6 +887,20 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           await chrome.storage.local.set({
             claudeEmailMismatch: { claudeEmail: snapshot.user_email || null, ts: Date.now() },
           });
+          // This 403 IS the server telling us the token identity and the snapshot identity have
+          // diverged, which is exactly the event accountCache needs to hear about — and a far
+          // more reliable signal than the org-list heuristic used at collection time, which
+          // cannot see a member's own address change when the org list only exposes the owner's.
+          // Expire the entry (rather than removing it) so the next cycle refetches /api/account,
+          // the authority, while seatTier/allSeatTiers stay available as a fallback meanwhile.
+          // Without this, the provider collectors keep sending the stale cached address, the
+          // server re-mints the token against it, and the migration is undone every cycle until
+          // the 8h TTL finally lapses.
+          const { accountCache: _staleAcct } = await chrome.storage.local.get('accountCache');
+          if (_staleAcct && _staleAcct.ts) {
+            await chrome.storage.local.set({ accountCache: { ..._staleAcct, ts: 0 } });
+            console.log('[Claude Tuner] accountCache expired by 403 email mismatch — will refetch /api/account');
+          }
         }
         // Keep existing token-clear behavior (race-safe: only clears if unchanged).
         const cleared = await clearExtTokenIfMatches(sentToken);
@@ -871,6 +910,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         return;
       }
       if (response.status === 401) {
+        // email-provider guard (401 login_required): an auth_provider='email' account is barred
+        // from the shared api_key, so this POST was rejected AND not stored. The reject is
+        // intended; the SILENCE was the bug — these installs hold no ext_token, so the clear
+        // below is a no-op and nothing ever surfaced. Raise authBlocked for the popup CTA.
+        if (await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`)) return;
         // ext_token invalid/expired — clear and fall back to API key next cycle.
         // Race-safe: only clear if the token we sent is still the stored one.
         const cleared = await clearExtTokenIfMatches(sentToken);
@@ -905,6 +949,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // Claude accepted (email matched the token identity) — clear any prior
       // email-mismatch warning so the popup banner disappears once collection works.
       await chrome.storage.local.remove('claudeEmailMismatch');
+      // Same for the email-provider block, but keyed on a TOKEN rather than on any 2xx: the
+      // [C1] guard fails OPEN on ingest when its D1 read times out (no 401), so a plain
+      // api_key POST can be accepted while the account is still blocked — clearing there
+      // would blink the CTA off for the length of a primary stall. A Bearer we sent, or a
+      // token the server minted, is the only real proof of recovery (Codex review).
+      if (sentToken || result?.ext_token) await clearAuthBlocked();
 
       // Confirmed Claude collection via a valid ext_token → if this is an email
       // (independent) account, upgrade it to 'claude' server-side (one-time) so it
