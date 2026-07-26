@@ -2,8 +2,8 @@
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
 import { gaugeColor, formatCountdown, formatResetAbsolute, formatTimeAgo, setRenewalDisplay } from './util.js';
-import { state, _filteredHistory } from './state.js';
-import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
+import { state, _filteredHistory, isDetailHidden } from './state.js';
+import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
 import { _providerOrgLabel } from './org-selector.js';
 import { _authedFetch } from './auth.js';
@@ -351,6 +351,10 @@ export function _updateUICore(status) {
       }
     }
 
+    // If a window is already maxed out, overwrite the strip with a plain "limit reached — wait
+    // until {reset}" message (overrides the collecting teaser renderGaugePrediction may have set).
+    renderLimitReachedHeadline(util5h, s.five_hour?.resets_at, util7d, s.seven_day?.resets_at);
+
     // === Extra usage (collapsible) ===
     const extraSection = document.getElementById('extra-usage-section');
     const extraTooltip = document.getElementById('extra-usage-tooltip');
@@ -467,7 +471,11 @@ export function _updateUICore(status) {
     }
 
     // === "Is it OK to use now?" status (excluding Enterprise) ===
-    if (!isEnterprise) {
+    // Skipped while the overview covers the detail view: #status-banner is display:none there,
+    // and this runs on every lastStatus write during a collection run (it also costs a full
+    // _filteredHistory() scan). enterDetail() -> selectOrg() re-renders the banner, so nothing
+    // stale can survive the trip back.
+    if (!isEnterprise && !isDetailHidden()) {
       renderStatusBanner(util5h, util7d, _filteredHistory(), s.five_hour?.resets_at, s.seven_day?.resets_at);
     }
 

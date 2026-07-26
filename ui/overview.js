@@ -9,12 +9,9 @@
 // overview only hides the detail sections via a body class, so removing that class
 // restores each section to whatever its own logic last set (zero regression risk).
 import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
-import { state } from './state.js';
-import { calcPredictedAtReset } from './prediction.js';
+import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
+import { calcPredictedAtReset, NEAR_LIMIT_PCT } from './prediction.js';
 import { selectOrg } from './org-selector.js';
-
-// Body class that hides every detail section (see popup.html `body.ct-view-overview`).
-const OVERVIEW_CLASS = 'ct-view-overview';
 
 // Drag-reorder state (module-level so the cross-device onChanged handler can tell a
 // drag is in progress and skip a re-render that would yank the card mid-gesture).
@@ -38,11 +35,53 @@ function _providerLogo(provider) {
   return `<span class="ov-logo">${svg}</span>`;
 }
 
-// Per-org usage-history slice — mirrors state._filteredHistory() but for an arbitrary
-// org (we compute projections for ALL cards, not just the selected one).
-function _orgHistory(org) {
-  const includeLegacy = org.isPrimary && (org.provider || 'claude') === 'claude';
-  return state.usageHistory.filter(p => p.org === org.uuid || (!p.org && includeLegacy));
+// Per-org usage-history slices — mirrors state._filteredHistory() but for ALL orgs at
+// once (we compute projections for every card, not just the selected one).
+//
+// Perf: state.usageHistory is one flat list of up to 30 days of points for every org.
+// Slicing it with one .filter() per card was O(orgs x history) — a full scan per card on
+// every render. Bucket the whole list in a SINGLE pass instead, and memoize the result so
+// consecutive renders of unchanged data reuse the same slices instead of re-allocating
+// tens of thousands of entries on every storage event.
+let _bucketCache = { src: null, len: 0, sig: '', map: null };
+
+// Cheap identity of the org set as far as bucketing is concerned (uuid + the two fields
+// that decide who owns legacy org-less rows).
+function _orgsSignature(orgs) {
+  let sig = '';
+  for (const o of orgs) sig += `${o.uuid}${o.isPrimary ? 1 : 0}${o.provider || 'claude'}`;
+  return sig;
+}
+
+// uuid -> that org's history points, in the original chronological order.
+function _historyByOrg(orgs) {
+  const src = state.usageHistory || [];
+  const sig = _orgsSignature(orgs);
+  const c = _bucketCache;
+  // Cache key: array identity + length + the org signature. Identity alone covers the
+  // normal path (every reload assigns a fresh array from chrome.storage); the length check
+  // is a cheap extra guard so an in-place append could never serve stale buckets.
+  if (c.map && c.src === src && c.len === src.length && c.sig === sig) return c.map;
+
+  const map = new Map();
+  for (const org of orgs) map.set(org.uuid, []);
+  // Legacy rows carry no .org and belong to the Claude primary org — the same rule the
+  // per-org filter applied. Collected as a list so a (malformed) multi-primary org set
+  // still gives every primary the legacy rows, exactly like the old per-org filter did.
+  const legacyBuckets = [];
+  for (const org of orgs) {
+    if (org.isPrimary && (org.provider || 'claude') === 'claude') legacyBuckets.push(map.get(org.uuid));
+  }
+  for (const p of src) {
+    if (p.org) {
+      const bucket = map.get(p.org);
+      if (bucket) bucket.push(p);
+    } else {
+      for (const bucket of legacyBuckets) bucket.push(p);
+    }
+  }
+  _bucketCache = { src, len: src.length, sig, map };
+  return map;
 }
 
 // Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini — matches org chips.
@@ -85,6 +124,19 @@ function _gaugeRow(labelKey, current, pred, resetAt) {
   const sub = resetAt
     ? `<div class="gauge-sub">⏱ ${formatCountdown(resetAt)}<br>↻ ${formatResetAbsolute(resetAt)}</div>`
     : '';
+  // Limit forecast (mirrors the detail view): exact "한도 도달 예상 {time}" when the window is
+  // projected to hit 100% before reset, else a "한도 근접 (~X%)" heads-up when it's near the cap.
+  // Keeps the compact card quiet below the near-limit threshold.
+  let limitLine = '';
+  if (pred && pred.rate > 0 && current < 100) {
+    if (pred.predicted >= 100) {
+      const hoursTo100 = pred.hoursTo100 != null ? pred.hoursTo100 : (100 - current) / pred.rate;
+      const limitTime = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
+      limitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_limit_at', limitTime))}</div>`;
+    } else if (pred.predicted >= NEAR_LIMIT_PCT) {
+      limitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
+    }
+  }
   return '<div class="gauge-row">'
     + '<div class="gauge-header">'
     + `<span class="gauge-label">${t(labelKey)}</span>`
@@ -96,6 +148,7 @@ function _gaugeRow(labelKey, current, pred, resetAt) {
     + predFill
     + '</div>'
     + sub
+    + limitLine
     + '</div>';
 }
 
@@ -112,7 +165,8 @@ function _spendRow(org) {
     + `<div class="gauge-sub">$${used} / $${limit}</div></div>`;
 }
 
-function _renderCard(org) {
+// `hist` is this org's pre-bucketed history slice (see _historyByOrg).
+function _renderCard(org, hist) {
   const provider = org.provider || 'claude';
   const isEnterprise = /Enterprise/i.test(org.plan);
   const isUsageBased = isEnterprise && org.h5 == null && org.d7 == null;
@@ -137,7 +191,6 @@ function _renderCard(org) {
     // Gemini plan with no 5h/7d limits: single "no usage limits" row.
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
-    const hist = _orgHistory(org);
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
     rows += _gaugeRow('usage_5h', org.h5, p5, org.resetsAt5h);
     const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
@@ -191,56 +244,52 @@ function _dragAfterElement(sec, y) {
   return closest.el;
 }
 
-// (Re)render the overview card list from state.collectedOrgs into #overview-section.
-export function renderOverview() {
-  const sec = document.getElementById('overview-section');
-  if (!sec) return;
-  const orgs = _orderedOrgs(state.collectedOrgs || []);
-  // One-time hint teaching that a card click drills into the detail view (so users
-  // migrating from the old single-view don't think the detail screen disappeared).
-  const hint = state.overviewHintDismissed
-    ? ''
-    : `<div class="ov-hint" id="ov-hint"><span>💡 ${escHtml(t('ov_click_hint'))}</span>`
-      + `<button class="ov-hint-x" id="ov-hint-x" aria-label="dismiss">✕</button></div>`;
-  sec.innerHTML = hint + orgs.map(_renderCard).join('');
+// Every card handler lives on the container instead of on the N cards, so a re-render
+// never rebinds anything. Assignment (not addEventListener) keeps it idempotent — the
+// same trick the dragover/drop handlers already used.
+function _bindDelegation(sec) {
+  sec.onclick = e => {
+    // One-time hint's ✕ (previously its own listener with stopPropagation).
+    if (e.target.closest('#ov-hint-x')) {
+      state.overviewHintDismissed = true;
+      chrome.storage.local.set({ overviewHintDismissed: true });
+      const h = sec.querySelector('#ov-hint');
+      if (h) h.remove();
+      return;
+    }
+    // The grip is a drag handle only — clicking it must NOT drill into the detail view
+    // (this replaces the grip's stopPropagation listener).
+    if (e.target.closest('.ov-grip')) return;
+    const card = e.target.closest('.ov-card');
+    if (card) enterDetail(card.dataset.orgId);
+  };
 
-  const hintX = sec.querySelector('#ov-hint-x');
-  if (hintX) hintX.addEventListener('click', e => {
-    e.stopPropagation();
-    state.overviewHintDismissed = true;
-    chrome.storage.local.set({ overviewHintDismissed: true });
-    const h = sec.querySelector('#ov-hint');
-    if (h) h.remove();
-  });
-
-  sec.querySelectorAll('.ov-card').forEach(card => {
-    card.addEventListener('click', () => enterDetail(card.dataset.orgId));
-    const grip = card.querySelector('.ov-grip');
+  // Only grips are draggable=true, so dragstart/dragend can only originate there.
+  sec.ondragstart = e => {
+    const grip = e.target.closest('.ov-grip');
     if (!grip) return;
-    // The grip is the only draggable element, so card clicks (→ detail) are untouched.
-    grip.addEventListener('click', e => e.stopPropagation());
-    grip.addEventListener('dragstart', e => {
-      _dragSrc = card;
-      _dropped = false;
-      card.classList.add('ov-dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      try { e.dataTransfer.setData('text/plain', card.dataset.orgId); } catch (_) { /* some browsers require a payload */ }
-      if (e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(card, 16, 16);
-    });
-    grip.addEventListener('dragend', () => {
-      if (_dragSrc) _dragSrc.classList.remove('ov-dragging');
-      const dropped = _dropped;
-      _dragSrc = null;
-      _dropped = false;
-      // Order is committed in the drop handler. If the drag was cancelled (Esc) or
-      // released outside the container, no drop fired — revert the live dragover
-      // shuffle by re-rendering from the last saved order.
-      if (!dropped) renderOverview();
-    });
-  });
+    const card = grip.closest('.ov-card');
+    if (!card) return;
+    _dragSrc = card;
+    _dropped = false;
+    card.classList.add('ov-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', card.dataset.orgId); } catch (_) { /* some browsers require a payload */ }
+    if (e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(card, 16, 16);
+  };
+  sec.ondragend = () => {
+    if (!_dragSrc) return;
+    _dragSrc.classList.remove('ov-dragging');
+    const dropped = _dropped;
+    _dragSrc = null;
+    _dropped = false;
+    // Order is committed in the drop handler. If the drag was cancelled (Esc) or
+    // released outside the container, no drop fired — revert the live dragover
+    // shuffle by re-rendering from the last saved order.
+    if (!dropped) renderOverview();
+  };
 
-  // Container-level dragover/drop reorder the dragged card live. Assignment (not
-  // addEventListener) so re-rendering doesn't stack duplicate listeners.
+  // Container-level dragover/drop reorder the dragged card live.
   sec.ondragover = e => {
     if (!_dragSrc) return;
     e.preventDefault();
@@ -257,6 +306,46 @@ export function renderOverview() {
     _dropped = true;
     _persistOrder(sec);
   };
+}
+
+// HTML of the last committed render, used to skip an identical DOM teardown.
+let _lastHtml = null;
+
+// True when the cards on screen are exactly `orgs`, in order. A cancelled drag leaves the
+// DOM shuffled while the markup is byte-identical, so the skip below MUST check this —
+// otherwise the revert re-render would be skipped and the shuffle would stick.
+function _domInSync(sec, orgs) {
+  const cards = sec.querySelectorAll('.ov-card');
+  if (cards.length !== orgs.length) return false;
+  for (let i = 0; i < orgs.length; i++) {
+    if (cards[i].dataset.orgId !== orgs[i].uuid) return false;
+  }
+  return true;
+}
+
+// (Re)render the overview card list from state.collectedOrgs into #overview-section.
+export function renderOverview() {
+  const sec = document.getElementById('overview-section');
+  if (!sec) return;
+  const orgs = _orderedOrgs(state.collectedOrgs || []);
+  const byOrg = _historyByOrg(orgs);
+  // One-time hint teaching that a card click drills into the detail view (so users
+  // migrating from the old single-view don't think the detail screen disappeared).
+  const hint = state.overviewHintDismissed
+    ? ''
+    : `<div class="ov-hint" id="ov-hint"><span>💡 ${escHtml(t('ov_click_hint'))}</span>`
+      + `<button class="ov-hint-x" id="ov-hint-x" aria-label="dismiss">✕</button></div>`;
+  const html = hint + orgs.map(o => _renderCard(o, byOrg.get(o.uuid) || [])).join('');
+
+  // renderOverview() re-runs on every storage change (background collection, cross-device
+  // order sync, ...). When the markup is unchanged, skip the innerHTML teardown entirely —
+  // that also preserves :hover/scroll state instead of rebuilding identical nodes.
+  if (html !== _lastHtml || !_domInSync(sec, orgs)) {
+    sec.innerHTML = html;
+    _lastHtml = html;
+  }
+
+  _bindDelegation(sec);
 }
 
 // Reflect the active view in the top tab bar (모아 보기 | 자세히).
@@ -281,12 +370,28 @@ function _saveLastView(view) {
   chrome.storage.local.set({ lastView: view });
 }
 
+// Perf instrumentation for the 자세히 → 모아 보기 transition. Marks/measures only (no
+// logging, no visual effect); read them with
+// performance.getEntriesByName('ct-overview-enter') from the popup devtools console.
+const PERF_START = 'ct-overview-enter-start';
+const PERF_HIDDEN = 'ct-overview-detail-hidden';
+const PERF_TOTAL = 'ct-overview-enter';
+const PERF_HIDE = 'ct-overview-hide-detail';
+const PERF_RENDER = 'ct-overview-render';
+
 // Show the master (overview) screen: hide detail sections, render cards.
 export function enterOverview() {
+  performance.mark(PERF_START);
   document.body.classList.add(OVERVIEW_CLASS);
   const sec = document.getElementById('overview-section');
   if (sec) sec.classList.remove('hidden');
+  performance.mark(PERF_HIDDEN);
   renderOverview();
+  performance.measure(PERF_HIDE, PERF_START, PERF_HIDDEN);
+  performance.measure(PERF_RENDER, PERF_HIDDEN);
+  performance.measure(PERF_TOTAL, PERF_START);
+  performance.clearMarks(PERF_START);
+  performance.clearMarks(PERF_HIDDEN);
   _syncTabs('overview');
   _saveLastView('overview');
   refreshDashboardLinks(null); // overview = all orgs → header link goes to plain dashboard
@@ -316,7 +421,8 @@ export function exitOverview() {
   if (sec) sec.classList.add('hidden');
 }
 
-// True when the overview (master) screen is currently shown.
+// True when the overview (master) screen is currently shown. Same predicate as
+// state.isDetailHidden() — kept as the name the popup's view logic reads by.
 export function isOverviewActive() {
-  return document.body.classList.contains(OVERVIEW_CLASS);
+  return isDetailHidden();
 }

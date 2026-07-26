@@ -1,7 +1,7 @@
 // popup.js is the ES-module orchestrator (see popup.html). Domains live in ui/*.js.
 import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, _toggleChartYAxis, isChartAutoRoll, isChartRolling } from './ui/charts.js';
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
-import { state, _filteredHistory } from './ui/state.js';
+import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
@@ -502,6 +502,69 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   let _statusReady = false, _historyReady = false;
 
+  // Status banner refresh (reflects rate-based prediction). Extracted because every
+  // detail redraw site below needs the exact same guard + argument unpacking.
+  function renderDetailBanner(hist) {
+    const s = state.currentSnapshot;
+    if (hist.length < 3 || !s) return;
+    renderStatusBanner(s.five_hour?.utilization ?? null, s.seven_day?.utilization ?? null, hist, s.five_hour?.resets_at, s.seven_day?.resets_at);
+  }
+
+  // Redraw the detail view's chart + status banner from the current state. Three call sites
+  // (language switch, background-collection update, manual collect) had grown byte-identical
+  // copies of this block.
+  //
+  // Perf: both targets live inside #chart-section / #status-banner, which body.ct-view-overview
+  // hides. A collection run writes lastStatus up to five times and appends usageHistory once per
+  // org, and EVERY one of those writes lands here — so a user sitting on the overview paid a full
+  // history scan plus a canvas redraw per write, for elements nobody can see. A hidden canvas
+  // reports clientWidth 0, so `canvas.width = 0` reallocated the backing store and every one of
+  // those draws was discarded anyway. Bailing out is safe because returning to the detail view
+  // always goes through enterDetail() -> selectOrg(), which redraws both from scratch.
+  function redrawDetail() {
+    if (isDetailHidden()) return;
+    const hist = _filteredHistory();
+    if (hist.length >= 2) drawCharts(hist, state.currentPlan, state.currentSnapshot);
+    renderDetailBanner(hist);
+  }
+
+  // Re-render everything that depends on lastStatus, coalesced to one pass per frame.
+  //
+  // A single collection run writes lastStatus up to five times (bg/collect.js) and appends a
+  // usageHistory point per org, and each write fired its own storage.get + updateUI + chart
+  // redraw. With several orgs that is a burst of full re-renders on the main thread, which is
+  // what made the popup feel sluggish WHILE COLLECTING (and only then). lastStatus is a whole
+  // snapshot, so collapsing a burst to its newest value lands on the same final UI that running
+  // every write in sequence would have — just without the discarded intermediate renders.
+  let _pendingStatus = null;
+  let _statusRenderQueued = false;
+  function queueStatusRender(status) {
+    _pendingStatus = status;
+    if (_statusRenderQueued) return;
+    _statusRenderQueued = true;
+    requestAnimationFrame(() => {
+      _statusRenderQueued = false;
+      const s = _pendingStatus;
+      _pendingStatus = null;
+      if (!s) return;
+      chrome.storage.local.get({ usageHistory: [], collectedOrgs: [] }, (r) => {
+        state.usageHistory = r.usageHistory || [];
+        state.historyLoaded = true;
+        state.collectedOrgs = r.collectedOrgs || [];
+        updateUI(s);
+        state.currentPlan = s?.snapshot?.plan || null;
+        state.currentSnapshot = s?.snapshot || null;
+        // updateUI handles early return for non-Claude orgs; only draw charts for Claude primary
+        if (!state.selectedOrgId || state.selectedOrgId === s?.snapshot?.claude_org_uuid) {
+          redrawDetail();
+        }
+        // No renderOverview() here on purpose: the cards read state.collectedOrgs, whose own
+        // onChanged branch above already re-renders them. Adding a second trigger would only
+        // duplicate work.
+      });
+    });
+  }
+
   function tryDrawCharts() {
     if (!_statusReady || !_historyReady) return;
     const hist = _filteredHistory();
@@ -511,10 +574,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isChartAutoRoll() && !isUsageBasedEnt) _startChartAutoRoll();
     }
     // Refresh banner after history load (reflects rate-based prediction)
-    if (hist.length >= 3 && state.currentSnapshot) {
-      const s = state.currentSnapshot;
-      renderStatusBanner(s.five_hour?.utilization ?? null, s.seven_day?.utilization ?? null, hist, s.five_hour?.resets_at, s.seven_day?.resets_at);
-    }
+    renderDetailBanner(hist);
   }
 
   // Load current status + history directly from chrome.storage
@@ -643,11 +703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           updateUI(r.lastStatus);
           state.currentPlan = r.lastStatus?.snapshot?.plan || null;
           state.currentSnapshot = r.lastStatus?.snapshot || null;
-          const hist = _filteredHistory();
-          if (hist.length >= 2) drawCharts(hist, state.currentPlan, state.currentSnapshot);
-          if (hist.length >= 3 && state.currentSnapshot) {
-            renderStatusBanner(state.currentSnapshot.five_hour?.utilization ?? null, state.currentSnapshot.seven_day?.utilization ?? null, hist, state.currentSnapshot.five_hour?.resets_at, state.currentSnapshot.seven_day?.resets_at);
-          }
+          redrawDetail();
         }
         // Re-render org chips too (reflects plan name translations, etc.)
         if (state.collectedOrgs.length >= 2) showMultiOrgBadges(state.collectedOrgs);
@@ -749,24 +805,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (!changes.lastStatus) return;
     const status = changes.lastStatus.newValue;
-    if (status) {
-      chrome.storage.local.get({ usageHistory: [], collectedOrgs: [] }, (r) => {
-        state.usageHistory = r.usageHistory || [];
-        state.historyLoaded = true;
-        state.collectedOrgs = r.collectedOrgs || [];
-        updateUI(status);
-        state.currentPlan = status?.snapshot?.plan || null;
-        state.currentSnapshot = status?.snapshot || null;
-        // updateUI handles early return for non-Claude orgs; only draw charts for Claude primary
-        if (!state.selectedOrgId || state.selectedOrgId === status?.snapshot?.claude_org_uuid) {
-          const hist = _filteredHistory();
-          if (hist.length >= 2) drawCharts(hist, state.currentPlan, state.currentSnapshot);
-          if (hist.length >= 3 && state.currentSnapshot) {
-            renderStatusBanner(state.currentSnapshot.five_hour?.utilization ?? null, state.currentSnapshot.seven_day?.utilization ?? null, hist, state.currentSnapshot.five_hour?.resets_at, state.currentSnapshot.seven_day?.resets_at);
-          }
-        }
-      });
-    }
+    if (status) queueStatusRender(status);
   });
 
   // Manual collection button
@@ -812,11 +851,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Non-Claude org: selectOrg is called from collectedOrgs onChange; skip chart/banner
         if (!state.selectedOrgId || state.selectedOrgId === s?.snapshot?.claude_org_uuid) {
-          const hist2 = _filteredHistory();
-          if (hist2.length >= 2) drawCharts(hist2, state.currentPlan, state.currentSnapshot);
-          if (hist2.length >= 3 && state.currentSnapshot) {
-            renderStatusBanner(state.currentSnapshot.five_hour?.utilization ?? null, state.currentSnapshot.seven_day?.utilization ?? null, hist2, state.currentSnapshot.five_hour?.resets_at, state.currentSnapshot.seven_day?.resets_at);
-          }
+          redrawDetail();
         }
       });
     });

@@ -4,7 +4,7 @@
 import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType } from './util.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
-import { setPredictHeadline, renderGaugePrediction, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
+import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 
@@ -211,6 +211,8 @@ export function selectOrg(orgId, container) {
       if (r5h) r5h.innerHTML = resetsAt5h ? `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>` : '';
       const r7d = document.getElementById('gauge-7d-reset');
       if (r7d) r7d.innerHTML = resetsAt7d ? `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>` : '';
+      // Maxed-window "limit reached \u2014 wait until {reset}" strip (same as the primary render path).
+      renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d);
     }
 
     // === 3. Extra usage section (Claude Enterprise only) ===

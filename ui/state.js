@@ -29,6 +29,20 @@ export const state = {
 };
 
 
+// Body class that hides every detail section (see popup.html `body.ct-view-overview`).
+export const OVERVIEW_CLASS = 'ct-view-overview';
+
+// True when the overview (master) screen is covering the detail view, i.e. every detail
+// section is display:none. Render paths that only touch hidden sections use this to bail out.
+//
+// It reads the body class rather than a mirrored boolean so there is exactly one source of
+// truth, and it lives HERE — a leaf module importing nothing — rather than in ui/overview.js,
+// which would put charts.js -> overview.js -> org-selector.js -> charts.js in an import cycle.
+export function isDetailHidden() {
+  return document.body.classList.contains(OVERVIEW_CLASS);
+}
+
+
 // Usage history filtered to the selected org (a computed view of state). Legacy org-less rows are
 // included only when a Claude primary org is selected.
 export function _filteredHistory() {

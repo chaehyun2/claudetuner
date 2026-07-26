@@ -128,9 +128,9 @@ export function planToMultiplier(plan, provider) {
     return 1; // plus, education, business, unknown
   }
   if (provider === 'gemini') {
-    if (p === 'free') return 0.2;
-    if (p.includes('ultra')) return 5;
-    if (p === 'ai plus') return 0.4;
+    if (p === 'free') return 0.25;
+    if (p.includes('ultra')) return p.includes('20') ? 20 : 5;
+    if (p === 'ai plus') return 0.5;
     return 1; // AI Pro/Advanced, Business, unknown
   }
   // Claude (default): original substring logic
@@ -142,6 +142,67 @@ export function planToMultiplier(plan, provider) {
   if (p.includes('team')) return 1.25; // Team Standard
   if (p.includes('enterprise')) return 1; // Enterprise: usage-based, no multiplier
   return 1; // Pro, Free, unknown
+}
+
+// Provider-specific quota tiers used by the popup's dashed guide lines.
+export function planLimitTiers(provider, currentMult) {
+  if (currentMult === 1.25 || currentMult === 6.25) {
+    return [
+      { mult: 1.25, label: provider === 'chatgpt' ? 'Team' : 'Team Standard', color: '#06b6d4' },
+      { mult: 6.25, label: 'Team Premium', color: '#14b8a6' },
+    ];
+  }
+  if (provider === 'chatgpt') {
+    return [
+      { mult: 1, label: 'Plus', color: '#22c55e' },
+      { mult: 5, label: 'Pro 5x', color: '#f97316' },
+      { mult: 20, label: 'Pro 20x', color: '#ef4444' },
+    ];
+  }
+  if (provider === 'gemini') {
+    return [
+      { mult: 1, label: 'AI Pro', color: '#22c55e' },
+      { mult: 5, label: 'Ultra 5x', color: '#f97316' },
+      { mult: 20, label: 'Ultra 20x', color: '#ef4444' },
+    ];
+  }
+  return [
+    { mult: 1, label: 'Pro', color: '#22c55e' },
+    { mult: 5, label: 'Max 5x', color: '#f97316' },
+    { mult: 20, label: 'Max 20x', color: '#ef4444' },
+  ];
+}
+
+export function buildPlanLimitLines(currentMult, provider) {
+  const tiers = planLimitTiers(provider, currentMult);
+  const lowerTiers = tiers.filter((tier) => tier.mult < currentMult);
+  const immediateLowerMult = lowerTiers.length
+    ? Math.max(...lowerTiers.map((tier) => tier.mult))
+    : null;
+  return tiers.map((tier) => ({
+    value: (tier.mult / currentMult) * 100,
+    label: tier.label,
+    color: tier.color,
+    isImmediateLower: tier.mult === immediateLowerMult,
+    // The tier the user is actually on lands at 100% — it IS the chart's limit. It used to be
+    // dropped here on the theory that it "overlaps the current plan limit", but no such line was
+    // ever drawn: 100% got nothing but the same gray gridline as 25/50/75, so a Max 20x user saw
+    // a Max 5x boundary and no marker for their own ceiling.
+    isCurrentPlan: Math.abs(tier.mult - currentMult) < 1e-9,
+  }));
+}
+
+// Auto mode follows the data but always leaves room for the nearest lower plan.
+//
+// Deliberately asymmetric: the nearest LOWER line is forced into the axis, the current-plan line
+// at 100% is not. They matter at opposite ends — "you could downgrade" is worth seeing precisely
+// when usage is low (the case where the axis used to clip it away), while your own ceiling only
+// matters as you approach it, and forcing 100% into every axis would squash a 5%-usage chart flat
+// against the baseline. So 100% is left opportunistic: it appears once the data climbs near it.
+export function chartMaxY(dataMax, fixed, limitLines) {
+  if (fixed) return 100;
+  const immediateLower = limitLines.find((line) => line.isImmediateLower);
+  return Math.max(dataMax * 1.15, immediateLower ? immediateLower.value * 1.08 : 0);
 }
 
 export function formatTimeAgo(timestamp) {

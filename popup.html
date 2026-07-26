@@ -110,6 +110,9 @@
     .gauge-value { font-size: 16px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
     .gauge-predict-inline { font-size: 11px; font-weight: 700; margin-left: 1px; padding: 0 3px; border-radius: 3px; white-space: nowrap; flex-shrink: 0; }
     .gauge-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    /* Per-gauge limit-hit warning line: "⚠️ {time} 한도 도달 예상" (shown only near 100%). */
+    .gauge-predict-line { margin-top: 4px; }
+    .gauge-predict-line .gpl-main { font-size: 11px; font-weight: 600; }
     .gauge-bar { height: 8px; background: var(--bg-hover); border-radius: 4px; position: relative; overflow: visible; margin-top: 1px; }
     .gauge-fill { height: 100%; border-radius: 4px; transition: width 0.3s ease; overflow: hidden; }
     .gauge-predict-fill { position: absolute; top: 0; height: 100%; border-radius: 0 4px 4px 0; opacity: 0.25; background: repeating-linear-gradient(90deg, transparent, transparent 2px, currentColor 2px, currentColor 4px); }
@@ -675,6 +678,7 @@
         <span id="gauge-5h-predict-label" class="gauge-predict-label" style="display:none"></span>
       </div>
       <div class="gauge-sub" id="gauge-5h-reset"></div>
+      <div class="gauge-predict-line" id="gauge-5h-predict-line" style="display:none"></div>
     </div>
     <div class="gauge-row" id="gauge-row-7d">
       <div class="gauge-header">
@@ -689,6 +693,7 @@
         <span id="gauge-7d-predict-label" class="gauge-predict-label" style="display:none"></span>
       </div>
       <div class="gauge-sub" id="gauge-7d-reset"></div>
+      <div class="gauge-predict-line" id="gauge-7d-predict-line" style="display:none"></div>
     </div>
   </div>
 

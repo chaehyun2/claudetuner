@@ -1,7 +1,10 @@
 // Chart rendering + 5h/7d tab state for the popup, extracted from popup.js (refactor/popup-charts).
 // Self-contained: no shared popup mutable state. Pure helpers come from ui/util.js;
 // i18n `t` is referenced as a global (i18n.js, a classic script that loads first).
-import { _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier, calcPaceTier } from './util.js';
+import {
+  _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier,
+  buildPlanLimitLines, chartMaxY, calcPaceTier,
+} from './util.js';
 
 // === Chart tab state ===
 let _activeChartTab = '5h';
@@ -253,21 +256,8 @@ export function drawCharts(history, plan, snapshot) {
   const last5h = sorted[sorted.length - 1].h5;
   const last7d = sorted[sorted.length - 1].d7;
 
-  // Plan limit lines (% relative to current plan, excluding 100% which overlaps current plan limit)
-  const isTeamPlan = currentMult === 1.25 || currentMult === 6.25;
-  const allLimits = isTeamPlan
-    ? [
-        { mult: 1.25, label: 'Std', color: '#06b6d4' },
-        { mult: 6.25, label: 'Prem', color: '#14b8a6' },
-      ]
-    : [
-        { mult: 1, label: 'Pro', color: '#22c55e' },
-        { mult: 5, label: '5x', color: '#f97316' },
-        { mult: 20, label: '20x', color: '#ef4444' },
-      ];
-  const limitLines = allLimits
-    .map((l) => ({ value: (l.mult / currentMult) * 100, label: l.label, color: l.color }))
-    .filter((l) => Math.abs(l.value - 100) > 1); // Exclude current plan overlapping with 100%
+  // Provider-aware guide lines shared by the 5h and 7d charts.
+  const limitLines = buildPlanLimitLines(currentMult, provider);
 
   // Hide placeholder and show both panes (for correct canvas size calculation)
   const pane5h = document.getElementById('chart-pane-5h');
@@ -369,12 +359,16 @@ function drawSingleChart(opts) {
   const allVals = vals.slice();
   if (predict) allVals.push(predict.v);
   const dataMax = Math.max(...allVals, 10);
-  // Limit line filter: only show within maxY range (re-filtered at draw stage)
-  const visibleLimits = limitLines.filter((l) => l.value <= dataMax * 3 && l.value >= dataMax * 0.25);
-  // maxY based on data only — OK if budget/limit is clipped (uses canvas clip).
+  // Always retain the nearest lower-plan boundary and the user's own 100% ceiling; other guides
+  // stay opportunistic. The ceiling is still subject to the `value > maxY` skip in the badge loop
+  // below, so on a low-usage chart it simply sits off-axis rather than flattening the data.
+  const visibleLimits = limitLines.filter((l) =>
+    l.isImmediateLower || l.isCurrentPlan || (l.value <= dataMax * 3 && l.value >= dataMax * 0.25)
+  );
+  // Auto mode normally follows the data, but includes the nearest lower-plan line.
   // Fixed mode pins the axis at 100% (over-100% data is clipped by the canvas clip);
   // auto mode scales to the data with 15% headroom (default, shows over-100% spikes).
-  const maxY = _yFixed ? 100 : dataMax * 1.15;
+  const maxY = chartMaxY(dataMax, _yFixed, limitLines);
 
   // Canvas
   const dpr = window.devicePixelRatio || 1;

@@ -2,8 +2,69 @@
 // Extracted from popup.js (refactor/popup-prediction). Leaf domain: depends only on shared state
 // (ui/state.js) and pure helpers (ui/util.js); i18n `t` is a global from i18n.js.
 import { state, _filteredHistory } from './state.js';
-import { calcPaceTier, _isDark } from './util.js';
+import { calcPaceTier, _isDark, formatResetAbsolute } from './util.js';
 import { diurnalProject7dAdaptive } from './diurnal.js';
+
+// Projected-at-reset threshold (%) at/above which a window counts as "near the cap" and
+// earns the amber-red warning even when it never cleanly crosses 100% (the discount-only
+// clamp deliberately holds such forecasts just under 100). Shared with the overview cards.
+export const NEAR_LIMIT_PCT = 99;
+
+// === 7d projection memo =====================================================================
+// The `d7` branch of calcPredictedAtReset rebuilds the user's PERSONAL diurnal + weekly curve
+// from the FULL 30-day history on every call (ui/diurnal.js: personalActivityCurve +
+// activityNormalizedRate are both O(history)). renderOverview() calls it once per org and re-runs
+// on every chrome.storage.onChanged, so the identical model was rebuilt from scratch on every
+// repaint — measured at ~1.6ms per org for a 30-day history at the 5-minute sample cadence, and
+// ~8.7ms at 1-minute. Memoizing the result makes a repeat render (detail -> overview, or a
+// storage-event repaint) cost ~0.
+//
+// The memo deliberately lives HERE and not in ui/diurnal.js: that file is the canonical source
+// for the auto-generated dashboard twin site/shared/diurnal.js, so touching it would require
+// regenerating the twin and bumping every `shared/diurnal.js?v=` reference plus the service
+// worker CACHE_VERSION. Caching the composed result skips the whole model build anyway.
+//
+// Invalidation is caller-free: the key is a content fingerprint of every input, so any new data
+// point (or a changed util/reset) misses the cache. The ONE input not in the key is wall-clock
+// `now`, which is bounded instead by a short TTL. Worst-case staleness at the TTL is far below
+// what the UI can render: `predicted` drifts by ratePerMass x (one weight-hour x TTL) — under
+// 0.1%pt even for a user burning a full 7d window in a day, against a display that rounds to
+// whole percent; the limit ETA is hour-granular (formatResetAbsolute); and `hoursToReset`, the
+// one field shown at minute granularity, is recomputed fresh on every cache hit.
+const PRED_CACHE_MAX = 24;                  // orgs x windows x a couple of renders — bounds memory
+const PRED_CACHE_TTL_MS = 30000;            // max age of a served entry (see staleness note above)
+const PRED_CACHE_MIN_HOURS_TO_RESET = 0.25; // never serve a cached forecast this close to a reset
+const _predCache = new Map();               // fingerprint -> { at, value }; insertion order = LRU
+
+// Cheap O(1) content fingerprint of a history array. usageHistory is append-only with a front
+// trim and an occasional sorted server-snapshot merge (bg/storage.js), so any real change moves
+// the length, the first/last timestamps, or the newest sample's values. The midpoint sample and
+// the org tag are folded in so two orgs' distinct arrays cannot collide onto one key.
+function _predCacheKey(history, key, currentUtil, resetsAt) {
+  const n = history.length;
+  const first = history[0];
+  const last = history[n - 1];
+  const mid = history[n >> 1];
+  return `${key}|${currentUtil}|${resetsAt}|${n}|${first.t}|${last.t}|${last.org}`
+    + `|${last.h5}|${last.d7}|${last.r7}|${mid.t}|${mid.d7}`;
+}
+
+function _predCacheGet(cacheKey, nowMs) {
+  const hit = _predCache.get(cacheKey);
+  if (!hit) return null;
+  if (nowMs - hit.at > PRED_CACHE_TTL_MS) { _predCache.delete(cacheKey); return null; }
+  _predCache.delete(cacheKey);            // re-insert so the most recently used entry evicts last
+  _predCache.set(cacheKey, hit);
+  return hit.value;
+}
+
+function _predCacheSet(cacheKey, value, nowMs) {
+  if (_predCache.size >= PRED_CACHE_MAX) {
+    const oldest = _predCache.keys().next().value;
+    if (oldest !== undefined) _predCache.delete(oldest);
+  }
+  _predCache.set(cacheKey, { at: nowMs, value });
+}
 
 // Used by both gauge prediction and banner evaluation (and the overview cards).
 export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
@@ -23,18 +84,37 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
     // is thin). Replaces the old thin/noisy last-6h flat window; the activity-mass model,
     // discount-only clamp and remaining-mass floor are unchanged. Passing the full local
     // history (extension keeps 30d) is what lets the personal curve be built.
+    //
+    // Memoized (see the "7d projection memo" block above): the model build is the expensive part
+    // of a renderOverview() pass. Skip the cache entirely near a reset, where the forecast is
+    // both shortest-lived and most sensitive.
+    const cacheKey = hoursToReset >= PRED_CACHE_MIN_HOURS_TO_RESET
+      ? _predCacheKey(history, key, currentUtil, resetsAt)
+      : null;
+    if (cacheKey) {
+      const cached = _predCacheGet(cacheKey, now);
+      // hoursToReset is recomputed from the live clock rather than served from the entry — it is
+      // the one field rendered at minute granularity (renderGaugePrediction's tooltip).
+      if (cached) return { ...cached, hoursToReset };
+    }
     const samples = history
       .filter(p => p.d7 != null && p.r7)
       .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
     const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: resetTime, nowMs: now });
     if (!dp) return null;
-    return {
+    const result = {
       rate: dp.rate,
       predicted: dp.predicted,
       hoursToReset: dp.hoursToReset,
       hoursDiff: dp.hoursDiff,
       hoursTo100: dp.hoursTo100,
     };
+    // Store a copy so a caller mutating the returned object can never poison the cache.
+    // A sub-hour observation window (a brand-new user, or the thin-data fallback) is NOT cached:
+    // renderGaugePrediction renders `hoursDiff` in whole MINUTES below 1h, which is fine enough
+    // to notice a TTL's worth of staleness — and such a short history is cheap to recompute.
+    if (cacheKey && dp.hoursDiff >= 1) _predCacheSet(cacheKey, { ...result }, now);
+    return result;
   } else {
     // 5h: rate based on local history
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
@@ -67,16 +147,56 @@ export function setPredictHeadline(html, tone) {
   el.classList.remove('hidden');
 }
 
+// If a usage window is already maxed (>= 100%), replace the top strip with a plain
+// "🚫 {window} 한도 도달 — {reset}까지 대기" message so the user knows WHEN access returns.
+// Overrides the day-1 "collecting" teaser (being at the cap is the more urgent, actionable
+// fact). When BOTH windows are capped, name the one whose reset is LATEST — access stays
+// blocked until every capped window resets. Call AFTER the per-gauge renderGaugePrediction()
+// calls so it wins the strip. Returns true when a headline was set.
+export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d) {
+  const capped = [];
+  if (util5h != null && util5h >= 100 && resets5h) capped.push({ label: t('win_5h'), reset: resets5h });
+  if (util7d != null && util7d >= 100 && resets7d) capped.push({ label: t('win_7d'), reset: resets7d });
+  if (!capped.length) return false;
+  capped.sort((a, b) => new Date(b.reset) - new Date(a.reset)); // latest reset = the binding window
+  setPredictHeadline(t('predict_headline_reached', capped[0].label, formatResetAbsolute(capped[0].reset)), 'is-alert');
+  return true;
+}
+
+// Per-gauge red warning line under a gauge (the projected-at-reset % itself is shown by the
+// bar fill, so we never repeat it as text). Independent of the stable/rising badge split:
+//   • projected to hit 100% before reset (limitTimeStr set) → exact "한도 도달 예상 {time}"
+//   • else projected NEAR the cap (>= NEAR_LIMIT_PCT) and still rising → "한도 근접 (~X%)", no
+//     time (the discount-clamped forecast has no honest hit time here)
+//   • otherwise → hidden
+function _renderWarnLine(lineEl, predicted, rate, currentUtil, limitTimeStr) {
+  if (!lineEl) return;
+  let warnHtml = '';
+  if (limitTimeStr) {
+    warnHtml = '⚠️ ' + t('predict_limit_at', limitTimeStr);
+  } else if (predicted >= NEAR_LIMIT_PCT && rate > 0 && currentUtil < 100) {
+    warnHtml = '⚠️ ' + t('predict_near_limit', Math.floor(predicted));
+  }
+  if (warnHtml) {
+    lineEl.style.display = 'block';
+    lineEl.innerHTML = `<div class="gpl-main" style="color:#ef4444">${warnHtml}</div>`;
+  } else {
+    lineEl.style.display = 'none';
+  }
+}
+
 export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const marker = document.getElementById(`gauge-${id}-predict`);
   const label = document.getElementById(`gauge-${id}-predict-label`);
   const inlineEl = document.getElementById(`gauge-${id}-predict-inline`);
   const fillEl = document.getElementById(`gauge-${id}-predict-fill`);
+  const lineEl = document.getElementById(`gauge-${id}-predict-line`);
   const hide = () => {
     if (marker) marker.style.display = 'none';
     if (label) label.style.display = 'none';
     if (inlineEl) inlineEl.style.display = 'none';
     if (fillEl) fillEl.style.display = 'none';
+    if (lineEl) lineEl.style.display = 'none';
   };
 
   const showCollecting = () => {
@@ -120,10 +240,25 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const clampedPos = Math.min(predicted, 100);
   console.log(`[GaugePred:${id}] rate=${rate.toFixed(3)}/h, hoursDiff=${hoursDiff.toFixed(2)}h, predicted=${predicted.toFixed(1)}%`);
 
-  // Minimal change or decreasing trend: show "stable"
+  // Estimated time to reach 100% (exact hit only) — computed BEFORE the "stable" gate because
+  // the red warning depends on the LEVEL, not the growth rate: a window parked at 99% with a
+  // trickle of growth must still warn. Same MM/DD(day) format as the reset line (formatResetAbsolute).
+  let limitTimeStr = '';
+  if (predicted >= 100 && rate > 0 && currentUtil < 100) {
+    // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
+    const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
+    limitTimeStr = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
+  }
+  // Headline strip is now the day-1 "collecting" teaser only; clear it once we have a forecast.
+  if (id === '5h') setPredictHeadline(null);
+  _renderWarnLine(lineEl, predicted, rate, currentUtil, limitTimeStr);
+
+  // Minimal change or decreasing trend: show the "stable" badge. The level-based warning line
+  // above still stands, so only the marker/fill + header badge switch to the stable look.
   if (rate <= 0 || predicted - currentUtil < 3) {
-    hide();
-    if (id === '5h') setPredictHeadline(null);
+    if (marker) marker.style.display = 'none';
+    if (label) label.style.display = 'none';
+    if (fillEl) fillEl.style.display = 'none';
     if (inlineEl) {
       inlineEl.style.display = 'inline';
       inlineEl.style.color = '#22c55e';
@@ -138,28 +273,6 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // Colors
   const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
   const predictText = predicted >= 100 ? '100%+' : `${Math.round(predicted)}%`;
-
-  // Calculate estimated time to reach 100%
-  let limitTimeStr = '';
-  if (predicted >= 100 && rate > 0 && currentUtil < 100) {
-    // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
-    const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
-    const limitDate = new Date(Date.now() + hoursTo100 * 3600000);
-    const mo = limitDate.getMonth() + 1, da = limitDate.getDate();
-    const dayNames = getLang() === 'ko' ? ['일','월','화','수','목','금','토'] : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const dayStr = dayNames[limitDate.getDay()];
-    const hh = limitDate.getHours();
-    limitTimeStr = getLang() === 'ko'
-      ? `${mo}/${da}(${dayStr}) ${hh >= 12 ? '오후' : '오전'} ${hh % 12 || 12}시`
-      : `${mo}/${da}(${dayStr}) ${hh % 12 || 12}${hh >= 12 ? 'PM' : 'AM'}`;
-  }
-
-  // Headline: surface the limit-reached forecast prominently (only when we
-  // actually project hitting 100%); otherwise keep the strip clean.
-  if (id === '5h') {
-    setPredictHeadline(limitTimeStr ? t('predict_headline_limit', limitTimeStr) : null,
-      limitTimeStr ? 'is-alert' : undefined);
-  }
 
   // (A) Header inline prediction: "▸ 78%" or "▸ 4/12 2PM" badge
   if (inlineEl) {
@@ -307,7 +420,8 @@ export function _restoreGaugeHTML(gaugeSection) {
     '<div id="gauge-5h-predict-fill" class="gauge-predict-fill" style="display:none"></div>' +
     '<div id="gauge-5h-predict" class="gauge-predict" style="display:none"></div>' +
     '<span id="gauge-5h-predict-label" class="gauge-predict-label" style="display:none"></span></div>' +
-    '<div class="gauge-sub" id="gauge-5h-reset"></div></div>' +
+    '<div class="gauge-sub" id="gauge-5h-reset"></div>' +
+    '<div class="gauge-predict-line" id="gauge-5h-predict-line" style="display:none"></div></div>' +
     '<div class="gauge-row" id="gauge-row-7d"><div class="gauge-header">' +
     '<span class="gauge-label">' + t('usage_7d') + '</span>' +
     '<span class="gauge-value" id="gauge-7d-value" style="color:var(--accent)">-</span>' +
@@ -316,7 +430,8 @@ export function _restoreGaugeHTML(gaugeSection) {
     '<div id="gauge-7d-predict-fill" class="gauge-predict-fill" style="display:none"></div>' +
     '<div id="gauge-7d-predict" class="gauge-predict" style="display:none"></div>' +
     '<span id="gauge-7d-predict-label" class="gauge-predict-label" style="display:none"></span></div>' +
-    '<div class="gauge-sub" id="gauge-7d-reset"></div></div>';
+    '<div class="gauge-sub" id="gauge-7d-reset"></div>' +
+    '<div class="gauge-predict-line" id="gauge-7d-predict-line" style="display:none"></div></div>';
 }
 
 // === Runner Animation ===
