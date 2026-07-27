@@ -12,7 +12,13 @@
 // Must match the `iss` the server signs (worker/src/utils/ext-token.ts).
 const EXT_TOKEN_ISSUER = 'claudetuner-ext';
 
-function decodeExtTokenPayload(token) {
+/**
+ * Base64url-decode any JWT's payload. Signature-agnostic on purpose — every caller here is
+ * making a CLIENT-side decision and the server remains the only thing that verifies. Exported
+ * because background.js needs the same decode for Google's id_token (nonce check); a second
+ * copy there would be the kind of duplicate this repo keeps getting bitten by.
+ */
+export function decodeJwtPayload(token) {
   try {
     let b64 = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     while (b64.length % 4) b64 += '=';
@@ -33,7 +39,7 @@ function decodeExtTokenPayload(token) {
  * rejecting on those grounds would silently change which tokens get persisted.
  */
 export function extTokenScope(token) {
-  return decodeExtTokenPayload(token)?.scope;
+  return decodeJwtPayload(token)?.scope;
 }
 
 /**
@@ -58,7 +64,7 @@ export function extTokenScope(token) {
  * the token has expired.
  */
 export function extTokenEmail(token) {
-  const payload = decodeExtTokenPayload(token);
+  const payload = decodeJwtPayload(token);
   if (!payload || payload.iss !== EXT_TOKEN_ISSUER) return null;
   // exp is seconds since epoch (worker/src/utils/ext-token.ts). A token with no numeric exp is
   // not one of ours in a usable state, so treat it as unusable rather than as never-expiring.

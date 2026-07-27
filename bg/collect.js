@@ -15,7 +15,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked, resolveIngestIdentity } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -723,12 +723,27 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // email, not this claude.ai account email, so an unsubstituted user_email would
     // be rejected (403 Email mismatch) and the data silently dropped.
     // See docs/DESIGN-identity-email-auth-trap.md (step C).
+    let linkedCanonical;
     {
       const { claudeAliasLink } = await chrome.storage.local.get('claudeAliasLink');
       if (claudeAliasLink && claudeAliasLink.claudeEmail === userEmail && claudeAliasLink.canonicalEmail) {
-        userEmail = claudeAliasLink.canonicalEmail;
+        linkedCanonical = claudeAliasLink.canonicalEmail;
       }
     }
+
+    // …then the ONE identity rule every collector shares (bg/storage.js — see
+    // docs/DESIGN-authenticated-attribution.md): the authenticated identity wins. Claude was the
+    // odd one out. It keyed on the claude.ai account email and repaired the mismatch from
+    // `claudeAliasLink`, which is DEVICE-local state; losing it (new browser, reinstall) meant a
+    // 403 on every POST, a cleared ext_token and permanent shared-api_key fallback — 22 of 297
+    // installs (7.4%) were measured in exactly that hole.
+    //
+    // 🔴 A verified link is passed in and OUTRANKS the token — do not "simplify" this by letting
+    // the resolver read the token first. Linking does not refresh the token, so right after a
+    // link the install still holds one bound to the OLD address; token-first silently undoes the
+    // link, permanently (the server then sees authedEmail === bodyEmail and re-mints the old
+    // one). Rationale in full at pickIngestIdentity(); regression covered by test:ingest-identity.
+    userEmail = (await resolveIngestIdentity(userEmail, linkedCanonical)) || userEmail;
 
     // 3. Build snapshot (resets_at normalized to minute precision)
     const extVersion = chrome.runtime.getManifest().version;

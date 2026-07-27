@@ -194,6 +194,9 @@ const TRANSLATIONS = {
     'perm_required_hint': '(권한 필요 — 토글을 다시 켜서 승인)',
     'perm_banner_text': '{0} 수집을 위해 사이트 접근 권한이 필요합니다.',
     'perm_banner_btn': '권한 허용',
+    // 3-org cap drop: the server accepts the POST but stores nothing for a non-selected org.
+    'capdrop_banner_text': '{0} 수집이 안 되고 있습니다. 활성 조직 3개 한도가 찼습니다.',
+    'capdrop_banner_btn': '조직 고르기',
     'collect_interval': '수집 주기 (분)',
     'plan_optimization': '관리자 플랜 변경 요청',
     'opt_mode': '처리 방식',
@@ -655,6 +658,9 @@ const TRANSLATIONS = {
     'perm_required_hint': '(permission needed — re-toggle to approve)',
     'perm_banner_text': '{0} collection requires site access permission.',
     'perm_banner_btn': 'Grant',
+    // 3-org cap drop: the server accepts the POST but stores nothing for a non-selected org.
+    'capdrop_banner_text': '{0} is not being collected — your 3 active-org limit is full.',
+    'capdrop_banner_btn': 'Choose orgs',
     'collect_interval': 'Interval (min)',
     'plan_optimization': 'Admin Plan Change Requests',
     'opt_mode': 'Handling Mode',

@@ -345,6 +345,45 @@ async function renderLoginCta() {
   }
 }
 
+// Orgs the server is silently dropping at the 3-org cap (recorded by recordCapDrop in
+// bg/cadence-config.js on every `skip_org` POST response).
+//
+// This is the only place the drop surfaces where the user actually is. The dashboard warns
+// too, but a dropped org produces NO data — so nothing ever pulls that user to the dashboard
+// to see the warning, which is exactly how the drop stayed invisible.
+//
+// ⚠️ Key literal is duplicated from bg/cadence-config.js (CAP_DROP_KEY): the popup is a
+// classic script and cannot import that ESM module. Rename in BOTH or neither.
+const CAP_DROP_KEY = '_ct_cap_drop';
+
+async function checkCapDrops() {
+  const banner = document.getElementById('capdrop-banner');
+  if (!banner) return;
+  let orgs = [];
+  try {
+    const stored = await chrome.storage.local.get(CAP_DROP_KEY);
+    const cur = stored && stored[CAP_DROP_KEY];
+    if (cur && Array.isArray(cur.orgs)) orgs = cur.orgs.filter(Boolean);
+  } catch { /* storage hiccup → treat as "nothing dropped" and stay quiet */ }
+  if (orgs.length === 0) { banner.classList.add('hidden'); return; }
+
+  // Name the PROVIDERS, not the org uuids: a uuid means nothing to a user, and the provider
+  // is the part they recognise ("my Gemini isn't being collected").
+  const labels = { chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude' };
+  const names = [...new Set(orgs.map(o => labels[o.provider] || o.provider))].join(', ');
+  banner.innerHTML = '';
+  banner.appendChild(document.createTextNode(
+    t('capdrop_banner_text', names) || names + ' is not being collected — active-org limit reached.',
+  ));
+  const btn = document.createElement('button');
+  btn.textContent = t('capdrop_banner_btn') || 'Choose';
+  btn.addEventListener('click', () => {
+    chrome.tabs.create({ url: 'https://claudetuner.com/dashboard/settings/#active-orgs-card' });
+  });
+  banner.appendChild(btn);
+  banner.classList.remove('hidden');
+}
+
 // Check optional provider permissions and show banner if needed
 async function checkProviderPermissions() {
   const banner = document.getElementById('perm-banner');
@@ -582,6 +621,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   loadOrgSelector();
   checkProviderPermissions();
+  checkCapDrops();
   loadFitnessMatrix();
 
   // Fitness table click opens dashboard (except link clicks)
@@ -793,6 +833,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderReauthWidget();
       renderLoginCta();
       checkProviderPermissions();
+      checkCapDrops();   // same reason — imperative t() text, rebuilt via innerHTML=''
       // Same reason: the sync-account note is imperative t() text with no data-i18n attribute.
       // It can't wait for the updateUI() below either — that only runs when lastStatus exists,
       // and provider-only (ChatGPT/Gemini) installs render from collectedOrgs with a null

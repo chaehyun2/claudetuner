@@ -1,6 +1,6 @@
 import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
-import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId } from './storage.js';
+import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 
 // Capitalize first letter: "plus" → "Plus"
@@ -438,15 +438,13 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   const config = await getConfig();
   if (!config.serverUrl) return;
 
-  // Server identity, in priority order:
-  //  1. Claude email (accountCache) — Claude user; this provider is an extra org
-  //  2. independent account email (magic-link) — chosen unified identity
-  //  3. the ChatGPT account's own email (TOFU) — no Claude/magic-link, so the
-  //     ChatGPT email IS the identity (same trust model Claude already uses)
-  const { accountCache, independentAccount } = await chrome.storage.local.get({
-    accountCache: null, independentAccount: null,
-  });
-  const serverEmail = accountCache?.email || independentAccount?.email || chatgptEmail;
+  // Server identity — ONE rule for every collector, in bg/storage.js (see
+  // docs/DESIGN-authenticated-attribution.md). The ext_token identity now wins: if this install
+  // proved it is A, this provider's usage belongs to A even though the ChatGPT account is B.
+  // `accountCache` is still read here for isExtraOrg below (a Claude account means this
+  // provider is an extra org, which is a different question from identity).
+  const { accountCache } = await chrome.storage.local.get({ accountCache: null });
+  const serverEmail = await resolveIngestIdentity(chatgptEmail);
   if (!serverEmail) {
     console.warn('[Claude Tuner] ChatGPT snapshot skipped: no email (no Claude/independent account and no ChatGPT email)');
     return;

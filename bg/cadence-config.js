@@ -71,6 +71,65 @@ export function setCadenceChangeHandler(fn) { _onChange = fn; }
 // `sinceSent >= floor` always true (over-send). Mandatory even with clamps removed.
 function num(v) { return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null; }
 
+// Orgs the server is dropping at the 3-org cap, remembered so the popup can warn.
+// ⚠️ Key literal is duplicated in popup.js (CAP_DROP_KEY) — a classic global script that
+// cannot import this ESM module (runtime boundary). Rename in BOTH or neither.
+const CAP_DROP_KEY = '_ct_cap_drop';
+const CAP_DROP_MAX = 10;   // bound the list; matches the server's MAX_AVAIL_ORGS
+// Tail of the recordCapDrop serialisation chain (see there). Module-level: one background worker.
+let _capDropQueue = Promise.resolve();
+
+/**
+ * Record (or clear) a 3-org-cap drop for the stream this response answered.
+ *
+ * A dropped snapshot comes back as a plain `200 {skipped:true, skip_org:true}` — the server
+ * stores nothing, and before this the client had no idea. The popup reads the resulting key
+ * to tell the user which providers are silently not being collected.
+ *
+ * Self-clearing: an authoritative (non-drop) 200 for the SAME stream removes the entry, so
+ * fixing the org selection makes the warning disappear on the very next POST instead of
+ * lingering. Writes only on an actual state CHANGE, so a steadily-dropping org doesn't hit
+ * storage on every cycle.
+ */
+function recordCapDrop(response, streamRef) {
+  const uuid = streamRef && streamRef.uuid;
+  // No stream identity (e.g. a heartbeat that names no org) → nothing to attribute.
+  // Checked BEFORE queueing so a no-op never serialises behind a real write.
+  if (!uuid) return Promise.resolve();
+  const provider = (streamRef && streamRef.provider) || 'claude';
+  const drop = !!response.skip_org;
+  // Serialise the read-modify-write below. The extra orgs are posted concurrently
+  // (`collect.js` fans them out with `.then`, not sequential `await`), so two drop responses
+  // can land together, both read the SAME base value, and the second `set` silently discards
+  // the first one's entry — the popup would then under-report which orgs are being dropped.
+  // A module-level promise chain is enough: every POST runs in the one background service
+  // worker, and if that worker is torn down there is nothing in flight to interleave with.
+  // `.then(run, run)` so a rejected link can never wedge the chain for the session.
+  const run = () => applyCapDrop(drop, provider + '|' + uuid, provider);
+  _capDropQueue = _capDropQueue.then(run, run);
+  return _capDropQueue;
+}
+
+/** The actual read-modify-write, only ever run one-at-a-time via _capDropQueue. Never throws. */
+async function applyCapDrop(drop, key, provider) {
+  try {
+    const stored = await chrome.storage.local.get(CAP_DROP_KEY);
+    const cur = stored && stored[CAP_DROP_KEY];
+    const orgs = cur && Array.isArray(cur.orgs) ? cur.orgs.slice() : [];
+    const idx = orgs.findIndex(o => o && o.key === key);
+    if (drop) {
+      if (idx >= 0) return;                       // already recorded — no write
+      orgs.unshift({ key, provider });
+    } else {
+      if (idx < 0) return;                        // nothing recorded — no write
+      orgs.splice(idx, 1);
+    }
+    await chrome.storage.local.set({
+      [CAP_DROP_KEY]: { at: Date.now(), orgs: orgs.slice(0, CAP_DROP_MAX) },
+    });
+  } catch { /* storage hiccup — non-fatal, the dashboard banner still covers it */ }
+}
+
 /**
  * Persist a server-provided cadence override from a POST response. Validates each
  * field (drops invalid ones) and stamps updatedAt for TTL decay. Missing fields are
@@ -94,6 +153,10 @@ export async function applyServerCadence(response, now = Date.now(), streamRef =
   // bouncing the browser back to full cadence forever (Codex MEDIUM, this PR). Leave the
   // stream's state exactly as the last authoritative response left it.
   if (!response.skip_org) await applyStreamCadence(response.stream_cadence, streamRef, now);
+  // The SAME `skip_org` verdict, used for the opposite purpose: remember that this org is
+  // being dropped, so the popup can say so. The drop was invisible on the client until now —
+  // the POST returns 200 and the extension carried on as though the snapshot had been stored.
+  await recordCapDrop(response, streamRef);
   // Piggyback: the server reads cf.country and returns it on POST responses so the
   // ad-server targeting filter (usage-shared.js) has a country signal without any
   // extra Worker call (design §3.2/§4). Cache it here — the shared POST chokepoint.

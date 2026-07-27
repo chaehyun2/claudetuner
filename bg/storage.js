@@ -290,6 +290,66 @@ export async function clearExtToken() {
 }
 
 /**
+ * The identity an ingest POST is attributed to. ONE implementation for all three collectors —
+ * they each carried their own precedence, which is how Claude drifted into a different rule
+ * from ChatGPT/Gemini (docs/DESIGN-authenticated-attribution.md).
+ *
+ * 🔑 THE RULE: identity comes from AUTHENTICATION; a provider's own email is only a label.
+ * If this install proved it is A, everything it collects belongs to A — including providers
+ * whose accounts are B and C. That inverts the old trust direction, in which the body email of
+ * an UNAUTHENTICATED POST was taken as identity: the #179/#180 oracle, the [C1] guard and the
+ * disclosure that killed D-2 all trace back to that one assumption.
+ *
+ * Priority:
+ *  1. linkedCanonical — a verified `claudeAliasLink`. See the 🔴 note below: this outranks the
+ *     token on purpose.
+ *  2. ext_token email — the identity the SERVER minted for this install. `extTokenEmail`
+ *     checks issuer + expiry, so a stale token falls through instead of misattributing.
+ *  3. accountCache.email — the Claude account. Legacy canonical, kept for installs with no
+ *     token yet (their first POST is still api_key TOFU until 단계 6 removes that path).
+ *  4. independentAccount.email — email-login identity for users with no Claude account.
+ *  5. the provider's own email — TOFU last resort.
+ *
+ * 🔴 WHY A LINK OUTRANKS THE TOKEN (Codex review of PR #702 caught the inverse, with a runnable
+ * repro). Linking does NOT refresh the token: `_finishEmailLink` (ui/render.js) only writes
+ * `claudeAliasLink`, and `/api/auth/claude-link/verify` returns no token. So the moment after a
+ * user links personal@ → work@, the install still holds a token bound to personal@ — valid, not
+ * expired, so rule 2 happily returns it. Ranking the token first therefore UNDOES the link the
+ * user just made, and it is stable, not transient: the server sees authedEmail === bodyEmail,
+ * skips its alias lookup, and re-mints under personal@ every cycle. The user is told "Linked —
+ * Claude usage will start syncing shortly" while nothing of the sort happens.
+ * A verified link is itself a server-established fact (verify requires a valid token AND inbox
+ * proof), so it is the NEWER authenticated statement — not an exception to "authentication
+ * decides identity" but an application of it.
+ *
+ * 🔴 Rule 2 is what makes `user_aliases` unnecessary GOING FORWARD: an install that reports the
+ * address its own token already names cannot hit ingest's 403 email mismatch, so it never falls
+ * back to the shared api_key and never needs a link. It applies to installs with no link.
+ */
+
+/**
+ * Pure precedence, split out so it can be tested by executing it rather than by regex-matching
+ * this file. The first cut of the guard only pattern-matched, which is exactly why it could not
+ * catch the link regression above.
+ */
+export function pickIngestIdentity({ linkedCanonical, tokenEmail, accountEmail, independentEmail, providerEmail }) {
+  return linkedCanonical || tokenEmail || accountEmail || independentEmail || providerEmail || null;
+}
+
+export async function resolveIngestIdentity(providerEmail, linkedCanonical) {
+  const { extToken, accountCache, independentAccount } = await chrome.storage.local.get({
+    extToken: null, accountCache: null, independentAccount: null,
+  });
+  return pickIngestIdentity({
+    linkedCanonical,
+    tokenEmail: extTokenEmail(extToken),
+    accountEmail: accountCache?.email,
+    independentEmail: independentAccount?.email,
+    providerEmail,
+  });
+}
+
+/**
  * Race-safe token clear. Only clears if a Bearer token was sent AND the stored
  * token still matches that exact token. This prevents a late-arriving auth
  * failure from one request from deleting a freshly rotated token stored by

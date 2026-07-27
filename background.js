@@ -12,7 +12,7 @@ import {
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
-import { extTokenEmail } from './bg/ext-token-claims.js';
+import { extTokenEmail, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
@@ -1679,7 +1679,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       try {
         const redirectUri = chrome.identity.getRedirectURL();
-        // `nonce` is required for response_type=id_token and is our replay guard.
+        // `nonce` is required for response_type=id_token, and it only guards anything if somebody
+        // CHECKS it on the way back — see the comparison after the redirect. Until 2026-07-27 this
+        // line claimed to be "our replay guard" while nothing anywhere read the claim: not here,
+        // and not on the server (`verifyGoogleIdToken` checks `aud` + `email_verified` only, and
+        // never sees this value). A guard that exists only in a comment is worse than none — the
+        // next reader stops looking.
         const nonce = crypto.randomUUID();
         const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
           + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
@@ -1693,6 +1698,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // id_token comes back in the URL FRAGMENT (implicit flow), never the query string.
         const idToken = new URLSearchParams(new URL(redirect).hash.slice(1)).get('id_token');
         if (!idToken) { sendResponse({ success: false, error: 'no_id_token' }); return; }
+
+        // Bind the token to THIS request: Google echoes our nonce into the id_token, so one
+        // minted for a different request cannot be substituted into this redirect.
+        // 🔴 Scope of the guarantee, stated so nobody over-trusts it again — this reads an
+        // UNVERIFIED payload client-side, so it stops substitution in this flow, NOT forgery.
+        // Authenticity stays the server's job (signature + `aud` in verifyGoogleIdToken).
+        if (decodeJwtPayload(idToken)?.nonce !== nonce) {
+          console.warn('[Claude Tuner] Google sign-in: id_token nonce mismatch — refusing');
+          sendResponse({ success: false, error: 'nonce_mismatch' });
+          return;
+        }
 
         const config = await getConfig();
         const resp = await fetch(`${config.serverUrl}/api/auth/ext-google`, {
