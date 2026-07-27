@@ -113,6 +113,39 @@ async function renderReauthWidget() {
 // that block is defined by the ABSENCE of a token and so has no token tail to fingerprint.
 const AUTH_BLOCKED_MARKER = 'auth-blocked';
 
+/**
+ * One-click login. Returns {ok} or {ok:false, message} — message '' means "user backed out",
+ * which must stay silent (an error line for a deliberate cancel reads like a bug).
+ *
+ * The `identity` permission is OPTIONAL and requested HERE, not in the background: Chrome
+ * requires a user gesture for chrome.permissions.request(), and a runtime message handler has
+ * none. Everything after the grant (the auth window, the token exchange, storing ext_token)
+ * happens in the background so the flow survives this popup closing — which it does the moment
+ * the Google window takes focus. That is also why a lost sendMessage reply is not treated as
+ * failure: storage.onChanged re-renders the CTA when the background stores the token.
+ */
+async function signInWithGoogle() {
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ permissions: ['identity'] });
+  } catch {
+    granted = false;
+  }
+  if (!granted) return { ok: false, message: t('login_cta_google_perm') || 'Permission needed for Google sign-in. Use the email code instead.' };
+
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'GOOGLE_SIGNIN' });
+  } catch {
+    // Popup closed mid-flow → the reply never arrived. The background may well have succeeded;
+    // do not claim failure.
+    return { ok: false, message: '' };
+  }
+  if (res?.success) return { ok: true };
+  if (res?.error === 'cancelled') return { ok: false, message: '' };
+  return { ok: false, message: t('login_cta_google_err') || 'Google sign-in failed. Use the email code instead.' };
+}
+
 async function renderLoginCta() {
   const widget = document.getElementById('login-cta');
   if (!widget) return;
@@ -230,6 +263,30 @@ async function renderLoginCta() {
   verifyBtn.textContent = t('login_cta_verify') || 'Verify & log in';
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
   dismissBtn.textContent = t('login_cta_dismiss') || 'Use locally only';
+
+  const googleBtn = document.getElementById('login-cta-google');
+  document.getElementById('login-cta-google-label').textContent = t('login_cta_google') || 'Continue with Google';
+  document.getElementById('login-cta-or').textContent = t('login_cta_or') || 'or use an email code';
+  if (googleBtn && !googleBtn.dataset.bound) {
+    googleBtn.dataset.bound = '1';
+    googleBtn.addEventListener('click', async () => {
+      googleBtn.disabled = true; status.textContent = '';
+      try {
+        const res = await signInWithGoogle();
+        if (res.ok) {
+          // Same tail as the email-code path: we now hold a full Bearer token, so kick a POST
+          // immediately (the server-sync gate just opened) and re-render off fresh storage.
+          status.textContent = t('login_cta_success') || 'Logged in — server sync will start shortly.';
+          chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+          setTimeout(() => location.reload(), 1200);
+          return;
+        }
+        status.textContent = res.message;
+      } finally {
+        googleBtn.disabled = false;
+      }
+    });
+  }
 
   if (!sendBtn.dataset.bound) {
     sendBtn.dataset.bound = '1';

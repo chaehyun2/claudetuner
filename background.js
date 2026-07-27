@@ -28,6 +28,14 @@ import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
 
+// Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
+// only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
+// launchWebAuthFlow lets an extension reuse a web client id, which is precisely why we use it
+// instead of chrome.identity.getAuthToken — that one forces a Chrome-app client id and a second
+// accepted audience on the server. Public value (it ships in dashboard JS), not a secret.
+// 🔴 Requires `https://<extension-id>.chromiumapp.org/` in the client's authorized redirect URIs.
+const GOOGLE_CLIENT_ID = '1073913781930-7r6v6nim1unn7so8s6jueap2a28eprla.apps.googleusercontent.com';
+
 // Check if optional host permission is granted for a provider
 function hasProviderPermission(provider) {
   const origins = {
@@ -1598,10 +1606,60 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           independentAccount: { email: data.email, name: data.name || '' },
           extToken: data.ext_token,
         });
-        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin']);
+        // `authBlocked` too: a login IS the fix for the email-provider 401, so the CTA must go
+        // now rather than waiting for the next accepted POST to clear it (bg/storage.js).
+        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
         sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  // Google sign-in from the popup → ext_token('full'), the one-click twin of VERIFY_MAGIC_CODE.
+  // The `identity` permission is OPTIONAL and requested by the popup (chrome.permissions.request
+  // needs a user gesture, which a message handler does not have) — by the time we get here it is
+  // already granted. Server counterpart: POST /api/auth/ext-google.
+  if (message.type === 'GOOGLE_SIGNIN') {
+    (async () => {
+      try {
+        const redirectUri = chrome.identity.getRedirectURL();
+        // `nonce` is required for response_type=id_token and is our replay guard.
+        const nonce = crypto.randomUUID();
+        const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
+          + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
+          + '&response_type=id_token'
+          + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+          + `&scope=${encodeURIComponent('openid email profile')}`
+          + `&nonce=${encodeURIComponent(nonce)}`
+          + '&prompt=select_account';
+        const redirect = await chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true });
+        if (!redirect) { sendResponse({ success: false, error: 'cancelled' }); return; }
+        // id_token comes back in the URL FRAGMENT (implicit flow), never the query string.
+        const idToken = new URLSearchParams(new URL(redirect).hash.slice(1)).get('id_token');
+        if (!idToken) { sendResponse({ success: false, error: 'no_id_token' }); return; }
+
+        const config = await getConfig();
+        const resp = await fetch(`${config.serverUrl}/api/auth/ext-google`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ google_token: idToken }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { sendResponse({ success: false, error: data.error || 'signin_failed' }); return; }
+
+        await chrome.storage.local.set({
+          independentAccount: { email: data.email, name: data.name || '' },
+          extToken: data.ext_token,
+        });
+        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
+        sendResponse({ success: true, email: data.email, name: data.name });
+      } catch (e) {
+        // launchWebAuthFlow rejects when the user closes the window — not an error worth surfacing
+        // as a failure message beyond "cancelled".
+        const msg = String(e?.message || e);
+        sendResponse({ success: false, error: /closed|canceled|cancelled/i.test(msg) ? 'cancelled' : msg });
       }
     })();
     return true;

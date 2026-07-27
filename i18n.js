@@ -165,6 +165,12 @@ const TRANSLATIONS = {
     'login_cta_authblocked_title': '인증하고 서버 동기화 다시 켜기',
     'login_cta_authblocked_msg': '사용량은 이 브라우저에 계속 기록되고 있지만, 서버에는 더 이상 저장되지 않고 있습니다. 이 계정은 이제 로그인이 필요합니다. 이메일 인증 한 번으로 다시 연결됩니다.',
     'login_cta_authblocked_mini': '🔒 인증 필요 — 지금 이 브라우저의 사용량이 서버에 저장되지 않고 있습니다',
+    // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
+    // the email-code flow below stays the fallback and the copy must never imply otherwise.
+    'login_cta_google': 'Google로 계속하기',
+    'login_cta_or': '또는 이메일 코드로 로그인',
+    'login_cta_google_perm': 'Google 로그인에는 권한 허용이 필요합니다. 아래 이메일 코드로도 로그인할 수 있습니다.',
+    'login_cta_google_err': 'Google 로그인에 실패했습니다. 아래 이메일 코드로 시도해 주세요.',
     // Status banner (6-tier pace)
     'pace_comfortable': '여유 — 마음껏 사용하세요!',
     'pace_ontrack': '순조로움 — 적절한 페이스입니다',
@@ -621,6 +627,12 @@ const TRANSLATIONS = {
     'login_cta_authblocked_title': 'Verify to resume server sync',
     'login_cta_authblocked_msg': 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires a login. One email verification restores it.',
     'login_cta_authblocked_mini': '🔒 Verification needed — this browser\'s usage is not reaching the server',
+    // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
+    // the email-code flow below stays the fallback and the copy must never imply otherwise.
+    'login_cta_google': 'Continue with Google',
+    'login_cta_or': 'or sign in with an email code',
+    'login_cta_google_perm': 'Google sign-in needs permission. You can also sign in with an email code below.',
+    'login_cta_google_err': 'Google sign-in failed. Try the email code below.',
     // Status banner (6-tier pace)
     'pace_comfortable': 'Comfortable — use freely!',
     'pace_ontrack': 'On Track — sustainable pace',
