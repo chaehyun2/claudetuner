@@ -142,6 +142,11 @@ export const BG_I18N = {
     notif_settings_hint: '확장 설정에서 알림을 관리할 수 있습니다.',
     notif_settings_btn: '설정',
     promo_push_btn: '자세히 보기',
+    // 서버 동기화 차단(email-provider 가드 401). 팝업 CTA는 "팝업을 여는 사람"에게만 닿는데,
+    // 이 확장은 원래 열어볼 일이 없는 물건이라 배지·알림이 유일하게 도달하는 표면이다.
+    authblocked_title: '사용량이 서버에 저장되지 않고 있습니다',
+    authblocked_msg: '이 계정은 로그인이 필요합니다. 확장 아이콘을 눌러 인증하면 다시 연결됩니다.',
+    authblocked_btn: '지금 인증하기',
   },
   en: {
     reset_soon_title: '{0} limit resetting soon',
@@ -179,5 +184,11 @@ export const BG_I18N = {
     notif_settings_hint: 'Manage alerts in extension settings.',
     notif_settings_btn: 'Settings',
     promo_push_btn: 'View',
+    // Server sync blocked (email-provider guard 401). The popup CTA only reaches someone who
+    // opens the popup, and this extension is built to be ignored — the badge/notification is the
+    // only surface that reaches a user who never opens it.
+    authblocked_title: 'Your usage is not reaching the server',
+    authblocked_msg: 'This account now requires a sign-in. Click the extension icon to verify and reconnect.',
+    authblocked_btn: 'Verify now',
   },
 };

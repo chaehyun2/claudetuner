@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus, authedFetch } from './storage.js';
 import { logNotification } from './notifications.js';
-import { resetIcon } from './badge.js';
+import { resetIcon , badgeLockedByAuthBlock } from './badge.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -160,13 +160,11 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
       completedPlanOrder: { ...po, ...(auto ? { auto: true } : {}), completedAt: Date.now() },
     });
     // Restore normal icon + badge now that pendingPlanOrder is cleared
-    resetIcon();
-    chrome.action.setBadgeText({ text: '' });
+    if (!(await badgeLockedByAuthBlock())) { resetIcon(); chrome.action.setBadgeText({ text: '' }); }
   } else if (changeResult?.error === 'Plan already changed externally') {
     // Plan was changed outside of the order — clear stale order so banner disappears
     await chrome.storage.local.set({ pendingPlanOrder: null });
-    resetIcon();
-    chrome.action.setBadgeText({ text: '' });
+    if (!(await badgeLockedByAuthBlock())) { resetIcon(); chrome.action.setBadgeText({ text: '' }); }
   }
   return changeResult;
 }
@@ -185,7 +183,7 @@ export async function dismissRecommendationServer({ permanent = false } = {}) {
       body: JSON.stringify(payload),
     }).catch(() => {});
   }
-  chrome.action.setBadgeText({ text: '' });
+  if (!(await badgeLockedByAuthBlock())) chrome.action.setBadgeText({ text: '' });
   chrome.notifications.clear(NOTIF_ID_OPTIMIZE);
 }
 
@@ -233,9 +231,9 @@ export async function executePlanChange(recommendation) {
       });
     }
 
-    // Success — clear badge and restore normal icon (order icon may be active)
-    chrome.action.setBadgeText({ text: '' });
-    resetIcon();
+    // Success — clear badge and restore normal icon (order icon may be active). Not when the
+    // auth-block alarm owns the badge: sync is still dead, so clearing would hide that.
+    if (!(await badgeLockedByAuthBlock())) { chrome.action.setBadgeText({ text: '' }); resetIcon(); }
     await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', fromPlan, toPlan), 2);
 
     console.log(`[Claude Tuner] Plan change successful: ${fromPlan} → ${toPlan}`);

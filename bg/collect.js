@@ -9,7 +9,7 @@ import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSu
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
-import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon } from './badge.js';
+import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon , badgeLockedByAuthBlock } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
@@ -297,6 +297,7 @@ function syncNotificationPrefs(config, userEmail) {
 
 /** Show recommendation badge (⚠) with display-mode-aware utilization */
 async function showRecommendationBadge(snapshot, recType) {
+  if (await badgeLockedByAuthBlock()) return; // the block alarm outranks a recommendation
   resetIcon();
   const { usageDisplayMode: _bdm = '7d' } = await chrome.storage.sync.get({ usageDisplayMode: '7d' });
   let util;
@@ -1015,9 +1016,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted', 'failed', e.message);
           }
         } else {
+          if (!(await badgeLockedByAuthBlock())) {
           chrome.action.setIcon({ path: { 16: 'icons/icon16-order.png', 48: 'icons/icon48-order.png', 128: 'icons/icon128-order.png' } });
           chrome.action.setBadgeText({ text: '📋' });
           chrome.action.setBadgeBackgroundColor({ color: '#7c3aed' });
+          }
           chrome.notifications.create('plan-order-' + po.order_id, {
             type: 'basic', iconUrl: 'icons/icon128.png',
             title: await bt('po_title'),

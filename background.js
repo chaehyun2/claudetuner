@@ -16,7 +16,7 @@ import { extTokenEmail } from './bg/ext-token-claims.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -555,6 +555,60 @@ async function resolveSyncIdentity() {
 
 // Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  // Silent recovery from the dashboard: the page is signed in, mints an ext_token server-side
+  // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
+  // recovery path we shipped needs them to notice something first, and none did (2026-07-27).
+  //
+  // 🔴 Two guards, both load-bearing:
+  //  [1] ORIGIN. externally_connectable also allows *.claude-tuner-site-git.pages.dev — every PR
+  //      preview. That is harmless for the read-only probes above, but a message that INSTALLS A
+  //      CREDENTIAL must come from production only.
+  //  [2] NO EXISTING TOKEN. Only a blocked/tokenless install accepts one. Without this, opening
+  //      the dashboard as account A would silently re-point an extension collecting for account B
+  //      — the exact account-mismatch the dashboard elsewhere warns about, caused by us.
+  if (message && message.type === 'RECOVER_EXT_TOKEN') {
+    (async () => {
+      if (sender.origin !== 'https://claudetuner.com') {
+        sendResponse({ success: false, error: 'origin_not_allowed' });
+        return;
+      }
+      if (!message.ext_token || typeof message.ext_token !== 'string') {
+        sendResponse({ success: false, error: 'missing_token' });
+        return;
+      }
+      const existing = await getExtToken();
+      if (existing) {
+        sendResponse({ success: false, error: 'already_authed' });
+        return;
+      }
+      // [3] IDENTITY. Tokenless is not the same as identity-less: an install can be collecting
+      // for account B on the shared api_key while the dashboard is open as A. Installing A's
+      // token there does not merely mis-attribute — the server would 403 every B snapshot on the
+      // email mismatch, so a partially-working install becomes a fully-broken one. Only accept a
+      // token for the identity this install already believes it is (Codex review).
+      // The SERVER already compared both addresses with alias resolution when it saw
+      // `collecting_email`; trust that over a raw string compare, which rejects an alias of the
+      // same person as a stranger (Codex re-review). This stays as the check for the case where
+      // the page sent no identity at all.
+      const local = message.identity_verified === true ? { email: null } : await resolveSyncIdentity();
+      if (local.email && message.email && local.email.toLowerCase() !== String(message.email).toLowerCase()) {
+        console.log('[Claude Tuner] recovery refused: dashboard account differs from the collecting one');
+        sendResponse({ success: false, error: 'identity_mismatch' });
+        return;
+      }
+      await chrome.storage.local.set({
+        extToken: message.ext_token,
+        ...(message.email ? { independentAccount: { email: message.email, name: message.name || '' } } : {}),
+      });
+      await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
+      console.log('[Claude Tuner] ext_token recovered from dashboard session');
+      // Collect right away so the dashboard the user is looking at stops being stale.
+      collectAndSend({ force: true }).catch(() => {});
+      sendResponse({ success: true });
+    })();
+    return true; // async sendResponse
+  }
+
   if (message && message.type === 'set_ref_source' && message.ref_source) {
     chrome.storage.local.set({ ref_source: message.ref_source });
     console.log('[Claude Tuner] ref_source set:', message.ref_source);
@@ -1731,6 +1785,40 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // === Notification click handler ===
 // Promo push (e.g. Product Hunt launch): clicking the notification body opens the promo URL.
+// Server-sync block → badge + one-time notification. Driven off the storage EDGE rather than
+// polled: bg/storage.js sets `authBlocked` deep inside the POST path, and importing notifications
+// there would close an import cycle (notifications.js already imports storage.js). onChanged also
+// gives the once-per-episode semantics for free — it fires only on an actual value change, so a
+// recovery followed by a fresh block notifies again while a steady block stays quiet.
+// Catch-up for a block that started BEFORE this build: the edge listener below never fires for
+// it, because the flag was already true. Runs on every service-worker wake; notifyAuthBlockedOnce
+// is idempotent via its episode marker, so this costs one storage read.
+(async () => {
+  const { authBlocked } = await chrome.storage.local.get('authBlocked');
+  if (authBlocked === true) await notifyAuthBlockedOnce();
+})();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.authBlocked) return;
+  const { oldValue, newValue } = changes.authBlocked;
+  if (newValue === true && oldValue !== true) {
+    notifyAuthBlockedOnce();
+    // Paint the badge now instead of waiting for the next collection tick — the whole point is
+    // that this user may not look at the extension for hours.
+    chrome.action.setBadgeText({ text: '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+  } else if (oldValue === true && newValue !== true) {
+    // Recovered (clearAuthBlocked removes the key → newValue undefined). Drop the alarm state
+    // immediately; leaving a red '!' up until the next collection tick would read as "still
+    // broken" right after the login that fixed it.
+    resetIcon();
+    chrome.action.setBadgeText({ text: '' });
+    chrome.notifications.clear('auth-blocked');
+    // Drop the episode marker so a FUTURE block notifies again.
+    chrome.storage.local.remove('authBlockedNotifiedAt');
+  }
+});
+
 chrome.notifications.onClicked.addListener(async (notifId) => {
   if (!notifId.startsWith('promo-push-')) return;
   const promoId = notifId.replace('promo-push-', '');
@@ -1753,6 +1841,15 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   // Collection failure notification → open Claude.ai
   if (notifId.startsWith('collect-fail-') && btnIdx === 0) {
     chrome.tabs.create({ url: 'https://claude.ai' });
+    chrome.notifications.clear(notifId);
+    return;
+  }
+  // Server-sync blocked → put the user in front of the login CTA. Opened as a TAB, not via
+  // chrome.action.openPopup(): that API is Chrome 127+ and throws when no window is focused,
+  // which is exactly the state a notification click can arrive in. popup.html renders the same
+  // CTA in a tab, so the simple path is also the reliable one.
+  if (notifId === 'auth-blocked' && btnIdx === 0) {
+    chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
     chrome.notifications.clear(notifId);
     return;
   }

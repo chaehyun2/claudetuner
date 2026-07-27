@@ -17,6 +17,67 @@ export async function logNotification(category) {
   await chrome.storage.local.set({ _notifLog: pruned });
 }
 
+/**
+ * Server sync blocked (email-provider guard 401) — fire ONCE per block episode.
+ *
+ * Why a notification at all: the popup CTA (and the Google one-click beside it) only reach a user
+ * who opens the popup, and this extension is built to run unattended. Real accounts stayed broken
+ * for days without noticing (2026-07-27); email reached them only because we had their address.
+ * The badge is the persistent signal, this is the one-time interrupt that makes them look at it.
+ *
+ * Deliberately NOT escalating like checkCollectFailNotification: repeating this would be nagging
+ * about something only the user can fix, and the badge already persists until they do.
+ *
+ * Callers: the false→true edge in background.js AND a service-worker-wake catch-up there, because
+ * an edge alone misses installs that were already blocked before this shipped. Both are safe to
+ * call repeatedly — the marker below is what enforces "once".
+ */
+export async function notifyAuthBlockedOnce() {
+  // Episode marker, not an edge. onChanged fires only on a CHANGE, so an install that was ALREADY
+  // blocked before this build shipped would never be told — and that is exactly the population
+  // this exists for (PR #682 set the flag; the notification only shipped after). The marker makes
+  // the call idempotent across service-worker wakes and is cleared on recovery, so a later block
+  // notifies again. (Codex HIGH.)
+  // 🔴 Re-read `authBlocked`, do not trust the caller's. Two independent event sources race here:
+  // the service-worker-wake catch-up (which read the flag before awaiting) and the dashboard's
+  // RECOVER_EXT_TOKEN, which clears the flag, the notification and the marker. Without this the
+  // catch-up can announce a problem that was fixed a moment ago — and worse, re-set the marker
+  // afterwards, swallowing the notification for the NEXT real block. (Codex integration review.)
+  const { authBlockedNotifiedAt, authBlocked } = await chrome.storage.local.get([
+    'authBlockedNotifiedAt', 'authBlocked',
+  ]);
+  if (authBlockedNotifiedAt) return;
+  if (authBlocked !== true) return; // recovered between the caller's read and now
+  // 🔴 Mark ONLY after creation is CONFIRMED. Reordering the calls was not enough (first attempt):
+  // create() is callback-based, so setting the marker on the next line still records "notified"
+  // for a call that may have failed — a revoked notifications permission, an OS-level block. The
+  // marker is what suppresses retries, so a stranded one means the user is never told at all.
+  // Awaiting the callback and bailing on lastError leaves the marker unset, and the
+  // service-worker-wake catch-up in background.js simply tries again. (Codex review ×2.)
+  const opts = {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: await bt('authblocked_title'),
+    message: await bt('authblocked_msg'),
+    priority: 2,
+    buttons: [{ title: await bt('authblocked_btn') }],
+  };
+  const created = await new Promise((resolve) => {
+    chrome.notifications.create('auth-blocked', opts, (id) => resolve(chrome.runtime.lastError ? null : id));
+  });
+  if (!created) return; // no marker → the next wake retries
+  // Check again: awaiting bt() and create() leaves a window for recovery to land. Marking now
+  // would strand a marker for an episode that is over, and the notification we just created is
+  // already wrong — clear it rather than leave a fixed problem on screen.
+  const { authBlocked: stillBlocked } = await chrome.storage.local.get('authBlocked');
+  if (stillBlocked !== true) {
+    chrome.notifications.clear('auth-blocked');
+    return;
+  }
+  await chrome.storage.local.set({ authBlockedNotifiedAt: Date.now() });
+  logNotification('auth-blocked');
+}
+
 // === Collection failure notification (3-stage escalation) ===
 export async function checkCollectFailNotification(errorMsg) {
   const { notifyCollectFail = true } = await chrome.storage.sync.get({ notifyCollectFail: true });

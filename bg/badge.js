@@ -29,9 +29,33 @@ export async function updateBadgeForSelectedOrg(claudeSnapshot) {
   }
 }
 
+/**
+ * True while the auth-blocked alarm owns the badge. Several paths write the badge WITHOUT going
+ * through updateBadge() — the recommendation badge, the plan-order badge, and plan.js's clears —
+ * so each has to ask. Without this a rec badge silently replaces the red `!` and the user is back
+ * to having no visible signal, which is the entire failure this feature exists to fix.
+ */
+export async function badgeLockedByAuthBlock() {
+  const { authBlocked } = await chrome.storage.local.get('authBlocked');
+  return authBlocked === true;
+}
+
 // === Badge update (based on usage display mode) ===
 export async function updateBadge(util7d, util5h) {
   resetIcon(); // Restore normal icon if it was showing error
+
+  // Server sync is BLOCKED (email-provider guard 401 → bg/storage.js noteAuthBlocked). This wins
+  // over every other badge state, including a pending order, for two reasons:
+  //  1. A utilization % here would be a LIE — nothing has reached the server since the block, so
+  //     the number the user is reading is stale and getting staler.
+  //  2. The popup CTA only reaches someone who opens the popup, and this extension is designed to
+  //     be ignored. The badge is the only surface that reaches a user who never opens it — which
+  //     is exactly the population that stayed silently broken for days (2026-07-27).
+  const { authBlocked } = await chrome.storage.local.get('authBlocked');
+  if (authBlocked === true) {
+    updateBadgeError();
+    return;
+  }
 
   // If there's a pending order, show order icon + badge first
   const { pendingPlanOrder } = await chrome.storage.local.get('pendingPlanOrder');
