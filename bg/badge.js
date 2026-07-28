@@ -1,3 +1,5 @@
+import { isUpgradeBlocked } from './upgrade-gate.js';
+
 // Get usage data for the PINNED (primary) org. The toolbar badge follows the
 // pinned org, NOT the transient popup selection — selecting a chip only changes
 // the popup view. If nothing is pinned: for a provider-only user (no Claude org)
@@ -30,14 +32,24 @@ export async function updateBadgeForSelectedOrg(claudeSnapshot) {
 }
 
 /**
- * True while the auth-blocked alarm owns the badge. Several paths write the badge WITHOUT going
+ * True while a hard server-side block owns the badge. Several paths write the badge WITHOUT going
  * through updateBadge() — the recommendation badge, the plan-order badge, and plan.js's clears —
  * so each has to ask. Without this a rec badge silently replaces the red `!` and the user is back
  * to having no visible signal, which is the entire failure this feature exists to fix.
+ *
+ * Two blocks qualify, for the same reason: while either is live NOTHING reaches the server, so any
+ * other badge would be advertising a number that stopped updating.
+ *   - authBlocked      — email-provider guard 401 (bg/storage.js noteAuthBlocked). Fix: log in.
+ *   - upgradeBlocked   — MIN_INGEST_VERSION 426 (bg/upgrade-gate.js). Fix: update the extension.
+ *
+ * ⚠️ The NAME now under-describes the function: it covers both hard blocks, not just the auth one.
+ * It is kept because test/ext-google-login-guard.mjs pins this exact symbol at three call sites on
+ * purpose — a rename there is a separate, deliberate change, not a drive-by in this PR. Rename it
+ * (to e.g. badgeLockedByBlock) together with that guard when someone owns both.
  */
 export async function badgeLockedByAuthBlock() {
   const { authBlocked } = await chrome.storage.local.get('authBlocked');
-  return authBlocked === true;
+  return authBlocked === true || await isUpgradeBlocked();
 }
 
 // === Badge update (based on usage display mode) ===
@@ -51,8 +63,11 @@ export async function updateBadge(util7d, util5h) {
   //  2. The popup CTA only reaches someone who opens the popup, and this extension is designed to
   //     be ignored. The badge is the only surface that reaches a user who never opens it — which
   //     is exactly the population that stayed silently broken for days (2026-07-27).
+  //  3. The same argument covers the MIN_INGEST_VERSION 426 block (bg/upgrade-gate.js): the user's
+  //     data stopped reaching the server, only the required action differs (update, not log in).
+  //     The popup banner carries that distinction; the badge just has to say "something is wrong".
   const { authBlocked } = await chrome.storage.local.get('authBlocked');
-  if (authBlocked === true) {
+  if (authBlocked === true || await isUpgradeBlocked()) {
     updateBadgeError();
     return;
   }

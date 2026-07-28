@@ -8,9 +8,10 @@
 // rather than re-implementing them. The detail renderer itself is left untouched — the
 // overview only hides the detail sections via a body class, so removing that class
 // restores each section to whatever its own logic last set (zero regression risk).
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
+import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
-import { calcPredictedAtReset, NEAR_LIMIT_PCT } from './prediction.js';
+import { calcPredictedAtReset, estimateCapHitTime, NEAR_LIMIT_PCT } from './prediction.js';
+import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
 
 // Drag-reorder state (module-level so the cross-device onChanged handler can tell a
@@ -94,16 +95,18 @@ function _planOrder(org) {
 }
 
 // The inline "▸ X%" prediction badge — mirrors renderGaugePrediction()'s detail-gauge
-// badge exactly (gray/amber/red by projected level, "100%+", green "▸ —" when stable).
+// badge exactly (gray/amber/red by projected level, green "▸ —" when stable).
 function _predictBadge(cur, pred) {
   if (!pred) return ''; // insufficient history → no badge (matches detail "collecting" minus the ⏳)
+  // Already at the cap: a "predicted 100%" badge next to a 100% value is noise.
+  if (cur >= 100) return '';
   const { rate, predicted } = pred;
   if (rate <= 0 || predicted - cur < 3) {
     const bg = _isDark() ? '#22c55e30' : '#22c55e18';
     return `<span class="gauge-predict-inline" style="display:inline;color:#22c55e;background:${bg}">▸ —</span>`;
   }
   const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
-  const txt = predicted >= 100 ? '100%+' : `${Math.round(predicted)}%`;
+  const txt = predicted >= 100 ? '100%' : `${Math.round(predicted)}%`;
   return `<span class="gauge-predict-inline" style="display:inline;color:${color}">▸ ${txt}</span>`;
 }
 
@@ -111,7 +114,7 @@ function _predictBadge(cur, pred) {
 // header (label + value% + ▸ badge), bar (current fill + striped projected extension),
 // sub (countdown + absolute reset). Returns '' when the window is unavailable for this
 // org/plan (Free/Team 7d, unused Gemini window).
-function _gaugeRow(labelKey, current, pred, resetAt) {
+function _gaugeRow(labelKey, current, pred, resetAt, capHitMs) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
   const valColor = gaugeColor(cur);
@@ -121,21 +124,25 @@ function _gaugeRow(labelKey, current, pred, resetAt) {
     const target = Math.min(pred.predicted, 100);
     predFill = `<div class="gauge-predict-fill" style="display:block;left:${Math.min(cur, 100)}%;width:${Math.max(target - cur, 0)}%;color:${pColor}"></div>`;
   }
-  const sub = resetAt
-    ? `<div class="gauge-sub">⏱ ${formatCountdown(resetAt)}<br>↻ ${formatResetAbsolute(resetAt)}</div>`
-    : '';
-  // Limit forecast (mirrors the detail view): exact "한도 도달 예상 {time}" when the window is
-  // projected to hit 100% before reset, else a "한도 근접 (~X%)" heads-up when it's near the cap.
-  // Keeps the compact card quiet below the near-limit threshold.
-  let limitLine = '';
-  if (pred && pred.rate > 0 && current < 100) {
-    if (pred.predicted >= 100) {
-      const hoursTo100 = pred.hoursTo100 != null ? pred.hoursTo100 : (100 - current) / pred.rate;
-      const limitTime = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
-      limitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_limit_at', limitTime))}</div>`;
-    } else if (pred.predicted >= NEAR_LIMIT_PCT) {
-      limitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
-    }
+  // Fact block — the SAME builders the detail tab uses, so the two tabs stay in sync.
+  // Already capped → capped block (hit time + total wait); at risk (projected to hit
+  // before reset) → wait-span block; otherwise the reset line / idle hint. current is
+  // non-null here (early return above), so hasWindow is always true.
+  const atRisk = !!pred && pred.rate > 0 && current < 100 && pred.predicted >= 100;
+  let facts;
+  if (current >= 100) {
+    facts = buildCappedFactsHtml(resetAt, capHitMs != null ? capHitMs : null, true);
+  } else if (atRisk) {
+    const hoursTo100 = pred.hoursTo100 != null ? pred.hoursTo100 : (100 - current) / pred.rate;
+    facts = buildWaitFactsHtml(resetAt, hoursTo100, pred.hoursToReset, true);
+  } else {
+    facts = buildResetFactsHtml(resetAt, true);
+  }
+  // Near-limit heads-up: projected close to the cap but not over it (the wait block
+  // already conveys the over-cap case). Kept as its own quiet line.
+  let nearLimitLine = '';
+  if (!atRisk && pred && pred.rate > 0 && current < 100 && pred.predicted >= NEAR_LIMIT_PCT) {
+    nearLimitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
   }
   return '<div class="gauge-row">'
     + '<div class="gauge-header">'
@@ -147,8 +154,8 @@ function _gaugeRow(labelKey, current, pred, resetAt) {
     + `<div class="gauge-fill" style="width:${Math.min(cur, 100)}%;background:${valColor}"></div>`
     + predFill
     + '</div>'
-    + sub
-    + limitLine
+    + facts
+    + nearLimitLine
     + '</div>';
 }
 
@@ -192,9 +199,9 @@ function _renderCard(org, hist) {
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
-    rows += _gaugeRow('usage_5h', org.h5, p5, org.resetsAt5h);
+    rows += _gaugeRow('usage_5h', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
     const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
-    rows += _gaugeRow('usage_7d', org.d7, p7, org.resetsAt7d);
+    rows += _gaugeRow('usage_7d', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`

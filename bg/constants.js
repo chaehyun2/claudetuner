@@ -76,6 +76,49 @@ export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid 
 export const SERVER_BACKOFF_BASE_MS = SEND_MIN_INTERVAL_MS; // 10min
 export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
 
+// Upgrade-required (426) backoff — bg/upgrade-gate.js. A DIFFERENT problem from the 5xx backoff
+// above, so a different ladder: a 5xx is transient and the server wants us back soon, while a 426
+// cannot resolve until the USER updates the extension. Retrying that on the 10min ladder is pure
+// waste at both ends, so BASE starts far higher and CAP is deliberately allowed past the
+// disconnection gates (3h/6h) — a version-blocked install genuinely IS disconnected, and pretending
+// otherwise by probing under the gate would only manufacture load, not data.
+// CAP is a PROBE interval, not a give-up: MIN_INGEST_VERSION / _MODE are env knobs that can be
+// lowered without a release, so a client that stopped forever would stay dead after the server had
+// already forgiven it. A user-driven update recovers instantly instead (version-keyed, no wait).
+export const UPGRADE_BACKOFF_BASE_MS = 30 * 60 * 1000;     // 30min
+export const UPGRADE_BACKOFF_CAP_MS = 6 * 60 * 60 * 1000;  // 6h
+
+// authBlocked (email-provider guard 401 login_required) backoff — bg/storage.js. Same shape and
+// same reasoning as the upgrade ladder: the block cannot resolve until the USER logs in, so the
+// every-cycle retry it replaces was pure waste (measured 3,557 401/day, 2026-07-28). Kept as its
+// own pair rather than reusing the UPGRADE_* values so the two can be tuned independently — they
+// answer to different populations and different fixes.
+// CAP is lower (2h) than the upgrade cap: logging in is a far lighter action than shipping and
+// adopting a new extension build, so a blocked account is much more likely to fix itself soon,
+// and the probe should not lag that by hours. Recovery does not actually wait for the probe —
+// clearing `authBlocked` on login releases it immediately — so the cap only bounds the case where
+// the block ends server-side without a login.
+export const AUTH_BLOCK_BACKOFF_BASE_MS = 30 * 60 * 1000;     // 30min
+export const AUTH_BLOCK_BACKOFF_CAP_MS = 2 * 60 * 60 * 1000;  // 2h
+
+// === Token-withheld fast retry — bg/storage.js noteTokenWithheld ===
+// The INVERSE of the two ladders above. Those slow a retry down because only the USER can end the
+// block; this one speeds a retry UP because the block is transient server state that ends on its
+// own. The server answers an api_key POST 200 with no `ext_token` when the [C1] guard's D1 read
+// degrades (routes/snapshots.ts resolveEmailProviderGuard), and for a TOKENLESS install that
+// response was its only supply — so it waits a full cycle holding nothing, for a condition that is
+// usually over in seconds. See .omc/report-token-loss.md.
+//
+// 🔴 BASE is 1 minute because chrome.alarms clamps sub-minute delays in a packed extension — a
+// 30s ladder would silently become a 1min one. Normal cadence is DEFAULT_INTERVAL_MINUTES (10) /
+// SEND_MIN_INTERVAL_MS (10min), so 1→2→4min is a real speed-up, not a cosmetic one.
+export const TOKEN_RETRY_BASE_MS = 60 * 1000;                 // 1min (alarm granularity floor)
+export const TOKEN_RETRY_MAX_ATTEMPTS = 3;                    // 1min, 2min, 4min — then give up
+// After the attempts are spent, stop probing for a while rather than restarting the ladder on the
+// very next cycle. Without this a persistently degrading replica would turn every cycle into
+// 3 extra forced POSTs, which is load amplification aimed at the exact D1 that is already sick.
+export const TOKEN_RETRY_COOLDOWN_MS = 60 * 60 * 1000;        // 1h
+
 // === Ad impression/click counter flush cadence (design §5.4) ===
 // The background SW is the single owner of the ad counters; it flushes the batched
 // impression/click deltas to /api/event on this alarm. Default 60min; the server can

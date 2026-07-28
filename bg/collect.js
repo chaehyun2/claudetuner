@@ -6,6 +6,7 @@ import {
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
+import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } from './upgrade-gate.js';
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
@@ -15,7 +16,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked, resolveIngestIdentity } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -365,6 +366,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
   // ChatGPT/Gemini). A USER-initiated collect (userManual: popup "수집" / onboarding)
   // DOES bypass — the person explicitly asked for fresh data now, one request is fine.
   if (!skipServer && !userManual && await isServerBackedOff()) {
+    skipServer = true;
+  }
+
+  // Version block (server 426 upgrade_required — bg/upgrade-gate.js). Same placement and same
+  // effect as the 5xx backoff above: local collection/history/UI keep running, only the POST is
+  // skipped. Deliberately does NOT honor `userManual`, unlike the 5xx case: a 5xx might be over by
+  // the time the user presses 수집, but the version verdict is a pure function of (env threshold,
+  // this install's version) — a manual retry from the SAME build can only produce the same 426.
+  // Bypassing would hand the user a button that silently does nothing.
+  if (!skipServer && await isUpgradePostSuppressed()) {
+    console.log('[Claude Tuner] Upgrade required — server POST paused until the extension updates.');
     skipServer = true;
   }
 
@@ -880,6 +892,15 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         await chrome.storage.local.set({ historyEmptyUntil: Date.now() + HISTORY_BACKFILL_COOLDOWN_MS });
       }
 
+    // authBlocked (401 login_required) backoff — bg/storage.js. Checked HERE rather than at the
+    // top-level skipServer gate because only here is the identity the POST will actually claim
+    // known, and the backoff is scoped to the blocked email. The optimistic send-state advance
+    // above is deliberately left in place: this is a persistent reject, and the convention on
+    // those (see rollbackPrimary) is to back off rather than re-arm an immediate resend.
+    // Local collection/history/UI already ran, so the popup stays fresh — only the send stops.
+    if (await isAuthBlockSuppressed(body && body.user_email)) {
+      console.log('[Claude Tuner] Auth blocked — server POST backed off until login.');
+    } else {
     // === Server POST: fire-and-forget (don't wait for response) ===
     // Send server save in background, proceed with local UI update first.
     // Preflight-free simple request (storage.js simplePost) — auth in body.
@@ -930,7 +951,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // from the shared api_key, so this POST was rejected AND not stored. The reject is
         // intended; the SILENCE was the bug — these installs hold no ext_token, so the clear
         // below is a no-op and nothing ever surfaced. Raise authBlocked for the popup CTA.
-        if (await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`)) return;
+        if (await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`, body && body.user_email)) return;
         // ext_token invalid/expired — clear and fall back to API key next cycle.
         // Race-safe: only clear if the token we sent is still the stored one.
         const cleared = await clearExtTokenIfMatches(sentToken);
@@ -949,6 +970,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
           return;
         }
+      }
+      if (response.status === 426) {
+        // MIN_INGEST_VERSION gate (worker/src/services/version-gate.ts): this build is below the
+        // server minimum, so NOTHING was stored and nothing will be until the extension updates.
+        // Raise the block (backoff + badge + popup banner) and return BEFORE the generic !ok
+        // handler — persistent rejects must not roll back the send-state (rolling back would
+        // re-arm an immediate resend, i.e. exactly the hammering this branch exists to stop).
+        // 🔴 No token is touched on this path: the ext_token is VALID, the extension is old.
+        // Clearing it would force an api_key re-TOFU and put a logged-in user back on the ingest
+        // path — the same trap as scope_insufficient (bg/storage.js:574-577).
+        if (await noteUpgradeRequired(response, `${config.serverUrl}/api/snapshots`)) return;
       }
       if (!response.ok) {
         console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
@@ -971,6 +1003,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // would blink the CTA off for the length of a primary stall. A Bearer we sent, or a
       // token the server minted, is the only real proof of recovery (Codex review).
       if (sentToken || result?.ext_token) await clearAuthBlocked();
+      // Version block: cleared on ANY 2xx, with no token condition — unlike the authBlocked case
+      // above there is no fail-open to confuse a recovery with. The version gate does zero I/O
+      // (pure env + ext_version, version-gate.ts), so an accepted POST is proof the gate no longer
+      // rejects us — e.g. the operator lowered MIN_INGEST_VERSION or set the mode back to shadow.
+      await clearUpgradeBlocked();
 
       // Confirmed Claude collection via a valid ext_token → if this is an email
       // (independent) account, upgrade it to 'claude' server-side (one-time) so it
@@ -982,6 +1019,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       if (result.ext_token) {
         await setExtTokenNoDowngrade(result.ext_token);
       }
+      // …and the inverse. A 200 with no ext_token, on a POST we sent WITHOUT one, means the
+      // server withheld it (degraded [C1] guard read) and this install still has nothing — the
+      // one case that used to fall through here silently and wait a full cycle.
+      // `result` is already parsed, so pass it instead of making the helper re-clone.
+      await noteTokenWithheld(response, sentToken, { result, email: body && body.user_email });
 
       // Apply server-provided poll_interval
       if (result.poll_interval_minutes && result.poll_interval_minutes > 0) {
@@ -1101,6 +1143,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       rollbackPrimary().catch(() => {}); // transient network failure → retry next tick
       noteServerFailure().catch(() => {}); // network failure → extend shared backoff
     });
+    } // end authBlocked backoff guard (inner body intentionally left at its original indent so
+      // the guard reads as a diff of one condition, not a reflow of 240 lines)
     } // end primary adaptive gate (primaryDue)
 
     // === Local UI update (don't wait for server response) ===
@@ -1373,6 +1417,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
                 await chrome.storage.local.set({ orgPollState: cur });
               }
             };
+            // authBlocked backoff, same identity scoping as the primary POST. Checked here and
+            // not inside simpleAuthedPost because that wrapper owes its caller a Response, and
+            // every synthetic one misreports: a 2xx would run the caller's r.ok branch and clear
+            // a 5xx backoff nothing recovered from, a non-2xx would log a failure for a request
+            // that was never sent. The 426 block needs no check here — the top-level skipServer
+            // gate already covers this whole loop.
+            // The optimistic send-state advance above is left standing on purpose: a persistent
+            // reject should back off, not re-arm an immediate resend (same rule as rollbackExtra).
+            if (await isAuthBlockSuppressed(extraSnapshot && extraSnapshot.user_email)) {
+              console.log(`[Claude Tuner] Extra org ${extraOrg.name}: auth blocked — POST backed off until login.`);
+            } else {
             // Server POST: fire-and-forget. Preflight-free simple request
             // (auth in body) with authedFetch's 401 auto-clear semantics.
             simpleAuthedPost(config, `${config.serverUrl}/api/snapshots`,
@@ -1398,6 +1453,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
               rollbackExtra();
               noteServerFailure().catch(() => {}); // network failure → extend shared backoff
             });
+            } // end authBlocked backoff guard (inner body left at its original indent)
           } else {
             console.log(`[Claude Tuner] Extra org ${extraOrg.name} delta-gate skip (${extraGateReason})`);
           }

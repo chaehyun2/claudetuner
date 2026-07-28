@@ -66,37 +66,79 @@ export function gaugeColor(util) {
   return '#06b6d4';
 }
 
+// Relative countdown, compact and language-neutral: "6h 29m" / "6d 13h" / "29m".
+// Only the "resetting soon" word is localized; the units stay d/h/m so the popup
+// and the three sidebars share one shape and the i18n surface stays tiny.
 export function formatCountdown(resetAt) {
   const diff = new Date(resetAt).getTime() - Date.now();
   if (diff <= 0) return t('countdown_soon');
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-  if (hours >= 24) {
-    const days = Math.floor(hours / 24);
-    const remHours = hours % 24;
-    return t('countdown_dhm', days, remHours);
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  if (h >= 24) {
+    const d = Math.floor(h / 24), rem = h % 24;
+    return rem > 0 ? `${d}d ${rem}h` : `${d}d`;
   }
-  return t('countdown_hm', hours, mins);
+  if (h >= 1) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
-export function formatResetAbsolute(resetAt) {
-  const d = new Date(resetAt);
-  const lang = (typeof getLang === 'function' ? getLang() : 'ko');
+// Localized day word for an instant relative to today: 어제/오늘/내일 (±1 day),
+// otherwise the "M/D(요일)" date. Near-term times read far better as "오늘/내일"
+// than as a date — and it dissolves the "different date on each row" problem when
+// a 5h window's limit-hit and reset straddle midnight.
+function relativeDay(d, lang) {
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const dDay = new Date(d); dDay.setHours(0, 0, 0, 0);
+  const days = Math.round((dDay.getTime() - midnight.getTime()) / 86400000);
+  if (days === -1) return lang === 'ko' ? '어제' : 'Yesterday';
+  if (days === 0) return lang === 'ko' ? '오늘' : 'Today';
+  if (days === 1) return lang === 'ko' ? '내일' : 'Tomorrow';
   const dayNames = lang === 'ko'
     ? ['일','월','화','수','목','금','토']
     : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const dayName = dayNames[d.getDay()];
-  const month = d.getMonth() + 1;
-  const date = d.getDate();
-  const h = d.getHours();
-  if (lang === 'ko') {
-    const ampm = h < 12 ? '오전' : '오후';
-    const h12 = h % 12 || 12;
-    return `${month}/${date}(${dayName}) ${ampm} ${h12}시`;
+  return `${d.getMonth() + 1}/${d.getDate()}(${dayNames[d.getDay()]})`;
+}
+
+// True when an instant would render as 어제/오늘/내일 (within ±1 local day) rather
+// than a date. Callers use it to keep a two-row block in ONE format: a wait block
+// whose limit-hit is "내일" but whose reset is days out shouldn't mix "내일" with a
+// date — if either row is beyond the relative window, both fall back to dates.
+export function isWithinRelativeDay(at) {
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const dDay = new Date(at); dDay.setHours(0, 0, 0, 0);
+  const days = Math.round((dDay.getTime() - midnight.getTime()) / 86400000);
+  return days >= -1 && days <= 1;
+}
+
+// Absolute wall-clock time, compact and 24-hour: "오늘 17:00" / "내일 2:00" /
+// "7/31(금) 6:00". 24h drops 오전/오후 (shorter, unambiguous); the day part uses
+// relativeDay(). Pass { absoluteDate: true } to force the date form (no 오늘/내일) —
+// used to keep both rows of a wait block in the same format.
+export function formatResetAbsolute(resetAt, opts) {
+  const d = new Date(resetAt);
+  const lang = (typeof getLang === 'function' ? getLang() : 'ko');
+  const time = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (opts && opts.absoluteDate) {
+    const dayNames = lang === 'ko'
+      ? ['일','월','화','수','목','금','토']
+      : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return `${d.getMonth() + 1}/${d.getDate()}(${dayNames[d.getDay()]}) ${time}`;
   }
-  const ampm = h < 12 ? 'AM' : 'PM';
-  const h12 = h % 12 || 12;
-  return `${month}/${date}(${dayName}) ${h12}${ampm}`;
+  return `${relativeDay(d, lang)} ${time}`;
+}
+
+// Approximate wait span for the headline ("약 3시간" reads as "3시간"; caller adds
+// 약/예상). Rounded to the hour (the wait is an estimate — a limit-hit derived from
+// a burn rate or a sampled history point), so no minute bucket: "3시간" / "4일 4시간".
+export function formatDuration(ms) {
+  const totalMin = Math.max(0, Math.round(ms / 60000));
+  if (totalMin < 60) return t('gauge_dur_m', totalMin);
+  const totalHours = Math.round(ms / 3600000);
+  if (totalHours >= 24) {
+    const days = Math.floor(totalHours / 24), rem = totalHours % 24;
+    return rem > 0 ? t('gauge_dur_dhm', days, rem) : t('gauge_dur_d', days);
+  }
+  return t('gauge_dur_h', totalHours);
 }
 
 // Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases

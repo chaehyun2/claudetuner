@@ -9,6 +9,7 @@
 
 import { ORG_POLL_CHANGE_THRESHOLD, SEND_HEARTBEAT_FLOOR_MS, SEND_MIN_INTERVAL_MS, SERVER_BACKOFF_BASE_MS, SERVER_BACKOFF_CAP_MS } from './constants.js';
 import { getCadence } from './cadence-config.js';
+import { withStorageLock } from './serialize.js';
 
 // ── Server-failure backoff ──────────────────────────────────────────────────
 // Global (not per-org) because a 5xx means the shared server/D1 is unhealthy, so
@@ -19,14 +20,10 @@ const SERVER_BACKOFF_KEY = '_serverBackoff';
 // Serialize all read-modify-write of _serverBackoff. Multiple collectors (primary
 // + extra orgs + providers) can POST concurrently in one service-worker cycle, so
 // without this two failures could both read fails=0 and both write fails=1, losing
-// the exponential escalation (or a success/failure could interleave). A module-level
-// promise chain runs the mutations one at a time within this SW instance.
-let _backoffMutex = Promise.resolve();
-function withBackoffLock(fn) {
-  const run = _backoffMutex.then(fn, fn);
-  _backoffMutex = run.then(() => {}, () => {});
-  return run;
-}
+// the exponential escalation (or a success/failure could interleave). The promise
+// chain lives in bg/serialize.js — bg/upgrade-gate.js shares the SAME chain for its
+// 426 backoff record, since both are mutated by that one concurrent POST fan-out.
+const withBackoffLock = withStorageLock;
 
 /** True while we're inside a server-failure backoff window — callers skip the POST. */
 export async function isServerBackedOff(now = Date.now()) {

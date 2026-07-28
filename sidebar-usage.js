@@ -88,37 +88,9 @@
     return '#06b6d4';
   }
 
-  function formatCountdown(resetAt) {
-    const diff = new Date(resetAt).getTime() - Date.now();
-    if (diff <= 0) return `⏱ ${t('soon')}`;
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
-    if (h >= 24) {
-      const d = Math.floor(h / 24);
-      return `⏱ ${d}d ${h % 24}h`;
-    }
-    return `⏱ ${h}h ${m}m`;
-  }
-
-  function formatResetAbsolute(resetAt) {
-    if (!resetAt) return '';
-    const d = new Date(resetAt);
-    const tz = d.toLocaleTimeString(_lang === 'ko' ? 'ko-KR' : 'en-US', { timeZoneName: 'short' })
-      .replace(/.*\s/, ''); // extract timezone abbreviation
-    if (_lang === 'ko') {
-      const days = ['\uc77c', '\uc6d4', '\ud654', '\uc218', '\ubaa9', '\uae08', '\ud1a0'];
-      const ampm = d.getHours() < 12 ? '\uc624\uc804' : '\uc624\ud6c4';
-      const h12 = d.getHours() % 12 || 12;
-      const min = String(d.getMinutes()).padStart(2, '0');
-      return `${d.getMonth() + 1}/${d.getDate()}(${days[d.getDay()]}) ${ampm} ${h12}\uc2dc ${min}\ubd84 (${tz}) \ub9ac\uc14b`;
-    }
-    const h12 = d.getHours() % 12 || 12;
-    const ampm = d.getHours() < 12 ? 'AM' : 'PM';
-    const min = String(d.getMinutes()).padStart(2, '0');
-    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return `Resets ${months[d.getMonth()]} ${d.getDate()} (${days[d.getDay()]}) ${h12}:${min} ${ampm} (${tz})`;
-  }
+  // Countdown / absolute-reset formatting is single-sourced in usage-shared.js
+  // (CORE.formatCountdown / CORE.formatResetAbsolute) — the same helpers the
+  // ChatGPT and Gemini sidebars use. Claude no longer keeps private copies.
 
   function isPeakNow() {
     // Disabled: Anthropic removed peak hour limit reduction (2026-05-07)
@@ -373,14 +345,23 @@
       predHtml = `<span class="ct-sb-arrow">→</span><span class="ct-sb-pred" style="color:${predColor}" title="${t('pred_tip')}">${predText}</span>`;
     }
 
-    const resetText = resetAt ? formatCountdown(resetAt) : '';
+    // Reset cell — single-sourced across all three sidebars (CORE.buildResetCellInner):
+    // countdown + compact absolute two lines, or an idle hint when the window has no reset.
+    // CORE is a soft dependency in this file (see the `CORE &&` guards at init), and this
+    // row used to be CORE-free — so guard the whole chain: an absent core / a stale core
+    // without the builder degrades (plain countdown, else nothing) rather than throwing.
+    const resetInner = (CORE && CORE.buildResetCellInner)
+      ? CORE.buildResetCellInner(resetAt, _lang)
+      : (resetAt && CORE && CORE.formatCountdown
+          ? `<span class="ct-reset-count">${CORE.formatCountdown(resetAt, _lang)}</span>`
+          : '');
 
     labelRow.innerHTML = `
       <span class="ct-sb-label-left">
         <span class="ct-sb-name">${label}</span>
         <span class="ct-sb-pct" style="color:${color}">${pctText}</span>${predHtml}
       </span>
-      <span class="ct-sb-reset" data-reset="${resetAt || ''}">${resetText}</span>
+      <span class="ct-sb-reset" data-reset="${resetAt || ''}">${resetInner}</span>
     `;
     row.appendChild(labelRow);
 
@@ -412,10 +393,10 @@
     const predSpan = row.querySelector('.ct-sb-pred');
     if (predSpan) attachTip(predSpan, 'tip_pred', true);
 
-    // Reset time tooltip (dynamic — recalculated on hover)
+    // Reset time tooltip (dynamic — recalculated on hover; verbose form with timezone)
     const resetSpan = row.querySelector('.ct-sb-reset');
     if (resetAt && resetSpan) {
-      attachTip(resetSpan, () => formatResetAbsolute(resetAt), true, true);
+      attachTip(resetSpan, () => CORE.formatResetAbsolute(resetAt, _lang), true, true);
     }
 
     return row;
@@ -565,11 +546,15 @@
   }
 
   // ── Countdown update (every second) ──
+  // Rewrite only the countdown sub-span, not the whole reset cell — the cell also
+  // holds the static absolute-time line, which a full textContent overwrite would wipe.
   function updateCountdowns() {
     const resets = document.querySelectorAll(`#${CT_PANEL_ID} .ct-sb-reset[data-reset]`);
     resets.forEach(el => {
       const resetAt = el.dataset.reset;
-      if (resetAt) el.textContent = formatCountdown(resetAt);
+      if (!resetAt) return;
+      const countEl = el.querySelector('.ct-reset-count');
+      if (countEl) countEl.textContent = CORE.formatCountdown(resetAt, _lang);
     });
   }
 

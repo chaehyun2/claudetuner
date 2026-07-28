@@ -1,17 +1,39 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatCountdown, formatResetAbsolute, formatTimeAgo, setRenewalDisplay } from './util.js';
+import { gaugeColor, formatTimeAgo, setRenewalDisplay } from './util.js';
+import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
 import { _providerOrgLabel } from './org-selector.js';
 import { _authedFetch } from './auth.js';
+import { getUpgradeBlock } from '../bg/upgrade-gate.js';
 
 function _applyTeamOnboarding(onboarding) {
   if (!state.onboardOrgName || !onboarding) return;
   const obTitle = onboarding.querySelector('#ob-title');
   if (obTitle) obTitle.textContent = t('ob_title_team', state.onboardOrgName);
+}
+
+// Set a gauge's value + bar fill from its utilization, or blank both to N/A when
+// the window has no value. Writing the null case (not skipping it) is what keeps a
+// window that lost its utilization from showing a previous render's stale % / fill.
+// `util` of 0 is a real value — the guard is `!== null`, never truthiness.
+function _setGaugeValue(id, util) {
+  const valEl = document.getElementById(`gauge-${id}-value`);
+  const fillEl = document.getElementById(`gauge-${id}-fill`);
+  if (!valEl || !fillEl) return;
+  if (util !== null) {
+    valEl.textContent = `${Math.round(util)}%`;
+    valEl.style.color = gaugeColor(util);
+    fillEl.style.width = `${Math.min(util, 100)}%`;
+    fillEl.style.background = gaugeColor(util);
+  } else {
+    valEl.textContent = 'N/A';
+    valEl.style.color = '#9ca3af';
+    fillEl.style.width = '0';
+  }
 }
 
 export function _updateUICore(status) {
@@ -33,6 +55,10 @@ export function _updateUICore(status) {
   // that their Claude account never collected). Fire-and-forget; reads storage.
   renderEmailMismatchWarning();
   renderClaudeLinkStatus();
+  // Extension-too-old block (server 426). Same fire-and-forget shape, and equally independent of
+  // the Claude error path: a version-blocked install collects and renders locally exactly as
+  // before, so nothing else in this pass would ever look wrong.
+  renderUpgradeWarning();
 
   const onboarding = document.getElementById('onboarding');
 
@@ -291,58 +317,42 @@ export function _updateUICore(status) {
       util5h = s.five_hour?.utilization ?? null;
       util7d = s.seven_day?.utilization ?? null;
       _restoreGaugeHTML(gaugeSection);
-      if (util5h !== null) {
-        document.getElementById('gauge-5h-value').textContent = `${Math.round(util5h)}%`;
-        document.getElementById('gauge-5h-fill').style.width = `${Math.min(util5h, 100)}%`;
-        document.getElementById('gauge-5h-fill').style.background = gaugeColor(util5h);
-        document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
-      }
-      if (s.five_hour?.resets_at) {
-        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
-      }
+      // Render the reset line for each window BEFORE prediction (which may overwrite
+      // it with the wait block). Pass hasWindow = util !== null: with a window and no
+      // reset it shows the idle hint, and it clears a stale wait block; a valueless
+      // gauge (util null) shows nothing.
+      renderGaugeReset('5h', s.five_hour?.resets_at, util5h !== null);
+      renderGaugeReset('7d', s.seven_day?.resets_at, util7d !== null);
+      // Set-or-blank each value/fill unconditionally so a window that lost its
+      // utilization (a seat can carry resets_at with util === null) drops its stale
+      // %/bar too, not just the reset line. renderGaugePrediction self-hides on null.
+      _setGaugeValue('5h', util5h);
       renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
-      if (util7d !== null) {
-        document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
-        document.getElementById('gauge-7d-fill').style.width = `${Math.min(util7d, 100)}%`;
-        document.getElementById('gauge-7d-fill').style.background = gaugeColor(util7d);
-        document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
-        if (s.seven_day?.resets_at) {
-          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
-        }
-        renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
-      }
+      _setGaugeValue('7d', util7d);
+      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
     } else {
       // Restore gauge DOM that may have been destroyed by org switching
       _restoreGaugeHTML(gaugeSection);
-      // 5h gauge
       util5h = s.five_hour?.utilization ?? null;
-      if (util5h !== null) {
-        document.getElementById('gauge-5h-value').textContent = `${Math.round(util5h)}%`;
-        document.getElementById('gauge-5h-fill').style.width = `${Math.min(util5h, 100)}%`;
-        document.getElementById('gauge-5h-fill').style.background = gaugeColor(util5h);
-        document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
-      }
-      if (s.five_hour?.resets_at) {
-        document.getElementById('gauge-5h-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.five_hour.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.five_hour.resets_at)}</div>`;
-      }
+      util7d = s.seven_day?.utilization ?? null;
+      // Base reset lines first (see the seat-based branch above): hasWindow = util
+      // !== null drives the idle hint and clears a stale wait block; a valueless
+      // gauge shows nothing. The 7d-null else below overwrites 7d with the no-7d
+      // message.
+      renderGaugeReset('5h', s.five_hour?.resets_at, util5h !== null);
+      renderGaugeReset('7d', s.seven_day?.resets_at, util7d !== null);
+      // 5h gauge
+      _setGaugeValue('5h', util5h);
       renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
 
       // 7d gauge
-      util7d = s.seven_day?.utilization ?? null;
-      if (util7d !== null) {
-        document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
-        document.getElementById('gauge-7d-fill').style.width = `${Math.min(util7d, 100)}%`;
-        document.getElementById('gauge-7d-fill').style.background = gaugeColor(util7d);
-        document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
-        if (s.seven_day?.resets_at) {
-          document.getElementById('gauge-7d-reset').innerHTML = `<div>\u23f1 ${formatCountdown(s.seven_day.resets_at)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(s.seven_day.resets_at)}</div>`;
-        }
-        renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
-      } else {
-        // Plan without 7d data (Free, Team, etc.)
-        document.getElementById('gauge-7d-value').textContent = 'N/A';
-        document.getElementById('gauge-7d-value').style.color = '#9ca3af';
-        document.getElementById('gauge-7d-fill').style.width = '0';
+      _setGaugeValue('7d', util7d);
+      // Call prediction unconditionally (it self-hides on null util) so a stale 7d
+      // prediction badge from a prior render is cleared, not just the value/reset.
+      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
+      if (util7d === null) {
+        // Plan without 7d data (Free, Team, etc.): replace the cleared reset line
+        // with the plan-specific no-7d message (_setGaugeValue already blanked the %).
         const plan = (s.plan || '').toLowerCase();
         document.getElementById('gauge-7d-reset').textContent = plan.includes('free') ? t('free_no_7d') : t('team_no_7d');
       }
@@ -537,6 +547,29 @@ export function renderSyncAccountNote() {
   }
   el.textContent = t('sync_account_note', sync);
   el.classList.remove('hidden');
+}
+
+/**
+ * Renders the "this extension is too old to sync" banner. Set by bg/upgrade-gate.js when the
+ * server answers an ingest POST with 426 upgrade_required (MIN_INGEST_VERSION gate); the block
+ * record self-clears the moment the extension version changes, so this banner disappears on its
+ * own once the update lands — no dismiss button, and none wanted: dismissing would restore
+ * exactly the silent death this whole feature exists to prevent, and there is no "later" state
+ * worth offering when nothing is reaching the server in the meantime.
+ *
+ * Reuses getUpgradeBlock() rather than reading `upgradeBlocked` directly so the version-staleness
+ * rule (the recovery path) has ONE implementation — a popup that decided for itself when the
+ * record was stale would be a second, drift-prone copy of the recovery contract.
+ */
+export async function renderUpgradeWarning() {
+  const banner = document.getElementById('upgrade-warn');
+  if (!banner) return;
+  if (!(await getUpgradeBlock())) { banner.classList.add('hidden'); return; }
+  document.getElementById('upgrade-warn-title').textContent = t('upgrade_required_title');
+  document.getElementById('upgrade-warn-msg').textContent = t('upgrade_required_msg');
+  document.getElementById('upgrade-warn-link').textContent = t('upgrade_required_link');
+  document.getElementById('upgrade-warn-hint').textContent = t('upgrade_required_hint');
+  banner.classList.remove('hidden');
 }
 
 // Renders the amber "Claude account email mismatch" banner from storage.

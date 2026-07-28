@@ -1,6 +1,8 @@
 import { extTokenScope, extTokenEmail } from './ext-token-claims.js';
-import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME } from './constants.js';
+import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME, AUTH_BLOCK_BACKOFF_BASE_MS, AUTH_BLOCK_BACKOFF_CAP_MS, TOKEN_RETRY_BASE_MS, TOKEN_RETRY_MAX_ATTEMPTS, TOKEN_RETRY_COOLDOWN_MS } from './constants.js';
+import { withStorageLock } from './serialize.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
+import { noteUpgradeRequired, isUpgradePostSuppressed, isUpgradeBlocked, clearUpgradeBlocked } from './upgrade-gate.js';
 import { applyServerCadence } from './cadence-config.js';
 
 export async function getConfig() {
@@ -259,7 +261,14 @@ export function getOrCreateInstallId() {
 }
 
 export async function setExtToken(token) {
-  return chrome.storage.local.set({ extToken: token });
+  await chrome.storage.local.set({ extToken: token });
+  // A token is now HELD, so any token-withheld retry episode is over. Clearing here — the one
+  // place a token is ever persisted — rather than where a token is merely OBSERVED in a response:
+  // simpleAuthedPost sees extra-org responses that carry `ext_token` and does NOT store them, so
+  // clearing on observation would cancel the retry while the install stayed tokenless (Codex
+  // review). This choke point also covers the login paths (verify-code / Google / dashboard
+  // recovery), which should end an episode just as much as a TOFU mint does.
+  await chrome.storage.local.remove(TOKEN_RETRY_KEY);
 }
 
 // Token claim readers live in a leaf module (bg/ext-token-claims.js) so the popup can use
@@ -471,12 +480,13 @@ export const AUTH_BLOCKED_CODE = 'login_required';
  * Returns true when the flag was raised, so callers can return early without running
  * the stale-token clear.
  */
-export async function noteAuthBlocked(response, sentToken, url) {
+export async function noteAuthBlocked(response, sentToken, url, email = null, now = Date.now()) {
   if (sentToken) return false;
   try {
     const body = await response.clone().json();
     if (body && body.code === AUTH_BLOCKED_CODE) {
       await chrome.storage.local.set({ authBlocked: true });
+      await noteAuthBlockBackoff(email, now);
       try {
         const path = new URL(url).pathname;
         console.log(`[Claude Tuner] login_required at ${path} — email account cannot use the shared key; log in to sync`);
@@ -487,13 +497,135 @@ export async function noteAuthBlocked(response, sentToken, url) {
   return false;
 }
 
+// ── authBlocked retry backoff ───────────────────────────────────────────────────────────────
+// The 401 was already correct; the RETRY was not. A blocked account re-POSTed every cycle until
+// the user logged in — the bulk of the measured 3,557 401/day. Like the 426 block
+// (bg/upgrade-gate.js) this only resolves when the USER acts, so it gets the same capped ladder.
+//
+// 🔴 Login recovers INSTANTLY: the predicate below reads `authBlocked` FIRST, so all three login
+// paths (background.js VERIFY_MAGIC_CODE / GOOGLE_SIGNIN / dashboard-session recovery) release it
+// via the `remove('authBlocked')` they already do. The record is advisory on top of the flag.
+//
+// 🔴 Scoped to the blocked EMAIL: with no Claude account each provider resolves its own identity
+// (resolveIngestIdentity → providerEmail), so a blocked ChatGPT must not silence a healthy Gemini.
+// A global suppression would turn a partial block into a total outage — worse than the retry storm
+// it fixes. With a Claude/independent account every stream resolves alike, so scoping is a no-op.
+const AUTH_BLOCK_BACKOFF_KEY = '_authBlockedBackoff';
+
+async function noteAuthBlockBackoff(email, now = Date.now()) {
+  await withStorageLock(async () => {
+    const { [AUTH_BLOCK_BACKOFF_KEY]: prev } = await chrome.storage.local.get({ [AUTH_BLOCK_BACKOFF_KEY]: null });
+    // A block for a DIFFERENT email is a different block — it must not inherit the fail count.
+    const fails = (prev && prev.email === email ? (prev.fails || 0) : 0) + 1;
+    const capped = Math.min(AUTH_BLOCK_BACKOFF_BASE_MS * Math.pow(2, fails - 1), AUTH_BLOCK_BACKOFF_CAP_MS);
+    const wait = Math.round(capped * (0.85 + Math.random() * 0.3));
+    await chrome.storage.local.set({ [AUTH_BLOCK_BACKOFF_KEY]: { email, until: now + wait, fails } });
+  });
+}
+
+/**
+ * True while a POST for `email` must be skipped: that account is auth-blocked AND still inside its
+ * backoff window. False the instant `authBlocked` is gone (the user logged in), whatever the
+ * record says. A null email on either side means "no finer information" → applies to this install.
+ */
+export async function isAuthBlockSuppressed(email = null, now = Date.now()) {
+  const { authBlocked, [AUTH_BLOCK_BACKOFF_KEY]: b } =
+    await chrome.storage.local.get({ authBlocked: false, [AUTH_BLOCK_BACKOFF_KEY]: null });
+  if (authBlocked !== true) return false;          // logged in / recovered → never suppress
+  if (!b || !b.until || now >= b.until) return false; // window open → let one probe through
+  return b.email == null || email == null || b.email === email;
+}
+
 /**
  * Drop the authBlocked flag after a POST the server actually accepted. Without this the
  * CTA would survive the login that fixed it (same reason background.js clears
- * showLoginPrompt/needsFullLogin on VERIFY_MAGIC_CODE).
+ * showLoginPrompt/needsFullLogin on VERIFY_MAGIC_CODE). Drops the backoff record with it so a
+ * later, unrelated block starts its ladder from the base wait rather than inheriting this one's.
  */
 export async function clearAuthBlocked() {
+  // Two calls, not one remove([...]): test/login-first-guard.mjs pins this exact
+  // `remove('authBlocked')` as the recovery contract, and quietly reshaping it into an array
+  // would blind that guard to a future edit that drops the flag clear entirely.
   await chrome.storage.local.remove('authBlocked');
+  await chrome.storage.local.remove(AUTH_BLOCK_BACKOFF_KEY);
+}
+
+// ── Token-withheld fast retry ───────────────────────────────────────────────────────────────
+// The server answers an api_key POST 200 with NO `ext_token` when the [C1] guard's D1 read
+// degrades (worker resolveEmailProviderGuard). A tokened install just defers; a TOKENLESS one
+// loses its only supply and waits a full 10min cycle for a condition usually over in seconds.
+// Detectable client-side with no server change: sentToken === null AND 2xx AND no ext_token.
+// Background + measured impact: .omc/report-token-loss.md, test/token-retry-guard.mjs.
+// ONE helper, three call sites (collect.js primary, simpleAuthedPost, postSnapshot).
+const TOKEN_RETRY_KEY = '_tokenRetry';
+export const TOKEN_RETRY_ALARM = 'token-retry';
+
+/** Drop the retry record — the token arrived, so the episode is over. */
+export async function clearTokenRetry() {
+  await chrome.storage.local.remove(TOKEN_RETRY_KEY);
+}
+
+/**
+ * Detect "200 but still tokenless" and schedule ONE short, jittered, capped retry.
+ * Returns true when a retry was scheduled (nothing branches on it).
+ *
+ * 🔴 BLOCK FLAGS ARE READ FIRST. authBlocked (401) / upgradeBlocked (426) mean the block ends only
+ * when the USER acts — the every-cycle retry they replaced was most of a measured 3,557 401/day,
+ * and an auth-blocked account cannot obtain a token via api_key at all. Retrying is both harmful
+ * and pointless there.
+ * 🔴 ONE ESCALATION PER WINDOW. A cycle fans out up to 4 payloads; escalating only when
+ * `now >= until` stops one cycle burning the whole ladder. Same shape as the other records.
+ * 🔴 JITTER. The degrade is fleet-wide correlated, so an unjittered ladder returns the whole fleet
+ * at once to the D1 that is already stalling.
+ */
+export async function noteTokenWithheld(response, sentToken, { result, email = null, now = Date.now() } = {}) {
+  // api_key path only. A request that CARRIED a token and got none back is a refresh that didn't
+  // rotate — the client keeps the token it already has, so there is nothing to recover.
+  if (sentToken) return false;
+  if (!response || !response.ok) return false;
+
+  // Body may already be consumed by the caller, so accept a pre-parsed one; only clone when we
+  // must. A body we cannot read is not evidence of withholding — bail rather than guess.
+  let body = result;
+  if (body === undefined) {
+    try { body = await response.clone().json(); } catch { return false; }
+  }
+  if (!body || typeof body !== 'object') return false;
+  // Token present → nothing to schedule. Deliberately does NOT clear the record: this helper runs
+  // in wrappers that only OBSERVE the body (simpleAuthedPost never stores it), so ending the
+  // episode here would cancel the retry for an install that gained nothing. setExtToken() clears
+  // it, because that is where a token is actually held (Codex review).
+  if (body.ext_token) return false;
+
+  // 🔴 Blocked installs first (see above).
+  const { authBlocked } = await chrome.storage.local.get({ authBlocked: false });
+  if (authBlocked === true) return false;
+  if (await isUpgradeBlocked()) return false;
+  // 단계 4 login-first: a fresh, non-grandfathered, not-logged-in install must not POST via the
+  // shared key at all, so it must not be retried into doing so faster.
+  if (await isServerSyncGated()) return false;
+
+  let scheduled = false;
+  await withStorageLock(async () => {
+    const { [TOKEN_RETRY_KEY]: prev } = await chrome.storage.local.get({ [TOKEN_RETRY_KEY]: null });
+    // Still inside the current window → this is a sibling payload from the same cycle (or the
+    // post-cap cooldown). Do not escalate, do not re-arm.
+    if (prev && prev.until && now < prev.until) return;
+    const fails = ((prev && prev.fails) || 0) + 1;
+    if (fails > TOKEN_RETRY_MAX_ATTEMPTS) {
+      // Ladder spent. Sit out the cooldown with the counter reset, so a later, unrelated degrade
+      // starts fresh from the base wait instead of inheriting this episode's exhaustion.
+      await chrome.storage.local.set({ [TOKEN_RETRY_KEY]: { fails: 0, until: now + TOKEN_RETRY_COOLDOWN_MS, ts: now } });
+      return;
+    }
+    const wait = Math.round(TOKEN_RETRY_BASE_MS * Math.pow(2, fails - 1) * (0.85 + Math.random() * 0.3));
+    await chrome.storage.local.set({ [TOKEN_RETRY_KEY]: { fails, until: now + wait, ts: now } });
+    // Deterministic alarm name → create() overwrites rather than piling up timers.
+    chrome.alarms.create(TOKEN_RETRY_ALARM, { delayInMinutes: wait / 60_000 });
+    scheduled = true;
+    console.log(`[Claude Tuner] 200 with no ext_token (api_key) — still tokenless; retry ${fails}/${TOKEN_RETRY_MAX_ATTEMPTS} in ${Math.round(wait / 1000)}s`);
+  });
+  return scheduled;
 }
 
 /** Extract the Bearer token from a getAuthHeaders() result, or null if API_KEY. */
@@ -527,8 +659,16 @@ export async function simplePost(config, url, payload) {
  * callers that only inspect response.ok. Returns the Response.
  */
 export async function simpleAuthedPost(config, url, payload) {
+  // No block check here, deliberately: this wrapper owes its caller a Response, and any synthetic
+  // one lies — a 2xx runs the caller's r.ok branch and clears a 5xx backoff nothing recovered
+  // from; a non-2xx logs a failure for a request never sent. Callers gate themselves instead
+  // (bg/collect.js extra-org send, where the identity is known).
   const { response, sentToken } = await simplePost(config, url, payload);
   if (response.status === 401) {
+    // The extra-org POST rides this wrapper, so without this its `login_required` 401 could never
+    // RAISE the block — only observe one raised elsewhere (Codex review). Early return is safe:
+    // this fires only when no Bearer was sent, so the clear below would be a no-op.
+    if (await noteAuthBlocked(response, sentToken, url, payload && payload.user_email)) return response;
     const cleared = await clearExtTokenIfMatches(sentToken);
     if (cleared) {
       try {
@@ -538,6 +678,17 @@ export async function simpleAuthedPost(config, url, payload) {
     }
   } else if (response.status === 403 && sentToken) {
     await noteScopeInsufficient(response, url);
+  } else if (response.status === 426) {
+    // MIN_INGEST_VERSION gate, handled in this shared wrapper because the extra-org POST goes out
+    // through here and inspects only `r.ok` — otherwise a version-blocked install's extra orgs
+    // would keep POSTing at full cadence while its primary org was already backed off.
+    await noteUpgradeRequired(response, url);
+  } else if (response.ok) {
+    // Token-withheld detection for the extra-org POST. It lives HERE, not at the call site, for
+    // the same reason the 401/426 handling does: this wrapper is the only place that still knows
+    // `sentToken`, and the caller sees a Response it inspects for `.ok` alone. The helper clones
+    // the body, so the caller's own r.json() is unaffected.
+    await noteTokenWithheld(response, sentToken, { email: payload && payload.user_email });
   }
   return response;
 }
@@ -568,6 +719,13 @@ export async function postSnapshot(config, payload) {
     await chrome.storage.local.set({ showLoginPrompt: true });
     return null;
   }
+  // Both persistent-block backoffs. This is the single chokepoint for every ChatGPT/Gemini POST,
+  // so one check each covers both providers and any future caller. Like the login-first gate
+  // above, the caller has already appended local history — usage still renders, only the send
+  // stops. The authBlocked check is scoped to THIS payload's identity, so a second provider under
+  // a different email keeps sending.
+  if (await isUpgradePostSuppressed()) return null;
+  if (await isAuthBlockSuppressed(payload && payload.user_email)) return null;
   // Preflight-free simple request (see simplePost) — auth rides in the body.
   const { response, sentToken } = await simplePost(config, `${config.serverUrl}/api/snapshots`, payload);
 
@@ -584,7 +742,7 @@ export async function postSnapshot(config, payload) {
   }
   // email-provider guard (401 login_required, api_key auth only): the reject is intended and
   // stays, but it must not be silent — raise authBlocked so the popup can ask for a login.
-  if (response.status === 401 && await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`)) {
+  if (response.status === 401 && await noteAuthBlocked(response, sentToken, `${config.serverUrl}/api/snapshots`, payload && payload.user_email)) {
     return null;
   }
   if (response.status === 401 || response.status === 403) {
@@ -609,6 +767,14 @@ export async function postSnapshot(config, payload) {
     return null;
   }
 
+  // MIN_INGEST_VERSION gate: nothing was stored and nothing will be until this build updates.
+  // Return before the generic !ok warn so the block (backoff + badge + banner) is the outcome,
+  // not a silent console line. 🔴 No token is cleared here — the ext_token is valid, the
+  // extension is old; clearing would force an api_key re-TOFU back into the ingest loop.
+  if (response.status === 426 && await noteUpgradeRequired(response, `${config.serverUrl}/api/snapshots`)) {
+    return null;
+  }
+
   if (!response.ok) {
     console.warn(`[Claude Tuner] Server POST failed: ${response.status} ${response.statusText}`);
     // 5xx → server/D1 overload: extend the shared backoff. (401/403/410 returned
@@ -626,6 +792,10 @@ export async function postSnapshot(config, payload) {
   // during a primary stall and would flicker its CTA off for the whole stall window.
   // A Bearer we sent, or a token the server minted, is the real proof (Codex review).
   if (sentToken || result?.ext_token) await clearAuthBlocked();
+  // Version block: cleared on ANY 2xx (no token condition). The version gate does zero I/O — it
+  // is a pure function of the env threshold and ext_version (version-gate.ts) — so unlike the
+  // authBlocked guard it has no fail-open branch that could fake a recovery.
+  await clearUpgradeBlocked();
   // Store any server-tunable cadence override here — the shared chokepoint for ALL
   // POSTs (Claude + ChatGPT + Gemini), so provider-only accounts get cadence too. The
   // payload names the stream this response answers, so a per-stream standby verdict
@@ -641,6 +811,10 @@ export async function postSnapshot(config, payload) {
     // A fresh token arrived — clear any stale re-auth flag.
     await chrome.storage.local.remove('needsReauth');
   }
+  // …and the inverse: a 200 that carried NO token, on a request we sent WITHOUT one, means this
+  // install is still tokenless and the server simply withheld it (degraded [C1] guard read).
+  // Body is already parsed here, so hand it over rather than making the helper re-clone.
+  await noteTokenWithheld(response, sentToken, { result, email: payload && payload.user_email });
   // === EXT REC PERSIST (per provider AND org): BEGIN (pinned by test/rec-delivery-guard.mjs) ===
   // Per-provider recommendation. lastStatus.recommendation is a SINGLE slot written by the Claude
   // path, so writing a ChatGPT rec there would make the Claude org show ChatGPT's advice (and vice

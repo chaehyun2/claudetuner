@@ -226,7 +226,13 @@
       predHtml = `<span class="ct-gm-arrow">→</span><span class="ct-gm-pred" style="color:${predColor}">${predText}</span>`;
     }
 
-    const resetText = resetAt ? CORE.formatCountdown(resetAt, _lang) : '';
+    // Reset cell — single-sourced across all three sidebars (CORE.buildResetCellInner):
+    // countdown + compact absolute two lines, or an idle hint when the window has no reset.
+    // Capability-guarded: a stale __ctUsageCore without the builder falls back to the
+    // plain countdown line instead of throwing.
+    const resetInner = CORE.buildResetCellInner
+      ? CORE.buildResetCellInner(resetAt, _lang)
+      : (resetAt ? `<span class="ct-reset-count">${CORE.formatCountdown(resetAt, _lang)}</span>` : '');
 
     const labelRow = document.createElement('div');
     labelRow.className = 'ct-gm-label-row';
@@ -235,7 +241,7 @@
         <span class="ct-gm-name">${CORE.escapeHtml(label)}</span>
         <span class="ct-gm-pct" style="color:${color}">${pctText}</span>${predHtml}
       </span>
-      <span class="ct-gm-reset" data-reset="${resetAt || ''}">${resetText}</span>
+      <span class="ct-gm-reset" data-reset="${resetAt || ''}">${resetInner}</span>
     `;
     row.appendChild(labelRow);
 
@@ -421,9 +427,12 @@
   }
 
   function updateCountdowns() {
+    // Update only the countdown sub-span; the static absolute-time line must survive.
     document.querySelectorAll(`#${PANEL_ID} .ct-gm-reset[data-reset]`).forEach(el => {
       const r = el.dataset.reset;
-      if (r) el.textContent = CORE.formatCountdown(r, _lang);
+      if (!r) return;
+      const countEl = el.querySelector('.ct-reset-count');
+      if (countEl) countEl.textContent = CORE.formatCountdown(r, _lang);
     });
   }
 

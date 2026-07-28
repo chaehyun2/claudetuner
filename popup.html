@@ -118,6 +118,17 @@
     .gauge-predict-fill { position: absolute; top: 0; height: 100%; border-radius: 0 4px 4px 0; opacity: 0.25; background: repeating-linear-gradient(90deg, transparent, transparent 2px, currentColor 2px, currentColor 4px); }
     .gauge-predict { position: absolute; top: -2px; width: 2px; height: 12px; border-radius: 1px; transform: translateX(-1px); }
     .gauge-predict-label { position: absolute; top: -13px; font-size: 8px; font-weight: 600; transform: translateX(-50%); white-space: nowrap; }
+    /* Gauge fact block (E-1). Both the normal reset line and the at-risk wait block
+       render inside #gauge-{id}-reset (a .gauge-sub container). Normal = one .gf-why
+       row (reset). At risk = .gf-lead (wait span) over .gf-why rows (limit + reset). */
+    .gf-why { display: grid; grid-template-columns: auto 1fr; row-gap: 2px; column-gap: 5px; align-items: baseline; margin-top: 3px; font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.4; }
+    .gf-k { color: var(--text-muted); white-space: nowrap; }
+    .gf-v { color: var(--text-secondary); font-weight: 600; }
+    .gf-rel { color: var(--text-muted); font-weight: 500; white-space: nowrap; }
+    .gf-k.r-hit, .gf-v.r-hit { color: #ef4444; }
+    /* Idle window: a value but no reset (Claude's 5h is usage-anchored → none at 0%). */
+    .gf-idle { margin-top: 3px; font-size: 10.5px; color: var(--text-muted); }
+    .gf-lead { margin-top: 4px; font-size: 12.5px; font-weight: 750; letter-spacing: -.012em; line-height: 1.25; color: #ef4444; font-variant-numeric: tabular-nums; }
 
     /* === Overview ("모아 보기") master screen === */
     /* When the overview is active, hide every detail section. Removing the class
@@ -563,6 +574,18 @@
       <a href="https://claude.ai" target="_blank" data-i18n="open_claude"></a> <span data-i18n="error_banner_hint"></span>
     </div>
     <div class="error-timing" id="error-timing"></div>
+  </div>
+
+  <!-- Extension-too-old block (server 426 upgrade_required, MIN_INGEST_VERSION gate).
+       NOT dismissable, and deliberately NOT the login CTA: the user may be perfectly logged in,
+       and sending them to a login screen for a version problem points them at what is not broken.
+       The only action is "update the extension", so the banner links to the store page. -->
+  <div id="upgrade-warn" class="warn-banner hidden">
+    <div class="warn-title" id="upgrade-warn-title"></div>
+    <div class="warn-msg" id="upgrade-warn-msg"></div>
+    <div class="warn-hint">
+      <a href="https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond" target="_blank" rel="noopener" id="upgrade-warn-link"></a> <span id="upgrade-warn-hint"></span>
+    </div>
   </div>
 
   <!-- Claude account email mismatch warning (claude.ai login ≠ Tuner login → 403 silent drop) -->

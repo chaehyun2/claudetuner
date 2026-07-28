@@ -148,12 +148,24 @@
 }
 
 .ct-sb-reset {
-  font-size: 10px;
-  opacity: 0.7;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   flex-shrink: 0;
+  text-align: right;
+  line-height: 1.3;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
+/* Reset-cell inner lines — prefix-free classes shared by all three sidebars
+   (emitted by CORE.buildResetCellInner in usage-shared.js). Keep these rules
+   byte-identical across sidebar-usage.css / chatgpt-sidebar.css / gemini-sidebar.css. */
+/* Line 1: relative countdown. */
+.ct-reset-count { font-size: 10px; opacity: 0.7; white-space: nowrap; }
+/* Line 2: absolute reset time — quieter than the countdown. */
+.ct-reset-abs { font-size: 9px; opacity: 0.5; white-space: nowrap; }
+/* Idle window (a value but no reset — Claude 5h at 0%). */
+.ct-reset-idle { font-size: 10px; opacity: 0.5; white-space: nowrap; }
 
 /* Progress bar */
 .ct-sb-bar {

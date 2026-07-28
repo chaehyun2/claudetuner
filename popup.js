@@ -7,7 +7,7 @@ import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
-import { _updateUICore, renderSyncAccountNote } from './ui/render.js';
+import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
 
 // True once the storage.onChanged listener has reported an ext_token, which makes state.syncEmail
@@ -595,6 +595,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
       // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
       if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      // Same reasoning for the 426 version block: it is raised (and cleared) by a background
+      // POST that can land while the popup is open. Both edges matter — appearing late is the
+      // silent-death case, and lingering after recovery would tell a fixed install it is broken.
+      if (area === 'local' && changes.upgradeBlocked) renderUpgradeWarning();
       // A token rotation IS the event this note exists for: a provider account-email change
       // gets the old token rejected and a new one minted against the NEW address. The panel can
       // sit open across that, so re-read the account — otherwise the footer keeps naming the

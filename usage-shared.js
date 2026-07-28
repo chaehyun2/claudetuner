@@ -19,22 +19,48 @@
     return '#06b6d4';
   }
 
-  function formatCountdown(resetAt, lang) {
-    const soon = lang === 'ko' ? '곧 리셋' : 'Resetting soon';
-    const diff = new Date(resetAt).getTime() - Date.now();
-    if (diff <= 0) return `⏱ ${soon}`;
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
-    if (h >= 24) {
-      const d = Math.floor(h / 24);
-      return `⏱ ${d}d ${h % 24}h`;
-    }
-    return `⏱ ${h}h ${m}m`;
+  // Localized day word relative to today (어제/오늘/내일 within ±1 day, else the
+  // "M/D(요일)" date). MUST match the popup's ui/util.js relativeDay() — the popup
+  // (ESM) and these sidebars (classic content scripts) can't share code, so this is
+  // a deliberate synced copy; the guard test asserts the two stay identical.
+  function relativeDay(d, lang) {
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    const dDay = new Date(d); dDay.setHours(0, 0, 0, 0);
+    const days = Math.round((dDay.getTime() - midnight.getTime()) / 86400000);
+    if (days === -1) return lang === 'ko' ? '어제' : 'Yesterday';
+    if (days === 0) return lang === 'ko' ? '오늘' : 'Today';
+    if (days === 1) return lang === 'ko' ? '내일' : 'Tomorrow';
+    const dayNames = lang === 'ko'
+      ? ['일','월','화','수','목','금','토']
+      : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return `${d.getMonth() + 1}/${d.getDate()}(${dayNames[d.getDay()]})`;
   }
 
-  function formatResetAbsolute(resetAt, lang) {
+  // Compact, language-neutral countdown: "6h 29m" / "6d 13h" / "29m" (only the
+  // "resetting soon" word is localized). Matches the popup's formatCountdown; the
+  // ⏱ prefix is the sidebar's own.
+  function formatCountdown(resetAt, lang) {
+    const diff = new Date(resetAt).getTime() - Date.now();
+    if (diff <= 0) return `⏱ ${lang === 'ko' ? '곧 리셋' : 'Resetting soon'}`;
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    let body;
+    if (h >= 24) { const d = Math.floor(h / 24), rem = h % 24; body = rem > 0 ? `${d}d ${rem}h` : `${d}d`; }
+    else if (h >= 1) body = `${h}h ${m}m`;
+    else body = `${m}m`;
+    return `⏱ ${body}`;
+  }
+
+  function formatResetAbsolute(resetAt, lang, opts) {
     if (!resetAt) return '';
     const d = new Date(resetAt);
+    // Compact form for the inline second line: "오늘 17:00" / "8/4(목) 6:00" — 24h,
+    // day-relative, no timezone (matches the popup's formatResetAbsolute). The
+    // verbose form below (with tz + label) stays for the hover tooltip.
+    if (opts && opts.compact) {
+      const time = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+      return `${relativeDay(d, lang)} ${time}`;
+    }
     const tz = d.toLocaleTimeString(lang === 'ko' ? 'ko-KR' : 'en-US', { timeZoneName: 'short' })
       .replace(/.*\s/, ''); // extract timezone abbreviation
     if (lang === 'ko') {
@@ -50,6 +76,21 @@
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     return `Resets ${months[d.getMonth()]} ${d.getDate()} (${days[d.getDay()]}) ${h12}:${min} ${ampm} (${tz})`;
+  }
+
+  // Inner HTML for a sidebar reset cell — the single source shared by all three
+  // sidebars (Claude/ChatGPT/Gemini), which differ only by their outer wrapper's
+  // class prefix. With a reset: a countdown line (`.ct-reset-count`, ticked每秒 by
+  // each sidebar's updateCountdowns) over a static compact absolute-time line
+  // (`.ct-reset-abs`). Without a reset but with a window (Claude's 5h is usage-
+  // anchored → no reset at 0%): a quiet idle hint (`.ct-reset-idle`). Inner class
+  // names are prefix-free so the three CSS files can share identical rules.
+  function buildResetCellInner(resetAt, lang) {
+    if (!resetAt) {
+      return `<span class="ct-reset-idle">${lang === 'ko' ? '최근 사용 없음' : 'No recent usage'}</span>`;
+    }
+    return `<span class="ct-reset-count">${formatCountdown(resetAt, lang)}</span>` +
+           `<span class="ct-reset-abs">${formatResetAbsolute(resetAt, lang, { compact: true })}</span>`;
   }
 
   function escapeHtml(str) {
@@ -677,6 +718,7 @@
     planDisplayName,
     formatCountdown,
     formatResetAbsolute,
+    buildResetCellInner,
     escapeHtml,
     detectLang,
     isContextValid,

@@ -3,6 +3,7 @@
 // (ui/state.js) and pure helpers (ui/util.js); i18n `t` is a global from i18n.js.
 import { state, _filteredHistory } from './state.js';
 import { calcPaceTier, _isDark, formatResetAbsolute } from './util.js';
+import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
 import { diurnalProject7dAdaptive } from './diurnal.js';
 
 // Projected-at-reset threshold (%) at/above which a window counts as "near the cap" and
@@ -64,6 +65,23 @@ function _predCacheSet(cacheKey, value, nowMs) {
     if (oldest !== undefined) _predCache.delete(oldest);
   }
   _predCache.set(cacheKey, { at: nowMs, value });
+}
+
+// Estimate when the current 100% episode began, for an already-capped window.
+// History is ascending by time; walk back from the newest sample while util is
+// still >= 100 and return the earliest such timestamp — the start of the run the
+// user is currently in. Null when history is empty or the newest sample isn't
+// capped. Approximate (history is sampled, and if the whole slice is >= 100 the
+// true start is earlier than we can see), so callers label the wait "약/~".
+export function estimateCapHitTime(history, key) {
+  if (!Array.isArray(history) || !history.length) return null;
+  let hitT = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const u = history[i][key];
+    if (u != null && u >= 100) hitT = history[i].t;
+    else break; // run of >=100 (walking back from now) ended → episode started after this
+  }
+  return hitT;
 }
 
 // Used by both gauge prediction and banner evaluation (and the overview cards).
@@ -217,6 +235,18 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     return;
   }
 
+  // Already at the cap: being at 100% is a fact independent of the forecast, so this
+  // must come BEFORE the "collecting" (insufficient-history) guards — otherwise a
+  // capped window with < 3 history points would show "collecting" instead of the
+  // capped block. Hide the badge/marker; render when the cap was hit (estimated from
+  // history; null → reset-line-only) + the total wait it implies.
+  if (currentUtil >= 100) {
+    hide();
+    if (id === '5h') setPredictHeadline(null);
+    renderGaugeCapped(id, resetsAt, estimateCapHitTime(history, key), true);
+    return;
+  }
+
   // Insufficient history: show collecting indicator + day-1 teaser headline.
   // The forecast needs 2-3 data points, so a new user's first session has none —
   // the teaser conveys the (unique) upcoming value and a reason to come back.
@@ -243,15 +273,25 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // Estimated time to reach 100% (exact hit only) — computed BEFORE the "stable" gate because
   // the red warning depends on the LEVEL, not the growth rate: a window parked at 99% with a
   // trickle of growth must still warn. Same MM/DD(day) format as the reset line (formatResetAbsolute).
+  const atRisk = predicted >= 100 && rate > 0 && currentUtil < 100;
   let limitTimeStr = '';
-  if (predicted >= 100 && rate > 0 && currentUtil < 100) {
+  if (atRisk) {
     // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
     const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
+    // For the badge tooltip only (the wait block shows this time itself).
     limitTimeStr = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
+    // The wait block (headline = wait span, evidence = limit/reset times) replaces
+    // the reset line in #gauge-{id}-reset. The separate warn line is hidden so the
+    // limit-hit time isn't shown twice.
+    renderGaugeWait(id, resetsAt, hoursTo100, hoursToReset, currentUtil !== null);
+    if (lineEl) lineEl.style.display = 'none';
+  } else {
+    // Not projected to hit the cap: keep the plain reset line rendered earlier and
+    // let the warn line handle the "near limit (~X%)" case on its own.
+    _renderWarnLine(lineEl, predicted, rate, currentUtil, '');
   }
   // Headline strip is now the day-1 "collecting" teaser only; clear it once we have a forecast.
   if (id === '5h') setPredictHeadline(null);
-  _renderWarnLine(lineEl, predicted, rate, currentUtil, limitTimeStr);
 
   // Minimal change or decreasing trend: show the "stable" badge. The level-based warning line
   // above still stands, so only the marker/fill + header badge switch to the stable look.
@@ -272,7 +312,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
 
   // Colors
   const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
-  const predictText = predicted >= 100 ? '100%+' : `${Math.round(predicted)}%`;
+  const predictText = predicted >= 100 ? '100%' : `${Math.round(predicted)}%`;
 
   // (A) Header inline prediction: "▸ 78%" or "▸ 4/12 2PM" badge
   if (inlineEl) {

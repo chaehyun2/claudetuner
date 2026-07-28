@@ -1,7 +1,8 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatCountdown, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType } from './util.js';
+import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType } from './util.js';
+import { renderGaugeReset } from './gauge-facts.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -172,6 +173,14 @@ export function selectOrg(orgId, container) {
       if (row5h) row5h.style.display = no5h ? 'none' : '';
       const util5h = orgData.h5;
       const util7d = orgData.d7;
+      // Establish the base reset line FIRST. renderGaugePrediction() may overwrite
+      // this same container with the wait block when a window is at risk, so the
+      // reset must be laid down before prediction runs — not after. hasWindow (the
+      // 3rd arg) = the window has a value: it drives the idle hint when there's a
+      // window but no reset, clears a stale wait block, and shows nothing for a
+      // valueless gauge.
+      renderGaugeReset('5h', resetsAt5h, util5h !== null && util5h !== undefined);
+      renderGaugeReset('7d', resetsAt7d, util7d !== null && util7d !== undefined);
       if (util5h !== null && util5h !== undefined) {
         document.getElementById('gauge-5h-value').textContent = `${Math.round(util5h)}%`;
         document.getElementById('gauge-5h-fill').style.width = `${Math.min(util5h, 100)}%`;
@@ -196,7 +205,10 @@ export function selectOrg(orgId, container) {
         document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
         renderGaugePrediction('7d', hist, 'd7', util7d, resetsAt7d);
       } else {
-        // Plan without 7d data
+        // Plan without 7d data. Mirror the 5h else above: blank the value/fill AND
+        // call renderGaugePrediction with null util so a stale 7d prediction badge/
+        // marker from a previously viewed org is hidden (_restoreGaugeHTML is a no-op
+        // on existing DOM, so it must be cleared explicitly here).
         const g7dVal = document.getElementById('gauge-7d-value');
         if (g7dVal) {
           g7dVal.textContent = 'N/A';
@@ -204,13 +216,8 @@ export function selectOrg(orgId, container) {
         }
         const g7dFill = document.getElementById('gauge-7d-fill');
         if (g7dFill) g7dFill.style.width = '0';
+        renderGaugePrediction('7d', hist, 'd7', null, resetsAt7d); // self-hides on null
       }
-      // Display reset time. Clear (not skip) when absent, so a window that lost
-      // its limit doesn't keep a previously viewed org's stale countdown.
-      const r5h = document.getElementById('gauge-5h-reset');
-      if (r5h) r5h.innerHTML = resetsAt5h ? `<div>\u23f1 ${formatCountdown(resetsAt5h)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt5h)}</div>` : '';
-      const r7d = document.getElementById('gauge-7d-reset');
-      if (r7d) r7d.innerHTML = resetsAt7d ? `<div>\u23f1 ${formatCountdown(resetsAt7d)}</div><div style="font-size:11px;color:var(--text-muted);font-weight:600;margin-top:1px">\u21bb ${formatResetAbsolute(resetsAt7d)}</div>` : '';
       // Maxed-window "limit reached \u2014 wait until {reset}" strip (same as the primary render path).
       renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d);
     }
@@ -410,6 +417,15 @@ export function selectOrg(orgId, container) {
     const orgPlan = orgData.plan || state.currentPlan;
     const orgSnapshot = {
       plan: orgPlan,
+      // drawCharts() reads snapshot.provider to pick the quota-multiplier scale and the guide-line
+      // tiers (planToMultiplier / buildPlanLimitLines). Omitting it defaulted EVERY org to Claude.
+      // Two consequences. The guide lines were always wrong for a non-Claude org — a ChatGPT org
+      // drew Pro/Max 5x/Max 20x instead of Plus/Pro 5x/Pro 20x. And the multiplier fell through to
+      // Claude's substring ladder, which agrees with the ChatGPT tiers only by coincidence: the
+      // display names 'Pro 20x'/'Pro 5x' happen to match its includes('20')/includes('5x') arms,
+      // but ChatGPT Free (0.2) and Go (0.4) both scored 1x, as did Gemini Free (0.25), AI Plus
+      // (0.5) and a bare 'Ultra' (5). Cross-plan history normalization used those numbers.
+      provider: orgData.provider || 'claude',
       five_hour: { utilization: orgData.h5, resets_at: resetsAt5h },
       seven_day: { utilization: orgData.d7, resets_at: resetsAt7d },
       extra_usage: orgData.extraUsage || (orgData.spendLimit ? { used_credits: orgData.spendUsed, monthly_limit: orgData.spendLimit } : null),

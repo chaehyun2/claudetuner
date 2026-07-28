@@ -13,9 +13,10 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, decodeJwtPayload } from './bg/ext-token-claims.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs } from './bg/storage.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
+import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
@@ -433,6 +434,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   checkPromoPush(); // fire a pending server push on install/update too (best-effort)
   // v1.9.x → v1.10+ migration (skip if already completed)
   if (details.reason === 'update') {
+    // An update is the ONLY fix for a 426 upgrade_required block, so drop it the instant one
+    // lands — the badge and popup banner then clear without waiting for the next poll cycle.
+    // Belt-and-braces, not the contract: bg/upgrade-gate.js keys the record on the ext version
+    // and drops a stale one on read, so recovery does not depend on this listener firing.
+    await clearUpgradeBlocked();
     const { intervalExplicitlySet } = await chrome.storage.sync.get({ intervalExplicitlySet: undefined });
     if (intervalExplicitlySet === undefined) {
       await chrome.storage.sync.set({ intervalExplicitlySet: false });
@@ -1151,6 +1157,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     console.log(`[Claude Tuner] Wake retry alarm: ${alarm.name}`);
     const result = await collectAndSend().catch(() => null);
     if (result?.success) clearWakeRetries();
+    return;
+  }
+  // Token-withheld fast retry (bg/storage.js noteTokenWithheld). The server answered 200 with no
+  // ext_token on an api_key POST, so this install is still tokenless — re-POST now rather than
+  // waiting a full cycle for a condition that is usually over in seconds.
+  //
+  // force:true is REQUIRED, not incidental: with flat usage the delta-gate would skip the send
+  // entirely (send-gate.js shouldSendSnapshot) and the retry would produce no POST at all — and
+  // therefore no chance at a token. It also bypasses the ALARM_NAME handler's `_lastServerPost`
+  // 10-min floor, which is the whole point of retrying early.
+  //
+  // The ladder is armed only by noteTokenWithheld, which re-checks authBlocked/upgradeBlocked and
+  // the login-first gate before scheduling. A retry that again comes back tokenless re-arms the
+  // next rung from there; one that receives a token clears the record.
+  if (alarm.name === TOKEN_RETRY_ALARM) {
+    console.log('[Claude Tuner] Token-retry alarm — re-POSTing to obtain an ext_token');
+    await collectAndSend({ force: true }).catch(() => null);
     return;
   }
   if (alarm.name === ALARM_BOOST) {
