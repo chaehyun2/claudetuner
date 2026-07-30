@@ -160,7 +160,11 @@ export function planDisplayName(plan, provider) {
 // = Pro 20x tier (20x), "Prolite"/"Pro 5x" = Pro 5x tier (5x) — the same aliases
 // remapped by planDisplayName().
 export function planToMultiplier(plan, provider) {
-  const p = (plan || '').toLowerCase();
+  // trim() matters here and not in the Claude substring arms: the non-Claude arms below are EXACT
+  // matches, so a padded " Pro 20x " would miss every one of them and fall through to `return 1` —
+  // the same silent 20x under-count this function exists to prevent. planDisplayName() above already
+  // trims, so an untrimmed label would also display correctly while scoring wrong.
+  const p = (plan || '').trim().toLowerCase();
   if (provider === 'chatgpt') {
     if (p === 'free') return 0.2;
     if (p === 'go') return 0.4;

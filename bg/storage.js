@@ -400,13 +400,42 @@ export async function getAuthHeaders(config) {
 }
 
 /**
- * fetch wrapper with auto auth header injection. On 401, clears the stored
- * ext_token so the next call falls back to API_KEY and re-issues a fresh token.
+ * True only when the server says THIS ext_token failed verification
+ * (`code: 'ext_token_invalid'`, middleware/auth.ts). Never throws; a body that is
+ * missing, non-JSON, or carries any other code reads as "not about my token".
  *
- * Guarded against two failure modes:
+ * 🔴 WHY A 401 ALONE IS NOT ENOUGH. Until 1.29.21 this wrapper cleared the token on ANY 401,
+ * and that destroyed VALID tokens at ~620/hour. The extension also calls endpoints that never
+ * accept an ext_token at all — `/api/me` and `/api/me/selected-orgs` run under the server's
+ * googleAuthMiddleware, which only takes session/Google credentials — so their 401 means
+ * "wrong credential for this door", not "your token is dead". Clearing on it produced a loop:
+ * a token existed → that made the call happen (it is gated on having one) → the call deleted it
+ * → the next snapshot POST re-issued one via TOFU → repeat. The `code` is the only thing that
+ * separates the two cases, so it, and nothing else, may authorise a delete.
+ *
+ * Reads the body via clone() so callers can still consume the response — same technique as
+ * noteScopeInsufficient below.
+ */
+async function isExtTokenRejected(response) {
+  try {
+    const body = await response.clone().json();
+    return !!body && body.code === 'ext_token_invalid';
+  } catch {
+    return false; // no/!JSON body → we cannot claim the token was rejected → keep it
+  }
+}
+
+/**
+ * fetch wrapper with auto auth header injection. On a 401 that the server marks as
+ * `ext_token_invalid`, clears the stored ext_token so the next call falls back to API_KEY and
+ * re-issues a fresh token.
+ *
+ * Guarded against three failure modes:
  *  - Late-arriving 401 for an in-flight request after the token was rotated
  *    (only clears if the stored token still matches the one we actually sent).
  *  - API_KEY fallback paths receiving a 401 (no Bearer was sent → never clear).
+ *  - 🔴 A 401 from an endpoint that does not accept ext_tokens at all (see isExtTokenRejected):
+ *    the token is fine, the door is wrong. Requires the server's `code` before clearing.
  *
  * Generic 403 is intentionally NOT treated as a stale token (the server uses it for
  * email-mismatch and other non-auth reasons; the snapshot POST is the canary that clears
@@ -423,12 +452,12 @@ export async function authedFetch(config, url, options = {}) {
     : null;
   const headers = { ...(options.headers || {}), ...auth };
   const response = await fetch(url, { ...options, headers });
-  if (response.status === 401) {
+  if (response.status === 401 && sentToken && await isExtTokenRejected(response)) {
     const cleared = await clearExtTokenIfMatches(sentToken);
     if (cleared) {
       try {
         const path = new URL(url).pathname;
-        console.log(`[Claude Tuner] ext_token cleared (401) at ${path}`);
+        console.log(`[Claude Tuner] ext_token cleared (401 ext_token_invalid) at ${path}`);
       } catch { /* ignore URL parse errors */ }
     }
   } else if (response.status === 403 && sentToken) {
