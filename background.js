@@ -1571,10 +1571,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   // Folder freemium gate: resolve our billing entitlement (server-authoritative).
-  // Returns { plan: 'pro' | 'free' } from /api/me's `billing` summary. Cache is
+  // Returns { plan: 'pro' | 'free' } from /api/users/entitlement. Cache is
   // scoped to the resolved account email and only trusted within a 24h TTL; on any
   // failure (or a different/expired account) it fails CLOSED to 'free' so a lapsed
   // or swapped account can never keep Pro-only capacity offline indefinitely.
+  //
+  // 🔴 THE ENDPOINT IS THE WHOLE FIX. This asked `/api/me` until 1.29.22, and that call could never
+  // succeed: `/api/me` is behind the worker's googleAuthMiddleware, which accepts only a session or
+  // Google credential, and this extension has no session token at all. So it 401'd on every attempt,
+  // the fail-closed path below answered 'free', and the 24h cache never filled because it only
+  // caches successes ⇒ `_plan` was permanently 'free'. A PAYING subscriber got free child/nesting
+  // limits and "upgrade" prompts on subfolder/color/icon. Invisible only because the folders feature
+  // sits behind a CDN flag that is still false.
+  //
+  // `/api/users/entitlement` is behind authMiddleware, which DOES accept our ext_token, and reports
+  // the same billingSummary. Deliberately NOT `/api/folders`: that endpoint enforces Pro, so it
+  // looks like it could answer this, but sync availability and entitlement are independent — it 404s
+  // when FOLDER_SYNC_ENABLED=0 (saying nothing about Pro) and its 403 means either 'Pro required' or
+  // 'Email mismatch', so its status cannot be read as an entitlement answer.
   if (message.type === 'GET_ENTITLEMENT') {
     (async () => {
       const CACHE_KEY = 'ct_entitlement';
@@ -1601,7 +1615,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           if (cachedPlan) { sendResponse({ plan: cachedPlan, cached: true }); return; }
         }
         if (!config?.serverUrl || !email) { sendResponse({ plan: 'free', stale: true }); return; }
-        const resp = await authedFetch(config, `${config.serverUrl}/api/me`, {
+        const resp = await authedFetch(config, `${config.serverUrl}/api/users/entitlement`, {
           headers: { 'X-User-Email': email },
         });
         // Fail CLOSED on any server error: never serve a Pro plan we couldn't
@@ -1609,7 +1623,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // non-force path above, so reaching here means we have no trustworthy Pro.)
         if (!resp.ok) { sendResponse({ plan: 'free', stale: true }); return; }
         const data = await resp.json();
-        const plan = data?.billing?.plan === 'pro' ? 'pro' : 'free';
+        // Flat billingSummary — NOT nested under `billing` like /api/me's payload was.
+        const plan = data?.plan === 'pro' ? 'pro' : 'free';
         await chrome.storage.local.set({ [CACHE_KEY]: { plan, at: Date.now(), email } });
         sendResponse({ plan });
       } catch (e) {

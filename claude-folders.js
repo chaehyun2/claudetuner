@@ -1874,8 +1874,16 @@
   }
 
   // ── Entitlement ──
+  // 🔴 GATED ON _enabled, AND THAT GATE IS NEW IN 1.29.22. This used to fetch unconditionally,
+  // which was free only because the endpoint it hit (`/api/me`) rejected the extension's credential
+  // before touching the database — the call was pure waste that happened to cost the server nothing.
+  // Now that it asks an endpoint which actually answers, an ungated call would put a D1 read behind
+  // every install, 4×/day, for a feature that is still dark for everyone: thousands of reads a day to
+  // compute a value nothing renders. `_plan` only matters once the panel is mounted, and both
+  // transitions INTO enabled (CDN flag via applyAvailability, user pref via storage.onChanged) call
+  // this, so the value is resolved exactly when it starts to matter and never before.
   function refreshEntitlement() {
-    if (!isContextValid()) return;
+    if (!_enabled || !isContextValid()) return;
     try {
       chrome.runtime.sendMessage({ type: 'GET_ENTITLEMENT' }, (res) => {
         if (chrome.runtime.lastError || !res) return;
@@ -1993,10 +2001,13 @@
     chrome.storage.sync.get({ lang: 'auto', [ADAPTER.prefKey]: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
       _userPref = cfg[ADAPTER.prefKey] !== false;
-      // _available is still its initial `false` here (DARK) — this refreshEntitlement()
-      // call resolves _plan only; its internal pullStore() is gated on _enabled, which is
-      // false until the CDN flag check below resolves true, so a dark start does ZERO
-      // /api/folders network even for a Pro user.
+      // `_available` is still its initial `false` here (DARK), so this refreshEntitlement() is a
+      // NO-OP as of 1.29.22 — it is gated on `_enabled` now, because the entitlement endpoint it
+      // reaches performs a real database read (see refreshEntitlement). A dark install therefore
+      // issues NOTHING: no /api/folders and no /api/users/entitlement. Both transitions INTO enabled
+      // resolve `_plan` themselves (CDN flag → applyAvailability, user pref → storage.onChanged), so
+      // nothing is lost. Kept as a call, not deleted, so that seeding `_available` synchronously from
+      // cache later resolves entitlement here instead of silently skipping it.
       _enabled = _available && _userPref;
       refreshEntitlement();
       // Kick off the initial availability check now (thereafter throttled to once per
@@ -2012,6 +2023,12 @@
         if (changes[ADAPTER.prefKey]) {
           _userPref = changes[ADAPTER.prefKey].newValue !== false;
           recomputeEnabled(); // effective gate still requires _available
+          // Resolve entitlement on the user-enable transition too, not just the CDN one
+          // (applyAvailability covers that). Without this the panel mounts with _plan at its initial
+          // 'free', so a Pro user who switches the feature on in options gets free limits and upgrade
+          // prompts until the 6h tick — the same "not resolved when it starts to matter" failure the
+          // endpoint change fixes. Gated on _enabled so switching OFF issues nothing.
+          if (_enabled) refreshEntitlement();
         }
         if (changes.lang) {
           const v = changes.lang.newValue;
