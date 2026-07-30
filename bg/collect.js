@@ -1224,44 +1224,36 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // === Multi-org collection: send all monitorable orgs; server-side 3-org cap
     // drops snapshots for orgs the user hasn't selected as active.
     if (!skipServer) {
-      // One-shot migration: hand legacy chrome.storage.sync `selectedOrgIds` to the
-      // server's `selected_orgs` and clear local fields. Claude-only — non-Claude
-      // providers never had a local selection. Runs once per device.
-      try {
-        const { selectedOrgsMigrated } = await chrome.storage.local.get({ selectedOrgsMigrated: false });
-        if (!selectedOrgsMigrated) {
-          const { selectedOrgIds } = await chrome.storage.sync.get({ selectedOrgIds: null });
-          const hasLegacy = Array.isArray(selectedOrgIds) && selectedOrgIds.length >= 1 && selectedOrgIds.length <= 3;
-          // /api/me/selected-orgs requires a Bearer session token; the API_KEY
-          // fallback always 401s. Only attempt the migration PATCH once we have an
-          // ext_token — otherwise skip WITHOUT marking migrated so it retries (once)
-          // after a token is issued, instead of hammering a guaranteed 401 every cycle.
-          if (hasLegacy && (await getExtToken())) {
-            const payload = selectedOrgIds.map(uuid => ({ provider: 'claude', org_uuid: uuid }));
-            const resp = await authedFetch(config, `${config.serverUrl}/api/me/selected-orgs`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json', 'X-User-Email': snapshot.user_email },
-              body: JSON.stringify({ selected_orgs: payload }),
-            });
-            if (resp.ok) {
-              await chrome.storage.sync.remove(['selectedOrgIds', 'orgAutoAll']);
-              await chrome.storage.local.set({ selectedOrgsMigrated: true });
-            } else if (resp.status === 403) {
-              // 403 is terminal (email-mismatch / not authorized — won't recover),
-              // so mark done. 401 is NOT marked terminal: it's a stale token, and
-              // authedFetch already cleared it → next cycle is tokenless → the
-              // getExtToken() gate skips (no request) until a fresh token is issued
-              // via the snapshot POST (TOFU), which then retries the migration once.
-              await chrome.storage.local.set({ selectedOrgsMigrated: true });
-            }
-          } else if (!hasLegacy) {
-            // Nothing to migrate — still mark done so we don't retry every collect
-            await chrome.storage.local.set({ selectedOrgsMigrated: true });
-          }
-        }
-      } catch (e) {
-        console.warn('[Claude Tuner] selected_orgs migration failed (will retry next cycle):', e.message);
-      }
+      // RETIRED (2026-07-31): the legacy `selectedOrgIds` → server `selected_orgs` migration that
+      // used to live here has been REMOVED, not fixed. Do not reintroduce it. Four facts, each
+      // verified in code, make every version of it either useless or destructive:
+      //
+      //  1. It could never succeed. It PATCHed `/api/me/selected-orgs` with an ext_token, but
+      //     `/api/me/*` is mounted under googleAuthMiddleware (worker index.ts), which accepts only
+      //     `iss:'claudetuner'` session JWTs or Google ID tokens — an ext_token is
+      //     `iss:'claudetuner-ext'`, so the call 401s by construction. `resp.ok` was unreachable.
+      //  2. It had no terminal state, and that was DELIBERATE — the old comment said 401 need not be
+      //     marked done because "authedFetch already cleared it → next cycle is tokenless → the
+      //     getExtToken() gate skips". PR #745 stopped clearing tokens on a codeless 401, which
+      //     removed that brake: the gate stayed open and this re-fired every collect cycle
+      //     (~575 requests/hour, rising with rollout). The loop was the visible symptom.
+      //  3. Nothing writes `selectedOrgIds` any more, so the value is frozen. options.js reads it
+      //     into memory but never persists or sends it, and options.html no longer even renders the
+      //     org checklist — that code is vestigial.
+      //  4. Reviving it would be DESTRUCTIVE, which is why "just give it an endpoint that accepts
+      //     ext_token" is the wrong fix. Org selection is now owned by the dashboard
+      //     (PATCH /api/me/selected-orgs under Google auth). Replaying a months-old local list over
+      //     it would overwrite the user's current choice — and for the many users whose
+      //     `selected_orgs` is unset, ingest currently lets every org through, so writing a stale
+      //     1-3 entry list would newly cap them and start DROPPING orgs they are collecting today.
+      //
+      // Retiring changes no behaviour: by (1) this never ran to completion for anyone, and the
+      // extension does not read server `selected_orgs` to decide what to collect (it sends all
+      // monitorable orgs below and lets the server decide what to persist).
+      //
+      // The legacy keys are deliberately NOT deleted. Removing this block is reversible; wiping a
+      // user's storage is not, and it buys nothing — nobody reads them.
+      // Pinned by test/selected-orgs-retired-guard.mjs.
 
       // Determine target orgs: exclude API + exclude Free if multi-org.
       // No client-side count cap — the server's selected_orgs decides what is

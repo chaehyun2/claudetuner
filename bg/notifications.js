@@ -4,17 +4,122 @@ import { getLastStatus } from './storage.js';
 
 const NOTIF_LOG_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+// === Notification budget ===
+//
+// WHY THIS EXISTS
+// ---------------
+// Every producer in this file rate-limits itself and none of them can see the others. A user can
+// be interrupted by a usage threshold, a collection failure, a weekly report and a promo on the
+// same day while each producer considers itself well-behaved. Re-engagement nudges are about to
+// be added on top of that, and nudges are the class users forgive least.
+//
+// The rule is deliberately ONE-DIRECTIONAL: a nudge fires only when nothing else has fired in the
+// last 24h. Urgent notifications (usage thresholds, collection failures, the first auth-blocked
+// interrupt) are never gated — they push nudges out of the day, never the reverse. That ordering
+// is what makes this safe to ship without first measuring the existing notification volume, which
+// is not measurable from the server anyway: `_notifLog` never leaves the device. There is no path
+// in which a threshold alert loses to a nudge.
+//
+// Deliberately NOT budgeted: `weekly-report`. Budgeting it would silently delete the weekly report
+// for exactly the users who get frequent usage alerts — the heaviest, most engaged ones — which is
+// a regression dressed up as politeness. Existing notifications are each already rate-limited and
+// each already has a user toggle; making them compete with each other is a different decision than
+// keeping nudges cheap.
+//
+// Storage cost is zero: `_notifLog` already records every notification with 30-day retention. This
+// only adds a reader, plus a lock so concurrent producers stop losing each other's writes.
+const NOTIF_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+const NUDGE_QUIET_START_HOUR = 22; // local time; nudges only
+const NUDGE_QUIET_END_HOUR = 8;
+
+// The nudge class — everything here is deferrable by definition. A category that represents
+// something BROKEN does not belong in this set, because being suppressed would hide a real fault.
+export const NUDGE_CATEGORIES = new Set(['promo-push', 'auth-blocked-followup', 'dash-nudge']);
+
+// Serialises read-modify-write on `_notifLog`. Without this the log loses entries: every producer
+// calls logNotification() without awaiting it, so two notifications a tick apart both read the old
+// array and the second write erases the first. That was survivable while the log was write-only
+// analytics; the moment a budget READS it, a lost entry becomes a nudge that fires when it should
+// not have. One MV3 service worker instance exists at a time, so module-level serialisation covers
+// every real interleaving, and the storage read happens inside the lock so a worker restart mid-
+// chain is harmless.
+let _notifLogChain = Promise.resolve();
+function withNotifLogLock(fn) {
+  // .then(fn, fn) so one rejected turn cannot wedge the chain for the rest of the worker's life.
+  const result = _notifLogChain.then(fn, fn);
+  _notifLogChain = result.then(() => {}, () => {});
+  return result;
+}
+
+async function readNotifLog(now) {
+  const { _notifLog = [] } = await chrome.storage.local.get({ _notifLog: [] });
+  const cutoff = now - NOTIF_LOG_MAX_AGE_MS;
+  return _notifLog.filter((e) => e && typeof e.ts === 'number' && e.ts > cutoff);
+}
+
+function inNudgeQuietHours(now) {
+  const h = new Date(now).getHours(); // device-local, same basis the notices feed already uses
+  return h >= NUDGE_QUIET_START_HOUR || h < NUDGE_QUIET_END_HOUR;
+}
+
 /**
  * Log a notification event for analytics (used to understand blocking reasons).
  * Stores {category, ts} entries in chrome.storage.local, pruned to 30 days.
  */
 export async function logNotification(category) {
-  const { _notifLog = [] } = await chrome.storage.local.get({ _notifLog: [] });
-  const now = Date.now();
-  const cutoff = now - NOTIF_LOG_MAX_AGE_MS;
-  const pruned = _notifLog.filter(e => e.ts > cutoff);
-  pruned.push({ c: category, ts: now });
-  await chrome.storage.local.set({ _notifLog: pruned });
+  return withNotifLogLock(async () => {
+    const now = Date.now();
+    const pruned = await readNotifLog(now);
+    pruned.push({ c: category, ts: now });
+    await chrome.storage.local.set({ _notifLog: pruned });
+  });
+}
+
+/**
+ * Ask for permission to interrupt the user with a NUDGE. Records the slot on success, so callers
+ * must NOT also call logNotification() — claiming is the log write.
+ *
+ * Claim BEFORE chrome.notifications.create(), not after: create() is async, and a check-then-create
+ * ordering lets two nudges in the same cycle both observe an unspent budget (checkPromoPush loops
+ * over a list, so this is reachable, not theoretical). If create() then fails, release the slot.
+ *
+ * @returns {Promise<{granted: true, ts: number, category: string} | {granted: false, reason: string}>}
+ */
+export async function claimNudgeSlot(category, now = Date.now()) {
+  return withNotifLogLock(async () => {
+    if (inNudgeQuietHours(now)) return { granted: false, reason: 'quiet-hours' };
+    const log = await readNotifLog(now);
+    // ANY category spends the day, not just nudges — that is the one-directional rule.
+    if (log.some((e) => e.ts > now - NOTIF_BUDGET_WINDOW_MS)) return { granted: false, reason: 'budget-spent' };
+    log.push({ c: category, ts: now });
+    await chrome.storage.local.set({ _notifLog: log });
+    return { granted: true, ts: now, category };
+  });
+}
+
+/**
+ * Give back a claimed slot when the notification failed to appear (revoked permission, OS block).
+ * Takes the object returned by claimNudgeSlot, not a bare timestamp.
+ *
+ * Takes `now` from the caller for the same reason claimNudgeSlot does: readNotifLog prunes against
+ * it, so releasing on a different clock than the claim can prune the very entry it came to remove,
+ * find nothing, and silently leave the day spent for a notification the user never saw.
+ *
+ * Matches on category AS WELL AS timestamp. A bare ts match can delete a DIFFERENT producer's entry
+ * that landed in the same millisecond — which would hand the day back to a nudge on the strength of
+ * an urgent notification the user actually saw, quietly inverting the one-directional rule.
+ */
+export async function releaseNudgeSlot(slot, now = Date.now()) {
+  const ts = slot && slot.ts;
+  const category = slot && slot.category;
+  if (typeof ts !== 'number' || !category) return;
+  return withNotifLogLock(async () => {
+    const log = await readNotifLog(now);
+    const i = log.findIndex((e) => e.ts === ts && e.c === category);
+    if (i === -1) return; // already pruned, or never written — nothing to hand back
+    log.splice(i, 1);
+    await chrome.storage.local.set({ _notifLog: log });
+  });
 }
 
 /**
@@ -250,9 +355,11 @@ export async function checkUsageAlerts(snapshot) {
 const PROMO_PUSH_URL = 'https://cdn.claudetuner.com/push.json';
 const PROMO_PUSH_THROTTLE_MS = 10 * 60 * 1000;
 
-export async function checkPromoPush() {
+// `now` is injectable so the budget guard can pin the wall clock. Without a seam the quiet-hours
+// branch makes this function's behaviour depend on what time the test suite happens to run —
+// a guard that passes at noon and fails at midnight is worse than no guard.
+export async function checkPromoPush(now = Date.now()) {
   try {
-    const now = Date.now();
     const { promoPushState = {}, _promoPushCheckedAt = 0 } = await chrome.storage.local.get({
       promoPushState: {}, _promoPushCheckedAt: 0,
     });
@@ -278,6 +385,11 @@ export async function checkPromoPush() {
       // sub-30s is unreliable). Without ttlSec, `sticky` decides: true (default) stays until the
       // user acts, false lets the OS auto-hide it after a few seconds.
       const ttlSec = Number(p.ttlSec) > 0 ? Number(p.ttlSec) : 0;
+      // A promo is a nudge: it yields to anything that already interrupted the user in the last
+      // 24h, and never fires in quiet hours. Claim BEFORE writing the dedup — a denied promo must
+      // stay un-deduped so it retries on a later cycle while its [start,end) window is still open.
+      const slot = await claimNudgeSlot('promo-push', now);
+      if (!slot.granted) continue;
       // Persist url + dedup BEFORE showing so a click always resolves the url even if the SW is
       // interrupted right after create(). Await create() and roll the dedup back if it actually
       // throws, so a failed notification isn't permanently deduped (retries next cycle).
@@ -298,13 +410,14 @@ export async function checkPromoPush() {
       } catch (e) {
         delete promoPushState[p.id]; // create failed → allow a retry on a later cycle
         await chrome.storage.local.set({ promoPushState });
+        await releaseNudgeSlot(slot, now); // nothing was shown → the day is not spent
         continue;
       }
       if (ttlSec > 0) {
         // chrome.alarms clamps to ~1-min minimum granularity; it fires even if the SW slept.
         chrome.alarms.create('promopushclear:' + notifId, { delayInMinutes: Math.max(ttlSec, 60) / 60 });
       }
-      logNotification('promo-push');
+      // No logNotification() here — claimNudgeSlot already wrote this promo's log entry.
     }
   } catch (e) {
     // best-effort: a push failure must never disrupt the collection cycle
