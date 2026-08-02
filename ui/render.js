@@ -235,7 +235,9 @@ export function _updateUICore(status) {
   if (timingEl) timingEl.innerHTML = '';
   if (onboarding) onboarding.classList.add('hidden');
   if (state.onboardOrgName) { state.onboardOrgName = null; chrome.storage.local.remove('onboardOrgName'); }
-  maybeShowDashNudge();
+  // async now (it consults isServerSyncStalled); nothing awaits it, so catch here or a storage
+  // hiccup becomes an unhandled rejection with the evaluation already claimed.
+  maybeShowDashNudge().catch(() => {});
 
   // Claude recovered — reset the dismissed-notice flag so a future disconnection
   // surfaces the notice again.
@@ -509,38 +511,37 @@ export function _updateUICore(status) {
 // moment collection succeeds again (bg/collect.js), so by the time the user looks, everything
 // reads "fine" while the dashboard they open still shows the old account's data.
 //
-// Kept silent when the two match so the common case gains no clutter.
-// Records the address the footer is showing, so the sync note compares against exactly what the
-// user sees. Called by every branch that writes #user-info; the value is stashed on the element
-// instead of in `state` on purpose (see _footerAccountEmail).
 function _setFooterText(el, email, ver) {
-  el.dataset.email = email || '';
   el.textContent = email ? `${email} | ${ver}` : ver;
 }
 
-// The address the footer is ACTUALLY showing.
-//
-// Deliberately not recomputed from state: _updateUICore has six early returns whose footer
-// precedence differs (independent email / provider org email / Claude snapshot email), and on
-// the error and no-data paths it leaves whatever the PREVIOUS render wrote in place. A
-// state-derived copy of that precedence disagreed with the DOM in exactly those cases — a
-// transient Claude error cleared currentSnapshot, so the note vanished while the stale email it
-// was explaining stayed on screen. Since the value is stored when the footer is written, it
-// survives those paths together with the text it describes.
-//
-// Read from a data attribute rather than parsed back out of the text: the rendered form is
-// "email | vX.Y.Z", and splitting on '|' mangles addresses that legitimately contain one
-// (the server's address validation permits it), either dropping a real warning or inventing one.
-function _footerAccountEmail() {
-  return document.getElementById('user-info')?.dataset.email || '';
-}
-
+/**
+ * Which Tuner account this install's data lands in — shown whenever we know it.
+ *
+ * 🔴 THE PROVIDER ADDRESS IS NOT THE REFERENCE POINT. This used to compare the token identity
+ * against whatever address the footer happened to be showing and stay silent unless they differed,
+ * which encoded the pre-#702 model where the scraped provider email drove attribution. It no longer
+ * does: every collector resolves through pickIngestIdentity() and the authenticated identity wins,
+ * so the provider address is a LABEL (DESIGN-authenticated-attribution §7.1-2) and the token is the
+ * fact. Comparing the fact against the label to decide whether to state the fact hid it in the two
+ * cases that matter most:
+ *
+ *   - provider address not known yet (before the first collection, or a provider that never
+ *     exposes one) → `!provider` short-circuited FIRST, so a user who had just signed in was told
+ *     nothing at all about which account they signed in as;
+ *   - addresses equal → silent, so nothing ever named the Tuner login. The footer shows *an*
+ *     address, but never says it is the one to sign in to the dashboard with.
+ *
+ * Asking only `sync` collapses those into one sentence and drops the DOM-read workaround the old
+ * comparison needed (it had to read the footer's own dataset because _updateUICore's six early
+ * returns disagree about footer precedence — a problem that only existed because of the compare).
+ */
 export function renderSyncAccountNote() {
   const el = document.getElementById('sync-account-note');
   if (!el) return;
   const sync = state.syncEmail;
-  const provider = (_footerAccountEmail() || '').trim().toLowerCase();
-  if (!sync || !provider || provider === 'unknown' || sync === provider) {
+  if (!sync) {
+    // Not signed in (gated). The login CTA already explains this; repeating it here is noise.
     el.classList.add('hidden');
     el.textContent = '';
     return;

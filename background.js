@@ -1,5 +1,5 @@
 // === ES Module Imports ===
-import { sendGAEvent } from './bg/analytics.js';
+import { sendGAEvent, pinnedState, authState } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
@@ -8,16 +8,17 @@ import {
   NOTIF_ID_OPTIMIZE, NOTIF_ID_ALERT,
   DEFAULT_SERVER_URL, SITE_URL,
   SEND_MIN_INTERVAL_MS,
+  PROVIDER_LABELS,
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
-import { extTokenEmail, decodeJwtPayload } from './bg/ext-token-claims.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { extTokenEmail, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtTokenNoDowngrade, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -434,12 +435,21 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   checkPromoPush(); // fire a pending server push on install/update too (best-effort)
   // v1.9.x → v1.10+ migration (skip if already completed)
   if (details.reason === 'update') {
+    // 🔴 FIRST STATEMENT ON PURPOSE. Grandfather EXISTING users so login-first never breaks their
+    // current server sync (many still sync via the api_key fallback). The gate now fails CLOSED
+    // while this flag is unwritten (#785), so every await ahead of this line is a window in which
+    // an existing user's collection is withheld. Only set when never set — a fresh install already
+    // wrote `false` and must stay gated across future updates.
+    const { serverSyncGrandfathered } = await chrome.storage.local.get(['serverSyncGrandfathered']);
+    if (serverSyncGrandfathered === undefined) {
+      await chrome.storage.local.set({ serverSyncGrandfathered: true });
+    }
     // An update is the ONLY fix for a 426 upgrade_required block, so drop it the instant one
     // lands — the badge and popup banner then clear without waiting for the next poll cycle.
     // Belt-and-braces, not the contract: bg/upgrade-gate.js keys the record on the ext version
     // and drops a stale one on read, so recovery does not depend on this listener firing.
     await clearUpgradeBlocked();
-    const { intervalExplicitlySet } = await chrome.storage.sync.get({ intervalExplicitlySet: undefined });
+    const { intervalExplicitlySet } = await chrome.storage.sync.get(['intervalExplicitlySet']);
     if (intervalExplicitlySet === undefined) {
       await chrome.storage.sync.set({ intervalExplicitlySet: false });
       console.log('[Claude Tuner] Migration: intervalExplicitlySet initialized to false');
@@ -451,9 +461,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // locally, but it does NOT send to the server via the shared api_key. Server sync (and the
     // ingest-token TOFU it would mint) is gated behind login. Existing users are grandfathered
     // in the 'update' branch so their fallback is never broken.
-    // 🔴 Set this FIRST — before opening the welcome tab or ANY awaited work — so a fast
-    // force_collect from the welcome page can't observe an uninitialized flag (which reads as
-    // NOT gated) and leak one api_key POST → an ingest token (Codex review HIGH).
+    // 🔴 Set this FIRST — before opening the welcome tab or ANY awaited work. An uninitialized
+    // flag is now GATED, not allowed (bg/storage.js), so the risk this ordering guards has flipped:
+    // it is no longer "a fast force_collect leaks an api_key POST", it is "a fast force_collect is
+    // needlessly withheld and shows a login CTA to someone we were about to grandfather". Writing
+    // first keeps both failure modes out of reach.
     await chrome.storage.local.set({ serverSyncGrandfathered: false });
     // Only force the welcome page's language when the user has *explicitly* set
     // the extension language. On 'auto' (the default), pass no param and let the
@@ -473,16 +485,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await chrome.storage.local.set({ sidePanelAutoOpened: false });
   } else if (details.reason === 'update') {
     // Existing users: skip auto-open (they already know the extension)
-    const { sidePanelAutoOpened } = await chrome.storage.local.get({ sidePanelAutoOpened: undefined });
+    const { sidePanelAutoOpened } = await chrome.storage.local.get(['sidePanelAutoOpened']);
     if (sidePanelAutoOpened === undefined) {
       await chrome.storage.local.set({ sidePanelAutoOpened: true });
-    }
-    // Grandfather EXISTING users so login-first never breaks their current server sync
-    // (many sync via the api_key fallback today). Only set if never set — a fresh install
-    // under this regime already wrote `false` and must stay gated across future updates.
-    const { serverSyncGrandfathered } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined });
-    if (serverSyncGrandfathered === undefined) {
-      await chrome.storage.local.set({ serverSyncGrandfathered: true });
     }
     // v1.24→1.25 migration: re-request previously-required host permissions
     // that moved to optional_host_permissions (Chrome may not auto-retain them)
@@ -565,13 +570,19 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
   // recovery path we shipped needs them to notice something first, and none did (2026-07-27).
   //
-  // 🔴 Two guards, both load-bearing:
+  // 🔴 Three guards, all load-bearing:
   //  [1] ORIGIN. externally_connectable also allows *.claude-tuner-site-git.pages.dev — every PR
   //      preview. That is harmless for the read-only probes above, but a message that INSTALLS A
   //      CREDENTIAL must come from production only.
-  //  [2] NO EXISTING TOKEN. Only a blocked/tokenless install accepts one. Without this, opening
-  //      the dashboard as account A would silently re-point an extension collecting for account B
-  //      — the exact account-mismatch the dashboard elsewhere warns about, caused by us.
+  //  [2] NO LOGIN-PROVEN TOKEN. This used to read "no existing token at all", which made the
+  //      recovery near-useless: a shared-key TOFU mint already leaves an `ingest` token on most
+  //      installs (measured 3,775 dashboard sign-ins vs 26 `full` tokens). An `ingest` token
+  //      proves nothing, so it may be upgraded; a `full` or scope-less legacy one may not.
+  //  [3] IDENTITY. Opening the dashboard as account A must never re-point an extension collecting
+  //      for account B — the exact account-mismatch the dashboard elsewhere warns about, caused by
+  //      us. Narrowing [2] does NOT weaken this: the server 409s on an alias-aware mismatch, and
+  //      when it could not compare, resolveSyncIdentity() reads the email out of the very token
+  //      being replaced.
   if (message && message.type === 'RECOVER_EXT_TOKEN') {
     (async () => {
       if (sender.origin !== 'https://claudetuner.com') {
@@ -582,8 +593,22 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         sendResponse({ success: false, error: 'missing_token' });
         return;
       }
+      // [2] SCOPE. Not every stored token is a credential worth protecting. `ingest` can ONLY
+      // originate from a shared-api_key TOFU mint — the server hands one to anybody who POSTs a
+      // snapshot with an email, and only login mints `full` (snapshots.ts:986 and :995). So an
+      // `ingest` token proves nothing about who is using this browser, and replacing it with a
+      // login-proven one is strictly an upgrade.
+      //
+      // Refusing EVERY existing token (the previous rule) meant this recovery almost never fired:
+      // collecting on the shared key already leaves a TOFU token behind, so most installs hold
+      // one. That is the measured 3,775 dashboard sign-ins against 26 `full` tokens.
+      //
+      // 🔴 `full` — and legacy tokens with NO scope claim, which must be assumed login-minted —
+      // still win. That preserves the property this gate exists for: a working authenticated
+      // install can never be re-pointed at whatever account the dashboard happens to be showing.
+      // Identity is still checked below; this only decides whose token may be REPLACED.
       const existing = await getExtToken();
-      if (existing) {
+      if (!mayReplaceStoredToken(existing)) {
         sendResponse({ success: false, error: 'already_authed' });
         return;
       }
@@ -602,10 +627,31 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         sendResponse({ success: false, error: 'identity_mismatch' });
         return;
       }
-      await chrome.storage.local.set({
-        extToken: message.ext_token,
-        ...(message.email ? { independentAccount: { email: message.email, name: message.name || '' } } : {}),
-      });
+      // 🔴 REPLACING a credential needs POSITIVE proof of the same person; filling an EMPTY slot
+      // does not. The mismatch check above only fires on a CONTRADICTION, so "we could not tell"
+      // sails through it — acceptable for a tokenless install ("no opinion yet"), wrong the moment
+      // [2] let us overwrite something. The reachable hole: an EXPIRED ingest token is replaceable
+      // (extTokenScope ignores expiry) but extTokenEmail() rejects it, so resolveSyncIdentity()
+      // can return null with no accountCache either — and account B's token would land on an
+      // install collecting for A, whose snapshots then 403 forever on the email mismatch. A
+      // partly-working install becomes a dead one, which is precisely what guard [3] exists to
+      // prevent. (Codex DEPLOY-BLOCKER — introduced by narrowing [2], not pre-existing.)
+      //
+      // This also disposes of the "stale per-account state" worry: an upgrade can no longer change
+      // WHO the install is, only the scope of its token, so accountCache/selectedOrgId and friends
+      // stay valid by construction.
+      if (existing && message.identity_verified !== true && !local.email) {
+        console.log('[Claude Tuner] recovery refused: cannot confirm the replaced token belongs to this account');
+        sendResponse({ success: false, error: 'identity_unknown' });
+        return;
+      }
+      // Canonical writer, not a raw set(): it is the one choke point that ends a token-withheld
+      // retry episode (clears TOKEN_RETRY_KEY) and refuses a full→ingest downgrade. Its own comment
+      // already claims to cover "dashboard recovery" — this path was quietly bypassing it.
+      await setExtTokenNoDowngrade(message.ext_token);
+      if (message.email) {
+        await chrome.storage.local.set({ independentAccount: { email: message.email, name: message.name || '' } });
+      }
       await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
       console.log('[Claude Tuner] ext_token recovered from dashboard session');
       // Collect right away so the dashboard the user is looking at stops being stale.
@@ -634,6 +680,29 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   if (message && message.type === 'GET_INFO') {
     sendResponse({ version: chrome.runtime.getManifest().version });
     return;
+  }
+
+  // Would a RECOVER_EXT_TOKEN handoff be accepted right now? Read-only, mints nothing, and
+  // deliberately reports ONLY the token-scope question — identity and origin are still decided by
+  // the handoff itself, so a "yes" here is not permission to bind anything.
+  //
+  // Why the dashboard needs to ask FIRST: the handoff costs a Worker request that reads D1 and
+  // signs a JWT, and most installs already hold a `full` token and would refuse the result. Firing
+  // it on every dashboard page view to find that out would be a self-inflicted load problem.
+  //
+  // 🔴 A separate message type rather than a field on GET_INFO: GET_INFO answers synchronously and
+  // is used as the extension-presence probe, so making it await storage would change the timing of
+  // the one call every dashboard load already depends on. An older extension simply has no handler
+  // here — the caller treats "no answer" as "unknown" and falls back to its own gate.
+  if (message && message.type === 'CAN_ACCEPT_EXT_TOKEN') {
+    (async () => {
+      try {
+        sendResponse({ canAccept: mayReplaceStoredToken(await getExtToken()) });
+      } catch {
+        sendResponse({ canAccept: false });   // unreadable storage → assume not replaceable
+      }
+    })();
+    return true;                              // async response
   }
 
   // Get the Tuner account this install syncs INTO (read-only, no token minted — unlike
@@ -818,7 +887,15 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 chrome.runtime.onStartup.addListener(async () => {
   await setupAlarm();
   checkPromoPush(); // server-signaled push, independent of collection success (best-effort)
-  sendGAEvent('extension_loaded');
+  // Rides the once-per-browser-start event rather than a new one: it samples EVERY install,
+  // unlike the ext_settings channel, which only reports for people engaged enough to open Settings
+  // and hit save — the opposite of the population this question is about.
+  // Detached on purpose: telemetry must not sit in front of the real startup work. Awaiting the two
+  // probes inline placed them ahead of restoreSidePanelPreference() and the dynamic script
+  // re-registration below, so a chrome API that never settled would take those down with it. (Codex.)
+  void (async () => {
+    sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState() });
+  })();
   await restoreSidePanelPreference();
   // Re-register dynamic ChatGPT/Gemini scripts on browser restart (registrations
   // persist, but this self-heals if they were lost; no-op without the optional
@@ -1275,7 +1352,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // Build a short label like "Claude" or "Claude · Dable Labs" for reset notifications.
 // Single-Claude-org users see just the provider name; multi-org / non-Claude users
 // get the org name appended so they can tell which account the alarm is for.
-const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
 async function buildResetContextLabel() {
   const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
   if (!collectedOrgs.length) return null;
@@ -1850,6 +1926,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 (async () => {
   const { authBlocked } = await chrome.storage.local.get('authBlocked');
   if (authBlocked === true) await notifyAuthBlockedOnce();
+  // Stages 2..4. Runs on every service-worker wake, which is what gives the ladder its clock —
+  // there is no alarm for it, and it must keep advancing for a user who never opens the popup.
+  await checkAuthBlockedLadder();
 })();
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -1857,6 +1936,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const { oldValue, newValue } = changes.authBlocked;
   if (newValue === true && oldValue !== true) {
     notifyAuthBlockedOnce();
+    // Stamp the episode start on the EDGE, where the true start time is known. The wake catch-up
+    // also stamps, but only with "now" — for a block that begins while the worker is alive, that
+    // would be a later (wrong) date. Written unconditionally because this branch IS the transition.
+    chrome.storage.local.set({ authBlockedSince: Date.now() });
     // Paint the badge now instead of waiting for the next collection tick — the whole point is
     // that this user may not look at the extension for hours.
     chrome.action.setBadgeText({ text: '!' });
@@ -1868,8 +1951,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
     resetIcon();
     chrome.action.setBadgeText({ text: '' });
     chrome.notifications.clear('auth-blocked');
-    // Drop the episode marker so a FUTURE block notifies again.
-    chrome.storage.local.remove('authBlockedNotifiedAt');
+    // Clear every follow-up still on screen too — leaving "you're missing 10 days of insights" up
+    // after the login that fixed it is worse than never having sent it.
+    for (let s = 2; s <= AUTH_LADDER_LAST_STAGE; s++) chrome.notifications.clear(`auth-blocked-r${s}`);
+    // Drop the episode marker AND the whole ladder state so a FUTURE block starts from rung one.
+    // 🔴 All four keys or none: a surviving `authBlockedStage` would silently skip straight to the
+    // last rung of the next episode, and a surviving `authBlockedSince` would make it fire at once.
+    chrome.storage.local.remove(AUTH_LADDER_KEYS);
   }
 });
 
@@ -1902,7 +1990,10 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   // chrome.action.openPopup(): that API is Chrome 127+ and throws when no window is focused,
   // which is exactly the state a notification click can arrive in. popup.html renders the same
   // CTA in a tab, so the simple path is also the reliable one.
-  if (notifId === 'auth-blocked' && btnIdx === 0) {
+  // Prefix, not equality: the follow-up ladder fires 'auth-blocked-r2'…'-r4' with the SAME Verify
+  // button, and an exact match left those buttons dead — the one action the notification exists to
+  // offer. (Codex.)
+  if ((notifId === 'auth-blocked' || notifId.startsWith('auth-blocked-r')) && btnIdx === 0) {
     chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
     chrome.notifications.clear(notifId);
     return;

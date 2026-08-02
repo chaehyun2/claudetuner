@@ -8,13 +8,13 @@ import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
+import { PROVIDER_LABELS } from '../bg/constants.js';
 
 // Human-readable label for a provider org, provider-qualified across all providers
 // (e.g. "Claude Max 20x", "ChatGPT Pro 5x", "Gemini Advanced"). Provider defaults to
 // 'claude' when absent (Claude orgs may omit the field), matching the chip's `pv` default.
 export function _providerOrgLabel(org) {
   if (!org) return '';
-  const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
   return [PROVIDER_LABELS[org.provider || 'claude'] || '', org.plan || ''].filter(Boolean).join(' ').trim();
 }
 

@@ -43,6 +43,28 @@ export function extTokenScope(token) {
 }
 
 /**
+ * May a stored token be REPLACED by one the dashboard just handed us?
+ *
+ * Yes when there is nothing stored, and yes when what is stored is an `ingest` token. `ingest` can
+ * only come from a shared-api_key TOFU mint — the server issues one to anybody who POSTs a snapshot
+ * with an email, and only login mints `full` (worker snapshots.ts:986, :995). It is therefore not
+ * evidence of who is using this browser, and swapping it for a login-proven token is an upgrade.
+ *
+ * 🔴 No for `full`, and no for a legacy token with NO scope claim. The legacy case is the subtle
+ * one: absent means "minted before scopes existed", which is most likely a login mint, and the
+ * whole point of this gate is that a genuinely authenticated install can never be re-pointed at
+ * whatever account the dashboard happens to be showing. Guessing wrong in that direction is the
+ * expensive mistake, so absence is treated as `full`.
+ *
+ * This says nothing about IDENTITY — whether the incoming token belongs to the same person is a
+ * separate check at the call site, and narrowing this one does not relax that one.
+ */
+export function mayReplaceStoredToken(existing) {
+  if (!existing) return true;
+  return extTokenScope(existing) === 'ingest';
+}
+
+/**
  * The Tuner account this install actually syncs INTO — the `email` claim the server bound
  * the token to.
  *

@@ -3,6 +3,8 @@ import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
+import { isServerSyncGated } from './bg/storage.js';
+import { PROVIDER_LABELS } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
@@ -22,20 +24,40 @@ let _syncEmailLive = false;
 // once collection resumes over Bearer, the server auto-upgrades email→claude
 // (/api/auth/link-claude) so it can't recur. Also covers genuine provider-only
 // (ChatGPT/Gemini) independent accounts whose token expired.
+let _reauthRenderSeq = 0;
 async function renderReauthWidget() {
   const widget = document.getElementById('reauth-widget');
   if (!widget) return;
-  const { independentAccount = null, extToken = null, claudeLinkDone = false, serverSyncGrandfathered = undefined } =
-    await chrome.storage.local.get({ independentAccount: null, extToken: null, claudeLinkDone: false, serverSyncGrandfathered: undefined });
+  // 🔴 This function awaits TWICE (the read below, then isServerSyncGated) and is now driven by
+  // storage.onChanged, so two renders can overlap and the LOSER can land last with a stale snapshot.
+  // The dangerous direction is "hide": renderLoginCta yields whenever `independentAccount?.email`
+  // exists, so a stale hide leaves NO recovery UI for the rest of the popup session — the exact
+  // dead-end this widget exists to prevent, arrived at silently. Concretely: a render reads a live
+  // extToken, a background 401 clears it, the newer render shows the widget, then the older render
+  // resumes and hides it again on the token it read before the 401. So stamp each render and let
+  // only the newest touch the DOM. (Codex DEPLOY-BLOCKER.)
+  //
+  // Collapsing the two awaits into one read is NOT the fix: the gate must be ASKED
+  // (isServerSyncGated), never re-derived here — a second copy of that rule is what drifted in #786.
+  const seq = ++_reauthRenderSeq;
+  const { independentAccount = null, extToken = null, claudeLinkDone = false } =
+    await chrome.storage.local.get(['independentAccount', 'extToken', 'claudeLinkDone']);
   // Trapped only when an email account has NO valid token (expired/cleared) AND
   // hasn't already been upgraded to a Claude account (claudeLinkDone). After a
   // link-claude upgrade the API_KEY fallback works, so a transient missing token
   // is not a trap — don't flash the widget in that window.
-  // EXCEPTION (Phase 2 단계 4, Fable review HIGH): on a GATED install (fresh regime,
-  // serverSyncGrandfathered===false) the api_key fallback is deliberately blocked, so a linked
-  // user whose token later expired has NO working sync and NO other login UI. Keep showing the
-  // reauth widget in that case so they can re-mint a `full` token (login re-opens the gate).
-  const gated = serverSyncGrandfathered === false;
+  // EXCEPTION (Phase 2 단계 4, Fable review HIGH): on a GATED install the api_key fallback is
+  // deliberately blocked, so a linked user whose token later expired has NO working sync and NO
+  // other login UI. Keep showing the reauth widget so they can re-mint a `full` token.
+  //
+  // 🔴 ASK THE GATE, do not re-derive it. This read `serverSyncGrandfathered === false` — a second
+  // copy of the rule — and it drifted the moment the real predicate became `!== true` (a MISSING
+  // flag is gated too). The result: a tokenless gated install with `claudeLinkDone` saw NEITHER
+  // recovery UI — this widget hid because it thought "not gated", and renderLoginCta hides
+  // whenever `independentAccount?.email` exists. Blocked from syncing, with no way back. (Codex.)
+  const gated = await isServerSyncGated();
+  // Superseded while awaiting → a newer render holds the truth. Bail BEFORE touching the DOM.
+  if (seq !== _reauthRenderSeq) return;
   if (!independentAccount?.email || extToken || (claudeLinkDone && !gated)) { widget.classList.add('hidden'); return; }
 
   const email = independentAccount.email;
@@ -52,30 +74,52 @@ async function renderReauthWidget() {
   sendBtn.textContent = t('reauth_send') || 'Send code';
   verifyBtn.textContent = t('reauth_verify') || 'Verify & reconnect';
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
+  // Same one-click path as the login CTA. These users already have an account, so the fastest way
+  // back in is the one that needs no inbox round trip; the email code stays the fallback.
+  mountGoogleButton(document.getElementById('reauth-google-slot'), {
+    statusEl: status,
+    successKey: 'reauth_success',
+    successFallback: 'Verified — server sync will resume shortly.',
+  });
+  document.getElementById('reauth-or').textContent = t('login_cta_or') || 'or use an email code';
   widget.classList.remove('hidden');
 
+  // Same shape as the login CTA: ONE send path reached from the initial button and from the
+  // "send a new code" link on the verify step. Without the second entry point the rejection copy
+  // ("request a new one") pointed at a control the step transition had just hidden.
+  const resendBtn = document.getElementById('reauth-resend');
+  const doSend = (btn) => {
+    btn.disabled = true; btn.classList.add('loading'); status.textContent = '';
+    // Clear at request START, not on the response: the old code is dead the moment a new one is
+    // asked for, and clearing in the callback would wipe digits the user had begun typing from the
+    // previous email while the request was in flight. (Codex.)
+    codeInput.value = '';
+    const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
+    chrome.runtime.sendMessage(
+      { type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang },
+      (res) => {
+        btn.disabled = false; btn.classList.remove('loading');
+        if (res && res.success) {
+          stepReq.classList.add('hidden');
+          stepVer.classList.remove('hidden');
+          status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
+          codeInput.focus();
+        } else if (res && res.error === 'rate_limited') {
+          status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
+        } else {
+          status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+        }
+      }
+    );
+  };
+  if (resendBtn) resendBtn.textContent = t('code_resend') || 'Send a new code';
   if (!sendBtn.dataset.bound) {
     sendBtn.dataset.bound = '1';
-    sendBtn.addEventListener('click', () => {
-      sendBtn.disabled = true; sendBtn.classList.add('loading'); status.textContent = '';
-      const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
-      chrome.runtime.sendMessage(
-        { type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang },
-        (res) => {
-          sendBtn.disabled = false; sendBtn.classList.remove('loading');
-          if (res && res.success) {
-            stepReq.classList.add('hidden');
-            stepVer.classList.remove('hidden');
-            status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
-            codeInput.focus();
-          } else if (res && res.error === 'rate_limited') {
-            status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
-          } else {
-            status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
-          }
-        }
-      );
-    });
+    sendBtn.addEventListener('click', () => doSend(sendBtn));
+  }
+  if (resendBtn && !resendBtn.dataset.bound) {
+    resendBtn.dataset.bound = '1';
+    resendBtn.addEventListener('click', () => doSend(resendBtn));
   }
 
   if (!verifyBtn.dataset.bound) {
@@ -100,8 +144,18 @@ async function renderReauthWidget() {
       });
     };
     verifyBtn.addEventListener('click', doVerify);
-    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+    bindCodeInput(codeInput, doVerify);
   }
+}
+
+/**
+ * Every call site goes through here so a render failure can never be silent: this widget is the
+ * ONLY way back for a gated user whose token expired. The call sites used to be `.catch(() => {})`,
+ * and from the outside a swallowed exception is indistinguishable from "the function never ran" —
+ * that ambiguity cost a full debugging cycle in #788. Still non-throwing, just no longer mute.
+ */
+function renderReauth() {
+  return renderReauthWidget().catch((e) => console.error('[Claude Tuner] reauth widget render failed', e));
 }
 
 // Phase 2 단계 4 login-first CTA — shown to a FRESH, not-logged-in install (showLoginPrompt set
@@ -144,6 +198,112 @@ async function signInWithGoogle() {
   if (res?.success) return { ok: true };
   if (res?.error === 'cancelled') return { ok: false, message: '' };
   return { ok: false, message: t('login_cta_google_err') || 'Google sign-in failed. Use the email code instead.' };
+}
+
+/**
+ * Wire a 6-digit code field: verify as soon as a complete code is present, and never re-send the
+ * same one twice.
+ *
+ * Typing the last digit and then having to locate a button is a step nobody wants — and the field
+ * is `autocomplete="one-time-code"`, so on macOS/iOS the code frequently ARRIVES already complete,
+ * leaving the user staring at a filled box wondering what else is expected. That is the state this
+ * fixes; it was never implemented, despite reading like a regression.
+ *
+ * Listens on `input`, not `keydown`: autofill and paste produce no key events, which is exactly the
+ * path that lands a full code in one go. Enter stays bound for anyone who reaches for it.
+ *
+ * `lastTried` closes the loop a rejected code would otherwise create: the wrong digits stay in the
+ * box, so the next input event (even deleting a character and retyping it) would re-submit them.
+ * Editing to a DIFFERENT code always submits again, which is what someone correcting a typo wants.
+ */
+function bindCodeInput(input, doVerify) {
+  if (!input || input.dataset.autoBound) return;
+  input.dataset.autoBound = '1';
+  let lastTried = '';
+  const sanitizeAndMaybeVerify = () => {
+    // Pasted codes arrive with spaces, hyphens, or a "code: " prefix from mail clients; reduce to
+    // bare digits so the length test means what it says.
+    //
+    // 🔴 This is also why the field carries NO `maxlength`. The browser applies maxlength BEFORE
+    // the input event fires, so "code: 123456" was cut to "code: " and then sanitised to "" — the
+    // sanitiser could never see the digits it exists to rescue, and the paste path (the whole
+    // point of this feature) silently ate the code. Length is enforced here instead, after the
+    // full string has landed. (Codex.)
+    const raw = (input.value || '').replace(/\D/g, '');
+    const digits = raw.slice(0, 6);
+    // Rewriting moves the caret to the end. Acceptable here: it only happens when the value held
+    // something that is not a digit, and what remains is a complete code anyway.
+    if (digits !== input.value) input.value = digits;
+    // An empty field re-arms auto-submit: a resend clears it, and after that the user may well
+    // enter the same digits again (the new mail had not arrived yet). Without this reset the
+    // dedupe below would silently refuse, and auto-submit would look broken.
+    if (!raw) { lastTried = ''; return; }
+    // 🔴 Submit ONLY when the input was EXACTLY six digits. More than six means we had to choose
+    // which ones the user meant — and a guessed code spends one of the server's 5 attempts on a
+    // value nobody typed. Two real ways to get here: pasting a longer digit run, and pasting a
+    // full code into a field that already holds some (value becomes "12" + "123456" → slice would
+    // submit "121234"). Truncate for display, but make the user confirm. (Codex DEPLOY-BLOCKER.)
+    if (raw.length !== 6 || digits === lastTried) return;
+    lastTried = digits;
+    doVerify();
+  };
+  input.addEventListener('input', (e) => {
+    // Mid-composition text is not a code yet, and rewriting `value` here would erase what the user
+    // is still composing.
+    if (e.isComposing) return;
+    sanitizeAndMaybeVerify();
+  });
+  // Chrome can fire the committing `input` with isComposing STILL true and never follow it with a
+  // false one, so the guard above would swallow the only event that mattered — an IME user would
+  // end up with six digits and no submit. compositionend always lands after the commit. (Codex.)
+  input.addEventListener('compositionend', sanitizeAndMaybeVerify);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+}
+
+/**
+ * Mount the shared Google button into `slot` and bind the one-click flow.
+ *
+ * ONE implementation on purpose. The login CTA and the re-auth widget need an identical tail —
+ * request the optional `identity` permission, hand off to the background, then POST immediately
+ * because the server-sync gate has just opened — and the ONLY thing that differs is the success
+ * line. Forking this (or the brand SVG in popup.html) is what would drift; hence the template.
+ *
+ * Idempotent by contract: both callers re-render on every relevant storage change and on a live
+ * language switch, so the label is refreshed on each call while the clone and the click listener
+ * are installed exactly once.
+ */
+function mountGoogleButton(slot, { statusEl, successKey, successFallback }) {
+  if (!slot) return;
+  if (!slot.dataset.mounted) {
+    const tpl = document.getElementById('google-btn-tpl');
+    if (!tpl) return;
+    slot.appendChild(tpl.content.cloneNode(true));
+    slot.dataset.mounted = '1';
+  }
+  const btn = slot.querySelector('.google-btn');
+  const label = slot.querySelector('.google-btn-label');
+  if (!btn || !label) return;
+  label.textContent = t('login_cta_google') || 'Continue with Google';
+  if (btn.dataset.bound) return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; statusEl.textContent = '';
+    try {
+      const res = await signInWithGoogle();
+      if (res.ok) {
+        // We hold a full Bearer token now and the gate just opened, so kick a POST immediately
+        // instead of waiting for the next alarm, then re-render off fresh storage.
+        // t() is called HERE, not at bind time: the language can change while the popup is open.
+        statusEl.textContent = t(successKey) || successFallback;
+        chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
+        setTimeout(() => location.reload(), 1200);
+        return;
+      }
+      statusEl.textContent = res.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 async function renderLoginCta() {
@@ -264,51 +424,47 @@ async function renderLoginCta() {
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
   dismissBtn.textContent = t('login_cta_dismiss') || 'Use locally only';
 
-  const googleBtn = document.getElementById('login-cta-google');
-  document.getElementById('login-cta-google-label').textContent = t('login_cta_google') || 'Continue with Google';
+  mountGoogleButton(document.getElementById('login-cta-google-slot'), {
+    statusEl: status,
+    successKey: 'login_cta_success',
+    successFallback: 'Logged in — server sync will start shortly.',
+  });
   document.getElementById('login-cta-or').textContent = t('login_cta_or') || 'or use an email code';
-  if (googleBtn && !googleBtn.dataset.bound) {
-    googleBtn.dataset.bound = '1';
-    googleBtn.addEventListener('click', async () => {
-      googleBtn.disabled = true; status.textContent = '';
-      try {
-        const res = await signInWithGoogle();
-        if (res.ok) {
-          // Same tail as the email-code path: we now hold a full Bearer token, so kick a POST
-          // immediately (the server-sync gate just opened) and re-render off fresh storage.
-          status.textContent = t('login_cta_success') || 'Logged in — server sync will start shortly.';
-          chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
-          setTimeout(() => location.reload(), 1200);
-          return;
-        }
-        status.textContent = res.message;
-      } finally {
-        googleBtn.disabled = false;
+
+  // ONE send path, two entry points: the initial "send code" button and the "send a new code" link
+  // on the verify step. The rejection copy has always said "request a new one" while offering no
+  // way to do it — the send button lives in the email step, which is hidden by then, so the user
+  // was told to take an action the UI had removed.
+  const resendBtn = document.getElementById('login-cta-resend');
+  const doSend = (btn, email) => {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { status.textContent = t('login_cta_bad_email') || 'Enter a valid email.'; return; }
+    btn.disabled = true; btn.classList.add('loading'); status.textContent = '';
+    codeInput.value = '';   // same reasoning as the re-auth widget above
+    const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
+    chrome.runtime.sendMessage({ type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang }, (res) => {
+      btn.disabled = false; btn.classList.remove('loading');
+      if (res && res.success) {
+        widget.dataset.email = email;
+        stepEmail.classList.add('hidden'); stepVerify.classList.remove('hidden');
+        status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
+        codeInput.focus();
+      } else if (res && res.error === 'rate_limited') {
+        status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
+      } else {
+        status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
       }
     });
-  }
-
+  };
+  if (resendBtn) resendBtn.textContent = t('code_resend') || 'Send a new code';
   if (!sendBtn.dataset.bound) {
     sendBtn.dataset.bound = '1';
-    sendBtn.addEventListener('click', () => {
-      const email = (emailInput.value || '').trim();
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { status.textContent = t('login_cta_bad_email') || 'Enter a valid email.'; return; }
-      sendBtn.disabled = true; sendBtn.classList.add('loading'); status.textContent = '';
-      const lang = (localStorage.getItem('ct-lang') || (navigator.language || 'en').slice(0, 2));
-      chrome.runtime.sendMessage({ type: 'REQUEST_MAGIC_LINK', email, purpose: 'login', lang }, (res) => {
-        sendBtn.disabled = false; sendBtn.classList.remove('loading');
-        if (res && res.success) {
-          widget.dataset.email = email;
-          stepEmail.classList.add('hidden'); stepVerify.classList.remove('hidden');
-          status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
-          codeInput.focus();
-        } else if (res && res.error === 'rate_limited') {
-          status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
-        } else {
-          status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
-        }
-      });
-    });
+    sendBtn.addEventListener('click', () => doSend(sendBtn, (emailInput.value || '').trim()));
+  }
+  if (resendBtn && !resendBtn.dataset.bound) {
+    resendBtn.dataset.bound = '1';
+    // The address is already proven at this point — take it from where the send stored it, never
+    // from the (hidden) email field, which the user can no longer see or correct.
+    resendBtn.addEventListener('click', () => doSend(resendBtn, widget.dataset.email || ''));
   }
 
   if (!verifyBtn.dataset.bound) {
@@ -331,14 +487,22 @@ async function renderLoginCta() {
       });
     };
     verifyBtn.addEventListener('click', doVerify);
-    codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+    bindCodeInput(codeInput, doVerify);
   }
 
-  if (!dismissBtn.dataset.bound) {
-    dismissBtn.dataset.bound = '1';
-    dismissBtn.addEventListener('click', async () => {
-      // "Use locally only" = keep the gate (no server send) AND collapse to the persistent mini
-      // reminder — never fully hidden, so login stays one tap away and keeps nudging.
+  // Dismiss = keep the gate (no server send) AND collapse to the persistent mini reminder — never
+  // fully hidden, so login stays one tap away and keeps nudging.
+  //
+  // TWO controls, ONE action. The text button states the consequence; the × states the gesture.
+  // Users read "로컬만 사용" as a setting they do not understand, and reach for the × they expect
+  // in a card's corner — which was not there, so there was no exit they recognised. Both bind to
+  // the same handler: a second copy of the collapse logic is how the two would drift apart.
+  const closeBtn = document.getElementById('login-cta-close');
+  if (closeBtn) closeBtn.setAttribute('aria-label', t('login_cta_dismiss') || 'Maybe later');
+  for (const btn of [dismissBtn, closeBtn]) {
+    if (!btn || btn.dataset.bound) continue;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', async () => {
       await chrome.storage.local.set({ loginCtaCollapsed: true });
       renderLoginCta();
     });
@@ -369,8 +533,7 @@ async function checkCapDrops() {
 
   // Name the PROVIDERS, not the org uuids: a uuid means nothing to a user, and the provider
   // is the part they recognise ("my Gemini isn't being collected").
-  const labels = { chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude' };
-  const names = [...new Set(orgs.map(o => labels[o.provider] || o.provider))].join(', ');
+  const names = [...new Set(orgs.map(o => PROVIDER_LABELS[o.provider] || o.provider))].join(', ');
   banner.innerHTML = '';
   banner.appendChild(document.createTextNode(
     t('capdrop_banner_text', names) || names + ' is not being collected — active-org limit reached.',
@@ -551,6 +714,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (isIndependent) {
     const signOut = document.getElementById('independent-signout');
     if (signOut) {
+      // One element, two roles (sign-out here, account switch below) — so each branch must OWN the
+      // key. A live language change re-applies every [data-i18n] from the markup, which would
+      // otherwise restore whichever label the HTML happens to carry.
+      signOut.setAttribute('data-i18n', 'sign_out');
+      signOut.textContent = t('sign_out') || 'Sign out';
       signOut.classList.remove('hidden');
       signOut.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -563,26 +731,57 @@ document.addEventListener('DOMContentLoaded', async () => {
     // isIndependent is false — but they still need a subtle "인증 해제" (de-verify → local-only) in
     // the footer next to their email. Scoped to serverSyncGrandfathered===false so existing/
     // grandfathered users are untouched. No prominent banner (user feedback).
-    const { serverSyncGrandfathered: _gf, extToken: _tok } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined, extToken: null });
+    const { serverSyncGrandfathered: _gf, extToken: _tok } = await chrome.storage.local.get(['serverSyncGrandfathered', 'extToken']);
     if (_gf === false && !!_ia?.email && !!_tok) {
       const signOut = document.getElementById('independent-signout');
       if (signOut) {
-        signOut.textContent = t('login_cta_deauth') || 'Disconnect';
+        // Named for the GOAL, not the mechanism. "인증 해제 / Disconnect" describes what the code
+        // does; nobody wants to de-authenticate — they want to be on a different account, and had
+        // to work out for themselves that it takes disconnect-then-log-in-again.
+        //
+        // 🔴 The KEY moves with the label, not just the text. This element is `data-i18n="sign_out"`
+        // in the markup and a live language switch re-applies every [data-i18n] from source — which
+        // silently relabelled this control "로그아웃 / Sign out", i.e. promised a reversible logout
+        // for a switch that permanently splits the history. (Codex.)
+        signOut.setAttribute('data-i18n', 'account_switch_cta');
+        signOut.textContent = t('account_switch_cta') || 'Switch account';
         signOut.classList.remove('hidden');
         if (!signOut.dataset.deauthBound) {
           signOut.dataset.deauthBound = '1';
-          signOut.addEventListener('click', async (e) => {
-            e.preventDefault();
+          const box = document.getElementById('account-switch-confirm');
+          const go = document.getElementById('account-switch-go');
+          const cancel = document.getElementById('account-switch-cancel');
+          // Ask before switching. The data already collected stays under the CURRENT account and
+          // the two are never merged (no merge exists — DESIGN-authenticated-attribution §7.4), so
+          // this is not the reversible "log out" it looks like. Name the account that keeps the
+          // history: that is the fact the user needs and cannot see anywhere else.
+          const doSwitch = async () => {
             await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed']);
             await chrome.storage.local.set({ showLoginPrompt: true });
             location.reload();
+          };
+          signOut.addEventListener('click', (e) => {
+            e.preventDefault();
+            // No confirm UI → do NOTHING. Switching unasked is the one outcome worth avoiding here
+            // (it splits the history silently and nothing merges it back), so a missing element
+            // fails closed: the user retries once the markup is fixed, having lost nothing.
+            if (!box) return;
+            document.getElementById('account-switch-msg').textContent =
+              t('account_switch_confirm', _ia.email)
+              || `Usage collected so far stays under ${_ia.email}. The new account starts from now, and the two are not merged.`;
+            go.textContent = t('account_switch_go') || 'Switch account';
+            cancel.textContent = t('account_switch_cancel') || 'Cancel';
+            box.classList.remove('hidden');
+            box.scrollIntoView({ block: 'nearest' });
           });
+          go?.addEventListener('click', doSwitch);
+          cancel?.addEventListener('click', () => box?.classList.add('hidden'));
         }
       }
     }
   }
 
-  renderReauthWidget();
+  renderReauth();
   renderLoginCta();
   // showLoginPrompt is written by the first gated collect cycle, which can land AFTER this
   // initial render (POPUP_OPENED → collect). Re-render the CTA when it flips so the login
@@ -595,6 +794,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
       // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
       if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      // #789 — the re-auth widget needs the same treatment, on ITS inputs (independentAccount /
+      // extToken / claudeLinkDone, plus the gate flag it asks isServerSyncGated about). Until now
+      // its only callers were the initial render and a language switch, so a token cleared by a
+      // background 401 mid-session hid BOTH recovery controls at once: renderLoginCta yields
+      // whenever `independentAccount?.email` exists (it defers to this widget by design), and this
+      // widget never re-ran. It healed on the next popup open — exactly one popup open too late,
+      // and precisely while the user is watching sync stop.
+      if (area === 'local' && (changes.extToken || changes.independentAccount
+          || changes.claudeLinkDone || changes.serverSyncGrandfathered)) renderReauth();
       // Same reasoning for the 426 version block: it is raised (and cleared) by a background
       // POST that can land while the popup is open. Both edges matter — appearing late is the
       // silent-death case, and lingering after recovery would tell a fixed install it is broken.
@@ -834,7 +1042,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       setLang(changes.lang.newValue);
       // These set text imperatively via t() (not data-i18n), so re-render them on a live lang
       // switch (checkProviderPermissions rebuilds the banner via innerHTML='' — no double-bind).
-      renderReauthWidget();
+      renderReauth();
       renderLoginCta();
       checkProviderPermissions();
       checkCapDrops();   // same reason — imperative t() text, rebuilt via innerHTML=''

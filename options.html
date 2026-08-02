@@ -438,6 +438,18 @@
         <div class="notify-desc" data-i18n="notify_collect_fail_desc"></div>
         <div class="notify-example" data-i18n="notify_collect_fail_ex"></div>
       </label>
+      <!-- 🔴 This toggle is the ONLY opt-out its audience can reach. The dashboard's notification
+           switches all sit behind a login, and this notification exists precisely because the user
+           is not logged in — "turn it off by doing the thing it is nagging you to do" is the worst
+           shape this feature could take. Do not move it to the dashboard. -->
+      <label class="notify-item">
+        <div class="notify-toggle">
+          <input type="checkbox" id="notify-authblock-followup" checked>
+          <span class="notify-name" data-i18n="notify_authblock_followup"></span>
+        </div>
+        <div class="notify-desc" data-i18n="notify_authblock_followup_desc"></div>
+        <div class="notify-example" data-i18n="notify_authblock_followup_ex"></div>
+      </label>
     </div>
   </div>
 

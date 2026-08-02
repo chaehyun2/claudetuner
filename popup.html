@@ -64,7 +64,20 @@
     [data-theme="dark"] .hdr-btn-primary:disabled { background: #3730a3; color: #c7d2fe; }
     [data-theme="dark"] .org-chip.primary .org-chip-plan { color: var(--accent); }
     [data-theme="dark"] .org-chip-pin.active, [data-theme="dark"] .org-chip-pin:hover { color: var(--accent); }
-    body { width: 340px; min-height: 600px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: var(--bg-body); }
+    /* 340px is the popup surface itself, not a max — the browser sizes the popup panel to it.
+       `margin-inline: auto` is a NO-OP there (the viewport equals the body, so auto resolves to 0);
+       it only does work when this same page is opened somewhere wider — a full tab
+       (chrome-extension://…/popup.html, how this UI gets inspected) or a side panel the user has
+       dragged out — where the column would otherwise sit flush against the left edge.
+       Safe by construction: `* { margin: 0; box-sizing: border-box }` above means the body has no
+       margin to disturb and 340px is the OUTER width, so nothing reflows. */
+    body { width: 340px; min-height: 600px; margin-inline: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: var(--bg-body); }
+    /* Centring alone leaves a 340px ribbon stranded in a wide window. Past the popup's own width,
+       give it an edge so it reads as a deliberate surface. The query CANNOT match inside the real
+       popup — that viewport is 340px — so this is strictly tab/side-panel dressing. */
+    @media (min-width: 520px) {
+      body { margin-block: 24px; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }
+    }
     /* Ad/promo banners use color:inherit; give the container an adaptive text color so text stays readable in dark mode (else it falls back to UA-default black). */
     #ct-popup-promos { color: var(--text-primary); }
     .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -507,24 +520,23 @@
       <span id="login-cta-mini-msg" class="cta-strong" style="flex:1;font-size:11px;line-height:1.4"></span>
       <button id="login-cta-mini-login" class="btn-primary" style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:600;border:none;cursor:pointer;white-space:nowrap"></button>
     </div>
-    <!-- Expanded full CTA: benefits (✓) → down arrow → verify action -->
-    <div id="login-cta-full">
-      <div id="login-cta-title" class="cta-strong" style="font-size:13px;font-weight:700;line-height:1.35;margin-bottom:3px"></div>
+    <!-- Expanded full CTA: benefits (✓) → down arrow → verify action.
+         position:relative anchors the × below; the title reserves room for it on the right. -->
+    <div id="login-cta-full" style="position:relative">
+      <!-- Same action as #login-cta-dismiss (bound together in renderLoginCta): the text button
+           names the consequence, this names the gesture people already look for in a card corner. -->
+      <button id="login-cta-close" type="button"
+        style="position:absolute;top:-2px;right:-2px;background:none;border:0;color:var(--text-muted);font-size:16px;line-height:1;cursor:pointer;padding:2px 5px">&times;</button>
+      <div id="login-cta-title" class="cta-strong" style="font-size:13px;font-weight:700;line-height:1.35;margin-bottom:3px;padding-right:20px"></div>
       <div id="login-cta-msg" class="cta-sub" style="font-size:11.5px;line-height:1.45;margin-bottom:10px"></div>
       <div id="login-cta-feats" style="display:flex;flex-direction:column;gap:7px;margin-bottom:10px"></div>
       <div class="cta-arrow" style="text-align:center;line-height:1;margin:0 0 8px"><span style="font-size:15px">↓</span></div>
       <div id="login-cta-prompt" class="cta-sub" style="font-size:11px;font-weight:600;text-align:center;margin-bottom:7px"></div>
       <!-- One-click path. The email+code flow below still works and stays the fallback:
-           Google sign-in needs an optional `identity` permission the user may decline. -->
-      <button id="login-cta-google" style="width:100%;padding:9px;margin-bottom:7px;background:#fff;color:#3c4043;border:1px solid #dadce0;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
-        <svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-          <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
-          <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.34A9 9 0 0 0 9 18z"/>
-          <path fill="#FBBC05" d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.94H.96a9 9 0 0 0 0 8.12l3.02-2.34z"/>
-          <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z"/>
-        </svg>
-        <span id="login-cta-google-label"></span>
-      </button>
+           Google sign-in needs an optional `identity` permission the user may decline.
+           The markup lives in ONE <template id="google-btn-tpl"> (bottom of this file) because the
+           re-auth widget mounts the same button — a second copy of the brand SVG would drift. -->
+      <div id="login-cta-google-slot"></div>
       <div id="login-cta-or" class="cta-sub" style="text-align:center;font-size:10.5px;margin-bottom:7px;opacity:.8"></div>
       <div id="login-cta-step-email">
         <input id="login-cta-email" type="email" autocomplete="email" inputmode="email"
@@ -533,9 +545,12 @@
         <button id="login-cta-dismiss" style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
       </div>
       <div id="login-cta-step-verify" class="hidden">
-        <input id="login-cta-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+        <input id="login-cta-code" type="text" inputmode="numeric" autocomplete="one-time-code"
           style="width:100%;box-sizing:border-box;padding:9px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;font-size:15px;letter-spacing:4px;text-align:center" />
         <button id="login-cta-verify" class="btn-primary" style="width:100%;padding:9px;border-radius:8px;font-size:12.5px;font-weight:700;border:none;cursor:pointer"></button>
+        <!-- The rejection copy says "request a new one"; this is that control. It has to live on the
+             verify step, because the send button is in the (now hidden) email step. -->
+        <button id="login-cta-resend" type="button" style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
       </div>
       <div id="login-cta-status" class="warn-hint" style="margin-top:7px;text-align:center"></div>
     </div>
@@ -630,13 +645,19 @@
   <div id="reauth-widget" class="warn-banner hidden">
     <div class="warn-title" id="reauth-title"></div>
     <div class="warn-msg" id="reauth-msg"></div>
+    <!-- Same one-click path the login CTA offers, mounted from the shared template. These users
+         already had an account, so the fastest way back in is the one that needs no inbox round
+         trip. The email code below stays the fallback: `identity` is optional and may be declined. -->
+    <div id="reauth-google-slot"></div>
+    <div id="reauth-or" class="warn-hint" style="text-align:center;font-size:10.5px;margin-bottom:7px;opacity:.8"></div>
     <div id="reauth-step-request">
       <button id="reauth-send" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
     </div>
     <div id="reauth-step-verify" class="hidden">
-      <input id="reauth-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+      <input id="reauth-code" type="text" inputmode="numeric" autocomplete="one-time-code"
         style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;font-size:14px;letter-spacing:3px;text-align:center" />
       <button id="reauth-verify" class="btn-primary" style="width:100%;padding:8px;border-radius:6px;font-size:12px;font-weight:600;border:none;cursor:pointer"></button>
+      <button id="reauth-resend" type="button" style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
     </div>
     <div id="reauth-status" class="warn-hint" style="margin-top:6px"></div>
   </div>
@@ -890,9 +911,24 @@
     <a id="independent-signout" href="#" class="hidden" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none" data-i18n="sign_out">Sign out</a>
   </div>
 
-  <!-- Which Tuner account the data actually lands in. Hidden unless it differs from the
-       provider account shown above (see renderSyncAccountNote in ui/render.js). -->
+  <!-- Which Tuner account the data actually lands in. Shown whenever we know it — the provider
+       address above is a label, this is the identity (see renderSyncAccountNote in ui/render.js). -->
   <div id="sync-account-note" class="user-info hidden" style="margin-top:4px"></div>
+
+  <!-- Switching accounts is not undoable in the way people expect: data already collected stays
+       under the OLD account and the two are never merged (no merge exists yet — see
+       docs/DESIGN-authenticated-attribution §7.4). So the switch asks first, and the question
+       names the account that keeps the history. Reuses .warn-banner rather than adding a second
+       modal shell; the plan-change modal is wired to plan-change logic and is not a generic one. -->
+  <div id="account-switch-confirm" class="warn-banner hidden" style="margin-top:8px">
+    <div class="warn-msg" id="account-switch-msg" style="font-size:11.5px;line-height:1.45"></div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button id="account-switch-go" class="btn-primary"
+        style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;font-weight:600;border:none;cursor:pointer"></button>
+      <button id="account-switch-cancel" type="button"
+        style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer"></button>
+    </div>
+  </div>
 
   <!-- Plan change confirmation modal -->
   <div id="smart-rec-confirm-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center">
@@ -908,6 +944,22 @@
       </div>
     </div>
   </div>
+
+  <!-- Shared Google sign-in button — the single source for this markup. mountGoogleButton() (popup.js)
+       clones it into #login-cta-google-slot and #reauth-google-slot. Kept as ONE copy on purpose:
+       the brand SVG and its styling must not fork between the two login surfaces. Class-based, not
+       id-based, precisely because it is instantiated more than once. -->
+  <template id="google-btn-tpl">
+    <button class="google-btn" style="width:100%;padding:9px;margin-bottom:7px;background:#fff;color:#3c4043;border:1px solid #dadce0;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
+      <svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
+        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
+        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.34A9 9 0 0 0 9 18z"/>
+        <path fill="#FBBC05" d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.94H.96a9 9 0 0 0 0 8.12l3.02-2.34z"/>
+        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z"/>
+      </svg>
+      <span class="google-btn-label"></span>
+    </button>
+  </template>
 
   <script src="config.js"></script>
   <script src="analytics.js"></script>

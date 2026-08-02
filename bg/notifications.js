@@ -1,6 +1,39 @@
-import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT } from './constants.js';
+import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER } from './constants.js';
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
+
+/**
+ * The services this install actually collects, as "Claude/ChatGPT/Gemini", for the auth-blocked
+ * copy's "this is not your X login" clause.
+ *
+ * Naming only what the user has is the point: telling a ChatGPT-only user that this is "separate
+ * from your Claude login" is noise about a product they do not use, and it makes the sentence look
+ * like it was written for somebody else.
+ *
+ * 🔴 Falls back to ALL THREE when nothing is detected, never to a guess. The clause exists to
+ * dissolve a specific confusion ("I just signed in, what is this?"), so naming the wrong service
+ * is strictly worse than naming a superset — the superset is still true.
+ *
+ * `collectedOrgs` is written by LOCAL collection, which keeps running while authBlocked is set
+ * (only the server POST is withheld) — but it is NOT guaranteed to be filled when stage 1 fires.
+ * `authBlocked` is raised from the POST response (bg/storage.js) while the provider collectors
+ * merge into `collectedOrgs` only after they return, so a first-ever block can land on an empty
+ * array. That is not a bug to fix here; it is why the fallback exists. (Codex: an earlier version
+ * of this comment claimed the ordering as a guarantee, which was false.)
+ */
+async function collectedProviderLabels() {
+  const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+  // Claude orgs may omit `provider` — same default the popup's chips use.
+  const seen = [...new Set((collectedOrgs || []).map((o) => o?.provider || 'claude'))];
+  // Known services first, in canonical order; anything unrecognised follows under its raw value.
+  // Dropping a provider we have no label for would make the sentence quietly WRONG for whoever
+  // uses it — a bare slug is a smaller error than an omission. (Same choice popup.js's cap-drop
+  // banner already made with `labels[o.provider] || o.provider`.)
+  const known = PROVIDER_ORDER.filter((p) => seen.includes(p));
+  const rest = seen.filter((p) => !PROVIDER_ORDER.includes(p));
+  const present = [...known, ...rest];
+  return (present.length ? present : PROVIDER_ORDER).map((p) => PROVIDER_LABELS[p] || p).join('/');
+}
 
 const NOTIF_LOG_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -130,8 +163,14 @@ export async function releaseNudgeSlot(slot, now = Date.now()) {
  * for days without noticing (2026-07-27); email reached them only because we had their address.
  * The badge is the persistent signal, this is the one-time interrupt that makes them look at it.
  *
- * Deliberately NOT escalating like checkCollectFailNotification: repeating this would be nagging
- * about something only the user can fix, and the badge already persists until they do.
+ * ⚠️ THIS COMMENT USED TO SAY "deliberately NOT escalating" AND THE CODE NOW ESCALATES. That is a
+ * moved boundary, not a contradiction — read checkAuthBlockedLadder() below before changing either.
+ * The original objection stands and is still honoured: repeating *without limit* is nagging about
+ * something only the user can fix, and the badge already persists until they do. What changed is
+ * that the paragraph above gives the counter-evidence — real accounts stayed broken for DAYS and
+ * only email reached them. So the ladder is bounded (4 total), spaced (>=72h), yields to every
+ * other notification (nudge budget), and announces its own end. "Once" and "forever" were never
+ * the only two options.
  *
  * Callers: the false→true edge in background.js AND a service-worker-wake catch-up there, because
  * an edge alone misses installs that were already blocked before this shipped. Both are safe to
@@ -163,8 +202,18 @@ export async function notifyAuthBlockedOnce() {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
     title: await bt('authblocked_title'),
-    message: await bt('authblocked_msg'),
+    message: await bt('authblocked_msg', await collectedProviderLabels()),
     priority: 2,
+    // Stay on screen until the user deals with it. Stage 1 is a FAULT REPORT — data is not reaching
+    // the server and only the user can fix it — so a banner that slides away after a few seconds
+    // can lose the one moment we get. Deliberately NOT applied to stages 2..4: those are
+    // persuasion, and the ladder is allowed to exist only because it is bounded, spaced and
+    // yields. A sticky persuasion notification is the nagging that whole design rules out, and
+    // rung 4 literally promises to stop.
+    // ⚠️ Platform-dependent: honoured on Windows/Linux/ChromeOS; macOS routes through the system
+    // notification centre where the effect is limited. Cheap either way, no downside where it is
+    // ignored.
+    requireInteraction: true,
     buttons: [{ title: await bt('authblocked_btn') }],
   };
   const created = await new Promise((resolve) => {
@@ -181,6 +230,126 @@ export async function notifyAuthBlockedOnce() {
   }
   await chrome.storage.local.set({ authBlockedNotifiedAt: Date.now() });
   logNotification('auth-blocked');
+}
+
+// === Auth-blocked follow-up ladder (stages 2..4) ===
+//
+// Stage 1 is notifyAuthBlockedOnce() above and is NEVER budgeted — "your data stopped reaching the
+// server" is a fault report, and a fault report must not lose to anything. Stages 2..4 are
+// persuasion, so they ride the nudge budget and yield to every other notification.
+//
+// Days are measured from when the BLOCK started, not from when we last spoke.
+const AUTH_LADDER_DAYS = [3, 10, 24];             // stage 2, 3, 4
+const AUTH_LADDER_MIN_GAP_MS = 72 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const AUTH_LADDER_LAST_STAGE = 1 + AUTH_LADDER_DAYS.length;
+// Every key that describes one block episode. Exported so the recovery branch in background.js
+// clears exactly this set — two hand-maintained lists would drift, and a single survivor is enough
+// to start the NEXT episode mid-ladder.
+export const AUTH_LADDER_KEYS = [
+  'authBlockedNotifiedAt', 'authBlockedSince', 'authBlockedStage', 'authBlockedLastNotifiedAt',
+];
+
+// Storage is not a type system. A corrupted or hand-edited value must degrade to "start over",
+// never to `auth-blocked-rNaN` or a stage that skips the bound.
+const asStage = (v) => (Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), AUTH_LADDER_LAST_STAGE) : 1);
+const asTime = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
+
+/**
+ * Advance the auth-blocked ladder if it is due. Safe to call on every wake and every collect cycle:
+ * it costs one storage read when nothing is blocked, and every guard below is idempotent.
+ */
+export async function checkAuthBlockedLadder(now = Date.now()) {
+  const { authBlocked } = await chrome.storage.local.get({ authBlocked: false });
+  if (authBlocked !== true) return;                 // recovered → nothing to escalate
+
+  // 🔴 The episode start is its OWN key. Reusing `authBlockedNotifiedAt` would look equivalent and
+  // is not: that marker is deliberately left UNSET when stage 1's create() fails (revoked
+  // notifications permission, OS-level block — see the comment above it). Deriving the ladder from
+  // it would mean the user whose first notification never appeared never gets a second one either
+  // — precisely the person the ladder exists for. "When did it break" and "when did we speak" are
+  // different facts and need different keys.
+  const { authBlockedSince } = await chrome.storage.local.get('authBlockedSince');
+  if (!Number.isFinite(authBlockedSince) || authBlockedSince <= 0) {
+    // An install already blocked before this shipped has no true start date, so it gets `now`.
+    // That UNDERSTATES the outage, which is the safe direction — it delays the ladder rather than
+    // firing "last reminder" at someone on their very first wake.
+    await chrome.storage.local.set({ authBlockedSince: now });
+    return;
+  }
+
+  const { notifyAuthBlockedFollowup = true } =
+    await chrome.storage.sync.get({ notifyAuthBlockedFollowup: true });
+  if (!notifyAuthBlockedFollowup) return;           // opt-out that needs no login (see options page)
+
+  const raw = await chrome.storage.local.get({ authBlockedStage: 1, authBlockedLastNotifiedAt: 0 });
+  const authBlockedStage = asStage(raw.authBlockedStage);
+  const authBlockedLastNotifiedAt = asTime(raw.authBlockedLastNotifiedAt);
+  if (authBlockedStage >= AUTH_LADDER_LAST_STAGE) return;            // ladder spent for this episode
+  if ((now - authBlockedSince) / DAY_MS < AUTH_LADDER_DAYS[authBlockedStage - 1]) return;
+  // Belt and braces next to the day schedule: if `authBlockedSince` is ever stamped late (an
+  // install that recovers and re-blocks quickly), the schedule alone could bunch two stages up.
+  if (now - authBlockedLastNotifiedAt < AUTH_LADDER_MIN_GAP_MS) return;
+
+  const stage = authBlockedStage + 1;
+  const slot = await claimNudgeSlot('auth-blocked-followup', now);
+  // Denied = the user already heard from us today, or it is the middle of their night. Return
+  // WITHOUT advancing the stage so this exact step retries on a later wake. The ladder slips; it
+  // never skips.
+  if (!slot.granted) return;
+
+  const notifId = `auth-blocked-r${stage}`;
+  const opts = {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: await bt(`authblock_r${stage}_title`),
+    message: await bt(`authblock_r${stage}_msg`),
+    priority: 1,                                    // below stage 1: persuasion, not a fault report
+    buttons: [{ title: await bt('authblocked_btn') }],
+  };
+  // 🔴 CONSUME THE RUNG BEFORE create(), NOT AFTER. MV3 kills the worker at any await, and the two
+  // orderings fail in opposite directions:
+  //   set-after-create  → worker dies with the notification ON SCREEN and the rung unconsumed, so
+  //                       the same rung fires again once the budget refreshes. "Bounded at 4"
+  //                       silently becomes unbounded — the exact thing this design promises not to
+  //                       do, and the reason the old code refused to escalate at all.
+  //   set-before-create → worker dies before the notification exists and the rung is spent, so the
+  //                       user misses one reminder.
+  // For a notification whose entire justification is "bounded, not nagging", a skipped rung is
+  // strictly better than a repeated one. (Codex DEPLOY-BLOCKER.)
+  const prevStage = authBlockedStage;
+  const prevLast = authBlockedLastNotifiedAt;
+  await chrome.storage.local.set({ authBlockedStage: stage, authBlockedLastNotifiedAt: now });
+
+  // Undo is recovery-aware on purpose. If the user logged in while we were mid-flight, the recovery
+  // branch in background.js may ALREADY have wiped the ladder keys — in which case the reservation
+  // above resurrected them, and restoring `prevStage` would leave the next episode starting
+  // mid-ladder. For a recovered install the correct state is no ladder keys at all, so undo
+  // re-runs the cleanup instead of restoring. (Codex DEPLOY-BLOCKER.)
+  const undo = async () => {
+    const { authBlocked: nowBlocked } = await chrome.storage.local.get({ authBlocked: false });
+    if (nowBlocked === true) {
+      await chrome.storage.local.set({ authBlockedStage: prevStage, authBlockedLastNotifiedAt: prevLast });
+    } else {
+      await chrome.storage.local.remove(AUTH_LADDER_KEYS);
+    }
+    await releaseNudgeSlot(slot, now);            // nothing was shown → the day is not spent
+  };
+
+  const created = await new Promise((resolve) => {
+    chrome.notifications.create(notifId, opts, (id) => resolve(chrome.runtime.lastError ? null : id));
+  });
+  if (!created) { await undo(); return; }
+
+  // Same recovery race as stage 1: awaiting bt() and create() leaves a window for a login to land.
+  // Keeping the rung burned would be survivable, but leaving "you're missing 10 days of insights"
+  // on screen right after the login that fixed it is not.
+  const { authBlocked: stillBlocked } = await chrome.storage.local.get({ authBlocked: false });
+  if (stillBlocked !== true) {
+    chrome.notifications.clear(notifId);
+    await undo();
+  }
+  // No logNotification() — claimNudgeSlot already wrote this notification's log entry.
 }
 
 // === Collection failure notification (3-stage escalation) ===

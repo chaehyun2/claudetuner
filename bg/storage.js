@@ -374,18 +374,38 @@ export async function clearExtTokenIfMatches(sentToken) {
 }
 
 /**
- * Phase 2 단계 4 login-first gate. True when this is a FRESH install (grandfathered === false,
- * set on 'install') that has NOT logged in (no extToken). Such installs show usage LOCALLY but
- * do NOT POST to the server via the shared api_key — so no ingest-token TOFU is minted for new
- * users (closing the oracle at the source for the growing population). Existing users are
- * grandfathered on 'update' (=== true) and any extToken (login OR a prior token) opens the gate,
- * so real/existing users' server sync is never withheld. `undefined` (never initialized) is
- * treated as NOT gated — favouring existing users during the brief update-time window.
+ * Phase 2 단계 4 login-first gate. True when this install must NOT POST via the shared api_key:
+ * it has no token AND was not grandfathered. Such installs show usage LOCALLY only, so no
+ * ingest-token TOFU is minted for them. Existing users are grandfathered on 'update' (=== true);
+ * any extToken (login or prior token) opens the gate.
+ *
+ * 🔴 THE ARRAY READ IS THE ORIGINAL FIX. This used to be
+ * `get({ serverSyncGrandfathered: undefined, extToken: null })`, and Chrome DROPS an object-form
+ * key whose default is `undefined` — measured 2026-08-01: a stored `false` came back as `{}`. So
+ * the comparison could never be true and this gate never gated a single install. Banned repo-wide
+ * by test/storage-undefined-default-guard.mjs (#785, #787).
+ *
+ * 🔴 A MISSING FLAG IS GATED (`!== true`), not allowed. Both directions were tried; this is the
+ * one where the wrong answer is RECOVERABLE. A missing flag is ambiguous — a fresh install whose
+ * write was lost, or an existing user whose storage was cleared/restored — and:
+ *   - gating a real existing user sets `showLoginPrompt`, so they SEE a login CTA and one click
+ *     fixes it permanently (a token opens the gate for good);
+ *   - allowing an unknown install mints a shared-key TOFU token silently, with no signal to
+ *     anyone, permanently — which is the exact leak this gate exists to stop.
+ * The update-time window is not a real cost: the 'update' branch writes `true` as its FIRST
+ * statement, while a collection reaches this check only after ~2.4s of network work (measured), so
+ * a grandfathered user is not realistically caught mid-write.
+ *
+ * 🔴 Do NOT add a self-healing writer that infers the cohort. That was tried: every decider is a
+ * guess, `_lastServerPost` was wrong in both directions, and writing at worker start raced
+ * onInstalled into permanently gating an existing install. `onInstalled('update')` already repairs
+ * a missing flag with the right value, because the event itself proves the install pre-existed.
  */
 export async function isServerSyncGated() {
-  const { serverSyncGrandfathered, extToken } = await chrome.storage.local.get({ serverSyncGrandfathered: undefined, extToken: null });
-  return serverSyncGrandfathered === false && !extToken;
+  const { serverSyncGrandfathered, extToken } = await chrome.storage.local.get(['serverSyncGrandfathered', 'extToken']);
+  return serverSyncGrandfathered !== true && !extToken;
 }
+
 
 /**
  * Build auth headers for server requests.

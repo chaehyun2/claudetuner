@@ -139,8 +139,54 @@ async function applyCapDrop(drop, key, provider) {
  *   collect_floor_minutes, collect_pause_minutes, send_floor_minutes, heartbeat_floor_minutes,
  *   impression_flush_minutes, ad_refresh_minutes
  */
+/**
+ * Store the dashboard-nudge state a POST response carried.
+ *
+ * It lives here, in the cadence applier, because this is the ONE function every successful POST
+ * response passes through — Claude posts via authedFetch in collect.js, ChatGPT/Gemini via
+ * postSnapshot in storage.js, and both call this (see the "paths are disjoint" note at the Claude
+ * call site). Hanging it off any single POST path would cover one provider and quietly miss the
+ * others, and duplicating it per path is the drift trap this repo keeps paying for.
+ *
+ * 🔴 `paid` is STICKY (OR-accumulated) but ONLY WITHIN ONE ACCOUNT; `never_visited` is REPLACED.
+ * They answer different questions: "is this account paying on ANY provider" accumulates across the
+ * separate per-provider POSTs, whereas "has anyone opened the dashboard" is a single account-wide
+ * fact whose whole value is that it can turn off. Latch the second one and the nudge outlives the
+ * visit that should have ended it.
+ *
+ * 🔴 The account key is what makes the stickiness safe. Per-provider POSTs can carry DIFFERENT
+ * user_emails (a ChatGPT account whose email differs from the Claude one), so a keyless sticky flag
+ * lets a paid account's `true` survive into a different, FREE account on the same browser — which
+ * would tell that user they are on a paid plan they do not have. On an account change we start
+ * over rather than merge. (Codex DEPLOY-BLOCKER.)
+ *
+ * 🔴 An ABSENT `dash_nudge` means "no news" (the server omits it on its D1 timeout path), never
+ * "not eligible". Treating absence as a verdict would let one slow POST reset the state.
+ */
+async function applyDashNudgeState(response, now) {
+  const d = response && response.dash_nudge;
+  if (!d || typeof d !== 'object') return;
+  // No account key → we cannot tell whose flag this is, and guessing is what the blocker was.
+  // An older server that omits it simply leaves the client's state alone.
+  if (!d.account) return;
+  try {
+    const { dashNudgeServer = null } = await chrome.storage.local.get({ dashNudgeServer: null });
+    const same = !!dashNudgeServer && dashNudgeServer.account === d.account;
+    await chrome.storage.local.set({
+      dashNudgeServer: {
+        account: d.account,
+        paid: (same && !!dashNudgeServer.paid) || !!d.paid,
+        neverVisited: !!d.never_visited,
+        firstSeenAt: d.first_seen_at || (same && dashNudgeServer.firstSeenAt) || null,
+        updatedAt: now,
+      },
+    });
+  } catch { /* storage hiccup — the nudge is advisory, never break the collection cycle */ }
+}
+
 export async function applyServerCadence(response, now = Date.now(), streamRef = null) {
   if (!response || typeof response !== 'object') return false;
+  await applyDashNudgeState(response, now);
   // Per-stream standby override for the stream THIS response answered. Same REPLACE
   // semantics as the global override: present → store; ABSENT → clear, so a server-side
   // rollback (flag off) restores full cadence on the very next POST instead of waiting out

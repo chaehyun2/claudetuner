@@ -4,6 +4,7 @@
 import { state, _isNonClaudePrimarySelected } from './state.js';
 import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util.js';
 import { _authedFetch } from './auth.js';
+import { isServerSyncStalled } from '../bg/server-reach.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 
@@ -420,25 +421,79 @@ export function _renderRecommendation(rec, provider, basisPlan) {
 }
 
 const DASH_NUDGE_MAX_SHOWS = 3;
-export function maybeShowDashNudge() {
+const DASH_NUDGE_DAY_MS = 24 * 60 * 60 * 1000;
+// 🔴 The cap used to be three POPUP OPENS with no clock, so it burned out in the first minutes
+// after install — three opens takes no time at all. That is the worst possible timing for this
+// audience: they are, by definition, people who have not yet found a reason to open the dashboard.
+// The two gates below are what turn "3 shows" into "3 shows spread over about three weeks".
+const DASH_NUDGE_MIN_AGE_MS = 3 * DASH_NUDGE_DAY_MS;                          // never on a fresh install
+const DASH_NUDGE_GAP_MS = [7 * DASH_NUDGE_DAY_MS, 14 * DASH_NUDGE_DAY_MS];    // → ≈ D+3 / +10 / +24
+// Rotate the wording: the same sentence three times is what gets tuned out fastest.
+const DASH_NUDGE_KEYS = ['dash_nudge_paid', 'dash_nudge_paid_2', 'dash_nudge_paid_3'];
+
+export async function maybeShowDashNudge() {
   if (state.dashNudgeEvaluated) return; // evaluate once per popup open
+  // Claimed SYNCHRONOUSLY: two renders in the same tick must not both evaluate and both burn a
+  // show. Handed back below if we bail on a server-block state.
   state.dashNudgeEvaluated = true;
   const el = document.getElementById('dash-nudge');
   if (!el) return;
-  chrome.storage.local.get({ dashNudge: { done: false, shows: 0 } }, (r) => {
-    const st = (r && r.dashNudge) || { done: false, shows: 0 };
+  // Ask the ONE predicate that owns "is our data reaching the server". Naming states here is how
+  // this check ended up incomplete three rounds running — see bg/server-reach.js.
+  const stalled = await isServerSyncStalled();
+  chrome.storage.local.get({
+    dashNudge: { done: false, shows: 0, lastShownAt: 0 }, dashNudgeServer: null,
+  }, (r) => {
+    const st = (r && r.dashNudge) || { done: false, shows: 0, lastShownAt: 0 };
     if (st.done) return;
+    // 🔴 Say NOTHING while this install cannot reach the server, and do not spend a show on it.
+    // Two separate reasons, either one sufficient:
+    //   - It would be a lie. "See your trends on the dashboard" points at data that stopped
+    //     arriving; what they would find there is stale.
+    //   - It competes with the one action that matters. The popup already renders the auth-blocked
+    //     login CTA right above this, and a second, softer call to action next to it dilutes it.
+    // Returning BEFORE the counter is touched means the nudge resumes intact once they recover,
+    // rather than having burnt a rung on a day it could not have worked. (Cross-cutting review:
+    // each feature was correct alone; only together did the popup end up saying both at once.)
+    // 🔴 HAND THE EVALUATION BACK when we bail on a block state. Keeping it spent meant a popup
+    // that was open when the user logged in could neither show nor retire the banner until it was
+    // reopened — the one evaluation had been consumed by a state that is now gone. Giving it back
+    // (rather than claiming it late) keeps the same-tick double-evaluation guard intact. (Codex.)
+    if (stalled) { state.dashNudgeEvaluated = false; return; }
+    const srv = r && r.dashNudgeServer;
+    // No server verdict yet → stay quiet. Absence means "we don't know", and this banner tells the
+    // user they are on a paid plan; saying that to a free user is worse than saying nothing.
+    if (!srv || !srv.paid) return;
+    // They opened the dashboard — on ANY device, which is the whole reason this fact comes from the
+    // server. The nudge has served its purpose; retire it instead of waiting out the cap.
+    if (!srv.neverVisited) { chrome.storage.local.set({ dashNudge: { ...st, done: true } }); return; }
+
+    const now = Date.now();
+    // 🔴 The trailing 'Z' is required, same as checkReviewNudge above: D1 `datetime()` renders UTC
+    // with no timezone marker, so parsing it bare reads as LOCAL time and skews the age gate by up
+    // to a day depending on the user's offset.
+    const firstSeen = srv.firstSeenAt ? new Date(srv.firstSeenAt + 'Z').getTime() : 0;
+    if (firstSeen && now - firstSeen < DASH_NUDGE_MIN_AGE_MS) return;   // too new to be nudged
     const shows = (st.shows || 0) + 1;
+    const gap = DASH_NUDGE_GAP_MS[(st.shows || 0) - 1];
+    if (st.lastShownAt && gap && now - st.lastShownAt < gap) return;    // not due yet
+
+    const label = el.querySelector('[data-i18n]');
+    if (label) {
+      const key = DASH_NUDGE_KEYS[Math.min(shows, DASH_NUDGE_KEYS.length) - 1];
+      label.setAttribute('data-i18n', key);
+      label.textContent = t(key);
+    }
     el.classList.remove('hidden');
     // Stop showing after the cap even if the user never interacts.
-    chrome.storage.local.set({ dashNudge: { done: shows >= DASH_NUDGE_MAX_SHOWS, shows } });
+    chrome.storage.local.set({ dashNudge: { done: shows >= DASH_NUDGE_MAX_SHOWS, shows, lastShownAt: now } });
     const end = () => {
       el.classList.add('hidden');
-      chrome.storage.local.set({ dashNudge: { done: true, shows } });
+      chrome.storage.local.set({ dashNudge: { done: true, shows, lastShownAt: now } });
     };
     const link = document.getElementById('dash-nudge-link');
     if (link) link.addEventListener('click', () => { // opens dashboard in a new tab
-      chrome.storage.local.set({ dashNudge: { done: true, shows } });
+      chrome.storage.local.set({ dashNudge: { done: true, shows, lastShownAt: now } });
     });
     const close = document.getElementById('dash-nudge-close');
     if (close) close.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); end(); });

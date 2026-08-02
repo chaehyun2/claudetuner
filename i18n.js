@@ -109,7 +109,7 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Claude 사용량 수집만 일시 중단되었습니다. 메인 프로바이더는 정상 추적 중입니다.',
     'error_banner_hint': '에서 로그인 상태를 확인해주세요.',
     'open_claude': 'Claude.ai 열기',
-    'sync_account_note': '↪ 수집된 데이터는 {0} 계정에 쌓입니다',
+    'sync_account_note': '↪ {0} 계정에 쌓입니다 · 대시보드도 이 이메일로 로그인',
     // Server 426 upgrade_required (bg/upgrade-gate.js). Says "update", never "log in" — the user
     // may be perfectly logged in, and the version block is not an auth problem.
     'upgrade_required_title': '⚠️ 확장 프로그램 업데이트가 필요해요',
@@ -133,13 +133,20 @@ const TRANSLATIONS = {
     'email_link_status': 'Claude 계정 {0} 연결됨',
     'email_link_unlink': '연결 해제',
     'email_link_unlink_err': '연결 해제에 실패했습니다. 다시 시도해 주세요.',
-    'reauth_title': '다시 연결해 수집을 재개하세요',
-    'reauth_msg': '세션이 만료되었습니다. {0} 계정을 다시 연결하면 사용량 수집이 재개됩니다.',
+    // 🔴 이 문구가 설명하는 대상은 "이미 로그인했다가 토큰을 잃은 사용자"다(independentAccount는
+    // 토큰과 함께만 기록된다 — background.js:652/:1766/:1829). 신규 설치는 login_cta_* 쪽이다.
+    // 종전 문구("세션이 만료되었습니다 … 사용량 수집이 재개됩니다")는 네 가지를 동시에 오해시켰다:
+    // ①"세션"의 주체가 없어 claude.ai 세션으로 읽힌다 ②claude.ai는 멀쩡히 연결돼 있어 모순으로
+    // 보인다 ③🔴 로컬 수집은 멈춘 적이 없으므로 "수집 재개"는 사용자가 눈으로 반박할 수 있는
+    // 거짓이다(멈춘 것은 서버 저장이다) ④무엇에 로그인하라는 것인지 말하지 않는다.
+    // login_cta_authblocked_* 와 어휘·문장구조를 일부러 맞췄다 — 사용자 입장에서 같은 상황이다.
+    'reauth_title': '다시 인증하고 서버 동기화 켜기',
+    'reauth_msg': '사용량은 이 브라우저에 계속 기록되고 있습니다. 다만 {0}의 Claude Tuner 인증이 만료되어 서버에 저장되지 않고 있고, 여러 기기 통합 분석·플랜 추천도 잠겨 있습니다. 이메일 인증 한 번으로 다시 켜집니다.',
     'reauth_send': '인증 코드 받기',
-    'reauth_verify': '확인하고 다시 연결',
+    'reauth_verify': '확인하고 인증',
     'reauth_code_placeholder': '6자리 코드',
     'reauth_code_sent': '{0}(으)로 코드를 보냈습니다.',
-    'reauth_success': '다시 연결되었습니다 — 곧 수집이 재개됩니다.',
+    'reauth_success': '인증 완료 — 곧 서버 동기화가 다시 시작됩니다.',
     'reauth_error': '코드를 보내지 못했습니다. 다시 시도해 주세요.',
     'reauth_error_code': '6자리 코드를 입력하세요.',
     'reauth_error_invalid': '잘못되었거나 만료된 코드입니다. 새 코드를 요청하세요.',
@@ -154,12 +161,16 @@ const TRANSLATIONS = {
     'login_cta_email_ph': 'you@email.com',
     'login_cta_send': '인증 코드 받기',
     'login_cta_verify': '확인하고 인증',
-    'login_cta_dismiss': '로컬만 사용',
+    'login_cta_dismiss': '나중에 하기',
+    'code_resend': '코드 다시 받기',
     'login_cta_success': '인증 완료 — 곧 서버 동기화가 시작됩니다.',
     'login_cta_bad_email': '올바른 이메일을 입력하세요.',
     'login_cta_mini': '🔒 인증하여 여러 기기 통합 분석·플랜 추천 등',
     'login_cta_mini_btn': '인증',
-    'login_cta_deauth': '인증 해제',
+    'account_switch_cta': '다른 계정으로 전환',
+    'account_switch_confirm': '지금까지 수집된 사용량은 {0} 계정에 그대로 남습니다. 새 계정에는 전환 시점부터 쌓이며, 두 계정의 데이터는 합쳐지지 않습니다.',
+    'account_switch_go': '전환하기',
+    'account_switch_cancel': '취소',
     // Scope-blocked variant (Phase 2 단계 5): 수집 전용(ingest) 토큰이 full 전용 기능을 호출해
     // 403 scope_insufficient를 받은 경우 — 이미 동기화는 되고 있으므로 "잠긴 기능" 관점의 문구
     'login_cta_scope_title': '이 기능은 이메일 인증이 필요합니다',
@@ -314,6 +325,13 @@ const TRANSLATIONS = {
     'ob_collecting': '수집 중...',
     'ob_guide_link': '설치 가이드 다시 보기 →',
     'dash_nudge': '대시보드에서 추세와 예측까지 확인하세요',
+    // 유료 플랜 사용자 전용 변형(3회 회전). 🔴 인증 상태를 단정하지 말 것 — 이 인구가 로그인했는지
+    // 우리는 모른다(auth_method는 공유키 TOFU 발급분이 섞여 인증 증거가 아니다). '로그인하세요'도
+    // '이미 로그인돼 있습니다'도 절반에게는 틀린 말이 된다. 기능만 말하고 판단은 사용자에게 맡긴다.
+    // 🔴 결제·요금 표현 금지 — Team/Enterprise는 회사가 내는 돈이라 '당신의 결제'가 아니다.
+    'dash_nudge_paid': '대시보드에만 있는 것: 팀 비교 · 7일 예측 · 플랜 추천',
+    'dash_nudge_paid_2': '지금 플랜이 과한지 부족한지 데이터로 확인해 보세요',
+    'dash_nudge_paid_3': '여러 기기·서비스 사용량을 한 화면에서 비교할 수 있습니다',
     'dash_nudge_dismiss': '닫기',
     'footer_help': '❔ 가이드',
     'footer_settings': '설정',
@@ -465,6 +483,9 @@ const TRANSLATIONS = {
     'notify_collect_fail': '수집 중단 알림',
     'notify_collect_fail_desc': '세션 만료 등으로 수집이 중단되면 알림',
     'notify_collect_fail_ex': '"Claude.ai 세션이 만료되었습니다. 다시 로그인해주세요."',
+    'notify_authblock_followup': '인증 안내 반복',
+    'notify_authblock_followup_desc': '서버 저장이 막힌 상태가 이어지면 최대 3번까지 더 안내 (끄면 처음 1회만)',
+    'notify_authblock_followup_ex': '"지난 10일치 분석을 놓치고 있습니다"',
     'opt_theme': '테마',
     'theme_light': '라이트',
     'theme_dark': '다크',
@@ -588,7 +609,7 @@ const TRANSLATIONS = {
     'claude_disconnected_secondary': 'Only Claude usage tracking is paused. Your primary provider is still being tracked normally.',
     'error_banner_hint': 'to check your login status.',
     'open_claude': 'Open Claude.ai',
-    'sync_account_note': '↪ Collected data is syncing to {0}',
+    'sync_account_note': '↪ Syncing to {0} · use this email to sign in to the dashboard',
     'upgrade_required_title': '⚠️ Please update the extension',
     'upgrade_required_msg': 'This version can no longer send usage to the server. Your usage is still recorded in this browser, but nothing is being saved to the server until you update.',
     'upgrade_required_link': 'Update from the store',
@@ -610,13 +631,16 @@ const TRANSLATIONS = {
     'email_link_status': 'Claude account {0} linked',
     'email_link_unlink': 'Unlink',
     'email_link_unlink_err': 'Could not unlink. Please try again.',
-    'reauth_title': 'Reconnect to resume syncing',
-    'reauth_msg': 'Your session expired. Reconnect {0} to keep syncing your usage.',
+    // See the Korean block for why this copy changed: "your session expired / usage collection will
+    // resume" named no subject, contradicted a healthy claude.ai login, and claimed collection had
+    // stopped when only server-side saving had. Vocabulary mirrors login_cta_authblocked_*.
+    'reauth_title': 'Verify again to resume server sync',
+    'reauth_msg': 'Your usage is still recorded in this browser, but your Claude Tuner verification for {0} expired, so it is no longer being saved to the server — multi-device analysis and plan recommendations are locked too. One email verification restores it.',
     'reauth_send': 'Send code',
-    'reauth_verify': 'Verify & reconnect',
+    'reauth_verify': 'Confirm & verify',
     'reauth_code_placeholder': '6-digit code',
     'reauth_code_sent': 'Code sent to {0}.',
-    'reauth_success': 'Reconnected — syncing will resume shortly.',
+    'reauth_success': 'Verified — server sync will resume shortly.',
     'reauth_error': 'Could not send the code. Please try again.',
     'reauth_error_code': 'Enter the 6-digit code.',
     'reauth_error_invalid': 'Invalid or expired code. Request a new one.',
@@ -631,12 +655,16 @@ const TRANSLATIONS = {
     'login_cta_email_ph': 'you@email.com',
     'login_cta_send': 'Send code',
     'login_cta_verify': 'Confirm & verify',
-    'login_cta_dismiss': 'Use locally only',
+    'login_cta_dismiss': 'Maybe later',
+    'code_resend': 'Send a new code',
     'login_cta_success': 'Verified — server sync will start shortly.',
     'login_cta_bad_email': 'Enter a valid email.',
     'login_cta_mini': '🔒 Verify for multi-device sync, recommendations & more',
     'login_cta_mini_btn': 'Verify',
-    'login_cta_deauth': 'Disconnect',
+    'account_switch_cta': 'Switch account',
+    'account_switch_confirm': 'Usage collected so far stays under {0}. The new account starts from the moment you switch, and the two are never merged.',
+    'account_switch_go': 'Switch account',
+    'account_switch_cancel': 'Cancel',
     // Scope-blocked variant (Phase 2 step 5): a collect-only (ingest) token called a full-only
     // feature and got 403 scope_insufficient — sync already works, so the pitch is the locked feature
     'login_cta_scope_title': 'This feature needs email verification',
@@ -790,6 +818,9 @@ const TRANSLATIONS = {
     'ob_collecting': 'Collecting...',
     'ob_guide_link': 'See setup guide →',
     'dash_nudge': 'See your trends & predictions on the dashboard',
+    'dash_nudge_paid': 'Only on the dashboard: team comparison, 7-day forecasts, plan recommendations',
+    'dash_nudge_paid_2': 'See whether your plan is over- or under-sized, from your own data',
+    'dash_nudge_paid_3': 'Compare usage across all your devices and services in one place',
     'dash_nudge_dismiss': 'Dismiss',
     'footer_help': '❔ Guide',
     'footer_settings': 'Settings',
@@ -940,6 +971,9 @@ const TRANSLATIONS = {
     'notify_collect_fail': 'Collection Stopped',
     'notify_collect_fail_desc': 'Alert when collection stops due to session expiry etc.',
     'notify_collect_fail_ex': '"Session expired. Please sign in to Claude.ai again."',
+    'notify_authblock_followup': 'Repeat Sign-in Reminders',
+    'notify_authblock_followup_desc': 'Up to 3 more reminders while your usage cannot reach the server (off = first one only)',
+    'notify_authblock_followup_ex': '"You\'re missing 10 days of insights"',
     'opt_theme': 'Theme',
     'theme_light': 'Light',
     'theme_dark': 'Dark',

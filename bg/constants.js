@@ -35,6 +35,14 @@ export const PLAN_API_MAP = {
 
 export const SEAT_TIER_MAP = { 'team_standard': 'Team Standard', 'team_tier_1': 'Team Premium', 'team_tier_2': 'Team Tier 2' };
 
+// Display names for the three collected services. Was hand-copied in background.js and
+// ui/org-selector.js; a third copy (bg/notifications.js) is what prompted the merge. Not i18n keys
+// on purpose — these are product names and read the same in every locale.
+// PROVIDER_ORDER fixes the sequence wherever several are listed together, so the wording does not
+// change with whatever order collection happened to write into `collectedOrgs`.
+export const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
+export const PROVIDER_ORDER = ['claude', 'chatgpt', 'gemini'];
+
 // Client headers required for Claude.ai API requests
 export const ANTHROPIC_HEADERS = { 'anthropic-client-platform': 'web_claude_ai', 'anthropic-client-version': '1.0.0' };
 
@@ -187,9 +195,34 @@ export const BG_I18N = {
     promo_push_btn: '자세히 보기',
     // 서버 동기화 차단(email-provider 가드 401). 팝업 CTA는 "팝업을 여는 사람"에게만 닿는데,
     // 이 확장은 원래 열어볼 일이 없는 물건이라 배지·알림이 유일하게 도달하는 표면이다.
-    authblocked_title: '사용량이 서버에 저장되지 않고 있습니다',
-    authblocked_msg: '이 계정은 로그인이 필요합니다. 확장 아이콘을 눌러 인증하면 다시 연결됩니다.',
+    // 🔴 어휘 3원칙 (login_cta_* / reauth_* 와 동일하게 유지할 것):
+    //   ① 인증의 주체를 반드시 밝힌다 — 맨 "로그인/인증"은 사용자가 방금 한 Claude 로그인으로
+    //      읽힌다("클로드에 로그인했는데 이건 또 무슨 소리지"). 1회차는 Claude와 별개임을 명시한다.
+    //   ② 로컬은 안전하다는 사실을 먼저 말한다. 종전 1회차는 "저장되지 않고 있습니다"로 시작해
+    //      기록이 날아간 것처럼 읽혔다 — 실제로는 이 브라우저에 온전히 남아 있다.
+    //   ③ "서버"는 써도 된다(제품 오너 확인). 한때 이 자리에 "개발자 어휘이니 피하라"고 적었다가
+    //      3회차를 "여러 기기 사용량이 모여야 만들어집니다"로 바꿔 **없는 제약을 지어냈다** —
+    //      트렌드·히트맵·예측은 서버 저장 기능이지 멀티기기 전용이 아니다. 🔴 어휘 선호가
+    //      사실관계를 이길 수 없다. 아래 "실재 확인된 것만" 원칙이 항상 우선한다.
+    authblocked_title: '사용량이 이 브라우저에만 쌓이고 있습니다',
+    // 🔴 세 서비스를 모두 적는다. 이 인구는 멀티 프로바이더다(차단 백오프가 이메일별로 스코프된
+    // 이유가 그것 — bg/storage.js). "Claude 로그인과는 별개"라고만 쓰면 ChatGPT만 쓰는 사람에겐
+    // 무의미하고, 셋 다 쓰는 사람에게 하나만 고르면 나머지는 여전히 오해로 남는다. 감지된
+    // 프로바이더를 넣는 방법도 있으나 멀티 프로바이더에서 답이 없다. 나열이 항상 참이다.
+    // 🔑 절의 순서는 잘림을 전제로 정했다. Chrome 알림 본문은 몇 줄 뒤 잘리므로 주체와 "별개"를
+    // 앞에, 복구 안내를 뒤에 뒀다 — 뒷절이 잘려도 버튼('지금 인증하기')이 행동을 대신한다.
+    // 반대로 놓으면 이 문구가 존재하는 이유(그 오해를 푸는 것)가 먼저 잘린다. 절 추가는 반드시 뒤에.
+    authblocked_msg: 'Claude Tuner 인증이 필요합니다 — {0} 로그인과는 별개이며, 이메일 인증 한 번이면 서버 저장이 다시 켜집니다.',
     authblocked_btn: '지금 인증하기',
+    // 후속 사다리(2~4회차). 원칙: "인증하세요"로 시작하지 않고 손실/혜택을 먼저 말한다.
+    // 여기 언급하는 기능은 전부 실재 확인된 것만 쓸 것 — "데이터 백업"이라는 기능은 없다(=서버 동기화).
+    authblock_r2_title: '3일째 이 브라우저에만 쌓이고 있습니다',
+    authblock_r2_msg: 'Claude Tuner 인증 한 번이면 여러 브라우저·기기의 사용량이 하나로 합쳐지고, 내 사용 패턴에 맞는 플랜 추천을 받을 수 있습니다.',
+    authblock_r3_title: '지난 10일치 분석을 놓치고 있습니다',
+    authblock_r3_msg: '주별 트렌드·시간대별 히트맵·7일 예측은 Claude Tuner에 저장된 사용량으로 만들어집니다. 인증 한 번이면 됩니다.',
+    // 🔴 마지막 회차는 "다시 알리지 않겠다"를 반드시 명시한다 — 끝난다는 걸 아는 것 자체가 분노를 크게 낮춘다.
+    authblock_r4_title: '마지막 안내입니다',
+    authblock_r4_msg: '인증하지 않으면 사용량은 이 브라우저에서만 볼 수 있습니다. 다시 알리지 않겠습니다 — 필요하면 확장 아이콘을 눌러 언제든 Claude Tuner 인증을 할 수 있습니다.',
   },
   en: {
     reset_soon_title: '{0} limit resetting soon',
@@ -230,8 +263,17 @@ export const BG_I18N = {
     // Server sync blocked (email-provider guard 401). The popup CTA only reaches someone who
     // opens the popup, and this extension is built to be ignored — the badge/notification is the
     // only surface that reaches a user who never opens it.
-    authblocked_title: 'Your usage is not reaching the server',
-    authblocked_msg: 'This account now requires a sign-in. Click the extension icon to verify and reconnect.',
+    // See the Korean block for the three copy rules: name WHO the verification is for (a bare
+    // "sign in" reads as the Claude login the user just completed), lead with the fact that
+    // nothing is lost locally, and prefer user-facing wording over "the server".
+    authblocked_title: 'Your usage is only being saved on this browser',
+    authblocked_msg: 'You need to verify Claude Tuner — separate from your {0} sign-in. One email verification turns server sync back on.',
     authblocked_btn: 'Verify now',
+    authblock_r2_title: '3 days of usage saved only on this browser',
+    authblock_r2_msg: 'Verify Claude Tuner once to merge usage across your browsers and devices, and to get plan recommendations based on how you actually use it.',
+    authblock_r3_title: "You're missing 10 days of insights",
+    authblock_r3_msg: 'Weekly trends, hourly heatmaps and 7-day forecasts are built from usage saved to Claude Tuner. One verification is all it takes.',
+    authblock_r4_title: 'Last reminder',
+    authblock_r4_msg: "Without verifying, your usage stays visible only on this browser. We won't remind you again — you can verify Claude Tuner any time from the extension icon.",
   },
 };
