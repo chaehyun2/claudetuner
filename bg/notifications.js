@@ -1,4 +1,4 @@
-import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER } from './constants.js';
+import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL } from './constants.js';
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
 
@@ -108,6 +108,178 @@ export async function logNotification(category) {
   });
 }
 
+// === Notification volume telemetry (AE) ===
+//
+// The local `_notifLog` above is the nudge BUDGET's ledger — it never leaves the browser, so
+// "how many notifications does the fleet actually send, of which kind" had no answer short of
+// reading the code. That is not a hypothetical gap: an uninstall reading "알림이 너무 많이 와요",
+// from an account with all eight toggles already off, took a manual code audit to explain.
+//
+// Counters, not events: reset alerts alone are ~4-5/day/user, so per-notification POSTs would be
+// pure waste. These accumulate locally and ride the ad-counter flush alarm (background.js), which
+// means zero additional requests. Same subtract-on-success discipline as the ad path — see
+// flushNotifCounters.
+const NOTIF_COUNTERS_KEY = '__ct_notif_counters'; // { category: { sent, clk } }
+const NOTIF_CATEGORY_MAX_LEN = 32;  // matches the worker's blob12 slice
+
+// Serialize read-modify-write. Two notifications a tick apart otherwise both read the old object
+// and the second write loses the first — the same race withNotifLogLock exists for.
+let _notifOpChain = Promise.resolve();
+function _notifEnqueue(fn) { _notifOpChain = _notifOpChain.then(fn).catch(() => {}); return _notifOpChain; }
+
+/**
+ * Adjust a category counter. `kind` is 'sent' or 'clk'; `by` is -1 only for releaseNudgeSlot,
+ * which hands back a claim whose create() failed. Fire-and-forget.
+ *
+ * Never lets a counter go negative: a decrement can outlive the flush that already sent its
+ * increment, and a negative would then be subtracted from a LATER flush's real count.
+ */
+export function bumpNotifCounter(rawCategory, kind, by = 1) {
+  if (typeof rawCategory !== 'string' || !rawCategory) return;
+  // Clamped to the same 32 chars the worker's blob keeps. Today every caller passes a short
+  // literal, so this changes nothing — it is here so that stays true by construction rather than
+  // by inspection. An interpolated category (`usage-${orgName}`) would otherwise inflate both the
+  // flush body and AE's cardinality, and the flush would find out by being silently dropped.
+  const category = rawCategory.slice(0, NOTIF_CATEGORY_MAX_LEN);
+  return _notifEnqueue(async () => {
+    const store = (await chrome.storage.local.get(NOTIF_COUNTERS_KEY))[NOTIF_COUNTERS_KEY] || {};
+    const cur = store[category] || { sent: 0, clk: 0 };
+    cur[kind] = Math.max(0, (cur[kind] || 0) + by);
+    store[category] = cur;
+    await chrome.storage.local.set({ [NOTIF_COUNTERS_KEY]: store });
+  });
+}
+
+// Notification ID -> the category logNotification() recorded for it. Clicks arrive with only the
+// id, so without this the click stream could not be joined to the sent stream and a CTR would be
+// impossible. Prefix-matched because most ids carry a timestamp or entity id.
+//
+// 🔴 Every id built by a chrome.notifications.create() call must appear here, or its clicks land
+// in 'other' and that category's CTR silently reads as zero. test/notif-telemetry-guard.mjs pins
+// this against the real create() call sites.
+export function notifCategoryFromId(notifId) {
+  const id = String(notifId || '');
+  if (id.startsWith('auth-blocked-r')) return 'auth-blocked-followup';
+  if (id === 'auth-blocked') return 'auth-blocked';
+  if (id.startsWith('plan-order-')) return 'plan-order';
+  if (id.startsWith('promo-push-')) return 'promo-push';
+  if (id.startsWith('collect-fail')) return 'collect-fail';
+  if (id.startsWith('reset-soon-')) return 'reset-soon';
+  if (id.startsWith('reset-done-')) return 'reset-done';
+  if (id.startsWith('weekly-report-')) return 'weekly-report';
+  // Severity-qualified first: these must return the SAME category the send recorded, or the two
+  // streams land in different buckets and every CTR built on them is wrong.
+  // Pre-1.29.28 ids carried no severity. They can still be clicked from the tray after an update,
+  // and there is no way to tell which category sent them — so they get their own bucket instead
+  // of being guessed into one and quietly skewing its CTR.
+  if (id.startsWith(`${NOTIF_ID_ALERT}-danger-`)) return 'usage-danger';
+  if (id.startsWith(`${NOTIF_ID_ALERT}-warn-`)) return 'usage-warn';
+  if (id.startsWith(NOTIF_ID_ALERT)) return 'usage-alert-legacy';
+  if (id === NOTIF_ID_OPTIMIZE) return 'plan-change';
+  return 'other';
+}
+
+/**
+ * Create a notification and count it as sent ONLY once the browser confirms it.
+ *
+ * The counter used to ride logNotification(), which every caller invokes whether or not
+ * create() succeeded — so an install with notifications blocked at the OS level reported a full
+ * stream of sends that never reached a screen (Codex). That is not a rounding error: it
+ * systematically over-counts exactly the population whose notifications do not work, which is
+ * the opposite of what a "are we sending too many?" number is for.
+ *
+ * logNotification() is intentionally left where each caller already had it: it feeds the nudge
+ * BUDGET, and changing when the budget is spent is a behaviour change, not a measurement one.
+ * Only the counter moved.
+ *
+ * 🔴 Callers must NOT await this, and none do. The raw create() it replaces was fire-and-forget,
+ * so awaiting pushes the dedup write that follows it (`usageAlertState[stateKey] = true`,
+ * `collectFailState.stage = …`) behind an async boundary — and a service worker torn down in that
+ * window leaves the notification shown but unmarked, re-firing it next cycle. Adding duplicate
+ * notifications while measuring notification volume would be its own punchline. The returned
+ * promise is for tests, not for sequencing.
+ */
+export function createCountedNotification(notifId, opts, category) {
+  return new Promise((resolve) => {
+    chrome.notifications.create(notifId, opts, (id) => {
+      if (chrome.runtime.lastError || !id) { resolve(null); return; }
+      bumpNotifCounter(category, 'sent');
+      resolve(id);
+    });
+  });
+}
+
+const NOTIF_EVENT_ENDPOINT = `${DEFAULT_SERVER_URL}/api/event`;
+const NOTIF_FLUSH_MAX_ROWS = 50;    // matches the worker's row slice
+const NOTIF_FLUSH_MAX_BYTES = 3600; // headroom under the worker's 6144-byte body cap
+
+// Byte-accurate size. Blob is exact for any encoding; str.length is an ASCII-only fallback for
+// the (impossible today) case where Blob is unavailable in the service worker.
+function _utf8Bytes(str) {
+  try { return new Blob([str]).size; } catch { return str.length; }
+}
+
+/**
+ * Flush accumulated per-category counters to /api/event. Called from the ad-flush alarm
+ * (background.js) so notification telemetry adds no request of its own.
+ *
+ * SUBTRACTS what was actually sent instead of clearing the store: a notification fired while the
+ * POST was in flight would otherwise be erased. Same reason the ad flush subtracts. On any
+ * failure the counters are left untouched and the next flush retries them — telemetry that
+ * silently drops on a blip is worse than telemetry that arrives an hour late.
+ */
+export function flushNotifCounters() {
+  return _notifEnqueue(async () => {
+    const store = (await chrome.storage.local.get(NOTIF_COUNTERS_KEY))[NOTIF_COUNTERS_KEY] || {};
+    const pending = Object.keys(store).filter((c) => (store[c].sent > 0 || store[c].clk > 0));
+    if (!pending.length) return;
+    const ver = chrome.runtime.getManifest().version;
+    // Accumulate by BYTE BUDGET as well as row count, the same way the ad flush does. The
+    // category set is short today and this loop will never trim anything — but the failure it
+    // prevents is silent: over the worker's cap the body is dropped while the endpoint still
+    // answers 204, and the subtract below would then delete counts that were never recorded.
+    // Keys left out stay in the store and drain on the next tick.
+    const cats = [];
+    const rows = [];
+    for (const c of pending) {
+      const row = { cat: c, sent: store[c].sent || 0, clk: store[c].clk || 0 };
+      const candidate = JSON.stringify({ type: 'notif_batch', ver, rows: rows.concat([row]) });
+      // BYTE length, not string length: the worker caps Content-Length, and a non-ASCII category
+      // costs up to 3 bytes per char — `.length` could read as under budget while the request is
+      // over it, which the worker answers 204 to without parsing, and the subtract below would
+      // then delete counts that were never recorded (Codex).
+      if (_utf8Bytes(candidate) > NOTIF_FLUSH_MAX_BYTES) {
+        if (rows.length) break; // batch full — the rest goes next flush
+        continue;               // a lone oversized row: skip rather than force-send and lose it
+      }
+      rows.push(row);
+      cats.push(c);
+      if (cats.length >= NOTIF_FLUSH_MAX_ROWS) break;
+    }
+    if (!rows.length) return;
+    let ok = false;
+    try {
+      // text/plain keeps this a CORS simple request (no preflight), matching the ad beacon.
+      const r = await fetch(NOTIF_EVENT_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ type: 'notif_batch', ver, rows }),
+        keepalive: true,
+      });
+      ok = r.ok || r.status === 204;
+    } catch { ok = false; }
+    if (!ok) return; // leave counters intact; retry next flush
+    const cur = (await chrome.storage.local.get(NOTIF_COUNTERS_KEY))[NOTIF_COUNTERS_KEY] || {};
+    for (const c of cats) {
+      if (!cur[c]) continue;
+      cur[c].sent -= store[c].sent || 0;
+      cur[c].clk -= store[c].clk || 0;
+      if (cur[c].sent <= 0 && cur[c].clk <= 0) delete cur[c];
+    }
+    await chrome.storage.local.set({ [NOTIF_COUNTERS_KEY]: cur });
+  });
+}
+
 /**
  * Ask for permission to interrupt the user with a NUDGE. Records the slot on success, so callers
  * must NOT also call logNotification() — claiming is the log write.
@@ -126,6 +298,10 @@ export async function claimNudgeSlot(category, now = Date.now()) {
     if (log.some((e) => e.ts > now - NOTIF_BUDGET_WINDOW_MS)) return { granted: false, reason: 'budget-spent' };
     log.push({ c: category, ts: now });
     await chrome.storage.local.set({ _notifLog: log });
+    // The SECOND telemetry chokepoint. Nudge-class notifications (promo-push,
+    // auth-blocked-followup) never call logNotification — claiming the slot IS their log write —
+    // so counting only there would make exactly the ad-like notifications invisible.
+    bumpNotifCounter(category, 'sent');
     return { granted: true, ts: now, category };
   });
 }
@@ -152,6 +328,10 @@ export async function releaseNudgeSlot(slot, now = Date.now()) {
     if (i === -1) return; // already pruned, or never written — nothing to hand back
     log.splice(i, 1);
     await chrome.storage.local.set({ _notifLog: log });
+    // Hand the telemetry count back too. The claim counted a notification that create() then
+    // failed to produce; leaving it would report sends that never reached a screen — and this
+    // path exists precisely because that failure is real (revoked permission, OS block).
+    bumpNotifCounter(category, 'sent', -1);
   });
 }
 
@@ -242,6 +422,8 @@ export async function notifyAuthBlockedOnce() {
   }
   await chrome.storage.local.set({ authBlockedNotifiedAt: Date.now() });
   logNotification('auth-blocked');
+  // Already past the confirmed-create bail-out above, so this needs no wrapper.
+  bumpNotifCounter('auth-blocked', 'sent');
 }
 
 // === Auth-blocked follow-up ladder (stages 2..4) ===
@@ -398,14 +580,14 @@ export async function checkCollectFailNotification(errorMsg) {
   if (!lastSuccess && !status?.lastSuccessTimestamp) {
     const failDurationFirstrun = Date.now() - collectFailState.firstFailAt;
     if (failDurationFirstrun >= 10 * 60 * 1000 && collectFailState.stage !== 'first-run') {
-      chrome.notifications.create('collect-fail-firstrun', {
+      createCountedNotification('collect-fail-firstrun', {
         type: 'basic',
         iconUrl: 'icons/icon128.png',
         title: await bt('cf_firstrun_title'),
         message: await bt('cf_firstrun_msg'),
         priority: 2,
         buttons: [{ title: await bt('cf_btn_open') }],
-      });
+      }, 'collect-fail');
       logNotification('collect-fail');
       collectFailState.stage = 'first-run';
       collectFailState.lastErrorCode = errorMsg;
@@ -470,7 +652,7 @@ export async function checkCollectFailNotification(errorMsg) {
     opts.buttons = [{ title: await bt('cf_btn_open') }];
   }
 
-  chrome.notifications.create(notifId, opts);
+  createCountedNotification(notifId, opts, 'collect-fail');
   logNotification('collect-fail');
 
   collectFailState.stage = targetStage;
@@ -506,15 +688,25 @@ export async function checkUsageAlerts(snapshot) {
       const alreadyNotified = usageAlertState[stateKey];
 
       if (util >= threshold && !alreadyNotified) {
-        chrome.notifications.create(`${NOTIF_ID_ALERT}-${stateKey}`, {
+        // The severity goes in the ID, not just in the category. Sends record 'usage-danger' or
+        // 'usage-warn' (which of the two depends on the user's thresholdDanger setting), but a
+        // click arrives carrying only the id — so an id of `usage-alert-5h_95` could not be
+        // mapped back to the category that sent it, and a CTR grouped by category showed
+        // usage-danger at 0% next to a usage-alert bucket with clicks and no sends (Codex).
+        // Encoding it makes the two agree by construction rather than by a lookup that would
+        // have to re-read a setting that may have changed since.
+        // Still prefixed with NOTIF_ID_ALERT, so background.js's settings-button branch
+        // (startsWith(NOTIF_ID_ALERT)) keeps matching.
+        const severity = threshold >= thresholdDanger ? 'danger' : 'warn';
+        createCountedNotification(`${NOTIF_ID_ALERT}-${severity}-${stateKey}`, {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
           title: await bt('alert_title', threshold),
           message: await bt(i18nKey, util.toFixed(1)) + '\n' + await bt('notif_settings_hint'),
           buttons: [{ title: await bt('notif_settings_btn') }],
           priority: threshold >= thresholdDanger ? 2 : 1,
-        });
-        logNotification(threshold >= thresholdDanger ? 'usage-danger' : 'usage-warn');
+        }, `usage-${severity}`);
+        logNotification(`usage-${severity}`);
         usageAlertState[stateKey] = true;
       } else if (util < threshold - 10 && alreadyNotified) {
         usageAlertState[stateKey] = false;
@@ -655,13 +847,13 @@ export async function sendWeeklyReport() {
   const avg5h = h5vals.length > 0 ? h5vals.reduce((a, b) => a + b, 0) / h5vals.length : 0;
   const peak5h = h5vals.length > 0 ? Math.max(...h5vals) : 0;
 
-  chrome.notifications.create('weekly-report-' + Date.now(), {
+  createCountedNotification('weekly-report-' + Date.now(), {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
     title: await bt('weekly_title'),
     message: `7d avg ${avg7d.toFixed(1)}% (peak ${peak7d.toFixed(0)}%) · 5h avg ${avg5h.toFixed(1)}% (peak ${peak5h.toFixed(0)}%)\n${await bt('notif_settings_hint')}`,
     buttons: [{ title: await bt('notif_settings_btn') }],
     priority: 0,
-  });
+  }, 'weekly-report');
   logNotification('weekly-report');
 }

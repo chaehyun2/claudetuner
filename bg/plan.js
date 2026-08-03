@@ -2,7 +2,7 @@ import { PLAN_HIERARCHY, PLAN_API_MAP, SEAT_TIER_MAP, NOTIF_ID_OPTIMIZE, ANTHROP
 import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus, authedFetch } from './storage.js';
-import { logNotification } from './notifications.js';
+import { logNotification, createCountedNotification } from './notifications.js';
 import { resetIcon , badgeLockedByAuthBlock } from './badge.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
@@ -19,9 +19,9 @@ function forceCollect(context) {
 async function notifyPlanChange(title, message, priority = 1) {
   const { notifyPlanChange: enabled = true } = await chrome.storage.sync.get({ notifyPlanChange: true });
   if (enabled) {
-    chrome.notifications.create(NOTIF_ID_OPTIMIZE, {
+    createCountedNotification(NOTIF_ID_OPTIMIZE, {
       type: 'basic', iconUrl: 'icons/icon128.png', title, message, priority,
-    });
+    }, 'plan-change');
     logNotification('plan-change');
   }
 }

@@ -18,7 +18,7 @@ import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistor
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -1313,8 +1313,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
   // Ad counter flush (flushAdCounters already serializes through _adEnqueue).
+  // Notification counters ride the SAME alarm rather than adding one of their own: both are
+  // low-value-per-row telemetry, and a second alarm would double the wake-ups to say half as
+  // much. Each flush serializes through its own op-chain, so they do not contend.
   if (alarm.name === AD_FLUSH_ALARM) {
     flushAdCounters();
+    flushNotifCounters();
     return;
   }
   // Handle expire alarms (5min-before notification, 2min/1min/at-reset collection, post-reset notification)
@@ -1339,7 +1343,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           priority: 1,
         };
         if (ctxLabel) opts.contextMessage = ctxLabel;
-        chrome.notifications.create(`reset-soon-${Date.now()}`, opts);
+        createCountedNotification(`reset-soon-${Date.now()}`, opts, 'reset-soon');
         logNotification('reset-soon');
       }
       return;
@@ -1360,7 +1364,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           priority: 1,
         };
         if (ctxLabel) opts.contextMessage = ctxLabel;
-        chrome.notifications.create(`reset-done-${Date.now()}`, opts);
+        createCountedNotification(`reset-done-${Date.now()}`, opts, 'reset-done');
         logNotification('reset-done');
       }
     }
@@ -1992,6 +1996,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.notifications.onClicked.addListener(async (notifId) => {
+  // Counted BEFORE the promo-push filter below: a click on any notification is a click, and
+  // gating the count on the one id this handler acts upon would report a 0% CTR for every other
+  // category — the wrong number is worse than none, because it reads as "nobody engages".
+  bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
   if (!notifId.startsWith('promo-push-')) return;
   const promoId = notifId.replace('promo-push-', '');
   const { promoPushState = {} } = await chrome.storage.local.get({ promoPushState: {} });
@@ -2001,6 +2009,10 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
 });
 
 chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
+  // Same reasoning as onClicked: count every button click, whichever branch below handles it.
+  // A button press and a body click are both "the user engaged", so they share one counter —
+  // splitting them would need a dimension nobody has asked a question about yet.
+  bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
   // Promo push (e.g. Product Hunt launch) → open the promo URL
   if (notifId.startsWith('promo-push-') && btnIdx === 0) {
     const promoId = notifId.replace('promo-push-', '');

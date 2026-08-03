@@ -11,7 +11,7 @@ import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence 
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon , badgeLockedByAuthBlock } from './badge.js';
-import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification } from './notifications.js';
+import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification, createCountedNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
@@ -1085,7 +1085,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           chrome.action.setBadgeText({ text: '📋' });
           chrome.action.setBadgeBackgroundColor({ color: '#7c3aed' });
           }
-          chrome.notifications.create('plan-order-' + po.order_id, {
+          createCountedNotification('plan-order-' + po.order_id, {
             type: 'basic', iconUrl: 'icons/icon128.png',
             title: await bt('po_title'),
             message: await bt('po_msg', po.org_name, po.from_plan, po.to_plan),
@@ -1094,7 +1094,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
               { title: await bt('po_reject') },
             ],
             requireInteraction: true,
-          });
+          }, 'plan-order');
           logNotification('plan-order');
         }
         }
