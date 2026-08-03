@@ -10,7 +10,11 @@
 // restores each section to whatever its own logic last set (zero regression risk).
 import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
-import { calcPredictedAtReset, estimateCapHitTime, NEAR_LIMIT_PCT } from './prediction.js';
+import {
+  calcPredictedAtReset, estimateCapHitTime, tierColor, tierSeverity, isAlertTier,
+  projectionTier, windowAverageProjection, PROJECTION_TIERS,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook,
+} from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
 
@@ -101,26 +105,28 @@ function _predictBadge(cur, pred) {
   // Already at the cap: a "predicted 100%" badge next to a 100% value is noise.
   if (cur >= 100) return '';
   const { rate, predicted } = pred;
-  if (rate <= 0 || predicted - cur < 3) {
+  // Shared verdict (ui/prediction.js) — withholds the green badge while the near-limit line is up.
+  if (isStableLook(predicted, rate, cur)) {
     const bg = _isDark() ? '#22c55e30' : '#22c55e18';
     return `<span class="gauge-predict-inline" style="display:inline;color:#22c55e;background:${bg}">▸ —</span>`;
   }
-  const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
-  const txt = predicted >= 100 ? '100%' : `${Math.round(predicted)}%`;
-  return `<span class="gauge-predict-inline" style="display:inline;color:${color}">▸ ${txt}</span>`;
+  const txt = `${Math.round(Math.min(predicted, 100))}%`; // clamp, not a tier — see tierColor()
+  return `<span class="gauge-predict-inline" style="display:inline;color:${tierColor(predicted)}">▸ ${txt}</span>`;
 }
 
 // One window column (5h or 7d) rendered with the SAME gauge classes as the detail view:
 // header (label + value% + ▸ badge), bar (current fill + striped projected extension),
 // sub (countdown + absolute reset). Returns '' when the window is unavailable for this
 // org/plan (Free/Team 7d, unused Gemini window).
-function _gaugeRow(labelKey, current, pred, resetAt, capHitMs) {
+function _gaugeRow(labelKey, key, current, pred, resetAt, capHitMs) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
   const valColor = gaugeColor(cur);
   let predFill = '';
-  if (pred && pred.rate > 0 && pred.predicted - cur >= 3) {
-    const pColor = pred.predicted >= 80 ? '#ef4444' : pred.predicted >= 50 ? '#f59e0b' : '#9ca3af';
+  // Same gate as the badge above and as the detail gauge's fill: whatever counts as "stable"
+  // draws no projection, so the bar and the badge can never disagree about whether one exists.
+  if (pred && !isStableLook(pred.predicted, pred.rate, cur)) {
+    const pColor = tierColor(pred.predicted);
     const target = Math.min(pred.predicted, 100);
     predFill = `<div class="gauge-predict-fill" style="display:block;left:${Math.min(cur, 100)}%;width:${Math.max(target - cur, 0)}%;color:${pColor}"></div>`;
   }
@@ -128,7 +134,7 @@ function _gaugeRow(labelKey, current, pred, resetAt, capHitMs) {
   // Already capped → capped block (hit time + total wait); at risk (projected to hit
   // before reset) → wait-span block; otherwise the reset line / idle hint. current is
   // non-null here (early return above), so hasWindow is always true.
-  const atRisk = !!pred && pred.rate > 0 && current < 100 && pred.predicted >= 100;
+  const atRisk = !!pred && isAtRiskOfCap(pred.predicted, pred.rate, current);
   let facts;
   if (current >= 100) {
     facts = buildCappedFactsHtml(resetAt, capHitMs != null ? capHitMs : null, true);
@@ -138,11 +144,23 @@ function _gaugeRow(labelKey, current, pred, resetAt, capHitMs) {
   } else {
     facts = buildResetFactsHtml(resetAt, true);
   }
-  // Near-limit heads-up: projected close to the cap but not over it (the wait block
-  // already conveys the over-cap case). Kept as its own quiet line.
+  // Forecast line — the same graded ladder as the detail gauge (the wait block above already
+  // conveys the over-cap case, so this covers PRESSING and WARMING only).
   let nearLimitLine = '';
-  if (!atRisk && pred && pred.rate > 0 && current < 100 && pred.predicted >= NEAR_LIMIT_PCT) {
-    nearLimitLine = `<div class="gauge-sub" style="color:#ef4444;font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
+  if (pred && isNearLimit(pred.predicted, pred.rate, current)) {
+    nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(pred.predicted)};font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
+  } else if (pred && isRisingNotice(pred.predicted, pred.rate, current)) {
+    nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(pred.predicted)}">📈 ${escHtml(t('predict_at_reset', Math.round(pred.predicted)))}</div>`;
+  } else if (!pred) {
+    // No measured forecast yet — fall back to the same coarse projection the banner and the
+    // detail gauge use, so a card is not the one surface staying silent. Level only, clamped for
+    // display, colour for severity (see _renderDegradedLine in ui/prediction.js).
+    const degraded = windowAverageProjection(current, key, resetAt);
+    const dTier = projectionTier(degraded);
+    if (dTier && tierSeverity(dTier) >= tierSeverity(PROJECTION_TIERS.find((x) => x.id === 'warming'))) {
+      const icon = isAlertTier(degraded) ? '⚠️' : '📈';
+      nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(degraded)}">${icon} ${escHtml(t('predict_at_reset', Math.round(Math.min(degraded, 100))))}</div>`;
+    }
   }
   return '<div class="gauge-row">'
     + '<div class="gauge-header">'
@@ -199,9 +217,9 @@ function _renderCard(org, hist) {
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
-    rows += _gaugeRow('usage_5h', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
+    rows += _gaugeRow('usage_5h', 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
     const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
-    rows += _gaugeRow('usage_7d', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
+    rows += _gaugeRow('usage_7d', 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`
@@ -239,16 +257,61 @@ function _persistOrder(sec) {
   chrome.storage.sync.set({ overviewOrder: ids });
 }
 
-// Find the card the dragged element should be inserted before, based on cursor Y.
-function _dragAfterElement(sec, y) {
-  const cards = [...sec.querySelectorAll('.ov-card:not(.ov-dragging)')];
-  let closest = { offset: -Infinity, el: null };
-  for (const card of cards) {
-    const box = card.getBoundingClientRect();
-    const offset = y - box.top - box.height / 2;
-    if (offset < 0 && offset > closest.offset) closest = { offset, el: card };
+// Find the card the dragged element should be inserted before, based on cursor position.
+//
+// Rows first, then columns. A wide side panel lays the cards out as a multi-column grid
+// (popup.html), where every card in a row answers a Y-only test identically — so the old
+// cursor-Y version could not tell the left card from the right one and reordering collapsed.
+// Folding both axes into one distance does not work either: the two offsets are unrelated
+// lengths, so a card a row down can score "closer" than the card right beside the cursor.
+//
+// Grid rows align to the pixel, so an equal `top` recovers the rows exactly, and the X test is
+// skipped entirely in a single column — a cursor sitting right of a lone card's centre must not
+// skip past it, so that case has to stay byte-for-byte the behaviour it had before.
+//
+// "Single column" is read off the CONTAINER, not off how many candidates a row happens to hold.
+// The dragged card is excluded from the candidates while it still occupies its grid cell, so a
+// two-column row containing it offers only one candidate — counting that would misread the row as
+// single-column and hand back the wrong insertion point (drag B out of `A B / C D`, aim right of
+// B, and B would land before A). getComputedStyle reports `none` for the flex fallback and one
+// track per column for the grid, which answers the question without consulting the cards at all.
+// Exported for test/overview-drag-hittest.mjs, which drives it against a real rendered grid —
+// this is geometry, so a source-text guard cannot check it.
+export function _dragAfterElement(sec, x, y) {
+  const tracks = getComputedStyle(sec).gridTemplateColumns;
+  const multiCol = tracks !== 'none' && tracks.split(/\s+/).filter(Boolean).length > 1;
+  const cards = [...sec.querySelectorAll('.ov-card:not(.ov-dragging)')]
+    .map((el) => ({ el, box: el.getBoundingClientRect() }));
+  const rows = [];
+  for (const c of cards) {
+    const row = rows.find((r) => Math.abs(r.top - c.box.top) < 1);
+    if (row) { row.cards.push(c); row.bottom = Math.max(row.bottom, c.box.bottom); }
+    else rows.push({ top: c.box.top, bottom: c.box.bottom, cards: [c] });
   }
-  return closest.el;
+  // One column: unchanged. The first card whose vertical midpoint the cursor has not passed wins,
+  // so the bottom half of a card means "after it" — the only sensible reading when a card spans
+  // the full width.
+  if (!multiCol) {
+    for (const row of rows) {
+      if (y < (row.top + row.bottom) / 2) return row.cards[0].el;
+    }
+    return null;
+  }
+  // Grid: the row whose vertical BAND holds the cursor owns the drop, and X orders within it.
+  // Carrying the midpoint rule over would make the bottom half of every row mean "next row",
+  // leaving only a row's top half able to express a position inside that row.
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (y >= row.bottom) continue;
+    // Above this row (i.e. in the gap under the previous one) -> its head.
+    if (y < row.top) return row.cards[0].el;
+    for (const c of row.cards) {
+      if (x < c.box.left + c.box.width / 2) return c.el;
+    }
+    // Past every card in this row -> the head of the next one (or the end of the list).
+    return rows[i + 1] ? rows[i + 1].cards[0].el : null;
+  }
+  return null;
 }
 
 // Every card handler lives on the container instead of on the N cards, so a re-render
@@ -301,7 +364,7 @@ function _bindDelegation(sec) {
     if (!_dragSrc) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    const after = _dragAfterElement(sec, e.clientY);
+    const after = _dragAfterElement(sec, e.clientX, e.clientY);
     if (after == null) sec.appendChild(_dragSrc);
     else if (after !== _dragSrc) sec.insertBefore(_dragSrc, after);
   };

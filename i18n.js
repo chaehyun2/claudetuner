@@ -194,6 +194,8 @@ const TRANSLATIONS = {
     'pace_warming': '주의 — {0} 사용 속도가 빨라지고 있습니다',
     'pace_pressing': '빠듯함 — 이 페이스면 {0} 한도 근처 도달',
     'pace_critical': '위험 — 이 페이스면 {0} 한도 초과 예상',
+    // A STATE, not a pace — the user is blocked and waiting, so no 'at this pace' phrasing.
+    'pace_at_limit': '한도 도달 — {0} 리셋까지 대기',
     'pace_runaway': '크게 초과 — {0} 한도를 크게 넘는 페이스',
     'pace_high_static': '사용량이 높습니다 ({0}%)',
     'pace_near_static': '{0} 한도에 거의 도달',
@@ -292,6 +294,7 @@ const TRANSLATIONS = {
     'chart_pace_warming': '주의',
     'chart_pace_pressing': '빠듯',
     'chart_pace_critical': '위험',
+    'chart_pace_at_limit': '도달',
     'chart_pace_runaway': '초과',
     'chart_used': '사용',
     'chart_now': '현재',
@@ -356,10 +359,16 @@ const TRANSLATIONS = {
     'predict_tip_line3': '리셋 시 예상: {0}',
     'predict_limit_at': '{0} 한도 도달 예상',
     'predict_near_limit': '리셋 시 한도 근접 (~{0}%)',
+    // The quiet WARMING step between silence and the red warning (restored 2026-08-02; dropped
+    // in 0d2e7d3e, which left a single hard cut as the only pre-emptive signal below 100%).
+    'predict_at_reset': '리셋 시 ~{0}% 예상',
     // Gauge fact block (E-1): wait-time lead + limit/reset detail rows.
     'gauge_wait_lead': '{0} 대기 예상',
     'gauge_wait_capped': '약 {0} 대기',
     'gauge_label_limit': '한도 도달',
+    // Same row in the FORECAST block, where the timestamp is in the future — the past-tense
+    // label above would read as "already blocked" next to a time that hasn't arrived yet.
+    'gauge_label_limit_eta': '한도 도달 예상',
     'gauge_label_reset': '리셋 예정',
     'gauge_reset_idle': '최근 사용 없음',
     'gauge_dur_dhm': '{0}일 {1}시간',
@@ -368,7 +377,6 @@ const TRANSLATIONS = {
     'gauge_dur_m': '{0}분',
     'predict_headline_reached': '🚫 {0} 한도 도달 — {1} 리셋까지 대기',
     'predict_headline_collecting': '📈 한도 도달 시점을 예측 중 — 데이터를 모으는 중이에요',
-    'predict_headline_limit': '⚠️ 5시간 한도 도달 예상 · {0}',
     'predict_tip_diurnal': '하루 활동 패턴(수면/유휴 시간)을 반영한 예측입니다.',
     'min': '분',
     'hours_short': '시간',
@@ -688,6 +696,8 @@ const TRANSLATIONS = {
     'pace_warming': 'Warming Up — {0} usage pace is rising',
     'pace_pressing': 'Pressing — {0} may hit the limit at this pace',
     'pace_critical': 'Critical — {0} limit will be exceeded at this pace',
+    // A STATE, not a pace — see the ko note.
+    'pace_at_limit': 'At limit — waiting for the {0} reset',
     'pace_runaway': 'Runaway — {0} far over limit pace',
     'pace_high_static': 'Usage is high ({0}%)',
     'pace_near_static': 'Almost at the {0} limit',
@@ -785,6 +795,7 @@ const TRANSLATIONS = {
     'chart_pace_warming': 'Warm',
     'chart_pace_pressing': 'Tight',
     'chart_pace_critical': 'Risk',
+    'chart_pace_at_limit': 'At limit',
     'chart_pace_runaway': 'Over',
     'chart_used': 'used',
     'chart_now': 'Now',
@@ -844,10 +855,14 @@ const TRANSLATIONS = {
     'predict_tip_line3': 'Expected at reset: {0}',
     'predict_limit_at': 'Limit expected at {0}',
     'predict_near_limit': 'Near limit at reset (~{0}%)',
+    // The quiet WARMING step between silence and the red warning — see the ko note.
+    'predict_at_reset': '~{0}% at reset',
     // Gauge fact block (E-1): wait-time lead + limit/reset detail rows.
     'gauge_wait_lead': '{0} wait expected',
     'gauge_wait_capped': '~{0} wait',
     'gauge_label_limit': 'Limit hit',
+    // Same row in the FORECAST block, where the timestamp is in the future — see the ko note.
+    'gauge_label_limit_eta': 'Limit expected',
     'gauge_label_reset': 'Resets',
     'gauge_reset_idle': 'No recent usage',
     'gauge_dur_dhm': '{0}d {1}h',
@@ -856,7 +871,6 @@ const TRANSLATIONS = {
     'gauge_dur_m': '{0}m',
     'predict_headline_reached': '🚫 {0} limit reached — wait until {1} reset',
     'predict_headline_collecting': '📈 Forecasting when you\'ll hit your limit — gathering data',
-    'predict_headline_limit': '⚠️ On track to hit your 5h limit · {0}',
     'predict_tip_diurnal': 'Estimate accounts for your daily activity rhythm (sleep/idle hours).',
     'min': 'min',
     'hours_short': 'h',

@@ -1,4 +1,4 @@
-import { extTokenScope, extTokenEmail } from './ext-token-claims.js';
+import { extTokenScope, extTokenEmail, extTokenSrc } from './ext-token-claims.js';
 import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME, AUTH_BLOCK_BACKOFF_BASE_MS, AUTH_BLOCK_BACKOFF_CAP_MS, TOKEN_RETRY_BASE_MS, TOKEN_RETRY_MAX_ATTEMPTS, TOKEN_RETRY_COOLDOWN_MS } from './constants.js';
 import { withStorageLock } from './serialize.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
@@ -260,8 +260,33 @@ export function getOrCreateInstallId() {
   return _installIdPromise;
 }
 
+const PROVEN_SRC = new Set(['ext_google', 'ext_email', 'dash_session']);
+
 export async function setExtToken(token) {
-  await chrome.storage.local.set({ extToken: token });
+  // 🔴 `everHadProvenToken` means "this install has held a LOGIN-PROVEN token", and the
+  // `scope === 'full'` test is the whole point — NOT "has held a token".
+  //
+  // The first draft set it for ANY token and was wrong in the one direction that matters (Codex
+  // DEPLOY-BLOCKER): the server mints an `ingest` token by TOFU to anyone who POSTs with the
+  // shared api_key, so a grandfathered user who never logged in holds one too. Marking them would
+  // eventually withhold sync from ALMOST EVERY install — precisely the authentication enforcement
+  // this change must not smuggle in (#767).
+  //
+  // Only login mints `full` (worker snapshots.ts: api_key TOFU is always 'ingest'). A scope-less
+  // LEGACY token is deliberately NOT counted: it probably predates scopes and may well be login-
+  // minted, but guessing wrong here withholds sync from a real user, so the unknown case stays
+  // unmarked and keeps today's behaviour. Fail-open.
+  //
+  // Write-once: only ever `true`, never cleared. Clearing the TOKEN (clearExtToken, the 401
+  // `ext_token_invalid` contract) leaves this standing — "has authenticated at least once" is a
+  // fact about the install's HISTORY, and forgetting it is how a token loss goes back to silent.
+  // 🔴 scope AND src. `full` alone is not proof: the server refreshes a LEGACY scope-less token
+  // into `full` (snapshots.ts mintScope), so a grandfathered install that never logged in would be
+  // marked and later have its sync withheld — the fail-CLOSED direction (Codex DEPLOY-BLOCKER).
+  // `src` is only one of these three when a human actually completed a login; it is absent for
+  // legacy and 'api_key' for shared-key TOFU. Unknown stays unmarked = today's behaviour.
+  const proven = extTokenScope(token) === 'full' && PROVEN_SRC.has(extTokenSrc(token));
+  await chrome.storage.local.set(proven ? { extToken: token, everHadProvenToken: true } : { extToken: token });
   // A token is now HELD, so any token-withheld retry episode is over. Clearing here — the one
   // place a token is ever persisted — rather than where a token is merely OBSERVED in a response:
   // simpleAuthedPost sees extra-org responses that carry `ext_token` and does NOT store them, so
@@ -275,7 +300,7 @@ export async function setExtToken(token) {
 // them without importing this file's dependency chain. Re-exported so existing importers of
 // storage.js keep working; imported too because setExtTokenNoDowngrade() calls extTokenScope
 // locally (a bare `export ... from` would NOT create that local binding).
-export { extTokenScope, extTokenEmail };
+export { extTokenScope, extTokenEmail, extTokenSrc };
 
 /**
  * Persist a server-issued ext_token, but NEVER downgrade a login-proven `full` token
@@ -292,6 +317,31 @@ export async function setExtTokenNoDowngrade(token) {
     return;
   }
   return setExtToken(token);
+}
+
+/**
+ * Backfill `everHadProvenToken` from a token this install ALREADY holds.
+ *
+ * 🔴 WHY THIS IS NEEDED (Codex DEPLOY-BLOCKER, round 4). The flag is written by setExtToken(), so
+ * it only appears on the next token WRITE. An install that updates to this build already holding a
+ * login-proven token therefore has no flag; if that token is 401-cleared before the next refresh
+ * lands, serverSyncWithheldReason() sees "grandfathered, no token, no flag" and returns null — the
+ * shared-key fallback stays silent for exactly the user this change exists to protect.
+ *
+ * The window is one collection cycle (the piggyback refresh calls setExtToken on every successful
+ * send), so this is a TRANSITION gap rather than a permanent one — but it lands on the population
+ * whose token is dying, which is the population that hits it.
+ *
+ * Reads only; marks only when the stored token is provably login-minted. Never clears.
+ */
+export async function markProvenIfStored() {
+  try {
+    const { extToken, everHadProvenToken } = await chrome.storage.local.get(['extToken', 'everHadProvenToken']);
+    if (everHadProvenToken === true || !extToken) return;
+    if (extTokenScope(extToken) === 'full' && PROVEN_SRC.has(extTokenSrc(extToken))) {
+      await chrome.storage.local.set({ everHadProvenToken: true });
+    }
+  } catch (_) { /* best effort: the next setExtToken marks it anyway */ }
 }
 
 export async function clearExtToken() {
@@ -402,8 +452,43 @@ export async function clearExtTokenIfMatches(sentToken) {
  * a missing flag with the right value, because the event itself proves the install pre-existed.
  */
 export async function isServerSyncGated() {
-  const { serverSyncGrandfathered, extToken } = await chrome.storage.local.get(['serverSyncGrandfathered', 'extToken']);
-  return serverSyncGrandfathered !== true && !extToken;
+  return (await serverSyncWithheldReason()) === 'login_first';
+}
+
+/**
+ * WHY server sync is being withheld right now — `null` | `'login_first'` | `'token_lost'`.
+ *
+ * The single decision point. `isServerSyncGated()` is now defined in terms of THIS function
+ * rather than re-deriving the rule, because a second copy of a gate is precisely what drifted in
+ * #786 the moment the real predicate changed.
+ *
+ *   null          holds a token, OR is a grandfathered install that never had one. Send as today.
+ *   'login_first' fresh install that has not authenticated (the existing 단계 4 gate, unchanged).
+ *   'token_lost'  🔴 NEW: an install that HELD a token and no longer does. Falling back to the
+ *                 shared key here is a SILENT DOWNGRADE — the account keeps syncing, so nothing
+ *                 looks broken, while its writes stop being attributable to a proven identity.
+ *                 Measured 2026-07-29→08-02: the api_key population fell 4,342 → 251 accounts
+ *                 (-94%) once #745 stopped destroying tokens, which is exactly how large this
+ *                 downgrade path had grown while looking like nothing was wrong.
+ *
+ * 🔴 FAIL-OPEN BY CONSTRUCTION, and this is the whole safety argument. `everHadProvenToken` is
+ * only ever written next to a token whose scope is `full`, so an install that lost its token BEFORE this shipped has no
+ * flag and keeps falling back exactly as today. The new behaviour can only apply to installs we
+ * have positively observed holding a token. A missing flag never withholds anything.
+ *
+ * 🔴 It must NEVER return 'token_lost' for a grandfathered install that never authenticated.
+ * Withholding from them is authentication enforcement, which is an open product decision (#767),
+ * not something this change is allowed to smuggle in.
+ */
+export async function serverSyncWithheldReason() {
+  // Array form, never `get({ k: undefined })` — Chrome drops an object-form key whose default is
+  // undefined, which is what made the original gate a no-op (#785/#787).
+  const { serverSyncGrandfathered, extToken, everHadProvenToken } =
+    await chrome.storage.local.get(['serverSyncGrandfathered', 'extToken', 'everHadProvenToken']);
+  if (extToken) return null;                              // authenticated — nothing withheld
+  if (serverSyncGrandfathered !== true) return 'login_first';
+  if (everHadProvenToken === true) return 'token_lost';
+  return null;                                            // grandfathered, never authenticated
 }
 
 
@@ -650,9 +735,10 @@ export async function noteTokenWithheld(response, sentToken, { result, email = n
   const { authBlocked } = await chrome.storage.local.get({ authBlocked: false });
   if (authBlocked === true) return false;
   if (await isUpgradeBlocked()) return false;
-  // 단계 4 login-first: a fresh, non-grandfathered, not-logged-in install must not POST via the
-  // shared key at all, so it must not be retried into doing so faster.
-  if (await isServerSyncGated()) return false;
+  // login-first / token-lost: an install that must not POST via the shared key at all must not be
+  // retried into doing so faster either. Asks the same single decision point as the POST paths —
+  // a retry that ignored 'token_lost' would keep hammering the fallback this change withholds.
+  if (await serverSyncWithheldReason()) return false;
 
   let scheduled = false;
   await withStorageLock(async () => {
@@ -761,10 +847,14 @@ export async function simpleAuthedPost(config, url, payload) {
  */
 export async function postSnapshot(config, payload) {
   if (!config.serverUrl) return null;
-  // Phase 2 단계 4 login-first gate (ChatGPT/Gemini path — Claude is gated in collect.js). A
-  // fresh, non-grandfathered, not-logged-in install shows usage locally (the caller already
-  // appended history) but does NOT send via the shared api_key. Surface the login CTA once.
-  if (await isServerSyncGated()) {
+  // login-first / token-lost gate (ChatGPT/Gemini path — Claude is gated in collect.js). An
+  // install that has not authenticated, OR that HELD a token and lost it, shows usage locally (the
+  // caller already appended history) but does NOT send via the shared api_key. Surface the login
+  // CTA once.
+  // 🔴 Both providers go through the SAME reason function as the Claude path. Gating only Claude
+  // would leave the shared-key downgrade wide open on ChatGPT/Gemini, i.e. the change would read
+  // as done while the hole stayed open for a chunk of the fleet.
+  if (await serverSyncWithheldReason()) {
     await chrome.storage.local.set({ showLoginPrompt: true });
     return null;
   }

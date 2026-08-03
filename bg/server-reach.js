@@ -22,7 +22,7 @@
 // stale server state, and the banner would render from it. (Codex.)
 import { getUpgradeBlock } from './upgrade-gate.js';
 import { isServerBackedOff } from './send-gate.js';
-import { isServerSyncGated } from './storage.js';
+import { serverSyncWithheldReason } from './storage.js';
 import { getCadence, isCollectionPaused } from './cadence-config.js';
 
 /**
@@ -37,7 +37,7 @@ export async function isServerSyncStalled() {
   if (authBlocked === true) return true;      // 401 — account needs a login
   if (await getUpgradeBlock()) return true;   // 426 — extension too old to be accepted
   if (await isServerBackedOff()) return true; // 5xx / network — waiting out a backoff
-  if (await isServerSyncGated()) return true; // login-first — never POSTs until a login
+  if (await serverSyncWithheldReason()) return true; // login-first OR token-lost — never POSTs until a login
   // Server-driven collection pause — bg/collect.js skips the whole cycle while it stands.
   // 🔴 Via getCadence()/isCollectionPaused(), NOT a raw key read: `collectPauseUntil` lives INSIDE
   // the cadence object, so `storage.get(['collectPauseUntil'])` returns nothing and the check would

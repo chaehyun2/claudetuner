@@ -261,22 +261,12 @@ export function formatTimeAgo(timestamp) {
   return `${Math.floor(hours / 24)}${t('ago_day')}`;
 }
 
-// Project current utilization to end-of-window and bucket into a pace tier (shared by status banner + charts).
-export function calcPaceTier(currentUtil, resetsAt, windowSeconds) {
-  if (currentUtil == null || !resetsAt || !windowSeconds) return null;
-  if (currentUtil === 0) return { id: 'comfortable', css: 'green' };
-  const remaining = Math.max((new Date(resetsAt).getTime() - Date.now()) / 1000, 0);
-  const elapsed = windowSeconds - remaining;
-  const fraction = elapsed / windowSeconds;
-  if (fraction < 0.10 || fraction >= 1.0) return null;
-  const projected = (currentUtil / 100) / fraction;
-  if (projected < 0.50) return { id: 'comfortable', css: 'green' };
-  if (projected < 0.75) return { id: 'ontrack',     css: 'green' };
-  if (projected < 0.90) return { id: 'warming',     css: 'yellow' };
-  if (projected < 1.00) return { id: 'pressing',    css: 'orange' };
-  if (projected < 1.20) return { id: 'critical',    css: 'red' };
-  return                        { id: 'runaway',     css: 'darkred' };
-}
+// REMOVED 2026-08-02 — calcPaceTier(). It projected end-of-window from the WINDOW AVERAGE
+// (current / fraction-of-window-elapsed), a second forecast that disagreed with the one the
+// gauges show: 34% used 1h25m into a 5h window is "97% at reset" by measured rate and "120%"
+// here, so the popup rendered a silent gauge above a red "크게 초과" banner. The tier ladder now
+// lives in ui/prediction.js (PROJECTION_TIERS) and reads calcPredictedAtReset like everything
+// else. Do not reintroduce a window-average pace — test/limit-eta-guard.mjs fails on it.
 
 export function _isDark() { return document.documentElement.dataset.theme === 'dark'; }
 export function _cGrid() { return _isDark() ? '#2d3748' : '#f0f0f0'; }

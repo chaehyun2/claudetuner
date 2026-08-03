@@ -67,8 +67,10 @@ export function buildWaitFactsHtml(resetsAt, hoursTo100, hoursToReset, hasWindow
 
   return `<div class="gf-lead">${t('gauge_wait_lead', formatDuration(waitMs))}</div>` +
     `<div class="gf-why">` +
-    // Limit-hit: absolute time only (the wait headline already conveys the gap).
-    factRow(t('gauge_label_limit'), formatResetAbsolute(hitMs, fmt), '', true) +
+    // Limit-hit: absolute time only (the wait headline already conveys the gap). The
+    // ESTIMATED label — this row carries a future time, so the capped block's past-tense
+    // label would claim the user is already blocked when they are not.
+    factRow(t('gauge_label_limit_eta'), formatResetAbsolute(hitMs, fmt), '', true) +
     // Reset: absolute time + a countdown when it's near (relativeIfNear).
     factRow(t('gauge_label_reset'), formatResetAbsolute(resetsAt, fmt), relativeIfNear(resetsAt), false) +
     `</div>`;

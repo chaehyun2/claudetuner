@@ -3,8 +3,9 @@
 // i18n `t` is referenced as a global (i18n.js, a classic script that loads first).
 import {
   _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier,
-  buildPlanLimitLines, chartMaxY, calcPaceTier,
+  buildPlanLimitLines, chartMaxY,
 } from './util.js';
+import { windowForecast } from './prediction.js';
 
 // === Chart tab state ===
 let _activeChartTab = '5h';
@@ -206,55 +207,36 @@ export function drawCharts(history, plan, snapshot) {
   const provider = snapshot?.provider || 'claude';
   const currentMult = planToMultiplier(plan, provider);
 
-  // Normalize past data to current plan scale
+  // Time-ordered but UNSCALED — this is what the gauges and the banner forecast from
+  // (render.js passes _filteredHistory() straight through). The forecast MUST read the same
+  // samples they do; feeding it the plan-normalized copy below would make the chart label
+  // disagree with the gauge above it for anyone who changed plans inside the history window,
+  // which is the exact bug this file was just changed to remove.
+  const sortedRaw = history.slice().sort((a, b) => a.t - b.t);
+
+  // Normalize past data to current plan scale, for DRAWING only
   // (e.g. Pro 80% -> Max 5x switch -> converted to 16%)
-  const sorted = history.slice().sort((a, b) => a.t - b.t).map((pt) => {
+  const sorted = sortedRaw.map((pt) => {
     const entryMult = planToMultiplier(pt.p || plan, provider);
     if (entryMult === currentMult) return pt;
     const scale = entryMult / currentMult;
     return { t: pt.t, h5: pt.h5 != null ? pt.h5 * scale : null, d7: pt.d7 != null ? pt.d7 * scale : null, p: pt.p, r7: pt.r7 };
   });
 
-  // Rate of change calculation (based on normalized values)
-  // 5h: last 2 hours (changes quickly)
-  let rate5h = 0;
-  const recent2h = sorted.filter((p) => p.t > now - 2 * 3600000);
-  if (recent2h.length >= 2) {
-    const rf = recent2h[0], rl = recent2h[recent2h.length - 1];
-    const hDiff = (rl.t - rf.t) / 3600000;
-    if (hDiff > 0.05 && rf.h5 !== null && rl.h5 !== null) {
-      rate5h = Math.max((rl.h5 - rf.h5) / hDiff, 0);
-    }
-  }
-  // 7d: rate based on local history r7(resets_at) (same logic as dashboard)
   const reset5h = snapshot?.five_hour?.resets_at ? new Date(snapshot.five_hour.resets_at).getTime() : null;
   const reset7d = snapshot?.seven_day?.resets_at ? new Date(snapshot.seven_day.resets_at).getTime() : null;
-  let rate7d = 0;
-  {
-    const sixHoursAgo = now - 6 * 3600000;
-    const recent = sorted.filter(p => p.d7 != null && p.r7 && p.t > sixHoursAgo);
-    if (recent.length >= 2) {
-      let totalDelta = 0;
-      for (let i = 1; i < recent.length; i++) {
-        if (recent[i - 1].r7 === recent[i].r7) {
-          totalDelta += Math.max(0, recent[i].d7 - recent[i - 1].d7);
-        }
-      }
-      const timeDiffH = (recent[recent.length - 1].t - recent[0].t) / 3600000;
-      if (timeDiffH > 0) rate7d = totalDelta / timeDiffH;
-    }
-  }
-  if (rate7d === 0) {
-    // fallback: elapsed time based on resets_at window
-    const last7dVal = sorted[sorted.length - 1].d7;
-    if (reset7d && last7dVal != null && last7dVal > 0) {
-      const hoursToReset7d = Math.max((reset7d - now) / 3600000, 0);
-      const elapsed = 7 * 24 - hoursToReset7d;
-      if (elapsed > 1) rate7d = last7dVal / elapsed;
-    }
-  }
   const last5h = sorted[sorted.length - 1].h5;
   const last7d = sorted[sorted.length - 1].d7;
+
+  // THE forecast — tier, projected-at-reset and rate, all from ui/prediction.js. This file used
+  // to run its OWN rate estimators here (a 2h flat window for 5h, a reset-boundary delta sum for
+  // 7d) and draw the dotted future point from them, so the chart's projection, the chart's own
+  // tier label and the gauge above could all disagree about the same window. Inputs come from the
+  // snapshot and the UNSCALED history, exactly as the gauges use them: `sorted` below is
+  // normalized to the current plan scale for DRAWING, and forecasting from that copy is what the
+  // previous round had to undo.
+  const fc5h = windowForecast(snapshot?.five_hour?.utilization ?? null, 'h5', snapshot?.five_hour?.resets_at, sortedRaw);
+  const fc7d = windowForecast(snapshot?.seven_day?.utilization ?? null, 'd7', snapshot?.seven_day?.resets_at, sortedRaw);
 
   // Provider-aware guide lines shared by the 5h and 7d charts.
   const limitLines = buildPlanLimitLines(currentMult, provider);
@@ -269,10 +251,6 @@ export function drawCharts(history, plan, snapshot) {
   // Force reflow — ensure canvas.clientWidth returns correctly after display change
   void chartSection.offsetHeight;
 
-  // Calculate pace tier (unified chart info using same logic as banner)
-  const chartPace5h = calcPaceTier(last5h, reset5h, 5 * 3600);
-  const chartPace7d = calcPaceTier(last7d, reset7d, 7 * 24 * 3600);
-
   // 5h chart (last 3 windows = 15 hours) — skipped for no-5h orgs (pane is hidden).
   if (!no5h) {
     const cutoff5h = now - 15 * 3600000;
@@ -280,8 +258,8 @@ export function drawCharts(history, plan, snapshot) {
     drawSingleChart({
       canvasId: 'chart-5h', infoId: 'chart-5h-info',
       sorted: sorted5h.length >= 2 ? sorted5h : sorted, key: 'h5', color: '#06b6d4',
-      rate: rate5h, lastVal: last5h, resetTime: reset5h,
-      limitLines, now, paceTier: chartPace5h,
+      forecast: fc5h, lastVal: last5h, resetTime: reset5h,
+      limitLines, now,
     });
   }
 
@@ -291,8 +269,8 @@ export function drawCharts(history, plan, snapshot) {
   drawSingleChart({
     canvasId: 'chart-7d', infoId: 'chart-7d-info',
     sorted: sorted7d.length >= 2 ? sorted7d : sorted, key: 'd7', color: '#7c3aed',
-    rate: rate7d, lastVal: last7d, resetTime: reset7d,
-    limitLines, now, paceTier: chartPace7d,
+    forecast: fc7d, lastVal: last7d, resetTime: reset7d,
+    limitLines, now,
   });
 
   // Hide inactive pane
@@ -308,7 +286,7 @@ function _syncChartInfo() {
 }
 
 function drawSingleChart(opts) {
-  const { canvasId, infoId, sorted, key, color, rate, lastVal, resetTime, limitLines, now, paceTier } = opts;
+  const { canvasId, infoId, sorted, key, color, forecast, lastVal, resetTime, limitLines, now } = opts;
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
 
@@ -326,25 +304,36 @@ function drawSingleChart(opts) {
   const hasFuture = futureEnd > now + 60000;
   const totalSpan = futureEnd - oldest;
 
+  // The dotted future point IS the shared forecast \u2014 the same number the tier label beside it is
+  // derived from. Drawn only when there is a forecast: with none, an invented point would be the
+  // chart asserting something nobody computed.
+  //
+  // It is NOT always the number the GAUGE shows, and this comment used to claim it was. The gauge
+  // renders only a MEASURED forecast and shows "collecting" when there is none, while
+  // windowForecast() also returns the degraded window-average. On a thin-history account the
+  // chart plots a point the gauge above is declining to state. Real gap, tracked separately.
+  const predicted = forecast ? forecast.predicted : null;
   let predict = null;
-  if (hasFuture && lastVal !== null) {
-    const hToReset = (resetTime - now) / 3600000;
-    predict = { x: (resetTime - oldest) / totalSpan, v: Math.min(Math.max(lastVal + rate * hToReset, 0), 100) };
+  if (hasFuture && lastVal !== null && predicted != null) {
+    predict = { x: (resetTime - oldest) / totalSpan, v: Math.min(Math.max(predicted, 0), 100) };
   }
 
   // Info label (stored in hidden span, copied to active tab via _syncChartInfo)
-  // Show paceTier (same calcPaceTier as banner) + rate side by side
+  // Show the tier (same ladder + forecast as the gauges and the banner) + rate side by side
   const infoEl = document.getElementById(infoId);
+  const paceTier = forecast ? forecast.tier : null;
   const paceColors = { green: '#22c55e', yellow: '#f59e0b', orange: '#f97316', red: '#ef4444', darkred: '#dc2626' };
   const paceCss = paceTier ? paceColors[paceTier.css] : '#9ca3af';
   const paceLabel = paceTier ? t('chart_pace_' + paceTier.id) : t('chart_stable');
 
-  // Rate portion: rising/falling/stagnant
+  // Rate portion: rising/falling/stagnant. Null on the degraded path (no measured rate exists),
+  // where showing a number would dress up an assumption as a measurement.
+  const rate = forecast ? forecast.rate : null;
   let ratePart = '';
-  if (rate > 0.1) {
+  if (rate != null && rate > 0.1) {
     const rateStr = rate >= 10 ? Math.round(rate) : rate.toFixed(1);
     ratePart = ` <span style="color:#9ca3af;font-size:0.85em">\u2191${rateStr}%/h</span>`;
-  } else if (rate < -0.1) {
+  } else if (rate != null && rate < -0.1) {
     const rateStr = Math.abs(rate) >= 10 ? Math.round(Math.abs(rate)) : Math.abs(rate).toFixed(1);
     ratePart = ` <span style="color:#9ca3af;font-size:0.85em">\u2193${rateStr}%/h</span>`;
   }

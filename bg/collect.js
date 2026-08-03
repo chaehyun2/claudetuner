@@ -16,7 +16,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, isServerSyncGated, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -789,12 +789,19 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // server sync requires a login-proven token (so no ingest-token TOFU is minted for new
     // users). Existing users (grandfathered on update) and any logged-in user (extToken
     // present) are unaffected. We surface the login CTA once so the popup/welcome can nudge.
-    const blockServerNewUser = await isServerSyncGated();
+    // 🔴 ASK THE GATE FOR ITS REASON — do not add a second condition here. `token_lost` is the new
+    // case: an install that HELD a token and no longer does used to fall back to the shared key,
+    // which keeps the account syncing (so nothing looks broken) while its writes quietly stop
+    // being attributable to a proven identity. A grandfathered install that never authenticated
+    // still gets `null` and is untouched — withholding from THEM would be authentication
+    // enforcement, an open decision (#767) and not this change's to make.
+    const withheldReason = await serverSyncWithheldReason();
+    const blockServerNewUser = !!withheldReason;
     if (blockServerNewUser) await chrome.storage.local.set({ showLoginPrompt: true });
 
     // 4. Send to server (local save only when skipServer/boost, or gated new user)
     if (skipServer || blockServerNewUser) {
-      console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? 'login required for server sync' : 'boost mode'})`);
+      console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? `login required for server sync: ${withheldReason}` : 'boost mode'})`);
       await setStatus({
         success: true,
         timestamp: Date.now(),
@@ -1551,6 +1558,19 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           const ver = chrome.runtime.getManifest().version;
           const { accountCache } = await chrome.storage.local.get('accountCache');
           const hbEmail = accountCache?.email;
+          // 🔴 DELIBERATELY NOT GATED, unlike the snapshot paths. Codex flagged this as the one
+          // shared-key write still landing while sync is withheld, and gating it was wrong on
+          // three counts:
+          //   1. ZERO security value. An attacker is not running this client, so refusing to send
+          //      OUR heartbeat stops nobody who holds the public key — it only silences honest
+          //      installs.
+          //   2. It is not usage data. The silent downgrade this change exists to stop is USAGE
+          //      being attributed to an unproven identity; a heartbeat writes last_heartbeat_at /
+          //      last_error_code / ext_version and nothing else.
+          //   3. It is the ONLY server-side trace a withheld install leaves. #775 was opened
+          //      precisely because gated installs are invisible server-side, and cutting this
+          //      would recreate that blind spot for the population we most need to count —
+          //      last_error_code is how we size it.
           if (hbEmail) {
             authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
               method: 'POST',

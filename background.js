@@ -14,7 +14,7 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtTokenNoDowngrade, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
@@ -212,7 +212,13 @@ async function mergeChatGPTOrgs(force = false, userManual = false) {
       for (const org of result.orgs) {
         await appendUsageHistory({
           t: Date.now(), h5: org.h5 ?? null, d7: org.d7 ?? null,
-          p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
+          // r5 = the 5h window's reset id. Without it a 5h boundary can only be inferred from the
+          // value FALLING, and it does not always fall: the new window can already hold more than
+          // the old one did by the time we next sample (49% -> reset -> 50%). Burn measured across
+          // such a boundary then reads +1 instead of "this cycle is already at 50". Samples
+          // written before this field exists simply lack it, and the shared projector falls back
+          // to drop-detection for those, so a mixed history stays safe.
+          p: org.plan, r7: org.resetsAt7d || null, r5: org.resetsAt5h || null, org: org.uuid,
         });
       }
       // Provider-only users (no Claude) — refresh the badge to this provider's
@@ -246,7 +252,13 @@ async function mergeGeminiOrgs(force = false, userManual = false) {
       for (const org of result.orgs) {
         await appendUsageHistory({
           t: Date.now(), h5: org.h5 ?? null, d7: org.d7 ?? null,
-          p: org.plan, r7: org.resetsAt7d || null, org: org.uuid,
+          // r5 = the 5h window's reset id. Without it a 5h boundary can only be inferred from the
+          // value FALLING, and it does not always fall: the new window can already hold more than
+          // the old one did by the time we next sample (49% -> reset -> 50%). Burn measured across
+          // such a boundary then reads +1 instead of "this cycle is already at 50". Samples
+          // written before this field exists simply lack it, and the shared projector falls back
+          // to drop-detection for those, so a mixed history stays safe.
+          p: org.plan, r7: org.resetsAt7d || null, r5: org.resetsAt5h || null, org: org.uuid,
         });
       }
       // Provider-only users (no Claude) — refresh the badge to this provider's
@@ -444,6 +456,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     if (serverSyncGrandfathered === undefined) {
       await chrome.storage.local.set({ serverSyncGrandfathered: true });
     }
+    // Backfill the proven-token marker from a token this install already holds. Without it, an
+    // install that updates while holding a login-proven token carries no marker until its next
+    // token write — and if the token dies first, its shared-key fallback stays silent.
+    await markProvenIfStored();
     // An update is the ONLY fix for a 426 upgrade_required block, so drop it the instant one
     // lands — the badge and popup banner then clear without waiting for the next poll cycle.
     // Belt-and-braces, not the contract: bg/upgrade-gate.js keys the record on the ext version
@@ -894,6 +910,10 @@ chrome.runtime.onStartup.addListener(async () => {
   // probes inline placed them ahead of restoreSidePanelPreference() and the dynamic script
   // re-registration below, so a chrome API that never settled would take those down with it. (Codex.)
   void (async () => {
+    // Backfill before reporting: authState() reads the token, and the marker should reflect a
+    // proven token the install is holding right now — onInstalled('update') fires once, this fires
+    // on every browser start, so together they close the transition window.
+    await markProvenIfStored();
     sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState() });
   })();
   await restoreSidePanelPreference();
@@ -1770,9 +1790,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // Store independent account + login-proven ext_token (scope:'full'). This opens the
         // Phase 2 단계 4 server-sync gate (extToken now present) and clears the login CTA flags
         // so the popup/welcome nudge disappears and scope_insufficient degradation resets.
+        // 🔴 setExtToken, NOT a raw set: it is the choke point that records
+        // `everHadProvenToken` (and ends a token-withheld retry episode). Writing `extToken`
+        // directly here meant a LOGIN-proven token left no trace, so a later token loss fell
+        // back to the shared key silently — for exactly the population this is meant to protect
+        // (Codex DEPLOY-BLOCKER).
+        await setExtToken(data.ext_token);
         await chrome.storage.local.set({
           independentAccount: { email: data.email, name: data.name || '' },
-          extToken: data.ext_token,
         });
         // `authBlocked` too: a login IS the fix for the email-provider 401, so the CTA must go
         // now rather than waiting for the next accepted POST to clear it (bg/storage.js).
@@ -1833,9 +1858,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const data = await resp.json();
         if (!resp.ok) { sendResponse({ success: false, error: data.error || 'signin_failed' }); return; }
 
+        // 🔴 setExtToken, NOT a raw set: it is the choke point that records
+        // `everHadProvenToken` (and ends a token-withheld retry episode). Writing `extToken`
+        // directly here meant a LOGIN-proven token left no trace, so a later token loss fell
+        // back to the shared key silently — for exactly the population this is meant to protect
+        // (Codex DEPLOY-BLOCKER).
+        await setExtToken(data.ext_token);
         await chrome.storage.local.set({
           independentAccount: { email: data.email, name: data.name || '' },
-          extToken: data.ext_token,
         });
         await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
         sendResponse({ success: true, email: data.email, name: data.name });

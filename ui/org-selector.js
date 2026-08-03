@@ -456,7 +456,14 @@ export function selectOrg(orgId, container) {
       // ChatGPT/Gemini with insufficient history: hide banner
       const banner = document.getElementById('status-banner');
       if (banner) banner.classList.add('hidden');
-    } else if (hist.length >= 3) {
+    } else {
+      // UNCONDITIONAL for Claude orgs. This used to be gated on hist.length >= 3, which left the
+      // PREVIOUS org's banner on screen when switching to an org with little history — a heavy
+      // account could inherit the last one's green "여유 — 마음껏 사용하세요!". renderStatusBanner
+      // handles thin history itself (windowTier falls back to the window average, then to the
+      // static utilization rule) and hides itself when both UTILIZATIONS are null, so the caller
+      // must not decide on its behalf that it has nothing to say. Note it does NOT hide when the
+      // utilizations exist but both tiers come back null — it renders the static rule then.
       renderStatusBanner(orgData.h5 ?? null, orgData.d7 ?? null, hist, resetsAt5h, resetsAt7d);
     }
 

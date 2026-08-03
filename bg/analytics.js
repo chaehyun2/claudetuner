@@ -1,5 +1,5 @@
 // GA4 Measurement Protocol for Chrome Extension MV3
-import { isServerSyncGated } from './storage.js';
+import { serverSyncWithheldReason } from './storage.js';
 import { extTokenEmail } from './ext-token-claims.js';
 const GA_MEASUREMENT_ID = 'G-ZMWJBD64FQ';
 const GA_API_SECRET = 'emqPWfUzSqOvqvLtbh8BuQ';
@@ -69,7 +69,16 @@ export async function authState() {
     // `serverSyncGrandfathered === true` itself — a second copy of the rule, which is precisely
     // what drifted in #786 the moment the real predicate became `!== true`. Tokenless AND gated is
     // the A0 population; tokenless and NOT gated is a grandfathered user still on the shared key.
-    return (await isServerSyncGated()) ? 'gated' : 'legacy';
+    // 🔴 ASK THE REASON, not the boolean. `isServerSyncGated()` is true only for 'login_first', so
+    // a 'token_lost' install fell through to 'legacy' — and 'legacy' is supposed to mean "never
+    // authenticated, syncing on the shared key by design". Folding a WITHHELD install into it
+    // reports the exact opposite of that install's state, and it pollutes the one bucket used to
+    // size the never-authenticated population (#772/#775). Splitting it out is additive: 'gated'
+    // and 'legacy' keep their meanings, so series recorded before this build stay comparable.
+    const reason = await serverSyncWithheldReason();
+    if (reason === 'login_first') return 'gated';
+    if (reason === 'token_lost') return 'token_lost';
+    return 'legacy';
   } catch {
     return 'unknown';
   }

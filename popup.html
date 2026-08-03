@@ -72,11 +72,32 @@
        Safe by construction: `* { margin: 0; box-sizing: border-box }` above means the body has no
        margin to disturb and 340px is the OUTER width, so nothing reflows. */
     body { width: 340px; min-height: 600px; margin-inline: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: var(--bg-body); }
-    /* Centring alone leaves a 340px ribbon stranded in a wide window. Past the popup's own width,
-       give it an edge so it reads as a deliberate surface. The query CANNOT match inside the real
-       popup — that viewport is 340px — so this is strictly tab/side-panel dressing. */
-    @media (min-width: 520px) {
-      body { margin-block: 24px; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }
+    /* Everything below is side-panel/full-tab dressing: none of these queries CAN match inside
+       the real popup, whose viewport is the 340px above.
+       Centring alone leaves that 340px ribbon stranded in a wide window while the content it
+       ellipsises (.ov-name, .gauge-label, .status-text) and the charts stay cramped — a user who
+       drags the panel wider is asking to see more, so let the column take the room. */
+    @media (min-width: 380px) {
+      body { width: 100%; max-width: 560px; }
+    }
+    /* The cap is the point where growth stops paying: .info-row is `justify-content:
+       space-between`, so past ~560px its 10px label and its value drift to opposite edges and
+       pairing them costs a horizontal saccade. The column deliberately stops before the panel does.
+       Overview is the exception — a list of repeating equal cards is the one region where columns
+       beat a longer scroll — so it gets a wider cap. The grid itself lives with .overview-section
+       below, which has to come after that rule to win. The detail view stays single-column on
+       purpose: its order (prediction headline -> gauges -> charts) IS the reading order. */
+    @media (min-width: 640px) {
+      body.ct-view-overview { max-width: 720px; }
+    }
+    /* Once the column has hit its cap it reads as a stranded ribbon again; give it an edge so it
+       reads as a deliberate surface. Two thresholds because the two views cap at different widths
+       — the chrome must only appear when there are real gutters to justify it. */
+    @media (min-width: 600px) {
+      body:not(.ct-view-overview) { margin-block: 24px; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }
+    }
+    @media (min-width: 760px) {
+      body.ct-view-overview { margin-block: 24px; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }
     }
     /* Ad/promo banners use color:inherit; give the container an adaptive text color so text stays readable in dark mode (else it falls back to UA-default black). */
     #ct-popup-promos { color: var(--text-primary); }
@@ -161,6 +182,17 @@
     body.ct-view-overview #org-chips { display: none !important; }
 
     .overview-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+    /* Wide side panel only (see the body caps up top; the popup's viewport is 340px, so this
+       cannot match there). Repeating equal cards are the one region where columns beat a longer
+       scroll. auto-fill/minmax rather than a fixed count: a second column appears only once each
+       card still clears 320px, so the grid can never make a card narrower than the popup it
+       replaces. MUST stay after the display:flex rule above — same specificity, so source order
+       is what decides, and the flex fallback would otherwise win inside the query too. */
+    @media (min-width: 640px) {
+      .overview-section { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); align-items: start; }
+      /* Full-bleed header rows; everything else is a card and takes one cell. */
+      .overview-section > .ov-hint, .overview-section > .ov-title { grid-column: 1 / -1; }
+    }
     .ov-title { font-size: 11px; font-weight: 700; color: var(--text-secondary); padding: 0 2px; }
     .ov-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; transition: border-color .15s, background .15s; }
     .ov-card:hover { background: var(--bg-hover); border-color: var(--accent); }

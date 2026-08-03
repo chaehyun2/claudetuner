@@ -2,14 +2,25 @@
 // Extracted from popup.js (refactor/popup-prediction). Leaf domain: depends only on shared state
 // (ui/state.js) and pure helpers (ui/util.js); i18n `t` is a global from i18n.js.
 import { state, _filteredHistory } from './state.js';
-import { calcPaceTier, _isDark, formatResetAbsolute } from './util.js';
+import { _isDark, formatResetAbsolute } from './util.js';
 import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
 import { diurnalProject7dAdaptive } from './diurnal.js';
 
-// Projected-at-reset threshold (%) at/above which a window counts as "near the cap" and
-// earns the amber-red warning even when it never cleanly crosses 100% (the discount-only
-// clamp deliberately holds such forecasts just under 100). Shared with the overview cards.
-export const NEAR_LIMIT_PCT = 99;
+// The tier ladder and every verdict derived from it live in ui/usage-tiers.js — the SoT shared
+// with the dashboard through a generated twin. Re-exported here so existing importers (and the
+// popup renderers below) keep one obvious place to reach for them.
+import {
+  PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap, windowAverageProjection,
+  projectFlatWindow, FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
+  etaWithinWindow, pickWorstWindow,
+} from './usage-tiers.js';
+export {
+  PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap,
+  etaWithinWindow, pickWorstWindow, projectFlatWindow, windowAverageProjection,
+  FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
+};
 
 // === 7d projection memo =====================================================================
 // The `d7` branch of calcPredictedAtReset rebuilds the user's PERSONAL diurnal + weekly curve
@@ -134,19 +145,18 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
     if (cacheKey && dp.hoursDiff >= 1) _predCacheSet(cacheKey, { ...result }, now);
     return result;
   } else {
-    // 5h: rate based on local history
-    const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
-    let valid = [];
-    for (const lb of lookbacks) {
-      valid = history.filter((p) => p[key] !== null && (lb === Infinity || p.t > now - lb));
-      if (valid.length >= 2) break;
-    }
-    if (valid.length < 2) return null;
-    const first = valid[0];
-    const last = valid[valid.length - 1];
-    hoursDiff = (last.t - first.t) / 3600000;
-    if (hoursDiff < 0.5) return null;
-    rate = (last[key] - first[key]) / hoursDiff;
+    // 5h: the SHARED flat projection (ui/usage-tiers.js). The dashboard runs the same function on
+    // its own samples, so the two surfaces can no longer land in different tiers because one of
+    // them measured the rate differently. Only the sample mapping is per-runtime — here, local
+    // history; there, the snapshot rows.
+    const flat = projectFlatWindow({
+      samples: history.map((p) => ({ tMs: p.t, util: p[key], resetKey: key === 'h5' ? p.r5 : p.r7 })),
+      currentUtil,
+      hoursToReset,
+      nowMs: now,
+    });
+    if (!flat) return null;
+    return { rate: flat.rate, predicted: flat.predicted, hoursToReset, hoursDiff: flat.hoursDiff };
   }
 
   const predicted = currentUtil + (rate * hoursToReset);
@@ -181,23 +191,48 @@ export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d) {
   return true;
 }
 
-// Per-gauge red warning line under a gauge (the projected-at-reset % itself is shown by the
-// bar fill, so we never repeat it as text). Independent of the stable/rising badge split:
-//   • projected to hit 100% before reset (limitTimeStr set) → exact "한도 도달 예상 {time}"
-//   • else projected NEAR the cap (>= NEAR_LIMIT_PCT) and still rising → "한도 근접 (~X%)", no
-//     time (the discount-clamped forecast has no honest hit time here)
-//   • otherwise → hidden
-function _renderWarnLine(lineEl, predicted, rate, currentUtil, limitTimeStr) {
+// Per-gauge forecast line, graded by the ladder above. The >= 100% case never reaches here —
+// the wait block owns it (it has an honest hit time to show; this line does not).
+//   • PRESSING (>= 95%)      → red "⚠️ 리셋 시 한도 근접 (~X%)"
+//   • WARMING  (75-95%)      → amber "📈 리셋 시 ~X% 예상", the quiet informational step
+//   • below that, or flat/falling → hidden (a calm window earns silence, not a green line)
+// The same line, but from the DEGRADED projection — used where there is no measured forecast yet
+// and the gauge is showing its "collecting" badge.
+//
+// Why the gauge speaks at all here: the banner and the chart already act on this fallback, so a
+// gauge that stays silent is not being careful, it is disagreeing with the rest of the popup about
+// whether anything can be said. The split is deliberate — the coarse estimate drives WORDS, the
+// measured forecast drives PIXELS. No marker, no fill, no "▸ X%" badge, because those imply a
+// precision a window average does not have; a line that names a level does not.
+//
+// It always uses `predict_at_reset` (never "한도 근접"), clamped for display: the window average
+// can read 300% on a fast start, and "리셋 시 한도 근접 (~300%)" would be both wrong and alarming.
+// Severity rides on the colour instead. Only WARMING and above speak; below that, silence.
+function _renderDegradedLine(lineEl, currentUtil, key, resetsAt) {
   if (!lineEl) return;
-  let warnHtml = '';
-  if (limitTimeStr) {
-    warnHtml = '⚠️ ' + t('predict_limit_at', limitTimeStr);
-  } else if (predicted >= NEAR_LIMIT_PCT && rate > 0 && currentUtil < 100) {
-    warnHtml = '⚠️ ' + t('predict_near_limit', Math.floor(predicted));
+  const degraded = windowAverageProjection(currentUtil, key, resetsAt);
+  const tier = projectionTier(degraded);
+  if (!tier || tierSeverity(tier) < tierSeverity(PROJECTION_TIERS.find((x) => x.id === 'warming'))) {
+    lineEl.style.display = 'none';
+    return;
   }
-  if (warnHtml) {
+  const icon = isAlertTier(degraded) ? '⚠️ ' : '📈 ';
+  const html = icon + t('predict_at_reset', Math.round(Math.min(degraded, 100)));
+  lineEl.style.display = 'block';
+  lineEl.innerHTML = `<div class="gpl-main" style="color:${tierColor(degraded)}">${html}</div>`;
+}
+
+function _renderProjectionLine(lineEl, predicted, rate, currentUtil) {
+  if (!lineEl) return;
+  let html = '';
+  if (isNearLimit(predicted, rate, currentUtil)) {
+    html = '⚠️ ' + t('predict_near_limit', Math.floor(predicted));
+  } else if (isRisingNotice(predicted, rate, currentUtil)) {
+    html = '📈 ' + t('predict_at_reset', Math.round(predicted));
+  }
+  if (html) {
     lineEl.style.display = 'block';
-    lineEl.innerHTML = `<div class="gpl-main" style="color:#ef4444">${warnHtml}</div>`;
+    lineEl.innerHTML = `<div class="gpl-main" style="color:${tierColor(predicted)}">${html}</div>`;
   } else {
     lineEl.style.display = 'none';
   }
@@ -252,6 +287,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // the teaser conveys the (unique) upcoming value and a reason to come back.
   if (!history || history.length < 3) {
     showCollecting();
+    _renderDegradedLine(lineEl, currentUtil, key, resetsAt);
     // Only after history has actually loaded, else the teaser flashes on every
     // popup open before the async history fetch resolves.
     if (id === '5h' && state.historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
@@ -262,6 +298,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
   if (!pred) {
     showCollecting();
+    _renderDegradedLine(lineEl, currentUtil, key, resetsAt);
     if (id === '5h' && state.historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
     return;
   }
@@ -273,7 +310,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // Estimated time to reach 100% (exact hit only) — computed BEFORE the "stable" gate because
   // the red warning depends on the LEVEL, not the growth rate: a window parked at 99% with a
   // trickle of growth must still warn. Same MM/DD(day) format as the reset line (formatResetAbsolute).
-  const atRisk = predicted >= 100 && rate > 0 && currentUtil < 100;
+  const atRisk = isAtRiskOfCap(predicted, rate, currentUtil);
   let limitTimeStr = '';
   if (atRisk) {
     // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
@@ -286,16 +323,18 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     renderGaugeWait(id, resetsAt, hoursTo100, hoursToReset, currentUtil !== null);
     if (lineEl) lineEl.style.display = 'none';
   } else {
-    // Not projected to hit the cap: keep the plain reset line rendered earlier and
-    // let the warn line handle the "near limit (~X%)" case on its own.
-    _renderWarnLine(lineEl, predicted, rate, currentUtil, '');
+    // Not projected to hit the cap: keep the plain reset line rendered earlier and let the
+    // graded forecast line speak for the near-limit / warming bands on its own.
+    _renderProjectionLine(lineEl, predicted, rate, currentUtil);
   }
   // Headline strip is now the day-1 "collecting" teaser only; clear it once we have a forecast.
   if (id === '5h') setPredictHeadline(null);
 
   // Minimal change or decreasing trend: show the "stable" badge. The level-based warning line
-  // above still stands, so only the marker/fill + header badge switch to the stable look.
-  if (rate <= 0 || predicted - currentUtil < 3) {
+  // above still stands, so only the marker/fill + header badge switch to the stable look —
+  // unless that line is UP, in which case isStableLook() withholds the green badge rather than
+  // contradict it, and the normal rising badge below renders instead.
+  if (isStableLook(predicted, rate, currentUtil)) {
     if (marker) marker.style.display = 'none';
     if (label) label.style.display = 'none';
     if (fillEl) fillEl.style.display = 'none';
@@ -310,15 +349,16 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     return;
   }
 
-  // Colors
-  const color = predicted >= 80 ? '#ef4444' : predicted >= 50 ? '#f59e0b' : '#9ca3af';
-  const predictText = predicted >= 100 ? '100%' : `${Math.round(predicted)}%`;
+  // Colors — from the ladder, so the badge, the fill and the line below always agree.
+  const color = tierColor(predicted);
+  const loud = isAlertTier(predicted); // PRESSING+ gets the solid treatment, notes stay tinted
+  const predictText = `${Math.round(clampedPos)}%`; // a bar cannot read past 100 — a clamp, not a tier
 
   // (A) Header inline prediction: "▸ 78%" or "▸ 4/12 2PM" badge
   if (inlineEl) {
     inlineEl.style.display = 'inline';
-    inlineEl.style.color = predicted >= 80 ? '#fff' : color;
-    inlineEl.style.background = predicted >= 80 ? color : `${color}${_isDark() ? '30' : '18'}`;
+    inlineEl.style.color = loud ? '#fff' : color;
+    inlineEl.style.background = loud ? color : `${color}${_isDark() ? '30' : '18'}`;
     inlineEl.textContent = `\u25b8 ${predictText}`;
     const obsTime = hoursDiff < 1 ? `${Math.round(hoursDiff * 60)}${t('min')}` : `${hoursDiff.toFixed(1)}${t('hours_short')}`;
     const resetTime2 = hoursToReset < 1 ? `${Math.round(hoursToReset * 60)}${t('min')}` : `${hoursToReset.toFixed(1)}${t('hours_short')}`;
@@ -350,28 +390,62 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   }
 }
 
+// THE verdict for one window, WITH the numbers behind it: the measured forecast when there is
+// one, the degraded projection when there is not, and null only when even that is impossible.
+// Returns { tier, predicted, rate, hoursTo100, measured } — a caller that DRAWS the projection and one
+// that LABELS it must not end up on different values, which is what happens when each derives
+// its own. `rate` is null on the degraded path (there is no measured rate to report).
+export function windowForecast(currentUtil, key, resetsAt, history) {
+  if (currentUtil == null || !resetsAt) return null;
+  // Already at the cap: there is no forecast past 100, and no pace verdict is true of someone
+  // who is blocked and waiting. AT_LIMIT is its own rung for exactly this — the old code took
+  // the loudest PACE rung here and told a stopped user they were "한도를 크게 넘는 페이스".
+  if (currentUtil >= 100) return { tier: AT_LIMIT_TIER, predicted: currentUtil, rate: null, hoursTo100: null, measured: false };
+  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
+  if (pred) {
+    return {
+      tier: projectionTier(pred.predicted), predicted: pred.predicted, rate: pred.rate,
+      hoursTo100: pred.hoursTo100 != null ? pred.hoursTo100 : null, measured: true,
+    };
+  }
+  const degraded = windowAverageProjection(currentUtil, key, resetsAt);
+  const tier = projectionTier(degraded);
+  return tier ? { tier, predicted: degraded, rate: null, hoursTo100: null, measured: false } : null;
+}
+
+// Tier-only convenience for callers that render nothing but the verdict.
+export function windowTier(currentUtil, key, resetsAt, history) {
+  return windowForecast(currentUtil, key, resetsAt, history)?.tier ?? null;
+}
+
+
 // === Status banner (6-tier pace) ===
+// Reads the SAME forecast as the gauges (calcPredictedAtReset — recent-rate for 5h, the
+// diurnal/weekly-aware projector for 7d), not the old window-average pace. Those two disagree
+// by a lot on a front-loaded window: 34% used 1h25m into a 5h window is "97% at reset" by
+// measured rate and "120%" by window average, and the popup used to show BOTH at once — a
+// silent gauge above a red "크게 초과" banner. One forecast, one verdict.
 export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) {
   const banner = document.getElementById('status-banner');
   if (!banner) return;
   if (util5h === null && util7d === null) { banner.classList.add('hidden'); return; }
 
-  const pace5h = calcPaceTier(util5h, resets5h, 5 * 3600);
-  const pace7d = calcPaceTier(util7d, resets7d, 7 * 24 * 3600);
-
-  const severity = { comfortable: 0, ontrack: 1, warming: 2, pressing: 3, critical: 4, runaway: 5 };
-  let tier, worstWindow;
-  if (pace5h && pace7d) {
-    if (severity[pace5h.id] >= severity[pace7d.id]) {
-      tier = pace5h; worstWindow = t('win_5h');
-    } else {
-      tier = pace7d; worstWindow = t('win_7d');
-    }
-  } else if (pace5h) {
-    tier = pace5h; worstWindow = t('win_5h');
-  } else if (pace7d) {
-    tier = pace7d; worstWindow = t('win_7d');
-  }
+  // Same picker as the dashboard banner (ui/usage-tiers.js): worst tier wins, ties go to the
+  // window that gets there sooner. This used to be hand-rolled here with a `>=` that always
+  // preferred 5h on a tie — a different rule from the one the shared helper documents, which is
+  // how 'both banners agree' quietly stops being true.
+  const candidate = (util, key, resetsAt, label) => {
+    const fc = windowForecast(util, key, resetsAt, history);
+    if (!fc) return null;
+    const hoursToReset = resetsAt ? (new Date(resetsAt).getTime() - Date.now()) / 3600000 : null;
+    return { tier: fc.tier, eta: etaWithinWindow(fc.hoursTo100, hoursToReset), label };
+  };
+  const win = pickWorstWindow([
+    candidate(util5h, 'h5', resets5h, t('win_5h')),
+    candidate(util7d, 'd7', resets7d, t('win_7d')),
+  ]);
+  let tier = win ? win.tier : undefined;
+  const worstWindow = win ? win.label : undefined;
 
   let text;
   if (tier) {

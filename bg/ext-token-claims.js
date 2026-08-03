@@ -94,3 +94,18 @@ export function extTokenEmail(token) {
   const email = payload.email;
   return typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
 }
+
+/**
+ * WHICH login minted this token — 'ext_google' | 'ext_email' | 'dash_session' | 'api_key', or
+ * undefined for a token predating the claim (worker utils/ext-token.ts, mintSrcFor()).
+ *
+ * 🔴 `scope === 'full'` is NOT by itself proof that a human logged in. The server's refresh rule
+ * is `mintScope = api_key ? 'ingest' : incomingScope === 'ingest' ? 'ingest' : 'full'`
+ * (snapshots.ts), so a LEGACY scope-less token — including one a shared-key TOFU minted before
+ * scopes existed — refreshes into `full` while `src` stays absent. Reading scope alone therefore
+ * marks grandfathered users who never logged in, which is the fail-CLOSED direction that would
+ * withhold their sync. Only these three sources are positive evidence of a login. (Codex.)
+ */
+export function extTokenSrc(token) {
+  return decodeJwtPayload(token)?.src;
+}

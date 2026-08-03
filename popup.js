@@ -3,7 +3,7 @@ import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
-import { isServerSyncGated } from './bg/storage.js';
+import { isServerSyncGated, serverSyncWithheldReason } from './bg/storage.js';
 import { PROVIDER_LABELS } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
@@ -11,6 +11,11 @@ import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selecto
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
+
+// How long the width has to hold still before the detail charts re-rasterise to it. Long enough
+// that dragging the side panel divider settles into a single redraw, short enough that the
+// stretched frame is not read as the final rendering.
+const RESIZE_REDRAW_MS = 120;
 
 // True once the storage.onChanged listener has reported an ext_token, which makes state.syncEmail
 // authoritative. The startup storage read then leaves it alone — the two are independent async
@@ -25,6 +30,31 @@ let _syncEmailLive = false;
 // (/api/auth/link-claude) so it can't recur. Also covers genuine provider-only
 // (ChatGPT/Gemini) independent accounts whose token expired.
 let _reauthRenderSeq = 0;
+
+// ── CTA exposure telemetry (#772/#759) ────────────────────────────────────────────────────────
+// THE QUESTION THIS ANSWERS. Every recovery route we ship is a login CTA in this popup, and until
+// now we could only measure that we DECIDED to render one — not that a human ever had it in front
+// of them. Those differ by a lot here: the icon is unpinned on ~57% of installs, so a badge alone
+// reaches nobody, and 28-day popup reach is ~40%. Withholding sync from an install whose CTA is
+// never seen is a silent block, which is the failure this whole area keeps producing.
+//
+// 🔴 FIRED WHERE THE ELEMENT IS ACTUALLY UN-HIDDEN, not where the decision is computed. A render
+// can decide "show" and still be superseded before it touches the DOM (#789/#791), and counting
+// decisions would report exposure that never happened.
+//
+// 🔴 ONCE PER POPUP OPEN, not per render. This popup re-renders on storage changes and on a
+// language switch, so per-render counting would inflate the numerator against `popup_open` — the
+// denominator this metric exists to be divided by — and the ratio would read above 100%.
+const _ctaShownSent = new Set();
+function noteCtaShown(kind, reason) {
+  if (_ctaShownSent.has(kind)) return;
+  _ctaShownSent.add(kind);
+  try {
+    // Classic global from analytics.js (loads before this module). Absent in tests//older builds.
+    if (typeof sendGAEvent === 'function') sendGAEvent('login_cta_shown', { kind, reason });
+  } catch (_) { /* telemetry must never break the popup */ }
+}
+
 async function renderReauthWidget() {
   const widget = document.getElementById('reauth-widget');
   if (!widget) return;
@@ -55,7 +85,11 @@ async function renderReauthWidget() {
   // flag is gated too). The result: a tokenless gated install with `claudeLinkDone` saw NEITHER
   // recovery UI — this widget hid because it thought "not gated", and renderLoginCta hides
   // whenever `independentAccount?.email` exists. Blocked from syncing, with no way back. (Codex.)
-  const gated = await isServerSyncGated();
+  // 🔴 The REASON, not the boolean: `isServerSyncGated()` is true only for 'login_first', so a
+  // 'token_lost' install would be withheld from syncing with NO recovery UI at all — this widget
+  // hides on `claudeLinkDone && !gated`, and renderLoginCta hides whenever independentAccount
+  // exists. Silent data loss from the user's side. (Codex DEPLOY-BLOCKER.)
+  const gated = !!(await serverSyncWithheldReason());
   // Superseded while awaiting → a newer render holds the truth. Bail BEFORE touching the DOM.
   if (seq !== _reauthRenderSeq) return;
   if (!independentAccount?.email || extToken || (claudeLinkDone && !gated)) { widget.classList.add('hidden'); return; }
@@ -83,6 +117,8 @@ async function renderReauthWidget() {
   });
   document.getElementById('reauth-or').textContent = t('login_cta_or') || 'or use an email code';
   widget.classList.remove('hidden');
+  // `gated` already carries the reason the send path used; report it so the two can be joined.
+  noteCtaShown('reauth', gated ? 'withheld' : 'token_missing');
 
   // Same shape as the login CTA: ONE send path reached from the initial button and from the
   // "send a new code" link on the verify step. Without the second entry point the rejection copy
@@ -336,6 +372,8 @@ async function renderLoginCta() {
   // reminder (like the permission card) so verify is always one tap away, just small.
   if (!blocked && (!showLoginPrompt || extToken || independentAccount?.email)) { widget.classList.add('hidden'); return; }
   widget.classList.remove('hidden');
+  // WHY the CTA is up, so exposure can be split by cause rather than reported as one number.
+  const _ctaReason = scopeBlocked ? 'scope_blocked' : authIsBlocked ? 'auth_blocked' : 'login_first';
 
   const full = document.getElementById('login-cta-full');
   const mini = document.getElementById('login-cta-mini');
@@ -370,10 +408,15 @@ async function renderLoginCta() {
       miniBtn.dataset.bound = '1';
       miniBtn.addEventListener('click', async () => { await chrome.storage.local.set({ loginCtaCollapsed: false }); renderLoginCta(); });
     }
+    // A SEPARATE kind, not folded into 'login_cta'. The collapsed reminder is one line of text —
+    // treating it as the same exposure as the full card would report the CTA as "seen" for users
+    // who only ever saw a mini nudge, which is the difference this metric exists to measure.
+    noteCtaShown('login_cta_mini', _ctaReason);
     return;
   }
   mini.style.display = 'none';
   full.classList.remove('hidden');
+  noteCtaShown('login_cta', _ctaReason);
 
   const emailInput = document.getElementById('login-cta-email');
   const codeInput = document.getElementById('login-cta-code');
@@ -882,6 +925,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hist.length >= 2) drawCharts(hist, state.currentPlan, state.currentSnapshot);
     renderDetailBanner(hist);
   }
+
+  // The three detail charts allocate their canvas backing store from clientWidth at DRAW time
+  // (ui/charts.js), so a width change after the draw stretches the old pixels instead of
+  // re-rasterising. That never mattered while the body was a fixed 340px column: nothing could
+  // change our width. It does now — popup.html lets the column grow with a dragged-out side
+  // panel — and without this the charts stay blurry until some unrelated event redraws them.
+  //
+  // Trailing debounce, not rAF: a drag fires resize continuously and each redraw costs a full
+  // history scan (the same cost that made collection feel sluggish, see queueStatusRender
+  // below), so one redraw when the drag settles beats sixty on the way there.
+  //
+  // Routed through selectOrg() rather than redrawDetail() whenever an org is selected, because
+  // redrawDetail() draws with state.currentPlan/currentSnapshot — and those track the PRIMARY
+  // Claude org, not the org on screen (ui/org-selector.js builds a per-org snapshot instead, which
+  // is what carries `provider` into the quota scale and the guide-line tiers). Its two existing
+  // callers get away with it only because both are guarded by a
+  // `selectedOrgId === snapshot.claude_org_uuid` check; an unguarded call here would repaint a
+  // ChatGPT/Gemini org's charts on Claude's plan ladder. selectOrg() is storage-read plus render,
+  // no network, so once per settled resize is cheap. Resizing on the overview needs nothing:
+  // returning to the detail view goes through enterDetail() -> selectOrg() anyway.
+  let _resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => {
+      if (isDetailHidden()) return;
+      if (state.selectedOrgId) selectOrg(state.selectedOrgId);
+      else redrawDetail();
+    }, RESIZE_REDRAW_MS);
+  });
 
   // Re-render everything that depends on lastStatus, coalesced to one pass per frame.
   //
