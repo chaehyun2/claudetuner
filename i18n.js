@@ -502,12 +502,23 @@ const TRANSLATIONS = {
     'confirm_upgrade_title': '업그레이드를 진행하시겠습니까?',
     'confirm_downgrade_title': '다운그레이드를 진행하시겠습니까?',
     'confirm_plan_change': '{0} → {1}',
-    'confirm_timing_immediate': '즉시 적용됩니다.',
-    'confirm_timing_renewal': '다음 갱신일부터 적용됩니다.',
-    'confirm_upgrade_btn': '업그레이드 확인',
+    // Stated plainly, not hedged. A mid-cycle upgrade to a paid tier bills prorated on the spot —
+    // that is the ordinary case, and inquiry #182 is a live instance of it. "결제될 수 있습니다"
+    // describes the exception and reads as boilerplate on the ordinary path, which is exactly the
+    // reading that let #182 happen. A warning has to be about what normally happens.
+    'confirm_timing_immediate': '즉시 적용되며, 지금 바로 결제됩니다.',
+    // The mirror of the line above, for the same reason: a downgrade is scheduled to the renewal
+    // date, so "not charged now" is the ordinary case and the user deserves to be told it.
+    'confirm_timing_renewal': '다음 갱신일부터 적용되며, 지금 결제되지 않습니다.',
+    'confirm_upgrade_btn': '업그레이드 · 결제',
     'confirm_downgrade_btn': '다운그레이드 확인',
     'confirm_cancel': '취소',
+    // Downgrade only. An upgrade takes money on the spot, so it gets its own warning below —
+    // sharing one line meant the modal never said "결제" on the ONE path where money moves.
     'confirm_warning': '⚠ 버튼을 클릭하시면 실제 요금제가 변경됩니다.',
+    // Names Anthropic as the payee on purpose: inquiry #182 read an Anthropic charge as a
+    // Claude Tuner one, and we hold no card for these users (we never touch this payment).
+    'confirm_warning_upgrade': '⚠ 확인을 누르면 요금제가 즉시 변경되고 Anthropic에서 결제가 청구됩니다. 결제와 환불은 Anthropic 정책을 따르며, 되돌리기 어려울 수 있습니다.',
     // Independent account
     'independent_signed_in_as': '로그인 계정:',
     'sign_out': '로그아웃',
@@ -996,12 +1007,15 @@ const TRANSLATIONS = {
     'confirm_upgrade_title': 'Confirm upgrade?',
     'confirm_downgrade_title': 'Confirm downgrade?',
     'confirm_plan_change': '{0} → {1}',
-    'confirm_timing_immediate': 'Takes effect immediately.',
-    'confirm_timing_renewal': 'Takes effect on your next renewal date.',
-    'confirm_upgrade_btn': 'Confirm Upgrade',
+    'confirm_timing_immediate': 'Takes effect immediately and you are charged now.',
+    'confirm_timing_renewal': 'Takes effect on your next renewal date. You are not charged now.',
+    'confirm_upgrade_btn': 'Upgrade & pay',
     'confirm_downgrade_btn': 'Confirm Downgrade',
     'confirm_cancel': 'Cancel',
+    // Downgrade only — see the ko block for why the upgrade warning is separate, and why both
+    // timing lines state the ordinary billing outcome instead of hedging it.
     'confirm_warning': '⚠ Clicking this button will change your actual plan.',
+    'confirm_warning_upgrade': "⚠ Confirming changes your plan immediately and Anthropic charges you right away. Billing and refunds follow Anthropic's policy and may be hard to undo.",
     // Independent account
     'independent_signed_in_as': 'Signed in as',
     'sign_out': 'Sign out',

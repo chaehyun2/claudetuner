@@ -3,9 +3,10 @@ import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
+import { pinnedState } from './bg/analytics.js';
 import { isServerSyncGated, serverSyncWithheldReason } from './bg/storage.js';
 import { PROVIDER_LABELS } from './bg/constants.js';
-import { dashboardUrl, refreshDashboardLinks } from './ui/util.js';
+import { dashboardUrl, refreshDashboardLinks, _isDark } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
@@ -710,7 +711,15 @@ function updateThemeBtn(mode) {
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
   initPopupTheme();
-  sendGAEvent('popup_open');
+  // 🔴 `pinned` rides THIS event so the two can be crossed for one install. They are already
+  // reported separately (`extension_loaded` carries pinned, `popup_open` does not), and that shape
+  // cannot answer "what share of installs are reachable at all" — GA has no way to join two events
+  // to the same user, so the union of "pinned OR opens the popup" could only be bounded
+  // (measured 2026-08-03: somewhere in 46–52%, which is too wide to decide anything on).
+  // Carrying it here collapses that to a measurement.
+  // 🔑 IMPORTED, not re-derived: pinnedState() owns the Chrome-91 'unknown' case, and folding a
+  // missing API into 'no' would invent unpinned users (#798).
+  sendGAEvent('popup_open', { pinned: await pinnedState() });
 
   // Request immediate local-only refresh if data is stale (>1 min)
   chrome.runtime.sendMessage({ type: 'POPUP_OPENED' }).catch(() => {});
@@ -1463,7 +1472,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       document.getElementById('src-modal-timing').textContent = t(isUpgrade ? 'confirm_timing_immediate' : 'confirm_timing_renewal');
-      document.getElementById('src-modal-warning').textContent = t('confirm_warning');
+      // Direction-specific, because only ONE of these two moves money. The shared line said the
+      // plan would change but never that a card would be charged, which is what inquiry #182 hit:
+      // an upgrade bills on the spot and is hard to unwind, a downgrade waits for the renewal and
+      // bills nothing now. Red for the charging one, amber for the other — the severity IS the
+      // difference between them, so it cannot be a constant.
+      // Dark mode takes the lighter red (#dc2626 on the dark card is ~4:1 — the one line that must
+      // not be skimmed should not be the hardest to read), matching how popup.html pairs its reds.
+      const warnEl = document.getElementById('src-modal-warning');
+      warnEl.textContent = t(isUpgrade ? 'confirm_warning_upgrade' : 'confirm_warning');
+      warnEl.style.color = isUpgrade ? (_isDark() ? '#fca5a5' : '#dc2626') : '#d97706';
 
       const confirmBtn = document.getElementById('src-modal-confirm');
       confirmBtn.textContent = t(isUpgrade ? 'confirm_upgrade_btn' : 'confirm_downgrade_btn');
