@@ -491,9 +491,18 @@ const TRANSLATIONS = {
     'notify_collect_fail': '수집 중단 알림',
     'notify_collect_fail_desc': '세션 만료 등으로 수집이 중단되면 알림',
     'notify_collect_fail_ex': '"Claude.ai 세션이 만료되었습니다. 다시 로그인해주세요."',
-    'notify_authblock_followup': '인증 안내 반복',
-    'notify_authblock_followup_desc': '서버 저장이 막힌 상태가 이어지면 최대 3번까지 더 안내 (끄면 처음 1회만)',
-    'notify_authblock_followup_ex': '"지난 10일치 분석을 놓치고 있습니다"',
+    // The key still says `followup` because it is the STORAGE key too, and renaming it would reset
+    // everyone who turned it off back to the default `true` (see bg/notifications.js). The setting
+    // now governs every sync-blocked notification, the first one included, so the label says so.
+    // The parenthetical matters: turning this off silences the warning, it does not restore sync —
+    // without it someone mutes this and later asks why months of history are missing.
+    // Says "인증이 필요해", not "이메일 인증이 없어": the same `login_required` code is also what
+    // API_KEY_INGEST_ENABLED / INSTALL_BIND_MODE emit when they move to enforce, and those blocks
+    // are not about an unverified email. The required ACTION is the same in every case, so the
+    // description names that instead of one particular cause (Codex).
+    'notify_authblock_followup': '서버 동기화 중단 알림',
+    'notify_authblock_followup_desc': '인증이 필요해 서버 저장이 멈췄을 때 알립니다 (끄면 알리지 않을 뿐, 동기화는 계속 멈춰 있습니다)',
+    'notify_authblock_followup_ex': '"사용량이 이 브라우저에만 쌓이고 있습니다"',
     'opt_theme': '테마',
     'theme_light': '라이트',
     'theme_dark': '다크',
@@ -996,9 +1005,10 @@ const TRANSLATIONS = {
     'notify_collect_fail': 'Collection Stopped',
     'notify_collect_fail_desc': 'Alert when collection stops due to session expiry etc.',
     'notify_collect_fail_ex': '"Session expired. Please sign in to Claude.ai again."',
-    'notify_authblock_followup': 'Repeat Sign-in Reminders',
-    'notify_authblock_followup_desc': 'Up to 3 more reminders while your usage cannot reach the server (off = first one only)',
-    'notify_authblock_followup_ex': '"You\'re missing 10 days of insights"',
+    // See the ko block for why the key keeps saying `followup`.
+    'notify_authblock_followup': 'Sync Stopped Alerts',
+    'notify_authblock_followup_desc': 'Alert when server sync stops because verification is required (off = no alert; sync stays stopped)',
+    'notify_authblock_followup_ex': '"Your usage is only being saved on this browser"',
     'opt_theme': 'Theme',
     'theme_light': 'Light',
     'theme_dark': 'Dark',

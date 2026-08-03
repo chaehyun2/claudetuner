@@ -5,7 +5,7 @@ import {
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   LOCAL_ACTIVE_INTERVAL_MINUTES, LOCAL_BACKGROUND_INTERVAL_MINUTES,
   VISIBILITY_THROTTLE_MS, POPUP_COLLECT_THROTTLE_MS,
-  NOTIF_ID_OPTIMIZE, NOTIF_ID_ALERT,
+  NOTIF_ID_ALERT,
   DEFAULT_SERVER_URL, SITE_URL,
   SEND_MIN_INTERVAL_MS,
   PROVIDER_LABELS,
@@ -2051,16 +2051,15 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
     chrome.notifications.clear(notifId);
     return;
   }
-  // Existing recommendation notification
-  if (notifId === NOTIF_ID_OPTIMIZE && btnIdx === 0) {
-    const status = await getLastStatus();
-    const rec = status?.recommendation;
-    if (rec?.type) {
-      await executePlanChange(rec);
-    }
-  } else if (notifId === NOTIF_ID_OPTIMIZE && btnIdx === 1) {
-    await dismissRecommendationServer();
-  }
+  // NOTIF_ID_OPTIMIZE deliberately has NO button handler. notifyPlanChange() (bg/plan.js) creates
+  // that notification without `buttons`, so Chrome can never fire onButtonClicked for it — the
+  // handler that used to live here (btnIdx 0 -> executePlanChange, btnIdx 1 -> dismiss) was
+  // unreachable code holding a door open: adding a single button to that notification would have
+  // silently turned it into a one-click plan upgrade, and an upgrade is billed by Anthropic on the
+  // spot (inquiry #182). A RECOMMENDATION-driven plan change must go through the popup's
+  // confirmation modal, the only surface that states the charge. (The plan-order branch above is a
+  // different case and does still apply directly from its button — deliberate, tracked in #820.)
+  // Do not reintroduce a button handler here.
   // Settings button on recurring notifications (usage alert, reset, weekly report)
   if (btnIdx === 0 && (notifId.startsWith(NOTIF_ID_ALERT) || notifId.startsWith('reset-soon-') || notifId.startsWith('reset-done-') || notifId.startsWith('weekly-report-'))) {
     let hash = 'notifications';

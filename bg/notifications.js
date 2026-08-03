@@ -192,6 +192,18 @@ export async function notifyAuthBlockedOnce() {
   ]);
   if (authBlockedNotifiedAt) return;
   if (authBlocked !== true) return; // recovered between the caller's read and now
+  // The user's opt-out covers THIS notification too, not just the follow-up ladder. Until now only
+  // rungs 2-4 were gated, so someone who turned every toggle off still got this one — and since the
+  // episode marker is cleared on recovery (background.js), a block that keeps recurring kept
+  // re-announcing itself with no way to stop it. One uninstall said exactly that ("알림이 너무 많이
+  // 와요") from an account with all eight toggles already off.
+  // 🔴 The storage key still says `Followup` while the setting now governs the whole feature. That
+  // mismatch is deliberate: renaming the key would reset it to the default `true` for everyone who
+  // had deliberately turned it OFF, i.e. would start notifying exactly the people who asked us not
+  // to. The label and description are what changed (i18n `notify_authblock_followup*`).
+  const { notifyAuthBlockedFollowup = true } =
+    await chrome.storage.sync.get({ notifyAuthBlockedFollowup: true });
+  if (!notifyAuthBlockedFollowup) return;
   // 🔴 Mark ONLY after creation is CONFIRMED. Reordering the calls was not enough (first attempt):
   // create() is callback-based, so setting the marker on the next line still records "notified"
   // for a call that may have failed — a revoked notifications permission, an OS-level block. The
