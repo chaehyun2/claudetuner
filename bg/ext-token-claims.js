@@ -82,17 +82,39 @@ export function mayReplaceStoredToken(existing) {
  * token left behind by a long-dormant install would otherwise keep naming a dead account while
  * the cache holds the current one — a worse answer than not having the claim at all.
  *
- * Returns a lowercased email, or null when there is no token, no claim, a foreign issuer, or
- * the token has expired.
+ * Returns the claim EXACTLY as the server minted it (case preserved), or null when there is no
+ * token, no claim, a foreign issuer, or the token has expired.
+ *
+ * 🔴 Use this ONLY where the value is SENT to the server as an identity. For display and for
+ * comparing two addresses, use extTokenEmail() below — mixing the two up is what caused #830.
  */
-export function extTokenEmail(token) {
+export function extTokenEmailRaw(token) {
   const payload = decodeJwtPayload(token);
   if (!payload || payload.iss !== EXT_TOKEN_ISSUER) return null;
   // exp is seconds since epoch (worker/src/utils/ext-token.ts). A token with no numeric exp is
   // not one of ours in a usable state, so treat it as unusable rather than as never-expiring.
   if (typeof payload.exp !== 'number' || payload.exp * 1000 <= Date.now()) return null;
   const email = payload.email;
-  return typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
+  return typeof email === 'string' && email.trim() ? email.trim() : null;
+}
+
+/**
+ * Same claim, LOWERCASED — the display/compare form.
+ *
+ * 🔴 THE LOWERCASING IS NOT COSMETIC AND NOT SAFE TO REUSE FOR TRANSMISSION. The server mints the
+ * claim from the address as stored, original case (`signExtToken(payload.user_email, …)`), and
+ * compares a snapshot's `user_email` against it. #702 promoted this function's output to the
+ * address the extension SENDS, which made every account whose stored email has an uppercase
+ * letter fail that comparison forever: 403 → token cleared → shared-api_key fallback re-mints the
+ * original-case token → 403 again. 21 live accounts, ~1,500 rejected POSTs a day, zero self-heal
+ * (#830). The send path now reads extTokenEmailRaw(); this one stayed lowercased because its
+ * remaining callers compare it against other lowercased addresses or print it.
+ *
+ * Enforced by test/ingest-identity-guard.mjs — resolveIngestIdentity() must not call this.
+ */
+export function extTokenEmail(token) {
+  const raw = extTokenEmailRaw(token);
+  return raw ? raw.toLowerCase() : null;
 }
 
 /**

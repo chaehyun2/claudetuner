@@ -1,4 +1,4 @@
-import { extTokenScope, extTokenEmail, extTokenSrc } from './ext-token-claims.js';
+import { extTokenScope, extTokenEmail, extTokenEmailRaw, extTokenSrc } from './ext-token-claims.js';
 import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME, AUTH_BLOCK_BACKOFF_BASE_MS, AUTH_BLOCK_BACKOFF_CAP_MS, TOKEN_RETRY_BASE_MS, TOKEN_RETRY_MAX_ATTEMPTS, TOKEN_RETRY_COOLDOWN_MS } from './constants.js';
 import { withStorageLock } from './serialize.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
@@ -300,7 +300,7 @@ export async function setExtToken(token) {
 // them without importing this file's dependency chain. Re-exported so existing importers of
 // storage.js keep working; imported too because setExtTokenNoDowngrade() calls extTokenScope
 // locally (a bare `export ... from` would NOT create that local binding).
-export { extTokenScope, extTokenEmail, extTokenSrc };
+export { extTokenScope, extTokenEmail, extTokenEmailRaw, extTokenSrc };
 
 /**
  * Persist a server-issued ext_token, but NEVER downgrade a login-proven `full` token
@@ -362,8 +362,10 @@ export async function clearExtToken() {
  * Priority:
  *  1. linkedCanonical — a verified `claudeAliasLink`. See the 🔴 note below: this outranks the
  *     token on purpose.
- *  2. ext_token email — the identity the SERVER minted for this install. `extTokenEmail`
+ *  2. ext_token email — the identity the SERVER minted for this install. `extTokenEmailRaw`
  *     checks issuer + expiry, so a stale token falls through instead of misattributing.
+ *     🔴 …and it is the RAW accessor, not `extTokenEmail`. The latter lowercases for display;
+ *     sending that instead made mixed-case accounts 403 against their own token forever (#830).
  *  3. accountCache.email — the Claude account. Legacy canonical, kept for installs with no
  *     token yet (their first POST is still api_key TOFU until 단계 6 removes that path).
  *  4. independentAccount.email — email-login identity for users with no Claude account.
@@ -401,7 +403,7 @@ export async function resolveIngestIdentity(providerEmail, linkedCanonical) {
   });
   return pickIngestIdentity({
     linkedCanonical,
-    tokenEmail: extTokenEmail(extToken),
+    tokenEmail: extTokenEmailRaw(extToken),
     accountEmail: accountCache?.email,
     independentEmail: independentAccount?.email,
     providerEmail,
