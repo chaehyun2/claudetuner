@@ -68,13 +68,19 @@
   margin-left: auto;
 }
 
-.ct-sb-actions a,
+/* This widget is injected into the host page's DOM with no Shadow DOM, so host
+   styles compete with ours. A host rule at or above `.ct-sb-actions a` (0,1,1) —
+   e.g. `.some-sidebar a { width: 100% }` — stretches the classless anchor, and its
+   attribute-less SVG stretches with it, filling the sidebar. Two defenses: anchor on
+   the class to raise specificity, and !important on the sizing so no host rule wins.
+   Sizing only — the icons are leaves nothing else needs to override. */
+.ct-sb-actions a.ct-sb-link,
 .ct-sb-actions button {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 20px !important;
+  height: 20px !important;
   border: none;
   background: none;
   cursor: pointer;
@@ -85,14 +91,15 @@
   text-decoration: none;
 }
 
-.ct-sb-actions a:hover,
+.ct-sb-actions a.ct-sb-link:hover,
 .ct-sb-actions button:hover {
   opacity: 1;
 }
 
 .ct-sb-actions svg {
-  width: 14px;
-  height: 14px;
+  width: 14px !important;
+  height: 14px !important;
+  flex: none;
 }
 
 /* Gauge content area */

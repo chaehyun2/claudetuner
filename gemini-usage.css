@@ -172,22 +172,28 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 }
 .ct-gm-plan { font-weight: 500; color: var(--ct-gm-text-muted); }
 .ct-gm-actions { display: inline-flex; align-items: center; gap: 2px; }
-.ct-gm-actions a, .ct-gm-settings-btn, .ct-gm-bell-btn {
+/* This widget is injected into the host page's DOM with no Shadow DOM, so host
+   styles compete with ours. A host rule at or above `.ct-gm-actions a` (0,1,1) —
+   e.g. `.some-sidebar a { width: 100% }` — stretches the classless anchor, and its
+   attribute-less SVG stretches with it, filling the sidebar. Two defenses: anchor on
+   the class to raise specificity, and !important on the sizing so no host rule wins.
+   Sizing only — the icons are leaves nothing else needs to override. */
+.ct-gm-actions a.ct-gm-link, .ct-gm-settings-btn, .ct-gm-bell-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px; height: 22px;
+  width: 22px !important; height: 22px !important;
   padding: 0; margin: 0;
   border: none; background: none; cursor: pointer;
   color: var(--ct-gm-text-muted);
   border-radius: 6px;
 }
-.ct-gm-actions a:hover, .ct-gm-settings-btn:hover, .ct-gm-bell-btn:hover {
+.ct-gm-actions a.ct-gm-link:hover, .ct-gm-settings-btn:hover, .ct-gm-bell-btn:hover {
   background: var(--ct-gm-hover);
   color: var(--ct-gm-text);
 }
-.ct-gm-actions svg { width: 14px; height: 14px; }
+.ct-gm-actions svg { width: 14px !important; height: 14px !important; flex: none; }
 .ct-gm-bell-badge {
   position: absolute; top: 0; right: 0;
   min-width: 13px; height: 13px; padding: 0 3px;
