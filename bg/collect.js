@@ -16,7 +16,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -735,13 +735,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // email, not this claude.ai account email, so an unsubstituted user_email would
     // be rejected (403 Email mismatch) and the data silently dropped.
     // See docs/DESIGN-identity-email-auth-trap.md (step C).
-    let linkedCanonical;
-    {
-      const { claudeAliasLink } = await chrome.storage.local.get('claudeAliasLink');
-      if (claudeAliasLink && claudeAliasLink.claudeEmail === userEmail && claudeAliasLink.canonicalEmail) {
-        linkedCanonical = claudeAliasLink.canonicalEmail;
-      }
-    }
+    // Derivation lives in storage.js (readLinkedCanonical) because the heartbeat path needs the
+    // same answer — see #834, where heartbeat having its OWN identity rule was the whole bug.
+    const linkedCanonical = await readLinkedCanonical(userEmail);
 
     // …then the ONE identity rule every collector shares (bg/storage.js — see
     // docs/DESIGN-authenticated-attribution.md): the authenticated identity wins. Claude was the
@@ -1556,8 +1552,27 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         const cfg = await getConfig();
         if (cfg.serverUrl && cfg.apiKey) {
           const ver = chrome.runtime.getManifest().version;
+          // 🔴 THE SAME RESOLVER THE COLLECTORS USE (#834). This used to be `accountCache?.email`
+          // raw, which gave the heartbeat its own identity rule — and the resolver ranks the
+          // ext_token ABOVE accountCache, so any install whose provider account differs from its
+          // token identity sent one address to /api/snapshots and a different one here. The
+          // snapshot passed, the heartbeat got 403 Email mismatch, and last_heartbeat_at /
+          // last_error_code / ext_version stopped updating for 23 accounts/day — 22 of which were
+          // ingesting normally at the time. Identity has ONE source; the heartbeat is not an
+          // exception just because it carries no usage.
+          //
+          // 🔴 WHO SENDS IS UNCHANGED; ONLY WHAT IT REPORTS CHANGES. `accountCache?.email` stays
+          // the send gate (Codex DEPLOY-BLOCKER). Calling the resolver unconditionally would let
+          // it answer from `independentAccount` when there is no accountCache, so an install that
+          // used to stay silent would start heartbeating — and with no ext_token that request goes
+          // out on the SHARED API KEY, making the server emit an `hb_gate` row for it. `hb_gate`'s
+          // shadow population is the input to the pending HEARTBEAT_IDENTITY_ENFORCE flip (#758);
+          // silently enlarging it makes post-rollout counts incomparable to the baseline that
+          // decision rests on. Fixing a reported identity must not redefine the measured population.
           const { accountCache } = await chrome.storage.local.get('accountCache');
-          const hbEmail = accountCache?.email;
+          const hbEmail = accountCache?.email
+            ? await resolveIngestIdentity(accountCache.email, await readLinkedCanonical(accountCache.email))
+            : null;
           // 🔴 DELIBERATELY NOT GATED, unlike the snapshot paths. Codex flagged this as the one
           // shared-key write still landing while sync is withheld, and gating it was wrong on
           // three counts:

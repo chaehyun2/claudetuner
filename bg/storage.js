@@ -397,6 +397,27 @@ export function pickIngestIdentity({ linkedCanonical, tokenEmail, accountEmail, 
   return linkedCanonical || tokenEmail || accountEmail || independentEmail || providerEmail || null;
 }
 
+/**
+ * The verified cross-email link for THIS provider address, or undefined.
+ *
+ * Extracted 2026-08-06 (#834) because a second caller appeared: the heartbeat used to read
+ * `accountCache.email` raw and skip the resolver entirely, which is how 23 accounts/day ended up
+ * 403-ing on /api/heartbeat while their snapshots landed fine. Two call sites deriving a link the
+ * same way is exactly the duplication that let the two paths drift apart in the first place.
+ *
+ * 🔴 The `claudeEmail === providerEmail` test is load-bearing, not a formality: a link belongs to
+ * ONE claude.ai address, and returning it for a different one would re-point an install at an
+ * account the user never linked from.
+ */
+export async function readLinkedCanonical(providerEmail) {
+  if (!providerEmail) return undefined;
+  const { claudeAliasLink } = await chrome.storage.local.get('claudeAliasLink');
+  if (claudeAliasLink && claudeAliasLink.claudeEmail === providerEmail && claudeAliasLink.canonicalEmail) {
+    return claudeAliasLink.canonicalEmail;
+  }
+  return undefined;
+}
+
 export async function resolveIngestIdentity(providerEmail, linkedCanonical) {
   const { extToken, accountCache, independentAccount } = await chrome.storage.local.get({
     extToken: null, accountCache: null, independentAccount: null,
