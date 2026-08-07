@@ -27,6 +27,10 @@ export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (for Ente
 
 export const PLAN_HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
 
+// USD/month list price per plan. Used to show the user what a plan change costs BEFORE they
+// confirm it (popup plan confirmation modal), so it must stay in sync with Anthropic's pricing.
+export const PLAN_MONTHLY_COST_USD = { 'Pro': 20, 'Max 5x': 100, 'Max 20x': 200 };
+
 export const PLAN_API_MAP = {
   'Pro': 'pro_monthly',
   'Max 5x': 'max_5x_monthly',

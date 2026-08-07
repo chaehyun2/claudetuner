@@ -5,7 +5,7 @@ import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { pinnedState } from './bg/analytics.js';
 import { isServerSyncGated, serverSyncWithheldReason } from './bg/storage.js';
-import { PROVIDER_LABELS } from './bg/constants.js';
+import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
@@ -1446,6 +1446,59 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
+  // The plan confirmation modal is shared by every surface that can trigger a Claude plan change,
+  // because it is the ONLY surface that states an upgrade bills the card on the spot (#820, and
+  // inquiry #182 before it). Callers supply the numbers and the action; the copy, the colours and
+  // the direction logic live here once so the two entry points cannot drift apart.
+  // `_planConfirmAction` is the pending caller's action — the single #src-modal-confirm listener
+  // dispatches to it, so adding a third caller means calling openPlanConfirmModal(), never wiring
+  // a new confirm handler.
+  let _planConfirmAction = null;
+
+  function openPlanConfirmModal({ fromPlan, toPlan, isUpgrade, fromCost, toCost, costDiff, onConfirm }) {
+    document.getElementById('src-modal-title').textContent = t(isUpgrade ? 'confirm_upgrade_title' : 'confirm_downgrade_title');
+    document.getElementById('src-modal-plan').textContent = t('confirm_plan_change', fromPlan || '', toPlan || '');
+
+    const costEl = document.getElementById('src-modal-cost');
+    if (fromCost != null && toCost != null) {
+      costEl.textContent = isUpgrade
+        ? t('opt_cost_up', fromCost, toCost, costDiff)
+        : t('opt_cost_down', fromCost, toCost, costDiff);
+    } else {
+      costEl.textContent = '';
+    }
+
+    document.getElementById('src-modal-timing').textContent = t(isUpgrade ? 'confirm_timing_immediate' : 'confirm_timing_renewal');
+    // Direction-specific, because only ONE of these two moves money. The shared line said the
+    // plan would change but never that a card would be charged, which is what inquiry #182 hit:
+    // an upgrade bills on the spot and is hard to unwind, a downgrade waits for the renewal and
+    // bills nothing now. Red for the charging one, amber for the other — the severity IS the
+    // difference between them, so it cannot be a constant.
+    // Dark mode takes the lighter red (#dc2626 on the dark card is ~4:1 — the one line that must
+    // not be skimmed should not be the hardest to read), matching how popup.html pairs its reds.
+    const warnEl = document.getElementById('src-modal-warning');
+    warnEl.textContent = t(isUpgrade ? 'confirm_warning_upgrade' : 'confirm_warning');
+    warnEl.style.color = isUpgrade ? (_isDark() ? '#fca5a5' : '#dc2626') : '#d97706';
+
+    const confirmBtn = document.getElementById('src-modal-confirm');
+    confirmBtn.textContent = t(isUpgrade ? 'confirm_upgrade_btn' : 'confirm_downgrade_btn');
+    confirmBtn.style.background = isUpgrade ? '#059669' : '#d97706';
+    confirmBtn.disabled = false;
+    confirmBtn.classList.remove('loading');
+
+    document.getElementById('src-modal-cancel').textContent = t('confirm_cancel');
+
+    _planConfirmAction = onConfirm;
+    document.getElementById('smart-rec-confirm-modal').style.display = 'flex';
+  }
+
+  // Every dismissal path funnels here. Clearing the action matters: leaving it set would let a
+  // later stray confirm click execute the plan change the user just backed out of.
+  function closePlanConfirmModal() {
+    document.getElementById('smart-rec-confirm-modal').style.display = 'none';
+    _planConfirmAction = null;
+  }
+
   // Smart recommendation execute button — show confirmation modal
   document.getElementById('smart-rec-btn').addEventListener('click', () => {
     // Plan-change execution is Claude-only. The button is already hidden for other providers
@@ -1456,61 +1509,42 @@ document.addEventListener('DOMContentLoaded', async () => {
       const recommendation = result.lastStatus?.recommendation;
       if (!recommendation?.type) return;
 
-      const isUpgrade = recommendation.type === 'upgrade';
-      const modal = document.getElementById('smart-rec-confirm-modal');
-
-      document.getElementById('src-modal-title').textContent = t(isUpgrade ? 'confirm_upgrade_title' : 'confirm_downgrade_title');
-      document.getElementById('src-modal-plan').textContent = t('confirm_plan_change', recommendation.from_plan || '', recommendation.to_plan || '');
-
-      const costEl = document.getElementById('src-modal-cost');
-      if (recommendation.from_cost != null && recommendation.to_cost != null) {
-        costEl.textContent = isUpgrade
-          ? t('opt_cost_up', recommendation.from_cost, recommendation.to_cost, recommendation.cost_diff)
-          : t('opt_cost_down', recommendation.from_cost, recommendation.to_cost, recommendation.cost_diff);
-      } else {
-        costEl.textContent = '';
-      }
-
-      document.getElementById('src-modal-timing').textContent = t(isUpgrade ? 'confirm_timing_immediate' : 'confirm_timing_renewal');
-      // Direction-specific, because only ONE of these two moves money. The shared line said the
-      // plan would change but never that a card would be charged, which is what inquiry #182 hit:
-      // an upgrade bills on the spot and is hard to unwind, a downgrade waits for the renewal and
-      // bills nothing now. Red for the charging one, amber for the other — the severity IS the
-      // difference between them, so it cannot be a constant.
-      // Dark mode takes the lighter red (#dc2626 on the dark card is ~4:1 — the one line that must
-      // not be skimmed should not be the hardest to read), matching how popup.html pairs its reds.
-      const warnEl = document.getElementById('src-modal-warning');
-      warnEl.textContent = t(isUpgrade ? 'confirm_warning_upgrade' : 'confirm_warning');
-      warnEl.style.color = isUpgrade ? (_isDark() ? '#fca5a5' : '#dc2626') : '#d97706';
-
-      const confirmBtn = document.getElementById('src-modal-confirm');
-      confirmBtn.textContent = t(isUpgrade ? 'confirm_upgrade_btn' : 'confirm_downgrade_btn');
-      confirmBtn.style.background = isUpgrade ? '#059669' : '#d97706';
-      confirmBtn.disabled = false;
-
-      document.getElementById('src-modal-cancel').textContent = t('confirm_cancel');
-
-      modal.style.display = 'flex';
+      openPlanConfirmModal({
+        fromPlan: recommendation.from_plan,
+        toPlan: recommendation.to_plan,
+        isUpgrade: recommendation.type === 'upgrade',
+        fromCost: recommendation.from_cost,
+        toCost: recommendation.to_cost,
+        costDiff: recommendation.cost_diff,
+        onConfirm: () => _executeRecommendedPlanChange(),
+      });
     });
   });
 
-  // Confirmation modal — confirm button
+  // Confirmation modal — confirm button. Dispatches to whichever caller opened the modal; it must
+  // stay a pure dispatcher so no execution path can bypass openPlanConfirmModal().
   document.getElementById('src-modal-confirm').addEventListener('click', () => {
-    const modal = document.getElementById('smart-rec-confirm-modal');
+    const action = _planConfirmAction;
+    if (!action) return; // modal open with no pending action (stale/injected click) — do nothing
     const confirmBtn = document.getElementById('src-modal-confirm');
     confirmBtn.disabled = true;
     confirmBtn.classList.add('loading');
     confirmBtn.textContent = t('changing');
+    action();
+  });
+
+  function _executeRecommendedPlanChange() {
+    const confirmBtn = document.getElementById('src-modal-confirm');
 
     const btn = document.getElementById('smart-rec-btn');
     btn.disabled = true;
 
     chrome.storage.local.get({ lastStatus: {} }, (result) => {
       const recommendation = result.lastStatus?.recommendation;
-      if (!recommendation?.type) { modal.style.display = 'none'; return; }
+      if (!recommendation?.type) { closePlanConfirmModal(); btn.disabled = false; return; }
 
       chrome.runtime.sendMessage({ type: 'EXECUTE_PLAN_CHANGE', recommendation }, (res) => {
-        modal.style.display = 'none';
+        closePlanConfirmModal();
         confirmBtn.disabled = false;
         confirmBtn.classList.remove('loading');
         btn.disabled = false;
@@ -1537,38 +1571,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
     });
-  });
+  }
 
   // Confirmation modal — cancel button
   document.getElementById('src-modal-cancel').addEventListener('click', () => {
-    document.getElementById('smart-rec-confirm-modal').style.display = 'none';
+    closePlanConfirmModal();
   });
 
   // Confirmation modal — backdrop click to close
   document.getElementById('smart-rec-confirm-modal').addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    if (e.target === e.currentTarget) closePlanConfirmModal();
   });
 
   // Confirmation modal — ESC key to close
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       const modal = document.getElementById('smart-rec-confirm-modal');
-      if (modal.style.display !== 'none') modal.style.display = 'none';
+      if (modal.style.display !== 'none') closePlanConfirmModal();
     }
   });
 
-  // Render plan change order banner (Claude only)
-  chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null, collectedOrgs: [] }, (store) => {
-    const primaryOrg = (store.collectedOrgs || []).find(o => o.isPrimary);
-    const primaryProvider = primaryOrg?.provider || 'claude';
-    if (primaryProvider !== 'claude') return; // plan orders are Claude-specific
+  // Render plan change order banner.
+  //
+  // Deliberately NOT gated on the primary org's provider. It used to be ("plan orders are
+  // Claude-specific"), which was harmless only while the notification's Accept button executed the
+  // order by itself. Now that Accept routes here (#820), that gate became a dead end: a user with a
+  // ChatGPT/Gemini org pinned primary would get the notification, click Accept, land on a popup
+  // that renders nothing, and have no way to accept or reject — the notification is already
+  // cleared by then, and no result is ever reported to the server. (Codex.)
+  //
+  // The gate was also redundant. `pendingPlanOrder` is only ever set from a plan order the server
+  // attached for THIS user (bg/collect.js), and orders are Claude-only, so its presence already
+  // proves the user has a Claude org. The order itself is the signal — which provider happens to
+  // be pinned primary in the popup is unrelated.
+  chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null }, (store) => {
     const po = store.pendingPlanOrder;
     const completed = store.completedPlanOrder;
     if (po) {
       const banner = document.getElementById('plan-order-banner');
       banner.classList.remove('hidden');
       banner.dataset.po = JSON.stringify(po);
-      const COSTS = { 'Pro': 20, 'Max 5x': 100, 'Max 20x': 200 };
       document.getElementById('plan-order-body').innerHTML =
         `<strong>${po.org_name}</strong> ${t('plan_order_admin')}(${po.requested_by_name})<br>` +
         `<strong>${po.from_plan} → ${po.to_plan}</strong> ${t('plan_order_request')}`;
@@ -1577,15 +1619,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         reasonEl.classList.remove('hidden');
         reasonEl.textContent = '💬 ' + po.reason;
       }
-      const fromCost = COSTS[po.from_plan] || 0;
-      const toCost = COSTS[po.to_plan] || 0;
+      const fromCost = PLAN_MONTHLY_COST_USD[po.from_plan] || 0;
+      const toCost = PLAN_MONTHLY_COST_USD[po.to_plan] || 0;
       const diff = toCost - fromCost;
       const diffStr = diff > 0 ? `+$${diff}` : `-$${Math.abs(diff)}`;
       document.getElementById('plan-order-cost').textContent = `$${fromCost}/${t('month_short')} → $${toCost}/${t('month_short')} (${diffStr})`;
     } else if (completed && Date.now() - completed.completedAt < 3600000) {
       // Order completed within the last hour — success notice
-      const HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
-      const isUp = HIERARCHY.indexOf(completed.to_plan) > HIERARCHY.indexOf(completed.from_plan);
+      const isUp = PLAN_HIERARCHY.indexOf(completed.to_plan) > PLAN_HIERARCHY.indexOf(completed.from_plan);
       let dDesc = t('plan_downgrade_desc');
       if (!isUp && state.currentSnapshot?.subscription?.renewal_date) {
         const rd = new Date(state.currentSnapshot.subscription.renewal_date);
@@ -1602,17 +1643,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Plan change order accept/reject buttons
+  // Plan change order accept/reject buttons.
+  // An admin-ordered upgrade calls the same upgrade_to_max as a recommendation-driven one and is
+  // billed by Anthropic on the spot, so it goes through the same confirmation modal (#820). The
+  // banner shows the cost, but showing a number is not the same as making the user acknowledge a
+  // charge — the modal is the surface that says "you are being charged now".
   document.getElementById('plan-order-accept').addEventListener('click', () => {
+    const _po = (() => { try { return JSON.parse(document.getElementById('plan-order-banner').dataset.po || '{}'); } catch { return {}; } })();
+    if (!_po.to_plan || !_po.from_plan) return;
+    const fromCost = PLAN_MONTHLY_COST_USD[_po.from_plan];
+    const toCost = PLAN_MONTHLY_COST_USD[_po.to_plan];
+    openPlanConfirmModal({
+      fromPlan: _po.from_plan,
+      toPlan: _po.to_plan,
+      isUpgrade: PLAN_HIERARCHY.indexOf(_po.to_plan) > PLAN_HIERARCHY.indexOf(_po.from_plan),
+      fromCost, toCost,
+      // The i18n templates already carry the sign ('+${2}' / 'save ${2}'), so pass the magnitude.
+      costDiff: (fromCost != null && toCost != null) ? Math.abs(toCost - fromCost) : null,
+      onConfirm: () => _acceptPlanOrder(_po),
+    });
+  });
+
+  function _acceptPlanOrder(_po) {
     const btn = document.getElementById('plan-order-accept');
     btn.disabled = true;
     btn.textContent = t('changing') || '변경 중...';
-    // Save order info (referenced after response)
-    const _po = (() => { try { return JSON.parse(document.getElementById('plan-order-banner').dataset.po || '{}'); } catch { return {}; } })();
     chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'accept' }, (res) => {
+      closePlanConfirmModal();
       if (res?.success) {
-        const HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
-        const isUpgrade = HIERARCHY.indexOf(_po.to_plan) > HIERARCHY.indexOf(_po.from_plan);
+        const isUpgrade = PLAN_HIERARCHY.indexOf(_po.to_plan) > PLAN_HIERARCHY.indexOf(_po.from_plan);
         const banner = document.getElementById('plan-order-banner');
         // Switch banner to success notice
         const _isDk = document.documentElement.dataset.theme === 'dark';
@@ -1646,7 +1705,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         showError(res?.error || t('collect_fail'));
       }
     });
-  });
+  }
   document.getElementById('plan-order-reject').addEventListener('click', () => {
     document.getElementById('plan-order-banner').classList.add('hidden');
     chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'reject' });

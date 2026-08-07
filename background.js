@@ -2049,12 +2049,20 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
     const status = await getLastStatus();
     const userEmail = status?.snapshot?.user_email;
     if (btnIdx === 0) {
-      // Accept → execute plan change
-      try {
-        await acceptPlanOrder(config, po, userEmail);
-      } catch (e) {
-        await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted', 'failed', e.message);
-      }
+      // Accept → open the popup, do NOT execute here.
+      //
+      // This button used to call acceptPlanOrder() directly, which for an upgrade meant one click
+      // on a Chrome notification put a charge on the user's card (upgrade_to_max bills on the spot
+      // — inquiry #182, tracked as #820). A notification cannot host a confirmation step: its
+      // buttons fire immediately and it cannot state the amount. So the button now does the only
+      // safe thing it can, which is hand off to the surface that CAN confirm — the popup renders
+      // the plan-order banner from `pendingPlanOrder` (still set) and its accept button goes
+      // through the shared confirmation modal.
+      //
+      // Deliberately direction-agnostic: routing only upgrades would leave a branch where a
+      // mislabelled or hierarchy-unknown plan silently takes the executing path. The notification
+      // never changes a plan, full stop — that invariant is what the guard test asserts.
+      chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
     } else {
       // Reject
       await reportPlanOrderResult(config, po.order_id, userEmail, 'rejected');
@@ -2069,8 +2077,8 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   // unreachable code holding a door open: adding a single button to that notification would have
   // silently turned it into a one-click plan upgrade, and an upgrade is billed by Anthropic on the
   // spot (inquiry #182). A RECOMMENDATION-driven plan change must go through the popup's
-  // confirmation modal, the only surface that states the charge. (The plan-order branch above is a
-  // different case and does still apply directly from its button — deliberate, tracked in #820.)
+  // confirmation modal, the only surface that states the charge. (The plan-order branch above now
+  // holds to the same rule: its Accept button opens the popup instead of executing — #820.)
   // Do not reintroduce a button handler here.
   // Settings button on recurring notifications (usage alert, reset, weekly report)
   if (btnIdx === 0 && (notifId.startsWith(NOTIF_ID_ALERT) || notifId.startsWith('reset-soon-') || notifId.startsWith('reset-done-') || notifId.startsWith('weekly-report-'))) {
