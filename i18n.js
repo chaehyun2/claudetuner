@@ -75,6 +75,8 @@ const TRANSLATIONS = {
     // insufficient_data hides the row entirely; rec_cg_insufficient_data is a defensive fallback only.
     'rec_cg_insufficient_data': '데이터 부족',
     'rec_cg_adequate': '현재 플랜 적합',
+    'rec_cg_at_ceiling': '한도 도달 — 상위 플랜 없음',
+    'rec_cg_at_ceiling_seat': '한도 도달 — 관리자 문의',
     'rec_cg_upgrade_go': 'Go 업그레이드 검토',
     'rec_cg_upgrade_plus': 'Plus 업그레이드 권장',
     'rec_cg_upgrade_pro5x': 'Pro 5x 업그레이드 권장',
@@ -603,6 +605,8 @@ const TRANSLATIONS = {
     // ChatGPT recommendation (v1) — see the ko block above.
     'rec_cg_insufficient_data': 'Insufficient data',
     'rec_cg_adequate': 'Current plan is a good fit',
+    'rec_cg_at_ceiling': 'At limit — no higher plan',
+    'rec_cg_at_ceiling_seat': 'At limit — contact admin',
     'rec_cg_upgrade_go': 'Consider Go upgrade',
     'rec_cg_upgrade_plus': 'Plus upgrade recommended',
     'rec_cg_upgrade_pro5x': 'Pro 5x upgrade recommended',

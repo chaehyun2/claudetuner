@@ -70,8 +70,9 @@ export const ORG_POLL_CHANGE_THRESHOLD = 0.1; // utilization pp change to consid
 // we only gate the SERVER POST: send when usage changed (and >= MIN_INTERVAL
 // since the last POST), or force a flat heartbeat every FLOOR. This both cuts
 // snapshot INSERTs and avoids the wasted POST+read the server-side dedup would
-// otherwise do. FLOOR (1h) must stay < the server disconnection gates
-// (3h skip / 6h email) and < the dashboard chart gap CLAUDE_GAP_MS (140min),
+// otherwise do. FLOOR (1h) must stay < the server disconnection-email gate
+// (6h — index.ts, "skip if any Claude snapshot landed within the last 6 hours")
+// and < the dashboard chart gap CLAUDE_GAP_MS (140min),
 // and >= the server unchanged-usage dedup window (60min) so heartbeats aren't
 // deduped away. Do NOT remove the floor — it is the liveness signal.
 export const SEND_HEARTBEAT_FLOOR_MS = 60 * 60 * 1000; // 1h: force-send even if unchanged
@@ -83,7 +84,7 @@ export const SEND_MIN_INTERVAL_MS = 10 * 60 * 1000;    // 10min: suppress rapid 
 // already saturated — 2026-06-18 read-saturation incident). The first failure
 // backs off BASE (= one normal interval, same as today's next-tick retry); only
 // CONSECUTIVE failures escalate (BASE, 2×, 4×, … up to CAP). CAP stays < the chart
-// gap CLAUDE_GAP_MS (140min) and the disconnection gates (3h/6h) so even at max
+// gap CLAUDE_GAP_MS (140min) and the 6h disconnection-email gate so even at max
 // backoff a client resumes well before any false "수집 끊김" / disconnection email.
 export const SERVER_BACKOFF_BASE_MS = SEND_MIN_INTERVAL_MS; // 10min
 export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
@@ -92,7 +93,7 @@ export const SERVER_BACKOFF_CAP_MS = 60 * 60 * 1000;       // 60min
 // above, so a different ladder: a 5xx is transient and the server wants us back soon, while a 426
 // cannot resolve until the USER updates the extension. Retrying that on the 10min ladder is pure
 // waste at both ends, so BASE starts far higher and CAP is deliberately allowed past the
-// disconnection gates (3h/6h) — a version-blocked install genuinely IS disconnected, and pretending
+// 6h disconnection-email gate — a version-blocked install genuinely IS disconnected, and pretending
 // otherwise by probing under the gate would only manufacture load, not data.
 // CAP is a PROBE interval, not a give-up: MIN_INGEST_VERSION / _MODE are env knobs that can be
 // lowered without a release, so a client that stopped forever would stay dead after the server had
@@ -148,7 +149,11 @@ export const IMPRESSION_FLUSH_DEFAULT_MS = 60 * 60 * 1000; // 60min default
 // dies (this TTL-decay replaces clamps for the unclamped send floor).
 export const COLLECT_HARD_FLOOR_MS = 5 * 60 * 1000;        // 5min: never collect faster, even at active tier (clamp kept — too-fast = provider ban risk)
 export const HEARTBEAT_FLOOR_MIN_MS = 60 * 60 * 1000;      // heartbeat clamp lower bound (>= server 60min dedup window)
-export const HEARTBEAT_FLOOR_MAX_MS = 140 * 60 * 1000;     // heartbeat clamp upper bound (< chart gap CLAUDE_GAP_MS 140min / 3h skip / 6h email) — exclusive
+// 🪤 This bound used to cite a "3h skip" gate. There is no such gate: 3h was the OLD value of the
+// disconnection-email skip, widened 1h → 3h (2026-06-04) → 6h (2026-06-14) — see the history comment
+// at worker/src/index.ts. The retired value was left sitting next to its own replacement, which read
+// as two independent gates and sent more than one person hunting for a 3h check that does not exist.
+export const HEARTBEAT_FLOOR_MAX_MS = 140 * 60 * 1000;     // heartbeat clamp upper bound (< chart gap CLAUDE_GAP_MS 140min / 6h disconnection email) — exclusive
 export const CADENCE_TTL_MS = 12 * 60 * 60 * 1000;         // 12h: a server override not reconfirmed within this decays to the hardcoded default
 // After a need_history backfill attempt, suppress re-triggering for this long. At a
 // slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
