@@ -4,7 +4,9 @@ import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { pinnedState } from './bg/analytics.js';
-import { isServerSyncGated, serverSyncWithheldReason } from './bg/storage.js';
+import { isServerSyncGated, serverSyncWithheldReason, getLastStatus } from './bg/storage.js';
+import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
+import { isUpgradeBlocked } from './bg/upgrade-gate.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
@@ -118,6 +120,7 @@ async function renderReauthWidget() {
   });
   document.getElementById('reauth-or').textContent = t('login_cta_or') || 'or use an email code';
   widget.classList.remove('hidden');
+  noteSurface('reauth');
   // `gated` already carries the reason the send path used; report it so the two can be joined.
   noteCtaShown('reauth', gated ? 'withheld' : 'token_missing');
 
@@ -344,6 +347,26 @@ function mountGoogleButton(slot, { statusEl, successKey, successFallback }) {
 }
 
 async function renderLoginCta() {
+  // Copy for the collapsed reminder bar.
+  //
+  // 🔴 STATE first, benefits second, whenever sync is actually withheld. The collapsed bar is the
+  // ONLY signal left for a user who dismissed the card, and the benefit-framed default ("verify for
+  // multi-device sync…") never says the thing they do not know: nothing is reaching the server right
+  // now. That gap matters most for a REINSTALLED user — a fresh install is not grandfathered
+  // (background.js), so reinstalling to "fix" something silently drops the account into this state,
+  // and the old copy read like an upsell they could keep ignoring. The sentence is equally true for
+  // a genuinely new install, so it is not gated to reinstalls.
+  //
+  // Kept OUT of the collapsed branch on purpose: test/cta-shown-guard.mjs proves the exposure event
+  // fires next to the code that actually shows the bar, and a long inline ternary pushes those two
+  // apart until the proof no longer holds.
+  function miniCtaMessage(authIsBlocked, scopeBlocked, withheld) {
+    if (authIsBlocked) return t('login_cta_authblocked_mini') || "Log in — this browser's usage is no longer being saved to the server";
+    if (scopeBlocked) return t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more';
+    if (withheld) return t('login_cta_withheld_mini') || 'Saved on this browser only — verify to sync to the dashboard';
+    return t('login_cta_mini') || 'Log in for multi-device sync & more';
+  }
+
   const widget = document.getElementById('login-cta');
   if (!widget) return;
   const { showLoginPrompt = false, extToken = null, independentAccount = null, loginCtaCollapsed = false, accountCache = null, needsFullLogin = false, scopeCtaShownFor = null, authBlocked = false } =
@@ -367,12 +390,17 @@ async function renderLoginCta() {
   // most likely to be blocked (Codex). So this is an OVERRIDE too, for both guards.
   const authIsBlocked = authBlocked === true && !extToken;
   const blocked = scopeBlocked || authIsBlocked;
+  // Sync is withheld right now (login_first / token_lost) — the collapsed bar says so instead of
+  // pitching features. Read from the gate, not from `showLoginPrompt`, so a stale prompt flag
+  // cannot make the bar claim a block that is over.
+  const withheldMini = !!(await serverSyncWithheldReason());
 
   // The CTA (verify prompt) — trapped independent accounts go to renderReauthWidget; this is the
   // new-user path. NEVER fully dismissed: "Use locally only" COLLAPSES to a persistent mini
   // reminder (like the permission card) so verify is always one tap away, just small.
   if (!blocked && (!showLoginPrompt || extToken || independentAccount?.email)) { widget.classList.add('hidden'); return; }
   widget.classList.remove('hidden');
+  noteSurface('login_cta');
   // WHY the CTA is up, so exposure can be split by cause rather than reported as one number.
   const _ctaReason = scopeBlocked ? 'scope_blocked' : authIsBlocked ? 'auth_blocked' : 'login_first';
 
@@ -398,11 +426,7 @@ async function renderLoginCta() {
   if (collapsed) {
     full.classList.add('hidden');
     mini.style.display = 'flex';
-    document.getElementById('login-cta-mini-msg').textContent = authIsBlocked
-      ? (t('login_cta_authblocked_mini') || 'Log in — this browser\'s usage is no longer being saved to the server')
-      : scopeBlocked
-        ? (t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more')
-        : (t('login_cta_mini') || 'Log in for multi-device sync & more');
+    document.getElementById('login-cta-mini-msg').textContent = miniCtaMessage(authIsBlocked, scopeBlocked, withheldMini);
     const miniBtn = document.getElementById('login-cta-mini-login');
     miniBtn.textContent = t('login_cta_mini_btn') || 'Log in';
     if (!miniBtn.dataset.bound) {
@@ -724,6 +748,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Request immediate local-only refresh if data is stale (>1 min)
   chrome.runtime.sendMessage({ type: 'POPUP_OPENED' }).catch(() => {});
 
+  // === #942 stage 1: SHADOW ONLY ===
+  // Compute the single-cause verdict and report it next to what the UI actually un-hid. Nothing
+  // branches on it — the point is to find, on real installs, the combinations where the seven
+  // independent predicates disagree with one resolver, BEFORE any surface starts consuming it.
+  // Delayed because the surfaces render async: sampling at once would report an empty set and
+  // manufacture a disagreement that never happened. Once per popup open (this handler runs once).
+  setTimeout(() => {
+    (async () => {
+      const st = await readBlockState({ isUpgradeBlocked, serverSyncWithheldReason, getLastStatus });
+      const verdict = resolveBlockState(st) || 'none';
+      const surfaces = surfacesShown();
+      if (typeof sendGAEvent === 'function') {
+        // `surfaces` is a sorted, bounded join — a stable low-cardinality key GA can group by.
+        sendGAEvent('block_state_shadow', {
+          verdict,
+          surfaces: surfaces.join('|') || 'none',
+          n: surfaces.length,
+          // Separates "the UI showed nothing because it is designed not to" from a real gap.
+          err_suppressed: st.errorUiSuppressed || 'none',
+        });
+      }
+    })().catch(() => { /* observation must never break the popup */ });
+  }, 2000);
+  // === end shadow === (the guard pins every resolver reference inside these two markers, so a
+  // switch/ternary/alias cannot start consuming the verdict without the boundary moving)
+
   // Check for deleted account
   const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
   if (account_deleted) {
@@ -735,6 +785,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       + '<br><a id="recover-link" href="#" style="display:inline-block;margin-top:8px;padding:6px 14px;background:#7c3aed;color:#fff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">'
       + (t('account_recover_btn') || 'Recover Account') + '</a>';
     errorBanner.classList.remove('hidden');
+    noteSurface('account_deleted');
     // Hide hint area
     const hintEl = errorBanner.querySelector('.error-hint');
     if (hintEl) hintEl.style.display = 'none';
@@ -1838,16 +1889,23 @@ function updateUI(status) {
 // === Gauge prediction markers ===
 // === Common prediction function: projected utilization at reset ===
 
+// These two overwrite the status line from outside the render (action confirmations, failures),
+// so they must drop the tooltip the render may have attached — otherwise a "취소되었습니다" toast
+// keeps a hover that says the install is local-only. (Codex, PR #948.)
 function showError(msg) {
   document.getElementById('status-indicator').className = 'status-dot red';
   // Translate if i18n key, otherwise display as-is
   const translated = msg && msg.startsWith('err_') ? t(msg) : msg;
-  document.getElementById('status-text').textContent = translated;
+  const el = document.getElementById('status-text');
+  el.textContent = translated;
+  el.title = '';
 }
 
 function showSuccess(msg) {
   document.getElementById('status-indicator').className = 'status-dot green';
-  document.getElementById('status-text').textContent = msg;
+  const el = document.getElementById('status-text');
+  el.textContent = msg;
+  el.title = '';
 }
 
 

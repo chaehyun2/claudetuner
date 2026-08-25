@@ -273,13 +273,21 @@ export function parseAdditionalLimits(usage) {
 // Returns null when there is no usable scoped weekly bucket. Pure — no I/O.
 function pickScopedWeekly(additionalLimits) {
   if (!Array.isArray(additionalLimits) || !additionalLimits.length) return null;
+  // Non-model buckets that ride the same additional_rate_limits array (observed
+  // 2026-08-22: OpenAI's banked-reset pool 'gpt-reserve', #926). They are not model
+  // weekly limits, so they must neither occupy the scoped slot nor outrank a real model
+  // bucket when both are present; the popup still shows them via parseAdditionalLimits.
+  // Kept INSIDE the function: scripts/scoped-weekly-slots.test.mjs compiles this body in
+  // isolation, so an outer constant would have to be stubbed there and could drift.
+  const NON_MODEL_LIMIT_NAMES = ['gpt-reserve'];
+  const isModelBucket = (b) => NON_MODEL_LIMIT_NAMES.indexOf(b.name) < 0;
   const weekly = additionalLimits.find((b) => typeof b.windowSeconds === 'number'
-    && b.windowSeconds >= WINDOW_SPLIT_SECONDS);
+    && b.windowSeconds >= WINDOW_SPLIT_SECONDS && isModelBucket(b));
   // Fall back to the first bucket ONLY when NO bucket carries span metadata (legacy
   // shape). If spans exist but none is weekly, there is no weekly bucket → return null;
   // never mis-persist a 5h bucket into the 7d (omelette) slot.
   const hasSpans = additionalLimits.some((b) => typeof b.windowSeconds === 'number');
-  const chosen = weekly || (hasSpans ? null : additionalLimits[0]);
+  const chosen = weekly || (hasSpans ? null : additionalLimits.find(isModelBucket) || null);
   if (!chosen || typeof chosen.used !== 'number') return null;
   return { utilization: chosen.used, resets_at: chosen.resetsAt || null, model: chosen.name || null };
 }

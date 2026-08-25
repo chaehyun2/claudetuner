@@ -16,6 +16,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
+import { upsertClaudeOrg } from './org-merge.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
@@ -800,24 +801,27 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? `login required for server sync: ${withheldReason}` : 'boost mode'})`);
       await setStatus({
         success: true,
+        // 🔴 The COLLECTION succeeded; the SERVER SYNC did not. Recording only `success: true`
+        // made the popup paint the same green ✓ as a fully synced collect, so a withheld install
+        // looks healthy while its dashboard and team report go empty — and the user's next move
+        // is to reinstall, which is what put a re-installed account into `login_first` in the
+        // first place (background.js sets serverSyncGrandfathered:false on a FRESH install).
+        // Null for boost mode (`skipServer`), which is a deliberate local-only collect and not a
+        // gate. setStatus REPLACES lastStatus, so a later synced collect drops this field —
+        // it can never latch.
+        serverWithheld: withheldReason || null,
         timestamp: Date.now(),
         lastSuccessTimestamp: Date.now(),
         snapshot: snapshot,
         recommendation: (await getLastStatus())?.recommendation || null,
         fetchMode: (await chrome.tabs.query({ url: 'https://claude.ai/*' })).length > 0 ? 'tab' : 'cookie',
       });
-      // Update collectedOrgs for boost mode so sidebar/input get fresh data
-      // (storage.onChanged on collectedOrgs triggers pushSidebarUsage)
+      // Keep collectedOrgs fresh so sidebar/input get this collection
+      // (storage.onChanged on collectedOrgs triggers pushSidebarUsage).
       const { collectedOrgs: prevOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
-      const updatedOrgs = prevOrgs.map(o => o.uuid === bestOrg?.uuid ? {
-        ...o,
-        h5: snapshot.five_hour?.utilization ?? o.h5,
-        d7: snapshot.seven_day?.utilization ?? o.d7,
-        resetsAt5h: snapshot.five_hour?.resets_at ?? o.resetsAt5h,
-        resetsAt7d: snapshot.seven_day?.resets_at ?? o.resetsAt7d,
-        extraUsage: snapshot.extra_usage ?? o.extraUsage,
-        updatedAt: Date.now(),
-      } : o);
+      // UPSERT, not map — see bg/org-merge.js for why a withheld install loses its Claude org
+      // otherwise. The logic lives there so it can be executed by a test instead of regex-matched.
+      const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot);
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
       updateBadgeForSelectedOrg(snapshot);
@@ -1537,6 +1541,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       timestamp: Date.now(),
       lastSuccessTimestamp: prevStatus?.lastSuccessTimestamp
         || (prevStatus?.success ? prevStatus?.timestamp : null),
+      // 🔴 The gate is independent of whether THIS collection worked. Carrying the reason only on
+      // the success path meant a failed Claude collect wrote a status with no `serverWithheld`,
+      // and ui/render.js's "Claude failed but a provider has data" demotion then painted the
+      // healthy green again — on an install that is sending nothing to the server. Observed live:
+      // logging out of claude.ai turned "⚠ 로컬 전용" back into "✓ Gemini Work".
+      // "Is my data reaching the server?" does not become No-and-then-Yes because a fetch failed.
+      serverWithheld: await serverSyncWithheldReason(),
     });
 
     // On collection failure: show error badge + check collect-fail notification

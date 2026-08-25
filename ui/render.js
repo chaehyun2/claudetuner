@@ -2,6 +2,7 @@
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
 import { gaugeColor, formatTimeAgo, setRenewalDisplay } from './util.js';
+import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -36,6 +37,25 @@ function _setGaugeValue(id, util) {
   }
 }
 
+// "수집이 됐다"와 "서버가 받았다"는 다른 사실이다. 세 군데가 각자 초록을 칠하고 있었고
+// (provider-only / Claude 실패 후 provider 강등 / Claude 성공), 그 중 서버 전송 여부를 보는
+// 곳은 하나도 없었다 — 그래서 로그인 게이트에 걸린 설치가 "✓ 방금"으로 보였다.
+// A healthy-looking status is painted HERE and nowhere else, so a future fourth site cannot
+// reintroduce the lie by copying one of the other three. The guard pins that the literal
+// 'status-dot green' appears only in this function.
+function paintHealthy(indicator, statusText, withheld, body) {
+  indicator.className = withheld ? 'status-dot amber' : 'status-dot green';
+  // 🔴 The label must stay SHORT. The status bar also appends the collection time and the next
+  // poll ("· 방금 / ⏳ 59분 후"), so a sentence here gets ellipsised — and the first version lost
+  // exactly the actionable half ("⚠ 로컬 전용 · 로그인해야 …"), which defeats the point of
+  // saying anything. The consequence lives in the tooltip and in the login card right below.
+  statusText.textContent = withheld ? `⚠ ${t('status_local_only')}${body ? ` · ${body}` : ''}` : `✓ ${body}`;
+  // Cleared on the healthy path: a stale tooltip would outlive its cause, which is the same
+  // latch-shaped bug this whole area exists to remove.
+  statusText.title = withheld ? t('status_local_only_tip') : '';
+  if (withheld) noteSurface('local_only_status');
+}
+
 export function _updateUICore(status) {
   // Always show version
   const userInfoEl = document.getElementById('user-info');
@@ -46,6 +66,14 @@ export function _updateUICore(status) {
   const statusText = document.getElementById('status-text');
   const errorBanner = document.getElementById('error-banner');
   const errorMsg = document.getElementById('error-msg');
+
+  // 🔴 Clear the status tooltip HERE, not only where it is set. paintHealthy() cleared it on its
+  // own healthy path, but every other branch overwrites `statusText.textContent` directly
+  // (no_data, collect_fail, the provider demotion) and left the local-only tooltip attached to a
+  // completely different sentence — "수집 실패" with a hover saying "로컬 전용". That is the
+  // outlives-its-cause shape this whole area exists to remove, so the reset belongs at the ONE
+  // place every render passes through. (Codex, PR #948.)
+  statusText.title = '';
 
   // Hide error banner by default
   errorBanner.classList.add('hidden');
@@ -75,7 +103,10 @@ export function _updateUICore(status) {
     const provOrg = (state.collectedOrgs || []).find(o => o.isPrimary) || (state.collectedOrgs || [])[0];
     if (provOrg) {
       const label = _providerOrgLabel(provOrg);
-      indicator.className = 'status-dot green';
+      // Provider-only installs are withheld by exactly the same gate — Gemini/ChatGPT usage does
+      // not reach the server either. Claude-specific FAILURES stay hidden here (irrelevant to
+      // them, #944), but "nothing is reaching the server" is not Claude-specific.
+      const _w = status.serverWithheld || null;
       // Top status shows collection freshness ("✓ 3m ago / ⏳ Nm") like the Claude
       // path; the provider name/plan goes in the "current plan" row below. Derive
       // last-collected from this org's latest usage-history point (providers don't
@@ -83,15 +114,18 @@ export function _updateUICore(status) {
       const orgPoints = (state.usageHistory || []).filter(p => p.org === provOrg.uuid);
       const lastT = orgPoints.reduce((m, p) => Math.max(m, p.t || 0), 0);
       if (lastT) {
-        statusText.textContent = `✓ ${formatTimeAgo(lastT)}`;
-        chrome.alarms.get('claude-usage-poll', (alarm) => {
-          if (alarm && alarm.scheduledTime) {
-            const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
-            statusText.textContent += ` / ⏳ ${mins}${t('min_later_check')}`;
-          }
-        });
+        paintHealthy(indicator, statusText, _w, formatTimeAgo(lastT));
+        // Countdown suppressed while withheld — see appendNextPoll's contract.
+        if (!_w) {
+          chrome.alarms.get('claude-usage-poll', (alarm) => {
+            if (alarm && alarm.scheduledTime) {
+              const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
+              statusText.textContent += ` / ⏳ ${mins}${t('min_later_check')}`;
+            }
+          });
+        }
       } else {
-        statusText.textContent = label ? `✓ ${label}` : '✓';
+        paintHealthy(indicator, statusText, _w, label || '');
       }
       // Surface which provider account is being tracked in the "current plan"
       // row (independent users have no Claude render to reveal it otherwise).
@@ -147,8 +181,7 @@ export function _updateUICore(status) {
 
     if (demoteOrg) {
       const label = _providerOrgLabel(demoteOrg);
-      indicator.className = 'status-dot green';
-      statusText.textContent = label ? `✓ ${label}` : '✓';
+      paintHealthy(indicator, statusText, status.serverWithheld || null, label || '');
       if (onboarding) onboarding.classList.add('hidden');
 
       const dismissBtn = document.getElementById('error-dismiss');
@@ -161,6 +194,7 @@ export function _updateUICore(status) {
 
       errorBanner.classList.add('soft');
       errorBanner.classList.remove('hidden');
+      noteSurface('error_banner_soft');
       if (errorTitle) errorTitle.textContent = t('claude_disconnected_title');
       errorMsg.textContent = t('claude_disconnected_secondary');
       // Keep the "Open Claude.ai" hint (still useful to reconnect), drop timing noise.
@@ -199,6 +233,7 @@ export function _updateUICore(status) {
       : t(errKey);
     errorMsg.textContent = translated;
     errorBanner.classList.remove('hidden');
+    noteSurface('error_banner');
     // Hide "Open Claude.ai" hint for Rate Limit/retry errors (not a login issue)
     const errorHint = errorBanner.querySelector('.error-hint');
     const hideHint = errKey === 'err_rate_limit' || errKey.includes('Rate Limit');
@@ -249,11 +284,19 @@ export function _updateUICore(status) {
   if (dismissBtnOk) dismissBtnOk.style.display = 'none';
 
   if (status.success && status.snapshot) {
-    indicator.className = 'status-dot green';
+    // Collection succeeded — but if the server sync was withheld (login-first gate / token lost)
+    // nothing reached the dashboard. Same green ✓ for both states is the lie this branch used to
+    // tell: the extension reads healthy while the dashboard is empty, and "reinstall" becomes the
+    // user's only theory. Usage still renders below — flipping `status.success` instead would
+    // skip this whole block and blank the popup for exactly the people who need it.
+    const withheld = status.serverWithheld || null;
     const modeLabel = status.fetchMode === 'cookie' ? ` (${t('cookie_mode')})` : '';
-    statusText.textContent = `✓ ${formatTimeAgo(status.timestamp)}${modeLabel}`;
-    // Show next collection schedule + boost status
-    chrome.alarms.get('claude-usage-poll', (alarm) => {
+    paintHealthy(indicator, statusText, withheld, `${formatTimeAgo(status.timestamp)}${withheld ? '' : modeLabel}`);
+    // Show next collection schedule + boost status — but NOT while withheld: the countdown is a
+    // promise that something will be sent, and nothing will be. "⏳ 59분 후" on a gated install
+    // reads as "it will fix itself shortly", which is the opposite of what we need the user to
+    // understand. Suppressing it also frees the width that was ellipsising the local-only label.
+    if (!withheld) chrome.alarms.get('claude-usage-poll', (alarm) => {
       if (alarm && alarm.scheduledTime) {
         const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
         chrome.alarms.get('claude-usage-boost', (boost) => {
@@ -571,6 +614,7 @@ export async function renderUpgradeWarning() {
   document.getElementById('upgrade-warn-link').textContent = t('upgrade_required_link');
   document.getElementById('upgrade-warn-hint').textContent = t('upgrade_required_hint');
   banner.classList.remove('hidden');
+  noteSurface('upgrade_warning');
 }
 
 // Renders the amber "Claude account email mismatch" banner from storage.
@@ -597,6 +641,7 @@ export async function renderEmailMismatchWarning() {
   document.getElementById('email-warn-link').textContent = t('open_claude');
   document.getElementById('email-warn-hint').textContent = t('email_mismatch_hint');
   banner.classList.remove('hidden');
+  noteSurface('email_mismatch');
 
   const dismiss = document.getElementById('email-warn-dismiss');
   if (dismiss && !dismiss.dataset.bound) {

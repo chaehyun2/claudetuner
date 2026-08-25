@@ -2238,8 +2238,9 @@ async function pushSidebarUsage() {
 // Hook into storage changes to push sidebar updates after collection.
 // Only trigger when Claude orgs actually changed — ChatGPT/Gemini merges
 // should not cause sidebar/input to re-render on claude.ai.
-// For skipServer/boost mode (no collectedOrgs write), pushSidebarUsage()
-// is called explicitly in collect.js.
+// skipServer/boost and the withheld local-only path DO write collectedOrgs
+// (bg/org-merge.js upserts there), so this listener fires for them too;
+// collect.js also calls pushSidebarUsage() explicitly on those paths.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.collectedOrgs) {
     // Push when any provider that has an in-page panel changed. pushSidebarUsage()
