@@ -129,6 +129,12 @@ export async function refineTeamPlan(plan, orgUuid) {
   if (plan !== 'Team' || !orgUuid) return plan;
   const { accountCache } = await chrome.storage.local.get({ accountCache: null });
   const st = accountCache?.allSeatTiers?.[orgUuid];
+  // Returning bare 'Team' when we have no tier is deliberate: the server folds it to Team Standard
+  // today, but the caller has NOT observed Standard — it has observed nothing. Keeping the two
+  // distinguishable here is what lets #969 be fixed at the source rather than guessed at downstream.
+  if (st && !SEAT_TIER_MAP[st]) {
+    console.warn(`[Claude Tuner] unmapped seat_tier "${st}" for org ${orgUuid} — falling back to Team Standard (#969)`);
+  }
   return st ? (SEAT_TIER_MAP[st] || 'Team Standard') : plan;
 }
 

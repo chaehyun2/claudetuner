@@ -534,11 +534,47 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           ) || memberships[0];
           seatTier = membership?.seat_tier || null;
           if (acctEmail) userEmail = acctEmail;
-          // Save all orgs' seat_tier (for extra org plan refinement)
+
+          // 🔴 A seat_tier the response did not carry is UNKNOWN — it is not "Team Standard" (#969).
+          // Both readers of this cache collapse those two: refineTeamPlan() returns a bare 'Team',
+          // which the server's normalizePlan() folds to 'Team Standard', and the primary path below
+          // does the same through `SEAT_TIER_MAP[x] || 'Team Standard'`. So losing a tier here
+          // silently DOWNGRADES a Team Premium member.
+          //
+          // The loss was on WRITE, not on read: allSeatTiers was rebuilt from an empty object and
+          // the whole cache replaced, so a single response without seat_tier erased what we already
+          // knew — and the 8h TTL meant that happened on a schedule. Measured before the fix: 602
+          // users / 935 day-over-day label changes, and every Premium→Standard sample had an
+          // UNCHANGED quota, i.e. the "downgrades" were this fallback rather than real ones.
+          //
+          // Merge over what we knew instead. A real downgrade still lands immediately — it arrives
+          // as seat_tier:'team_standard' and overwrites its key. Only ABSENCE is preserved.
+          // 🔴 Only inherit from a cache belonging to the SAME account. This branch also runs when
+          // acctCacheValid was false BECAUSE the account email changed (acctOrgEmailChanged above),
+          // and a seat tier is a property of the person in the seat — carrying it across an identity
+          // change would report the previous account's tier as the new one's.
+          const sameAccount = !!cache && !!acctEmail && cache.email === acctEmail;
+          // Keep tiers only for orgs this account is STILL a member of, so a tier from an org the
+          // user left cannot resurface if they rejoin and that response omits seat_tier. Skipped
+          // when memberships is empty — an empty list is far more likely a degraded response than
+          // a real "left every org", and pruning on it would reinstate the very wipe this fixes.
+          const currentOrgUuids = new Set(
+            memberships.map((m) => m.organization_uuid || m.organization?.uuid).filter(Boolean)
+          );
           const allSeatTiers = {};
+          if (sameAccount && cache.allSeatTiers) {
+            for (const [uuid, tier] of Object.entries(cache.allSeatTiers)) {
+              if (currentOrgUuids.size === 0 || currentOrgUuids.has(uuid)) allSeatTiers[uuid] = tier;
+            }
+          }
           for (const m of memberships) {
             const mOrgUuid = m.organization_uuid || m.organization?.uuid;
             if (mOrgUuid && m.seat_tier) allSeatTiers[mOrgUuid] = m.seat_tier;
+          }
+          // Same rule for the primary org's tier: same account AND same org.
+          if (!seatTier && sameAccount && cache.seatTier && cache.orgUuid === bestOrgUuid) {
+            seatTier = cache.seatTier;
+            console.warn('[Claude Tuner] /api/account carried no seat_tier — keeping last known:', seatTier);
           }
           const acctName = acct?.full_name || acct?.display_name || '';
           // orgEmail = the org-derived address seen alongside this fetch. It is the baseline the
@@ -651,6 +687,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
 
     // Refine plan based on seat tier
     if (bestPlan === 'Team' && seatTier) {
+      // An unmapped tier (a new 'team_tier_N' Anthropic adds) would otherwise become Team Standard
+      // with no trace — the same silent downgrade as a missing tier, just from a different cause.
+      if (!SEAT_TIER_MAP[seatTier]) {
+        console.warn(`[Claude Tuner] unmapped seat_tier "${seatTier}" — falling back to Team Standard (#969)`);
+      }
       bestPlan = SEAT_TIER_MAP[seatTier] || 'Team Standard';
       console.log(`[Claude Tuner] Team seat_tier: ${seatTier} → ${bestPlan}`);
     } else if (bestPlan === 'Enterprise' && seatTier) {
