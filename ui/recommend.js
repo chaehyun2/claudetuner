@@ -5,6 +5,7 @@ import { state, _isNonClaudePrimarySelected } from './state.js';
 import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util.js';
 import { _authedFetch } from './auth.js';
 import { isServerSyncStalled } from '../bg/server-reach.js';
+import { recDismissActive } from '../bg/rec-dismiss.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 
@@ -38,6 +39,11 @@ const _canonPlan = (p) => {
 // truthy keeps two unknown strings from comparing equal (null === null) and suppressing a valid rec.
 export function _shouldSuppressRec(rec, pendingPlan) {
   const recTo = rec.to_plan || rec.toPlan;
+  // The user's own "not now" / "don't show again", for as long as the SERVER said it lasts
+  // (bg/rec-dismiss.js). Without this the card is only hidden until the popup is reopened (#1004).
+  // Claude-scoped via the same `rec.provider || 'claude'` convention bg/rec-notice.js uses: the two
+  // dismiss buttons refuse to run for any other provider, so their record must not silence one.
+  if ((rec.provider || 'claude') === 'claude' && recDismissActive(state.recDismiss)) return true;
   // Suppress if same as just-executed plan change in this session
   if (state.planChangedTo && recTo === state.planChangedTo) return true;
   // Suppress if recommended plan matches an already scheduled pending plan

@@ -2,12 +2,13 @@
 import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _toggleChartAutoRoll, _toggleChartYAxis, isChartAutoRoll, isChartRolling } from './ui/charts.js';
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
+import { getRecDismiss } from './bg/rec-dismiss.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { pinnedState } from './bg/analytics.js';
 import { isServerSyncGated, serverSyncWithheldReason, getLastStatus } from './bg/storage.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
-import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD } from './bg/constants.js';
+import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
@@ -734,6 +735,9 @@ function updateThemeBtn(mode) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
+  // Load the active dismissal before anything renders: _shouldSuppressRec reads it synchronously,
+  // so a rec arriving ahead of this would draw a card the user already dismissed (#1004).
+  state.recDismiss = await getRecDismiss();
   initPopupTheme();
   // 🔴 `pinned` rides THIS event so the two can be crossed for one install. They are already
   // reported separately (`extension_loaded` carries pinned, `popup_open` does not), and that shape
@@ -1483,7 +1487,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     // DISMISS callback landing after the user switched to a ChatGPT org, must not stamp
     // "current_plan_ok" onto the now-visible ChatGPT rec.
     if ((state.recProvider || 'claude') !== 'claude') return;
-    chrome.runtime.sendMessage({ type: 'DISMISS_RECOMMENDATION' }, () => {
+    chrome.runtime.sendMessage({ type: 'DISMISS_RECOMMENDATION' }, (res) => {
+      // Adopt the window the background just stored, so a re-render inside THIS popup open (an org
+      // switch, a status push) does not redraw the card we are about to hide.
+      if (res?.dismiss) state.recDismiss = res.dismiss;
+      // ...and drop the in-memory copy too. ui/org-selector.js:368 restores the card from
+      // `state.lastRecommendation` when the user returns to the primary org, BEFORE consulting
+      // storage — so leaving it set makes the suppression depend entirely on the record above
+      // having arrived. Same clear the plan-change path already does.
+      state.lastRecommendation = null;
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');
       document.getElementById('recommendation').textContent = t('current_plan_ok');
@@ -1498,7 +1510,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Smart recommendation permanent mute button
   document.getElementById('smart-rec-mute').addEventListener('click', () => {
     if ((state.recProvider || 'claude') !== 'claude') return; // Claude-only, same as dismiss above
-    chrome.runtime.sendMessage({ type: 'MUTE_RECOMMENDATION' }, () => {
+    chrome.runtime.sendMessage({ type: 'MUTE_RECOMMENDATION' }, (res) => {
+      if (res?.dismiss) state.recDismiss = res.dismiss;
+      state.lastRecommendation = null;
       document.getElementById('smart-rec-detail').classList.add('hidden');
       document.getElementById('smart-rec-mute').classList.add('hidden');
       document.getElementById('recommendation').textContent = t('current_plan_ok');
@@ -1625,6 +1639,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             chrome.storage.local.set({ lastStatus: ls });
           });
           showRecFeedback(recommendation.type);
+        } else if (res?.error === ERR_PLAN_CHANGED_EXTERNALLY) {
+          // The plan already moved on claude.ai, so this recommendation is answering a question
+          // that no longer exists — and executePlanChange has just dismissed it server-side and
+          // cleared it from storage. Take the card down with it. Without this the popup only
+          // swaps the button label back and leaves a live "execute" control for a change that
+          // already happened; _updateUICore renders a rec when there is one but has no branch
+          // that hides one, so nothing else in this open would remove it.
+          state.lastRecommendation = null;
+          document.getElementById('recommendation-row')?.classList.add('hidden');
+          document.getElementById('smart-rec-detail').classList.add('hidden');
+          document.getElementById('smart-rec-btn').classList.add('hidden');
+          document.getElementById('smart-rec-dismiss').classList.add('hidden');
+          document.getElementById('smart-rec-mute').classList.add('hidden');
+          showError(t('plan_already_changed') || res.error);
         } else {
           btn.textContent = t('opt_execute');
           showError(res?.error || t('collect_fail'));

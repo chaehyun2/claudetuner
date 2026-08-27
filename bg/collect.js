@@ -18,6 +18,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { upsertClaudeOrg } from './org-merge.js';
+import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
@@ -1225,6 +1226,16 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // Keep previous recommendation (will be async-updated when server response arrives)
     const prevStatus = await getLastStatus();
     let recommendation = prevStatus?.recommendation || null;
+    // 🔴 ...but never carry forward one the user has dismissed. This write is a read-modify-write of
+    // the whole container from a value read EARLIER, so a collect already in flight when the user
+    // clicks "not now" writes the dismissed rec back AFTER the dismissal cleared it — the exact
+    // symptom of #1004, re-created by ordering alone. Deciding it HERE, from the same stored record
+    // both other readers use, makes the race unwinnable rather than merely unlikely.
+    // Claude-scoped like the dismiss buttons; a non-Claude rec in this slot is carried as before.
+    if (recommendation && (recommendation.provider || 'claude') === 'claude'
+        && recDismissActive(await getRecDismiss())) {
+      recommendation = null;
+    }
     // Drop a stale actionable rec whose basis plan no longer matches the current snapshot
     // plan (the user changed plans since it was cached; server 24h-throttle + snapshot dedup
     // can leave the prior rec). Prevents a nonsensical card/badge (e.g. a Max 20x user seeing

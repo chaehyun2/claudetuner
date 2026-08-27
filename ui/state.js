@@ -25,6 +25,7 @@ export const state = {
   recProvider: 'claude', // provider of the rec currently ON SCREEN — gates plan-change execution,
                          // which only Claude supports (see ui/recommend.js)
   planChangedTo: null, // plan we just changed to — suppresses same recommendation from re-rendering
+  recDismiss: null, // active "not now"/"don't show again" record (bg/rec-dismiss.js), loaded on open
   popupNoticeList: [],
   popupAds: [], // selected in-house ad banners (design §3.2) rendered alongside promos
   updateUITimer: null,

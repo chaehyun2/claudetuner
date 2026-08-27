@@ -63,6 +63,11 @@ export const ANTHROPIC_HEADERS = { 'anthropic-client-platform': 'web_claude_ai',
 export const NON_PERSONAL_PLANS = ['Enterprise', 'Team', 'Team Standard', 'Team Premium', 'Team Tier 2', 'API'];
 
 export const NOTIF_ID_OPTIMIZE = 'claude-plan-optimize';
+
+// executePlanChange's verdict when the plan on claude.ai no longer matches the one the
+// recommendation was computed for. Produced by bg/plan.js, consumed by bg/plan.js and popup.js —
+// a value that crosses module boundaries, so it is not a literal repeated at each end.
+export const ERR_PLAN_CHANGED_EXTERNALLY = 'Plan already changed externally';
 export const NOTIF_ID_ALERT = 'usage-alert';
 
 // === Adaptive Polling for secondary orgs ===

@@ -1,9 +1,10 @@
-import { PLAN_HIERARCHY, PLAN_API_MAP, SEAT_TIER_MAP, NOTIF_ID_OPTIMIZE, ANTHROPIC_HEADERS } from './constants.js';
+import { PLAN_HIERARCHY, PLAN_API_MAP, SEAT_TIER_MAP, NOTIF_ID_OPTIMIZE, ANTHROPIC_HEADERS, ERR_PLAN_CHANGED_EXTERNALLY } from './constants.js';
 import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus, authedFetch } from './storage.js';
 import { logNotification, createCountedNotification } from './notifications.js';
 import { resetIcon , badgeLockedByAuthBlock, updateBadgeForSelectedOrg } from './badge.js';
+import { recordRecDismiss, clearDismissedClaudeRec } from './rec-dismiss.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -184,7 +185,7 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
     // pending order no longer paints either (bg/badge.js), so the badge now holds the usage
     // percentage — and `setBadgeText({ text: '' })` would blank it until the next collection,
     // i.e. up to an hour of an empty toolbar because a plan order happened to succeed.
-  } else if (changeResult?.error === 'Plan already changed externally') {
+  } else if (changeResult?.error === ERR_PLAN_CHANGED_EXTERNALLY) {
     // Plan was changed outside of the order — clear stale order so banner disappears.
     // Same compare-and-clear: a newer order in the slot is not resolved by this one.
     await clearIfStillOurs();
@@ -193,25 +194,45 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
 }
 
 // === Dismiss recommendation → send to server ===
+//
+// 🔴 THE SERVER CALL IS NOT THE WHOLE DISMISSAL. It used to be all this did, fire-and-forget — and
+// the card came back within the hour, because every popup surface re-renders from
+// `lastStatus.recommendation` and nothing here ever cleared it (#1004). Three things have to
+// happen, and the local two are what the user actually sees:
+//   1. tell the server (it owns the escalating 3/7/14-day cooldown),
+//   2. store the window it reports, so a stale server answer can't resurrect the card, and
+//   3. drop the rec from storage, so the popup has nothing to redraw.
+// Awaited rather than fired and forgotten: the response IS the window, and a caller told
+// "dismissed" while nothing was recorded is the bug this replaced.
 export async function dismissRecommendationServer({ permanent = false } = {}) {
   const config = await getConfig();
   const status = await getLastStatus();
   const email = status?.snapshot?.user_email;
+  let result = null;
   if (email && config.serverUrl) {
     const payload = { user_email: email };
     if (permanent) payload.permanent = true;
-    authedFetch(config, `${config.serverUrl}/api/snapshots/dismiss`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
+    try {
+      const res = await authedFetch(config, `${config.serverUrl}/api/snapshots/dismiss`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) result = await res.json().catch(() => null);
+    } catch { /* offline/blocked — recordRecDismiss falls back to its local floor */ }
   }
+  // Order matters: record the window BEFORE dropping the rec, so a crash between the two leaves a
+  // suppressed-but-present rec (harmless) rather than a deleted-and-unsuppressed one (the rec
+  // silently returns on the next fetch with nothing to stop it).
+  const record = await recordRecDismiss(result, permanent);
+  await clearDismissedClaudeRec();
   // Repaint rather than blank — same reason as executePlanChange above (#994). Dismissing a
   // recommendation must remove the recommendation, not the percentage.
   if (!(await badgeLockedByAuthBlock())) {
     await updateBadgeForSelectedOrg((await getLastStatus())?.snapshot || null);
   }
   chrome.notifications.clear(NOTIF_ID_OPTIMIZE);
+  return record;
 }
 
 export const muteRecommendationServer = () => dismissRecommendationServer({ permanent: true });
@@ -231,7 +252,7 @@ export async function executePlanChange(recommendation) {
       console.log(`[Claude Tuner] Plan changed externally: expected ${fromPlan}, got ${currentPlan}`);
       await notifyPlanChange(await bt('opt_already_title'), await bt('opt_already_msg', currentPlan));
       await dismissRecommendationServer();
-      return { success: false, error: 'Plan already changed externally' };
+      return { success: false, error: ERR_PLAN_CHANGED_EXTERNALLY };
     }
 
     const isUpgrade = recommendation.type === 'upgrade';

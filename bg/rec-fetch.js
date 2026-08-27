@@ -11,6 +11,7 @@
 // `lastStatus.recommendation` and `lastStatus.recommendations_by_provider[provider][org||'-']`.
 
 import { authedFetch, getLastStatus, setStatus } from './storage.js';
+import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { refreshRecNotice, updateBadgeForSelectedOrg } from './badge.js';
 
 /**
@@ -33,8 +34,18 @@ export async function fetchRecommendations(config) {
     const data = await response.json().catch(() => null);
     if (!data) return;
 
-    const recommendation = data.recommendation != null ? data.recommendation : null;
+    let recommendation = data.recommendation != null ? data.recommendation : null;
     const recommendations_by_provider = data.recommendations_by_provider || {};
+
+    // Honour the user's own dismissal even when the server still sends the rec. The server's
+    // in-memory rec cache is PER-ISOLATE (1h TTL), so the isolate that recorded the dismissal is
+    // not necessarily the one answering this fetch — persisting what it says would put the
+    // dismissed card, and its toolbar marker, straight back (#1004). Claude-only, matching the
+    // scope of the dismiss buttons; a non-Claude rec in this slot is passed through untouched.
+    if (recommendation && (recommendation.provider || 'claude') === 'claude'
+        && recDismissActive(await getRecDismiss())) {
+      recommendation = null;
+    }
 
     // Overwrite stored recs ONLY on a COMPLETE, non-empty result. The server sets `complete:false`
     // when any read/compute failed, and returns an empty body when latest_snapshot has no row yet

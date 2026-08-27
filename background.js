@@ -1646,11 +1646,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'DISMISS_RECOMMENDATION') {
-    dismissRecommendationServer().then(() => sendResponse({ success: true }));
+    dismissRecommendationServer()
+      .then((r) => sendResponse({ success: true, dismiss: r }))
+      .catch((e) => sendResponse({ success: false, error: e?.message || String(e) }));
     return true;
   }
   if (message.type === 'MUTE_RECOMMENDATION') {
-    muteRecommendationServer().then(() => sendResponse({ success: true }));
+    muteRecommendationServer()
+      .then((r) => sendResponse({ success: true, dismiss: r }))
+      .catch((e) => sendResponse({ success: false, error: e?.message || String(e) }));
     return true;
   }
   if (message.type === 'RESPOND_PLAN_ORDER') {
