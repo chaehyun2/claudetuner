@@ -8,7 +8,7 @@ import { isServerSyncGated, serverSyncWithheldReason, getLastStatus } from './bg
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD } from './bg/constants.js';
-import { dashboardUrl, refreshDashboardLinks, _isDark } from './ui/util.js';
+import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
@@ -1202,6 +1202,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           state.currentSnapshot = r.lastStatus?.snapshot || null;
           redrawDetail();
         }
+        // Gauge window labels carry no data-i18n (ui/util.js applyGaugeWindowLabels strips it, or
+        // applyI18n would put the static slot label back), so nothing above re-translates them:
+        // _updateUICore() returns before the gauge branches for a selected non-primary/provider
+        // org, redrawDetail() only redraws charts + banner, and a provider-only install has no
+        // lastStatus at all so it never enters that branch. Re-apply from the org list, which is
+        // the same source selectOrg() labels from. Outside the lastStatus block on purpose.
+        const langSelOrg = (r.collectedOrgs || state.collectedOrgs || [])
+          .find(o => o.uuid === state.selectedOrgId);
+        if (langSelOrg) applyGaugeWindowLabels(langSelOrg.w5s, langSelOrg.w7s);
         // Re-render org chips too (reflects plan name translations, etc.)
         if (state.collectedOrgs.length >= 2) showMultiOrgBadges(state.collectedOrgs);
         // Re-render overview cards (title + countdown strings are i18n).

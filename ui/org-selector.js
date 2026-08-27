@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType } from './util.js';
+import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
@@ -167,6 +167,12 @@ export function selectOrg(orgId, container) {
             : orgData.renewalDate);
       setRenewalDisplay(orgRenewal);
       _restoreGaugeHTML(gaugeSection);
+      // Label from THIS org's reported window lengths. Must be here and not only in
+      // _updateUICore(): that runs for the primary org and returns early for a selected
+      // non-primary/provider org, so without this the detail view a ChatGPT Free/Go user actually
+      // looks at keeps the static "7일 사용률" — and, because _restoreGaugeHTML() is a no-op when
+      // the gauge already exists, would carry the PREVIOUS org's label across a switch (#954).
+      applyGaugeWindowLabels(orgData.w5s, orgData.w7s);
       // Hide the whole 5h gauge row for no-5h orgs (ChatGPT); show it otherwise so a
       // prior no-5h org's hide is reset when switching back to a Claude/5h org.
       const row5h = document.getElementById('gauge-row-5h');
@@ -426,8 +432,12 @@ export function selectOrg(orgId, container) {
       // but ChatGPT Free (0.2) and Go (0.4) both scored 1x, as did Gemini Free (0.25), AI Plus
       // (0.5) and a bare 'Ultra' (5). Cross-plan history normalization used those numbers.
       provider: orgData.provider || 'claude',
-      five_hour: { utilization: orgData.h5, resets_at: resetsAt5h },
-      seven_day: { utilization: orgData.d7, resets_at: resetsAt7d },
+      // window_seconds = the provider's REPORTED window length, not the slot's nominal one. Null
+      // when unreported (Claude/Gemini, or an older stored org) and every consumer must then keep
+      // its static label. ChatGPT Free/Go report 2592000 here — see ui/util.js formatWindowLabel
+      // and #954.
+      five_hour: { utilization: orgData.h5, resets_at: resetsAt5h, window_seconds: orgData.w5s ?? null },
+      seven_day: { utilization: orgData.d7, resets_at: resetsAt7d, window_seconds: orgData.w7s ?? null },
       extra_usage: orgData.extraUsage || (orgData.spendLimit ? { used_credits: orgData.spendUsed, monthly_limit: orgData.spendLimit } : null),
     };
     // No 5h/7d limits (Enterprise usage-based or no-limit Gemini): no tab rolling

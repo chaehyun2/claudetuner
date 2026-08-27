@@ -13,6 +13,12 @@ const TRANSLATIONS = {
     'min_later_check': '분 후',
     'usage_5h': '5시간 사용률',
     'usage_7d': '7일 사용률',
+    // Window labels derived from the reported span, for plans whose window is not the slot's
+    // nominal length (ChatGPT Free/Go report a 30-day window in the 7d slot). usage_5h/usage_7d
+    // above stay as the fallback when no span was reported. See #954.
+    'usage_window': '{0} 사용률',
+    'window_hours': '{0}시간',
+    'window_days': '{0}일',
     'ov_title': '모아 보기',
     'ov_back': '전체 보기',
     'ov_detail': '자세히',
@@ -547,6 +553,9 @@ const TRANSLATIONS = {
     'min_later_check': 'm',
     'usage_5h': '5-Hour Usage',
     'usage_7d': '7-Day Usage',
+    'usage_window': '{0} Usage',
+    'window_hours': '{0}-Hour',
+    'window_days': '{0}-Day',
     'ov_title': 'Overview',
     'ov_back': 'All accounts',
     'ov_detail': 'Detail',

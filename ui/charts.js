@@ -3,7 +3,7 @@
 // i18n `t` is referenced as a global (i18n.js, a classic script that loads first).
 import {
   _isDark, _cGrid, _cLabel, _cTick, gaugeColor, planToMultiplier,
-  buildPlanLimitLines, chartMaxY,
+  buildPlanLimitLines, chartMaxY, formatWindowShort,
 } from './util.js';
 import { windowForecast } from './prediction.js';
 
@@ -196,6 +196,18 @@ export function drawCharts(history, plan, snapshot) {
   // early return below so the tab state is correct even without enough history to draw.
   const tab5hBtn = chartSection?.querySelector('.chart-tab[data-tab="5h"]');
   if (tab5hBtn) tab5hBtn.style.display = no5h ? 'none' : '';
+  // Tab captions follow the REPORTED window length: a ChatGPT Free/Go org's 7d slot holds a
+  // 30-day window, so its tab reads '30d' (#954). `data-tab` is the slot id and never changes —
+  // only the caption does, so every selector/switch path above keeps working.
+  //
+  // 🔴 The no-span case must WRITE the default, not skip. This renders on every org switch, so
+  // leaving the previous caption in place would carry a 30d org's '30d' onto the Claude org the
+  // user switched to — a stale label that looks like a data error.
+  const shortLabel = (btn, span, fallback) => {
+    if (btn) btn.textContent = formatWindowShort(span) || fallback;
+  };
+  shortLabel(tab5hBtn, snapshot?.five_hour?.window_seconds ?? null, '5h');
+  shortLabel(chartSection?.querySelector('.chart-tab[data-tab="7d"]'), snapshot?.seven_day?.window_seconds ?? null, '7d');
   // Pin to 7d by reusing the tab-switch helper (handles active class + pane display
   // consistently). The `_switchChartTab('5h' && _no5hMode)` guard above blocks any
   // later roll back to the hidden 5h pane.
@@ -205,7 +217,10 @@ export function drawCharts(history, plan, snapshot) {
   const now = Date.now();
   // Provider determines the multiplier scale (ChatGPT/Gemini tiers differ from Claude)
   const provider = snapshot?.provider || 'claude';
-  const currentMult = planToMultiplier(plan, provider);
+  // Per-window (#955): Max 20x is 20x Pro in the 5h window and ~10x in the weekly one, so the
+  // guide lines and the plan-change rebase below need one multiplier each, not one shared.
+  const currentMult5h = planToMultiplier(plan, provider, '5h');
+  const currentMult7d = planToMultiplier(plan, provider, '7d');
 
   // Time-ordered but UNSCALED — this is what the gauges and the banner forecast from
   // (render.js passes _filteredHistory() straight through). The forecast MUST read the same
@@ -217,10 +232,12 @@ export function drawCharts(history, plan, snapshot) {
   // Normalize past data to current plan scale, for DRAWING only
   // (e.g. Pro 80% -> Max 5x switch -> converted to 16%)
   const sorted = sortedRaw.map((pt) => {
-    const entryMult = planToMultiplier(pt.p || plan, provider);
-    if (entryMult === currentMult) return pt;
-    const scale = entryMult / currentMult;
-    return { t: pt.t, h5: pt.h5 != null ? pt.h5 * scale : null, d7: pt.d7 != null ? pt.d7 * scale : null, p: pt.p, r7: pt.r7 };
+    const entryMult5h = planToMultiplier(pt.p || plan, provider, '5h');
+    const entryMult7d = planToMultiplier(pt.p || plan, provider, '7d');
+    if (entryMult5h === currentMult5h && entryMult7d === currentMult7d) return pt;
+    const scale5h = entryMult5h / currentMult5h;
+    const scale7d = entryMult7d / currentMult7d;
+    return { t: pt.t, h5: pt.h5 != null ? pt.h5 * scale5h : null, d7: pt.d7 != null ? pt.d7 * scale7d : null, p: pt.p, r7: pt.r7 };
   });
 
   const reset5h = snapshot?.five_hour?.resets_at ? new Date(snapshot.five_hour.resets_at).getTime() : null;
@@ -238,8 +255,11 @@ export function drawCharts(history, plan, snapshot) {
   const fc5h = windowForecast(snapshot?.five_hour?.utilization ?? null, 'h5', snapshot?.five_hour?.resets_at, sortedRaw);
   const fc7d = windowForecast(snapshot?.seven_day?.utilization ?? null, 'd7', snapshot?.seven_day?.resets_at, sortedRaw);
 
-  // Provider-aware guide lines shared by the 5h and 7d charts.
-  const limitLines = buildPlanLimitLines(currentMult, provider);
+  // 🔴 One array per window (#955). These used to be built once and handed to BOTH charts, so a
+  // Max 20x user's WEEKLY chart drew the "Max 5x" boundary at 5/20 = 25% when it belongs at
+  // 5/10 = 50% — i.e. the popup told them they needed 20x while a 5x would have held them.
+  const limitLines5h = buildPlanLimitLines(currentMult5h, provider, '5h');
+  const limitLines7d = buildPlanLimitLines(currentMult7d, provider, '7d');
 
   // Hide placeholder and show both panes (for correct canvas size calculation)
   const pane5h = document.getElementById('chart-pane-5h');
@@ -259,7 +279,7 @@ export function drawCharts(history, plan, snapshot) {
       canvasId: 'chart-5h', infoId: 'chart-5h-info',
       sorted: sorted5h.length >= 2 ? sorted5h : sorted, key: 'h5', color: '#06b6d4',
       forecast: fc5h, lastVal: last5h, resetTime: reset5h,
-      limitLines, now,
+      limitLines: limitLines5h, now,
     });
   }
 
@@ -270,7 +290,7 @@ export function drawCharts(history, plan, snapshot) {
     canvasId: 'chart-7d', infoId: 'chart-7d-info',
     sorted: sorted7d.length >= 2 ? sorted7d : sorted, key: 'd7', color: '#7c3aed',
     forecast: fc7d, lastVal: last7d, resetTime: reset7d,
-    limitLines, now,
+    limitLines: limitLines7d, now,
   });
 
   // Hide inactive pane

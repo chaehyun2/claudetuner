@@ -211,6 +211,19 @@ const WINDOW_7D_SECONDS = 7 * 24 * 60 * 60; // 604800
 // treated as the 5h window, longer as the 7d window.
 const WINDOW_SPLIT_SECONDS = Math.round(Math.sqrt(WINDOW_5H_SECONDS * WINDOW_7D_SECONDS));
 
+// The reported length of a window, or null when the provider did not say.
+//
+// 🔴 The slot a window lands in is NOT its length. ChatGPT Free/Go report a 30-DAY window, which
+// classifyWindows() below correctly files in the 7d slot (there is nowhere else for it to go) —
+// but reading that slot as "7 days" is then false for 1,018 users. Keeping the span as a VALUE is
+// what lets a consumer label and reason about the real window, instead of guessing from the
+// provider or plan name (which is wrong in both directions — see #952).
+// See #954 and docs/DESIGN-window-span-preservation.md.
+export function windowSpan(w) {
+  const s = w?.limit_window_seconds;
+  return typeof s === 'number' && isFinite(s) && s > 0 ? s : null;
+}
+
 // Pick the 5h and 7d windows out of the rate_limit object by their span.
 function classifyWindows(rateLimit) {
   const primary = rateLimit?.primary_window || null;
@@ -336,6 +349,10 @@ export async function collectChatGPT(force = false, userManual = false) {
       d7: w7d?.used_percent ?? null,
       resetsAt5h: unixToResetTime(w5h?.reset_at),
       resetsAt7d: unixToResetTime(w7d?.reset_at),
+      // Reported window lengths. `w7s` is 2592000 (30 days) for Free/Go and 604800 for everyone
+      // else — the popup labels from this rather than assuming the slot's nominal length (#954).
+      w5s: windowSpan(w5h),
+      w7s: windowSpan(w7d),
       renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
       // Scheduled plan change from accounts/check entitlement.scheduled_plan_change
       // (e.g. "changes to Plus on 7/22"); null when no downgrade/change is scheduled.
@@ -404,6 +421,10 @@ export async function collectChatGPT(force = false, userManual = false) {
       d7: null,
       resetsAt5h: null,
       resetsAt7d: null,
+      // Usage is null for extra workspaces (per-account token needed), so there is no window
+      // either — stated explicitly so org-merge does not carry a stale span forward.
+      w5s: null,
+      w7s: null,
       renewalDate: ws.renewal,
       pendingPlan: ws.pendingPlan || null,
       pendingChangeDate: ws.pendingChangeDate || null,
@@ -471,13 +492,20 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     plan: plan,
     collected_at: new Date().toISOString(),
     ext_version: extVersion,
+    // `window_seconds` is additive and OPTIONAL: today's server ignores it, and Phase 2 of
+    // docs/DESIGN-window-span-preservation.md persists it. Sending it now means that when the
+    // server side ships, the clients already updated are contributing spans immediately instead
+    // of waiting out a second CWS review. Absent/null on old clients → NULL column, which every
+    // consumer must read as "not reported" (§7 of that doc).
     five_hour: {
       utilization: org.h5,
       resets_at: org.resetsAt5h,
+      window_seconds: org.w5s ?? null,
     },
     seven_day: {
       utilization: org.d7,
       resets_at: org.resetsAt7d,
+      window_seconds: org.w7s ?? null,
     },
     claude_org_uuid: org.uuid,
     provider: 'chatgpt',

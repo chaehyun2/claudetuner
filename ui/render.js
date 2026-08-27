@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatTimeAgo, setRenewalDisplay } from './util.js';
+import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
@@ -362,6 +362,7 @@ export function _updateUICore(status) {
       util5h = s.five_hour?.utilization ?? null;
       util7d = s.seven_day?.utilization ?? null;
       _restoreGaugeHTML(gaugeSection);
+      applyGaugeWindowLabels(s?.five_hour?.window_seconds, s?.seven_day?.window_seconds);
       // Render the reset line for each window BEFORE prediction (which may overwrite
       // it with the wait block). Pass hasWindow = util !== null: with a window and no
       // reset it shows the idle hint, and it clears a stale wait block; a valueless
@@ -378,6 +379,7 @@ export function _updateUICore(status) {
     } else {
       // Restore gauge DOM that may have been destroyed by org switching
       _restoreGaugeHTML(gaugeSection);
+      applyGaugeWindowLabels(s?.five_hour?.window_seconds, s?.seven_day?.window_seconds);
       util5h = s.five_hour?.utilization ?? null;
       util7d = s.seven_day?.utilization ?? null;
       // Base reset lines first (see the seat-based branch above): hasWindow = util

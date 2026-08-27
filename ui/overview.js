@@ -8,7 +8,7 @@
 // rather than re-implementing them. The detail renderer itself is left untouched — the
 // overview only hides the detail sections via a body class, so removing that class
 // restores each section to whatever its own logic last set (zero regression risk).
-import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName } from './util.js';
+import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, windowLabel } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
 import {
   calcPredictedAtReset, estimateCapHitTime, tierColor, tierSeverity, isAlertTier,
@@ -118,7 +118,9 @@ function _predictBadge(cur, pred) {
 // header (label + value% + ▸ badge), bar (current fill + striped projected extension),
 // sub (countdown + absolute reset). Returns '' when the window is unavailable for this
 // org/plan (Free/Team 7d, unused Gemini window).
-function _gaugeRow(labelKey, key, current, pred, resetAt, capHitMs) {
+// `label` is the RESOLVED window label, not an i18n key: the 7d slot can hold a 30-day window
+// (ChatGPT Free/Go, #954), so the caller decides via windowLabel() and this only renders it.
+function _gaugeRow(label, key, current, pred, resetAt, capHitMs) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
   const valColor = gaugeColor(cur);
@@ -164,7 +166,7 @@ function _gaugeRow(labelKey, key, current, pred, resetAt, capHitMs) {
   }
   return '<div class="gauge-row">'
     + '<div class="gauge-header">'
-    + `<span class="gauge-label">${t(labelKey)}</span>`
+    + `<span class="gauge-label">${escHtml(label)}</span>`
     + `<span class="gauge-value" style="color:${valColor}">${cur}%</span>`
     + _predictBadge(cur, pred)
     + '</div>'
@@ -217,9 +219,9 @@ function _renderCard(org, hist) {
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
-    rows += _gaugeRow('usage_5h', 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
+    rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
     const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
-    rows += _gaugeRow('usage_7d', 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
+    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`

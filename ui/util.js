@@ -6,6 +6,88 @@ export function escHtml(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ── Usage-window labels (#954) ────────────────────────────────────────────────────────────────
+//
+// The 5h / 7d slots are SLOTS, not window lengths. ChatGPT Free and Go report a **30-day** window
+// in the 7d slot (938 + 80 users; 98.5% / 99.9% of their rows, measured 2026-08-26), so
+// "7일 사용률" is a false label for them. The provider's own `limit_window_seconds` is the truth
+// and it rides every response; these helpers turn it into a label.
+//
+// 🔴 Do NOT derive the window from the provider or the plan name. Within ChatGPT alone Plus is 7
+// days and Free is 30, so a provider test is wrong in BOTH directions — which is exactly how the
+// team Race broke (#952). The span is a property of (plan, point in time); read it from the data.
+//
+// A null/absent span means "not reported" (an older client, or a provider that does not send one,
+// e.g. Claude) → callers fall back to the static usage_5h / usage_7d labels, so nothing changes
+// for anyone whose window really is the slot's nominal length.
+const WINDOW_HOUR = 3600;
+const WINDOW_DAY = 86400;
+
+/** True when `seconds` is a usable span. Rejects 0 and negatives, not merely non-numbers. */
+function isSpan(seconds) {
+  return typeof seconds === 'number' && isFinite(seconds) && seconds > 0;
+}
+
+/**
+ * Short slot label for a chart tab: '5h' / '7d' / '30d'.
+ * Returns null when there is no span, so the caller keeps its existing hard-coded label.
+ */
+export function formatWindowShort(seconds) {
+  if (!isSpan(seconds)) return null;
+  if (seconds < WINDOW_DAY) return `${Math.round(seconds / WINDOW_HOUR)}h`;
+  return `${Math.round(seconds / WINDOW_DAY)}d`;
+}
+
+/**
+ * Full gauge label: '30일 사용률' / '30-Day Usage'.
+ * Returns null when there is no span (caller falls back to t('usage_5h') / t('usage_7d')).
+ */
+export function formatWindowLabel(seconds) {
+  if (!isSpan(seconds)) return null;
+  const unit = seconds < WINDOW_DAY
+    ? t('window_hours', Math.round(seconds / WINDOW_HOUR))
+    : t('window_days', Math.round(seconds / WINDOW_DAY));
+  return t('usage_window', unit);
+}
+
+/**
+ * THE way to label a usage gauge. Every caller goes through this rather than writing
+ * `formatWindowLabel(x) || t('usage_7d')` itself — one rule, one place to change.
+ *
+ * `fallbackKey` is the slot's static label ('usage_5h' / 'usage_7d'), used when the provider
+ * reported no span. That keeps Claude and every pre-span stored org rendering exactly as before.
+ */
+export function windowLabel(spanSeconds, fallbackKey) {
+  return formatWindowLabel(spanSeconds) || t(fallbackKey);
+}
+
+/**
+ * Write both detail-gauge labels from the reported spans. Lives here, not in a render module,
+ * because THREE call sites need it and a second copy would drift: _updateUICore() (primary org),
+ * selectOrg() (any selected org — the path a ChatGPT Free/Go user actually uses), and the
+ * language-switch handler.
+ *
+ * 🔴 Call it AFTER _restoreGaugeHTML(). That reinstates popup.html's markup, whose spans carry
+ * data-i18n="usage_5h"/"usage_7d", so a label written before it is discarded.
+ *
+ * 🔴 Both slots are written unconditionally, including the no-span case. _restoreGaugeHTML() is a
+ * NO-OP when the gauge element already exists, so skipping the null case would carry org A's
+ * "30일 사용률" onto org B on switch.
+ *
+ * Removing data-i18n is required (applyI18n() re-runs on language change and would restore the
+ * static slot label), which is why the language-switch handler must call this itself.
+ */
+export function applyGaugeWindowLabels(span5, span7) {
+  const set = (rowId, span, fallbackKey) => {
+    const el = document.querySelector(`#gauge-row-${rowId} .gauge-label`);
+    if (!el) return;
+    el.textContent = windowLabel(span, fallbackKey);
+    el.removeAttribute('data-i18n');
+  };
+  set('5h', span5 ?? null, 'usage_5h');
+  set('7d', span7 ?? null, 'usage_7d');
+}
+
 // THE canonical way to read a recommendation's type. Every consumer must go through this —
 // reading `rec.type` directly is a live bug, not a style preference.
 //
@@ -159,7 +241,12 @@ export function planDisplayName(plan, provider) {
 // Claude's); Claude falls through to the original substring logic. ChatGPT "Pro"
 // = Pro 20x tier (20x), "Prolite"/"Pro 5x" = Pro 5x tier (5x) — the same aliases
 // remapped by planDisplayName().
-export function planToMultiplier(plan, provider) {
+// 🔴 `win` ('5h' | '7d') is REQUIRED at every call site. Claude Max 20x grants 20x Pro's 5-hour
+// quota but only ~10x its WEEKLY quota (#955 — measured over 3 weeks of our own snapshots; the
+// method is documented at planQuota() in worker/src/services/usage-calculator.ts). No compiler
+// here, so test/plan-mult-window-args-guard.mjs enforces the argument; the runtime default is '5h'
+// so a missed call degrades to the PREVIOUS behaviour instead of throwing in a user's popup.
+export function planToMultiplier(plan, provider, win) {
   // trim() matters here and not in the Claude substring arms: the non-Claude arms below are EXACT
   // matches, so a padded " Pro 20x " would miss every one of them and fall through to `return 1` —
   // the same silent 20x under-count this function exists to prevent. planDisplayName() above already
@@ -181,7 +268,7 @@ export function planToMultiplier(plan, provider) {
   }
   // Claude (default): original substring logic
   if (!plan) return 1;
-  if (p.includes('20')) return 20;
+  if (p.includes('20')) return win === '7d' ? 10 : 20;
   if (p.includes('5x') || (p.includes('max') && p.includes('5'))) return 5;
   if (p.includes('max')) return 5; // "Max" alone defaults to 5x
   if (p.includes('team') && p.includes('premium')) return 6.25;
@@ -191,7 +278,9 @@ export function planToMultiplier(plan, provider) {
 }
 
 // Provider-specific quota tiers used by the popup's dashed guide lines.
-export function planLimitTiers(provider, currentMult) {
+// `win` picks the Claude 20x tier's quota for THIS chart's window (#955). ChatGPT/Gemini 20x
+// tiers are unmeasured and stay at 20 in both windows, so only the Claude arm below moves.
+export function planLimitTiers(provider, currentMult, win) {
   if (currentMult === 1.25 || currentMult === 6.25) {
     return [
       { mult: 1.25, label: provider === 'chatgpt' ? 'Team' : 'Team Standard', color: '#06b6d4' },
@@ -215,12 +304,14 @@ export function planLimitTiers(provider, currentMult) {
   return [
     { mult: 1, label: 'Pro', color: '#22c55e' },
     { mult: 5, label: 'Max 5x', color: '#f97316' },
-    { mult: 20, label: 'Max 20x', color: '#ef4444' },
+    { mult: win === '7d' ? 10 : 20, label: 'Max 20x', color: '#ef4444' },
   ];
 }
 
-export function buildPlanLimitLines(currentMult, provider) {
-  const tiers = planLimitTiers(provider, currentMult);
+// 🔴 `currentMult` and `win` must describe the SAME window: the returned values are percentages of
+// `currentMult`, so mixing a 5h denominator with a 7d ladder is the #955 defect in one line.
+export function buildPlanLimitLines(currentMult, provider, win) {
+  const tiers = planLimitTiers(provider, currentMult, win);
   const lowerTiers = tiers.filter((tier) => tier.mult < currentMult);
   const immediateLowerMult = lowerTiers.length
     ? Math.max(...lowerTiers.map((tier) => tier.mult))
