@@ -378,8 +378,17 @@ export function selectOrg(orgId, container) {
     // users the spec says must see none.
     // === POPUP REC RENDER GATE: BEGIN (pinned by test/rec-reachability-guard.mjs) ===
     const recRenderable = !!rec && recType(rec) !== 'insufficient_data';
+    // 🔴 The pending plan must come from the SAME provider as `rec`. `state.currentSnapshot` is the
+    // CLAUDE snapshot; a ChatGPT org carries its own scheduled change on `orgData.pendingPlan` — the
+    // very value §4 above renders as the "pending plan" row. Reading the Claude slot for a ChatGPT
+    // rec meant a downgrade the user had ALREADY scheduled kept being recommended, in a card two
+    // rows below the one announcing that same change (#986). Claude's own pending_plan is null for
+    // most multi-provider users, so the suppression simply never fired.
+    const pendingForRec = isClaudeOrg
+      ? state.currentSnapshot?.subscription?.pending_plan
+      : orgData.pendingPlan;
     if ((isClaudeOrg || isChatgptOrg) && recRenderable
-        && !_shouldSuppressRec(rec, state.currentSnapshot?.subscription?.pending_plan)) {
+        && !_shouldSuppressRec(rec, pendingForRec)) {
       if (isClaudeOrg) state.lastRecommendation = rec;
       if (recRow) recRow.classList.remove('hidden');
       // Pass THIS org's plan as the stale-plan basis. state.currentPlan tracks the primary Claude

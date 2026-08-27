@@ -23,14 +23,29 @@ const _canonPlan = (p) => {
   return _KNOWN_PLANS.includes(v) ? v : null;
 };
 
+// === REC PENDING SUPPRESSION: BEGIN (pinned by test/rec-pending-suppress-guard.mjs) ===
+// Suppress a rec the user has ALREADY acted on. `pendingPlan` must come from the SAME provider as
+// `rec` — see the caller note in ui/org-selector.js.
+//
+// 🔴 Both sides go through _canonPlan(). The two providers hand us the pending plan in DIFFERENT
+// shapes: Claude stores an API id (`max_5x_monthly`, from subscription.pending_plan) and ChatGPT
+// stores an already-display label (`Plus`, from bg/collect-chatgpt.js). The old comparison did a
+// bare `_planApiToLabel[pendingPlan]` lookup, which is an API-id→label map — so a ChatGPT 'Plus'
+// missed it and returned undefined, and the rec was never suppressed even when the right value was
+// passed in. Canonicalizing both sides accepts either shape.
+//
+// A null canon means "unrecognized tier", NOT "no pending change" — requiring `pendingCanon` to be
+// truthy keeps two unknown strings from comparing equal (null === null) and suppressing a valid rec.
 export function _shouldSuppressRec(rec, pendingPlan) {
   const recTo = rec.to_plan || rec.toPlan;
   // Suppress if same as just-executed plan change in this session
   if (state.planChangedTo && recTo === state.planChangedTo) return true;
-  // Suppress if recommended plan matches already scheduled pending plan
-  if (pendingPlan && recTo === _planApiToLabel[pendingPlan]) return true;
+  // Suppress if recommended plan matches an already scheduled pending plan
+  const pendingCanon = _canonPlan(pendingPlan);
+  if (pendingCanon && _canonPlan(recTo) === pendingCanon) return true;
   return false;
 }
+// === REC PENDING SUPPRESSION: END ===
 
 const FM_CACHE_TTL = 8 * 3600000; // 8h
 const FM_WINDOWS = ['24h', '7d', '14d'];

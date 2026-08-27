@@ -16,7 +16,8 @@ import { bt } from './bg/i18n.js';
 import { extTokenEmail, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
-import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon } from './bg/badge.js';
+import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
+import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification } from './bg/notifications.js';
 import {
@@ -1248,6 +1249,58 @@ async function evaluateBoost(snapshot) {
 }
 
 // === Alarm Handler ===
+
+/**
+ * Record the recommendation currently on offer as "seen", so its toolbar marker stops showing.
+ * Never throws: an acknowledgement failing must not break opening the popup.
+ */
+async function markRecNoticeSeenFromStatus() {
+  try {
+    // 🔴 ACKNOWLEDGE WHAT THE MARKER IS SHOWING, NOT WHAT STORAGE HAPPENS TO HOLD (Codex). This
+    // read used to be `lastStatus.recommendation`, and a concurrent writer — the rec-fetch alarm,
+    // or a fire-and-forget POST response — can replace that between the panel opening and this
+    // read resolving. Acknowledging the replacement marks a recommendation the user has never seen
+    // as seen, and since the marker is keyed on identity that suppresses it PERMANENTLY.
+    //
+    // The derived key is what the icon is actually painted from, so acknowledging it can only ever
+    // dismiss something that was on screen. Residual: if the marker changes in that same window
+    // the user acknowledges the new one — but they are then looking at the new one, and the worst
+    // case is one missed marker rather than a permanently silenced recommendation.
+    const { [REC_NOTICE_KEY]: notice } = await chrome.storage.local.get({ [REC_NOTICE_KEY]: null });
+    // Null means no recommendation is entitled to a marker — nothing to acknowledge, and writing
+    // would be pointless storage churn on every panel open.
+    if (notice) await chrome.storage.local.set({ [REC_SEEN_KEY]: notice });
+  } catch (e) {
+    // Never let an acknowledgement failure break opening the panel.
+    console.warn('[Claude Tuner] rec notice ack failed:', e?.message);
+  }
+}
+
+// === Toolbar tooltip: one subscription instead of N call sites (#994 unit 3) ===
+// 🔴 The states behind the tooltip are written from many places — `pendingPlanOrder` from the
+// collector, two accept paths and a reject path; `pinMoveServer` from the ingest response; the
+// recommendation from the GET path, the POST path and the popup. Hanging a refresh off each is the
+// drift trap this work keeps running into: the rule lands on all of them but one, and the miss is
+// silent. Watching the keys instead cannot drift, because a writer that forgets to notify does not
+// exist — writing IS the notification.
+//
+// `_toolbarTip` itself is deliberately NOT watched: it is what this handler writes, and watching it
+// would loop.
+const TOOLBAR_TIP_DEPS = ['pinMoveServer', 'pinMoveDismissedAt', 'pendingPlanOrder', '_recNotice'];
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (TOOLBAR_TIP_DEPS.some((k) => k in changes)) { refreshToolbarTip(); return; }
+  // `lastStatus` churns on every collection, so refreshing on any change to it would put the
+  // expensive rebuild back on the hot path. Only its RECOMMENDATION matters here — and comparing
+  // identities costs nothing, because onChanged already handed us both values. This is also what
+  // catches the popup clearing a recommendation after executing it, which writes no other key.
+  if (changes.lastStatus) {
+    const before = recNoticeKey(changes.lastStatus.oldValue?.recommendation);
+    const after = recNoticeKey(changes.lastStatus.newValue?.recommendation);
+    if (before !== after) refreshToolbarTip();
+  }
+});
+
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   // Wake-from-sleep retries (30s / 60s alarms)
   if (alarm.name.startsWith(WAKE_RETRY_ALARM)) {
@@ -1529,7 +1582,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     _lastPopupCollect = now;
     chrome.storage.local.set({ _lastPopupCollect: now });
-    collectAndSend({ skipServer: true }).then((result) => sendResponse(result));
+    // 🔴 Opening the panel IS the acknowledgement (#994 unit 2). The recommendation marker is a
+    // notification, not a state light: it says "there is something you have not looked at", so it
+    // has to go out when they look. Stored against the recommendation's identity, not as a bare
+    // boolean, so the NEXT recommendation can still speak — same contract #984 used for ★ moves.
+    //
+    // Marked BEFORE the collect below rather than after: that collect repaints the icon, and
+    // marking afterwards would paint the marker and then clear the reason for it, leaving the
+    // dot up until some later paint happened to run.
+    // 🔴 AWAITED, AND BEFORE THE COLLECT. Not awaiting looks harmless — the acknowledgement is
+    // "just" a storage write — but the collect below ends in updateBadge()→applyStateIcon(), which
+    // reads the very key this writes. Losing that race leaves the marker up, and nothing repaints
+    // again until the next alarm: up to an HOUR of a dot the user already dismissed by looking.
+    // That teaches "this marker is a lie", which is the exact failure the transient design exists
+    // to prevent. (The reverse race — acknowledging a recommendation the user never saw — cannot
+    // happen here: this collect is skipServer, and the local-only path carries `recommendation`
+    // over unchanged from the previous status. A NEW rec only ever arrives on a server response.)
+    markRecNoticeSeenFromStatus()
+      .then(() => collectAndSend({ skipServer: true }))
+      .then((result) => sendResponse(result));
     return true;
   }
   if (message.type === 'MANUAL_COLLECT') {
@@ -1976,8 +2047,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
     chrome.storage.local.set({ authBlockedSince: Date.now() });
     // Paint the badge now instead of waiting for the next collection tick — the whole point is
     // that this user may not look at the extension for hours.
-    chrome.action.setBadgeText({ text: '!' });
-    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+    // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
+    // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
+    // icon next to an alarm badge, which reads as two states at once. Chrome persists the
+    // icon across service-worker restarts, so a missed paint is permanent, not transient.
+    updateBadgeError();
   } else if (oldValue === true && newValue !== true) {
     // Recovered (clearAuthBlocked removes the key → newValue undefined). Drop the alarm state
     // immediately; leaving a red '!' up until the next collection tick would read as "still

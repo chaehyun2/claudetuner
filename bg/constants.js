@@ -23,6 +23,15 @@ export const CHATGPT_API_BASE = 'https://chatgpt.com';
 export const CHATGPT_SESSION_COOKIE = '__Secure-next-auth.session-token';
 export const GEMINI_API_BASE = 'https://gemini.google.com';
 export const HEARTBEAT_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
+// Backoff after a heartbeat that did NOT land. The interval above is the SUCCESS cadence; a
+// heartbeat the server never received must not consume it (#980 — see bg/heartbeat.js for why the
+// bias is one-directional). Capped at HEARTBEAT_INTERVAL_MS by heartbeatRetryDelayMs so a
+// permanently-rejected install can never exceed the request rate it already has today.
+export const HEARTBEAT_RETRY_BASE_MS = 5 * 60 * 1000; // 5 min after the 1st failed delivery
+// Abort a heartbeat that never answers. Awaiting the request is what keeps the MV3 service worker
+// alive long enough to flush it, so an unbounded hang would stall the alarm handler that awaits
+// collectAndSend — the timeout is the price of awaiting.
+export const HEARTBEAT_TIMEOUT_MS = 10_000;
 export const HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (for Enterprise spending monthly chart)
 
 export const PLAN_HIERARCHY = ['Pro', 'Max 5x', 'Max 20x'];
@@ -167,6 +176,18 @@ export const ACTIONABLE_ERRORS = ['err_session_expired', 'err_no_cookies', 'err_
 // === i18n (lightweight translations for service worker) ===
 export const BG_I18N = {
   ko: {
+    // #966 badge tooltip. 🔴 Twin of `pin_move_title` in the popup dictionary
+    // (i18n.js) — separate runtimes, so the two copies are pinned identical by
+    // test/pin-heal-guard.mjs.
+    pin_move_title: '대표 조직이 변경되었습니다',
+    // #994 unit 3 — TOOLBAR TOOLTIP ONLY. 🔴 Deliberately NOT twinned into the popup dictionary
+    // (i18n.js). The pin_move_* keys above are twinned because the popup RENDERS that same text, so
+    // the two copies can drift and a guard pins them. A tooltip is chrome.action.setTitle and has
+    // no popup counterpart — adding one would manufacture the very twin problem the guard exists
+    // to police. One runtime, one copy.
+    tip_rec: '{0} → {1} 변경을 추천합니다',
+    tip_order: '{0} → {1} 변경을 처리하고 있습니다',
+    tip_blocked: '사용량이 서버에 저장되지 않고 있습니다 — 확장을 열어 확인해 주세요',
     reset_soon_title: '{0} 한도 곧 리셋',
     reset_soon_msg: '약 5분 후 {0} 사용량이 리셋됩니다. 큰 작업은 리셋 후에 시작하세요!',
     reset_soon_usage_prefix: '현재 {0}% 사용 중. ',
@@ -234,6 +255,14 @@ export const BG_I18N = {
     authblock_r4_msg: '인증하지 않으면 사용량은 이 브라우저에서만 볼 수 있습니다. 다시 알리지 않겠습니다 — 필요하면 확장 아이콘을 눌러 언제든 Claude Tuner 인증을 할 수 있습니다.',
   },
   en: {
+    // #966 badge tooltip. 🔴 Twin of `pin_move_title` in the popup dictionary
+    // (i18n.js) — separate runtimes, so the two copies are pinned identical by
+    // test/pin-heal-guard.mjs.
+    pin_move_title: 'Your primary organization changed',
+    // #994 unit 3 — toolbar tooltip only; see the note on the Korean side.
+    tip_rec: 'Consider moving from {0} to {1}',
+    tip_order: 'Changing from {0} to {1}…',
+    tip_blocked: 'Your usage is not reaching the server — open the extension to fix it',
     reset_soon_title: '{0} limit resetting soon',
     reset_soon_msg: '{0} usage will reset in ~5 minutes. Start big tasks after the reset!',
     reset_soon_usage_prefix: 'Currently at {0}%. ',

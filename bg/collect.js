@@ -1,22 +1,24 @@
 import { sendGAEvent } from './analytics.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
-  HEARTBEAT_INTERVAL_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
+  HEARTBEAT_TIMEOUT_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
   HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } from './upgrade-gate.js';
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
+import { applyPinMoveTitle } from './badge.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
-import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, resetIcon , badgeLockedByAuthBlock } from './badge.js';
+import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, refreshRecNotice } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification, createCountedNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { upsertClaudeOrg } from './org-merge.js';
+import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
@@ -297,18 +299,7 @@ function syncNotificationPrefs(config, userEmail) {
   });
 }
 
-/** Show recommendation badge (⚠) with display-mode-aware utilization */
-async function showRecommendationBadge(snapshot, recType) {
-  if (await badgeLockedByAuthBlock()) return; // the block alarm outranks a recommendation
-  resetIcon();
-  const { usageDisplayMode: _bdm = '7d' } = await chrome.storage.sync.get({ usageDisplayMode: '7d' });
-  let util;
-  if (_bdm === '5h') util = snapshot.five_hour.utilization;
-  else if (_bdm === 'both') util = Math.max(snapshot.five_hour.utilization || 0, snapshot.seven_day.utilization || 0);
-  else util = snapshot.seven_day.utilization;
-  chrome.action.setBadgeText({ text: Math.round(util || 0) + '⚠' });
-  chrome.action.setBadgeBackgroundColor({ color: recType === 'upgrade' ? '#d97706' : '#059669' });
-}
+
 
 // === Org detection based on lastActiveOrg cookie ===
 export async function getLastActiveOrgId() {
@@ -865,7 +856,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot);
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
-      updateBadgeForSelectedOrg(snapshot);
+      await refreshRecNotice();
+      await updateBadgeForSelectedOrg(snapshot);
       return { success: true, snapshot, localOnly: true };
     }
 
@@ -1014,8 +1006,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
           await chrome.storage.local.set({ account_deleted: true });
           chrome.alarms.clear(ALARM_NAME);
-          chrome.action.setBadgeText({ text: '!' });
-          chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+          // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
+          // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
+          // icon next to an alarm badge, which reads as two states at once. Chrome persists the
+          // icon across service-worker restarts, so a missed paint is permanent, not transient.
+          updateBadgeError();
           return;
         }
       }
@@ -1092,7 +1087,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // primary/extra paths POST via authedFetch directly (not postSnapshot), so they
       // need their own call — postSnapshot's call covers only ChatGPT/Gemini. Paths
       // are disjoint (Claude→authedFetch, providers→postSnapshot) so no double-apply.
-      await applyServerCadence(result, Date.now(), { uuid: bestOrg?.uuid, provider: 'claude' });
+      await applyServerCadence(result, Date.now(), { uuid: bestOrg?.uuid, provider: 'claude', account: body && body.user_email });
 
       // Save review nudge state
       if (result.review_nudge) {
@@ -1112,6 +1107,16 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         } else {
         console.log(`[Claude Tuner] Plan order received: #${po.order_id} ${po.from_plan} → ${po.to_plan} (auto_approve=${po.auto_approve})`);
         await chrome.storage.local.set({ pendingPlanOrder: po });
+        // 🔴 A pending order no longer takes the badge or the icon (#994) — see bg/badge.js for
+        // why. The sticky notification below is what replaces it, so WHO GETS IT matters more
+        // than it used to. It used to be "manual orders only"; an auto order that FAILED fell
+        // through to no notification at all, and relied on the next updateBadge() painting 📋.
+        // That badge is gone, so a failed auto order would have been left with only the popup
+        // banner — a surface the user has to think to open (Codex DEPLOY-BLOCKER). A failed auto
+        // order is precisely the case that needs a person: the change did not happen and only
+        // they can retry or reject it.
+        let needsUserDecision = !po.auto_approve;
+        let autoAttemptFailed = false;
         if (po.auto_approve) {
           console.log('[Claude Tuner] Auto-approving plan order');
           try {
@@ -1120,15 +1125,31 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             console.error('[Claude Tuner] Auto plan order failed:', e.message);
             await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted', 'failed', e.message);
           }
-        } else {
-          if (!(await badgeLockedByAuthBlock())) {
-          chrome.action.setIcon({ path: { 16: 'icons/icon16-order.png', 48: 'icons/icon48-order.png', 128: 'icons/icon128-order.png' } });
-          chrome.action.setBadgeText({ text: '📋' });
-          chrome.action.setBadgeBackgroundColor({ color: '#7c3aed' });
-          }
+          // 🔴 ASK STORAGE WHAT HAPPENED, DO NOT INFER IT FROM CONTROL FLOW (Codex, 2nd pass).
+          // The obvious version set this flag in the `catch` — and the catch almost never runs,
+          // because executePlanChange() swallows the API failure and acceptPlanOrder() RETURNS
+          // `{ success: false }` rather than throwing. So the flag stayed false on exactly the
+          // path it existed for. (The guard that pinned it was a false green for the same reason:
+          // it asserted the SHAPE `catch { ... = true }` instead of the outcome.)
+          //
+          // The outcome is legible in one place: acceptPlanOrder clears `pendingPlanOrder` when
+          // the order is resolved — succeeded, or "already changed externally". Still set means
+          // still stuck, whatever route it took to get there. That also covers a throw, a returned
+          // failure, and any future third way, which is why it is a re-read and not a return code.
+          const { pendingPlanOrder: stillPending } = await chrome.storage.local.get('pendingPlanOrder');
+          if (stillPending) { needsUserDecision = true; autoAttemptFailed = true; }
+        }
+        if (needsUserDecision) {
           createCountedNotification('plan-order-' + po.order_id, {
             type: 'basic', iconUrl: 'icons/icon128.png',
-            title: await bt('po_title'),
+            // 🔴 THE TWO NOTIFICATIONS MUST NOT DISAGREE. When the auto attempt failed, the user
+            // has ALREADY been shown executePlanChange's "플랜 변경 실패" toast. Titling this one
+            // "플랜 변경 요청" would then announce a brand-new request for a change that just
+            // failed — two toasts telling different stories about one event. Same title, so this
+            // reads as the actionable follow-up to the failure rather than a separate event.
+            // (Composed from existing keys on purpose: new strings would need adding to BOTH
+            // dictionaries plus a drift guard, which is #994 unit 3's work, not this one's.)
+            title: await bt(autoAttemptFailed ? 'opt_fail_title' : 'po_title'),
             message: await bt('po_msg', po.org_name, po.from_plan, po.to_plan),
             buttons: [
               { title: await bt('po_accept') },
@@ -1153,10 +1174,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           curStatus.recommendation = rec;
           await setStatus(curStatus);
         }
-        const _hasPending = !!snapshot.subscription?.pending_plan;
-        if (rec && (rec.type === 'upgrade' || rec.type === 'downgrade') && !_hasPending) {
-          await showRecommendationBadge(snapshot, rec.type);
-        }
+        // 🔴 The recommendation no longer touches the badge (#994 unit 2). Recompute the derived
+        // notice state (the rec just changed), then repaint — updateBadge() decides the ICON, so
+        // this pair keeps the percentage current AND lights or clears the marker. Order matters:
+        // the paint reads what the refresh writes.
+        await refreshRecNotice();
+        await updateBadgeForSelectedOrg(snapshot);
       }
 
       // Merge server recent snapshots (history backfill)
@@ -1243,13 +1266,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     await appendUsageHistory(buildHistoryPoint(snapshot, plan));
 
     // 4-2. Update badge (based on previous recommendation, async-updated on server response)
-    // Skip recommendation badge if plan change is already scheduled (subscription has pending_plan)
-    const hasPendingPlan = !!snapshot.subscription?.pending_plan;
-    if ((recommendation?.type === 'upgrade' || recommendation?.type === 'downgrade') && !hasPendingPlan) {
-      await showRecommendationBadge(snapshot, recommendation.type);
-    } else {
-      await updateBadgeForSelectedOrg(snapshot);
-    }
+    // One authority: updateBadge() decides the icon (hard block > unacknowledged recommendation >
+    // normal) and the badge keeps the percentage. Refresh first — this path also rewrites
+    // lastStatus, so the derived notice state has to catch up before the paint reads it.
+    await refreshRecNotice();
+    await updateBadgeForSelectedOrg(snapshot);
 
     // 4-3. Usage threshold alerts (use selected org data if pinned to non-Claude org)
     const selectedUsage = await getSelectedOrgUsage();
@@ -1266,8 +1287,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     await checkPromoPush();
 
     sendGAEvent('collect_success', { plan: snapshot.plan, fetch_mode: fetchMode });
-    // On success: reset heartbeat timer + clear error code + reset collect fail state
-    chrome.storage.local.remove(['lastHeartbeatAt', 'collectFailState']);
+    // On success: reset heartbeat timer + clear error code + reset collect fail state.
+    // HEARTBEAT_RETRY_KEY goes with it — a surviving backoff ladder would make the NEXT failure
+    // episode start mid-ladder (up to a full hour of silence on its first heartbeat) for reasons
+    // that stopped existing the moment collection worked again.
+    chrome.storage.local.remove(['lastHeartbeatAt', HEARTBEAT_RETRY_KEY, 'collectFailState']);
 
     // === Multi-org collection: send all monitorable orgs; server-side 3-org cap
     // drops snapshots for orgs the user hasn't selected as active.
@@ -1485,7 +1509,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
                 // that would strand it at full cadence forever. Consume it here, scoped to
                 // THIS org's stream. Failure is non-fatal (cadence stays as-is).
                 r.json()
-                  .then(body => applyServerCadence(body, Date.now(), { uuid: extraOrg.uuid, provider: 'claude' }))
+                  .then(body => applyServerCadence(body, Date.now(), { uuid: extraOrg.uuid, provider: 'claude', account: userEmail }))
                   .catch(() => {});
               }
             }).catch(e => {
@@ -1597,10 +1621,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
 
     sendGAEvent('collect_fail', { error: errorMsg.slice(0, 100) });
 
-    // Send heartbeat every 6 hours (notify server of connection failure state)
+    // Send heartbeat at most once per HEARTBEAT_INTERVAL_MS (1 hour — this comment said "every 6
+    // hours" until #980; the constant has been 1 h and the stale figure was live-misread once).
+    // Notifies the server of connection failure state.
     try {
-      const { lastHeartbeatAt } = await chrome.storage.local.get('lastHeartbeatAt');
-      if (!lastHeartbeatAt || (Date.now() - lastHeartbeatAt) >= HEARTBEAT_INTERVAL_MS) {
+      const { lastHeartbeatAt, [HEARTBEAT_RETRY_KEY]: hbRetry } =
+        await chrome.storage.local.get({ lastHeartbeatAt: null, [HEARTBEAT_RETRY_KEY]: null });
+      if (isHeartbeatDue({ lastHeartbeatAt, retry: hbRetry })) {
         const cfg = await getConfig();
         if (cfg.serverUrl && cfg.apiKey) {
           const ver = chrome.runtime.getManifest().version;
@@ -1638,14 +1665,45 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           //      precisely because gated installs are invisible server-side, and cutting this
           //      would recreate that blind spot for the population we most need to count —
           //      last_error_code is how we size it.
+          // 🔴 THE THROTTLE IS ARMED BY DELIVERY, NOT BY THE ATTEMPT (#980). `lastHeartbeatAt` used
+          // to be stamped unconditionally, right here, outside the `if (hbEmail)` below and next to
+          // a fire-and-forget fetch whose response was never read — so three different non-events
+          // (no identity to send, a non-2xx answer, the worker dying before the request flushed)
+          // each bought an hour of server-side silence. `await` is load-bearing for the third: the
+          // failure path returns immediately and the alarm listener awaits collectAndSend, so
+          // awaiting here is what keeps the MV3 worker alive long enough to flush the request.
+          // See bg/heartbeat.js for why losing these specifically biases the numbers one way.
+          let delivered = false;
           if (hbEmail) {
-            authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: hbEmail, error_code: errorMsg.split(':')[0].slice(0, 50), ext_version: ver }),
-            }).catch(() => {});
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), HEARTBEAT_TIMEOUT_MS);
+            try {
+              const resp = await authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: hbEmail, error_code: errorMsg.split(':')[0].slice(0, 50), ext_version: ver }),
+                signal: ac.signal,
+              });
+              delivered = !!resp?.ok;
+            } catch (_) {
+              // Network error / abort — delivered stays false, which is the whole point.
+            } finally {
+              clearTimeout(timer);
+            }
           }
-          await chrome.storage.local.set({ lastHeartbeatAt: Date.now() });
+          if (delivered) {
+            await chrome.storage.local.set({ lastHeartbeatAt: Date.now() });
+            await chrome.storage.local.remove(HEARTBEAT_RETRY_KEY);
+          } else {
+            // Undelivered: back off instead of consuming the success window. The ladder is capped
+            // at HEARTBEAT_INTERVAL_MS (bg/heartbeat.js), so the worst case — an install the server
+            // rejects forever — converges to the one-per-hour rate it already sends today.
+            // nextHeartbeatRetry coerces the stored rung — a non-numeric `n` would floor the delay
+            // to the base forever, i.e. the 12x amplification the cap exists to prevent.
+            await chrome.storage.local.set({
+              [HEARTBEAT_RETRY_KEY]: nextHeartbeatRetry(hbRetry, Date.now()),
+            });
+          }
         }
       }
     } catch (_) {}

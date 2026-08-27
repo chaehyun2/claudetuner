@@ -228,8 +228,27 @@ const DEGRADED_MIN_ELAPSED_FRAC = 0.10;
 // and safe rather than merely tolerated — near the end of a window `fraction` approaches 1, so
 // this returns approximately the current utilization, which is what actually happened. It is the
 // early-window cases that need the guard below, and they have it.
-export function windowAverageProjection(currentUtil, key, resetsAt) {
-  const windowSeconds = WINDOW_SECONDS[key];
+export function windowAverageProjection(currentUtil, key, resetsAt, spanSeconds) {
+  // 🔴 `spanSeconds` is the window length the PROVIDER reported for this slot; WINDOW_SECONDS is
+  // only the fallback for when it did not (Claude, Gemini, any client before 1.29.46).
+  //
+  // ⚠️ NOTHING PASSES IT YET — this is a seam, not a fix. Threading it means adding an argument to
+  // renderGaugePrediction (13 call sites), windowForecast (5), makeCand (2) and _renderDegradedLine
+  // (3), in BOTH twins. Doing only the cheap ones is worse than doing none: the popup gauge and the
+  // overview card would then state different tiers for the same account, which the comment at
+  // dashboard-render.js makeCand calls out as the thing to avoid. Measured impact today is 1 user
+  // (see the issue), so the threading waits for the next change that already touches these
+  // signatures. Until then this argument is inert and behaviour is byte-identical.
+  //
+  // Getting this from a constant was wrong for ChatGPT Free/Go, whose 7d slot holds a 30-DAY
+  // window (#954). `remaining` comes from the REAL resets_at, so mixing it with an assumed 7-day
+  // denominator makes `fraction` describe a window that does not exist: past 7 days out it goes
+  // negative and the guard below returns null (silent, harmless), but INSIDE ~6.3 days of reset it
+  // is merely too small, and the projection is inflated — a Free user at 30% with 5 days left
+  // projected to 105% ("한도 도달 예상") instead of 36%.
+  const windowSeconds = (typeof spanSeconds === 'number' && isFinite(spanSeconds) && spanSeconds > 0)
+    ? spanSeconds
+    : WINDOW_SECONDS[key];
   if (currentUtil == null || !resetsAt || !windowSeconds) return null;
   if (currentUtil === 0) return 0;
   const remaining = Math.max((new Date(resetsAt).getTime() - Date.now()) / 1000, 0);

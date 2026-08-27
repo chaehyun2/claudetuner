@@ -3,6 +3,10 @@ import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAU
 import { withStorageLock } from './serialize.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, isUpgradeBlocked, clearUpgradeBlocked } from './upgrade-gate.js';
+// badge.js does NOT import this module (it pulls only upgrade-gate + i18n), so this direction
+// is safe. Routing the account-deleted paint through updateBadgeError() keeps the icon and the
+// badge in one place — see #994.
+import { updateBadgeError } from './badge.js';
 import { applyServerCadence } from './cadence-config.js';
 
 export async function getConfig() {
@@ -923,8 +927,11 @@ export async function postSnapshot(config, payload) {
       console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
       await chrome.storage.local.set({ account_deleted: true });
       chrome.alarms.clear(ALARM_NAME);
-      chrome.action.setBadgeText({ text: '!' });
-      chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+      // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
+      // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
+      // icon next to an alarm badge, which reads as two states at once. Chrome persists the
+      // icon across service-worker restarts, so a missed paint is permanent, not transient.
+      updateBadgeError();
     }
     return null;
   }
@@ -965,6 +972,7 @@ export async function postSnapshot(config, payload) {
   await applyServerCadence(result, Date.now(), {
     uuid: payload && payload.claude_org_uuid,
     provider: (payload && payload.provider) || 'claude',
+    account: payload && payload.user_email,
   });
   // Store ext_token from server (TOFU issuance or refresh). No-downgrade: a refresh that
   // returns 'ingest' must not strip a logged-in user's 'full' token (Phase 2 단계 4).

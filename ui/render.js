@@ -82,6 +82,7 @@ export function _updateUICore(status) {
   // it must show even for "provider-only" looking users, since the whole point is
   // that their Claude account never collected). Fire-and-forget; reads storage.
   renderEmailMismatchWarning();
+  renderPinMoveNotice();
   renderClaudeLinkStatus();
   // Extension-too-old block (server 426). Same fire-and-forget shape, and equally independent of
   // the Claude error path: a version-blocked install collects and renders locally exactly as
@@ -622,6 +623,52 @@ export async function renderUpgradeWarning() {
 // Renders the amber "Claude account email mismatch" banner from storage.
 // Set by bg/collect.js when a Claude snapshot is rejected with 403 (the claude.ai
 // account email ≠ the Tuner login bound to the ext_token), cleared on the next
+// ★ auto-move notice (#966). The server stops sending `pin_move` once the move is
+// acknowledged, and applyPinMoveState clears the record then — so this renders only while
+// there really is something unacknowledged to say.
+//
+// 🔴 Explain-only. Undoing means writing primary_org_uuid, and every /api/me/* route is
+// session/Google-only (it rejects ext_token, #745), so the popup links to the dashboard
+// instead of offering a button it cannot honour.
+export async function renderPinMoveNotice() {
+  const banner = document.getElementById('pin-move-warn');
+  if (!banner) return;
+  const { pinMoveServer = null, pinMoveDismissedAt = null } =
+    await chrome.storage.local.get({ pinMoveServer: null, pinMoveDismissedAt: null });
+  // Hide first: a record cleared since the last popup open must not leave the banner up.
+  banner.classList.add('hidden');
+  if (!pinMoveServer || !pinMoveServer.movedAt) return;
+  // Dismissal is compared against THIS move's timestamp, so a LATER move speaks again.
+  if (pinMoveDismissedAt === pinMoveServer.movedAt) return;
+  // 🔴 No age gate here, unlike the dashboard. The SERVER owns this notice's lifetime — it
+  // stops sending `pin_move` the moment the move is acknowledged, and applyPinMoveState clears
+  // the record then. Adding a second, client-side expiry would silence a notice the server is
+  // still actively asserting, and the user would never learn why their plan changed.
+
+  document.getElementById('pin-move-title').textContent = t('pin_move_title');
+  document.getElementById('pin-move-msg').textContent = t('pin_move_msg');
+  document.getElementById('pin-move-link').textContent = t('pin_move_open_dash');
+  document.getElementById('pin-move-hint').textContent = t('pin_move_hint');
+  banner.classList.remove('hidden');
+  noteSurface('pin_move');
+
+  const dismiss = document.getElementById('pin-move-dismiss');
+  if (dismiss) {
+    // 🔴 Carry the RENDERED move on the element, not in the listener's closure. The listener is
+    // bound once (dataset.bound), so a closure would freeze the FIRST render's value and a
+    // later click would dismiss the wrong move — either acknowledging one the user never saw,
+    // or failing to silence the one they did. Re-stamped on every render; read at click time.
+    dismiss.dataset.movedAt = pinMoveServer.movedAt;
+    if (!dismiss.dataset.bound) {
+      dismiss.dataset.bound = '1';
+      dismiss.addEventListener('click', async () => {
+        banner.classList.add('hidden');
+        await chrome.storage.local.set({ pinMoveDismissedAt: dismiss.dataset.movedAt || null });
+      });
+    }
+  }
+}
+
 // successful Claude collection. Dismissable; re-arms when a newer mismatch occurs.
 export async function renderEmailMismatchWarning() {
   const banner = document.getElementById('claude-email-warn');

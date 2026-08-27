@@ -638,6 +638,19 @@
   </div>
 
   <!-- Claude account email mismatch warning (claude.ai login ≠ Tuner login → 403 silent drop) -->
+  <!-- ★ auto-move notice (#966). Informational: collection is healthy, the primary org just
+       moved because the old one went silent. The UNDO lives on the dashboard, not here —
+       /api/me/* is session/Google-only and rejects ext_token, so the popup can explain but
+       cannot write. -->
+  <div id="pin-move-warn" class="warn-banner hidden">
+    <button id="pin-move-dismiss" class="error-dismiss" aria-label="dismiss">&times;</button>
+    <div class="warn-title" id="pin-move-title"></div>
+    <div class="warn-msg" id="pin-move-msg"></div>
+    <div class="warn-hint">
+      <a href="https://claudetuner.com/dashboard/" target="_blank" rel="noopener" id="pin-move-link"></a> <span id="pin-move-hint"></span>
+    </div>
+  </div>
+
   <div id="claude-email-warn" class="warn-banner hidden">
     <button id="email-warn-dismiss" class="error-dismiss" aria-label="dismiss">&times;</button>
     <div class="warn-title" id="email-warn-title"></div>

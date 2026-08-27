@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { fetchClaudeApi } from './api.js';
 import { getConfig, getLastStatus, authedFetch } from './storage.js';
 import { logNotification, createCountedNotification } from './notifications.js';
-import { resetIcon , badgeLockedByAuthBlock } from './badge.js';
+import { resetIcon , badgeLockedByAuthBlock, updateBadgeForSelectedOrg } from './badge.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -160,17 +160,34 @@ export async function acceptPlanOrder(config, po, userEmail, { auto = false } = 
   await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted',
     changeResult?.success ? 'completed' : 'failed',
     changeResult?.success ? undefined : (changeResult?.error || 'Plan change failed'));
+  // 🔴 COMPARE-AND-CLEAR: only retire the order this call was about (#994, Codex 3rd pass).
+  // `pendingPlanOrder` is a ONE-SLOT key and this used to null it unconditionally. Server POST
+  // results are handled in an unawaited `.then` (bg/collect.js), so a second order can land in
+  // that slot while this accept is still awaiting network calls — and the unconditional clear
+  // would retire an order nobody resolved. That was survivable when the slot only drove a banner;
+  // it is not now that the same key decides whether the user is notified at all.
+  const clearIfStillOurs = async (extra = {}) => {
+    const { pendingPlanOrder: cur } = await chrome.storage.local.get('pendingPlanOrder');
+    if (cur && cur.order_id !== po.order_id) {
+      console.log(`[Claude Tuner] plan order slot moved on (${po.order_id} → ${cur.order_id}); leaving it`);
+      if (Object.keys(extra).length) await chrome.storage.local.set(extra);
+      return;
+    }
+    await chrome.storage.local.set({ pendingPlanOrder: null, ...extra });
+  };
   if (changeResult?.success) {
-    await chrome.storage.local.set({
-      pendingPlanOrder: null,
+    await clearIfStillOurs({
       completedPlanOrder: { ...po, ...(auto ? { auto: true } : {}), completedAt: Date.now() },
     });
-    // Restore normal icon + badge now that pendingPlanOrder is cleared
-    if (!(await badgeLockedByAuthBlock())) { resetIcon(); chrome.action.setBadgeText({ text: '' }); }
+    // 🔴 NOTHING TO UNDO HERE ANY MORE, AND UNDOING IT WOULD DESTROY THE NUMBER (#994). These
+    // lines used to clear the 📋 badge and the order icon that a pending order had painted. A
+    // pending order no longer paints either (bg/badge.js), so the badge now holds the usage
+    // percentage — and `setBadgeText({ text: '' })` would blank it until the next collection,
+    // i.e. up to an hour of an empty toolbar because a plan order happened to succeed.
   } else if (changeResult?.error === 'Plan already changed externally') {
-    // Plan was changed outside of the order — clear stale order so banner disappears
-    await chrome.storage.local.set({ pendingPlanOrder: null });
-    if (!(await badgeLockedByAuthBlock())) { resetIcon(); chrome.action.setBadgeText({ text: '' }); }
+    // Plan was changed outside of the order — clear stale order so banner disappears.
+    // Same compare-and-clear: a newer order in the slot is not resolved by this one.
+    await clearIfStillOurs();
   }
   return changeResult;
 }
@@ -189,7 +206,11 @@ export async function dismissRecommendationServer({ permanent = false } = {}) {
       body: JSON.stringify(payload),
     }).catch(() => {});
   }
-  if (!(await badgeLockedByAuthBlock())) chrome.action.setBadgeText({ text: '' });
+  // Repaint rather than blank — same reason as executePlanChange above (#994). Dismissing a
+  // recommendation must remove the recommendation, not the percentage.
+  if (!(await badgeLockedByAuthBlock())) {
+    await updateBadgeForSelectedOrg((await getLastStatus())?.snapshot || null);
+  }
   chrome.notifications.clear(NOTIF_ID_OPTIMIZE);
 }
 
@@ -237,9 +258,29 @@ export async function executePlanChange(recommendation) {
       });
     }
 
-    // Success — clear badge and restore normal icon (order icon may be active). Not when the
-    // auth-block alarm owns the badge: sync is still dead, so clearing would hide that.
-    if (!(await badgeLockedByAuthBlock())) { chrome.action.setBadgeText({ text: '' }); resetIcon(); }
+    // Success — clear the RECOMMENDATION badge that prompted this change. Not when the auth-block
+    // alarm owns the badge: sync is still dead, so clearing would hide that.
+    // (The "order icon may be active" this used to also cover is gone — a pending order no longer
+    // paints an icon or a badge, #994. The recommendation still does, until #994 unit 2.)
+    // 🔴 REPAINT, DO NOT BLANK (#994, Codex DEPLOY-BLOCKER). This used to `setBadgeText('')`,
+    // which was survivable when the slot held a 📋 or a recommendation glyph — the next collect
+    // would put the number back. It is not survivable now that the slot holds the PERCENTAGE:
+    // blanking leaves an empty toolbar until the next collection, and the 3s forced collect that
+    // was supposed to cover it (background.js) is a timer in an MV3 worker that can be killed.
+    // Repainting from the last snapshot restores the number synchronously and still removes the
+    // recommendation badge that prompted this change.
+    // 🔴 NEVER LET COSMETICS FAIL THE TRANSACTION (Codex). This sits inside the try that decides
+    // whether the plan change succeeded. The Anthropic call has already returned OK by now, so a
+    // throw from a badge repaint would report failure for a change that DID happen — leaving
+    // pendingPlanOrder around and inviting a retry of a partially applied change.
+    try {
+      if (!(await badgeLockedByAuthBlock())) {
+        resetIcon();
+        await updateBadgeForSelectedOrg((await getLastStatus())?.snapshot || null);
+      }
+    } catch (e) {
+      console.warn('[Claude Tuner] badge repaint after plan change failed:', e?.message);
+    }
     await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', fromPlan, toPlan), 2);
 
     console.log(`[Claude Tuner] Plan change successful: ${fromPlan} → ${toPlan}`);

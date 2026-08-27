@@ -219,9 +219,20 @@ const WINDOW_SPLIT_SECONDS = Math.round(Math.sqrt(WINDOW_5H_SECONDS * WINDOW_7D_
 // what lets a consumer label and reason about the real window, instead of guessing from the
 // provider or plan name (which is wrong in both directions — see #952).
 // See #954 and docs/DESIGN-window-span-preservation.md.
+// 🔴 Must match windowSpanValue() in worker/src/services/snapshot-service.ts. A span the client
+// calls valid but the server rejects is worse than either rule alone: the picker below can let a
+// degenerate bucket WIN the scoped slot and then the server stores its span as NULL, so the row
+// claims a window it never reported. Same bounds, same rounding, same "reject rather than clamp".
+const MAX_WINDOW_SECONDS = 366 * 24 * 60 * 60;
+
+function normalizeSpan(s) {
+  if (typeof s !== 'number' || !isFinite(s) || s <= 0 || s > MAX_WINDOW_SECONDS) return null;
+  const n = Math.round(s);
+  return n > 0 ? n : null;
+}
+
 export function windowSpan(w) {
-  const s = w?.limit_window_seconds;
-  return typeof s === 'number' && isFinite(s) && s > 0 ? s : null;
+  return normalizeSpan(w?.limit_window_seconds);
 }
 
 // Pick the 5h and 7d windows out of the rate_limit object by their span.
@@ -272,37 +283,67 @@ export function parseAdditionalLimits(usage) {
       feature: item.metered_feature || null,
       used,
       resetsAt: unixToResetTime(w.reset_at),
-      windowSeconds: typeof w.limit_window_seconds === 'number' ? w.limit_window_seconds : null,
+      // Normalized through the SAME rule the server stores by, so "this bucket has a span" means
+      // the same thing here, in the picker below, and in the snapshots row (#926).
+      windowSeconds: windowSpan(w),
     });
     if (out.length >= MAX_ADDITIONAL_LIMITS) break;
   }
   return out;
 }
 
-// Select the model-scoped WEEKLY bucket (e.g. Codex 'GPT-5.3-Codex-Spark') from the
-// per-feature limits and shape it like Claude's weekly_scoped slot
-// ({ utilization, resets_at, model }) so it can ride the shared `seven_day_omelette`
-// slot. Prefer a 7d-span bucket; fall back to the first bucket when spans are absent.
-// Returns null when there is no usable scoped weekly bucket. Pure — no I/O.
-function pickScopedWeekly(additionalLimits) {
+// Select the model-scoped bucket (e.g. Codex 'GPT-5.3-Codex-Spark') from the per-feature limits
+// and shape it like Claude's weekly_scoped slot ({ utilization, resets_at, model, window_seconds })
+// so it can ride the shared `seven_day_omelette` slot. Pure — no I/O.
+//
+// 🔴 This used to REQUIRE a weekly span and return null otherwise, so a 5h bucket could never be
+// mis-persisted into a slot every reader treated as weekly. On 2026-08-20 OpenAI moved the Codex
+// Spark bucket from 604800 to 18000 seconds, and that guard did exactly what it promised: 232
+// users' Spark usage silently stopped being stored (#926 — omelette holders 232 → 2 overnight).
+//
+// The guard is obsolete because the row now records the span itself
+// (`seven_day_omelette_window_seconds`, Phase 2a). The slot means "the model-scoped bucket"; how
+// long its window is, is DATA. Same rule the model name already follows — the model rotates, the
+// column does not; now the window rotates too and the column still does not.
+//
+// Selection keeps the OLD weekly-first `find` and only replaces what happened when it missed:
+// `null` becomes "take the first model bucket anyway". Every account that has a weekly bucket
+// therefore selects byte-identically to before — including when a LONGER bucket exists.
+//
+// 🪤 An earlier draft used "longest span wins", which is NOT a generalization: given
+// [Weekly 604800, Monthly 2592000] the old rule picks Weekly and longest-span picks Monthly. Free
+// and Go already report 30-day windows, so that input is reachable, not hypothetical.
+function pickScopedModel(additionalLimits) {
   if (!Array.isArray(additionalLimits) || !additionalLimits.length) return null;
-  // Non-model buckets that ride the same additional_rate_limits array (observed
-  // 2026-08-22: OpenAI's banked-reset pool 'gpt-reserve', #926). They are not model
-  // weekly limits, so they must neither occupy the scoped slot nor outrank a real model
-  // bucket when both are present; the popup still shows them via parseAdditionalLimits.
+  // Non-model buckets that ride the same additional_rate_limits array (observed 2026-08-22:
+  // OpenAI's banked-reset pool 'gpt-reserve', #926). They are not model limits, so they must
+  // neither occupy the scoped slot nor outrank a real model bucket when both are present; the
+  // popup still shows them via parseAdditionalLimits.
   // Kept INSIDE the function: scripts/scoped-weekly-slots.test.mjs compiles this body in
   // isolation, so an outer constant would have to be stubbed there and could drift.
   const NON_MODEL_LIMIT_NAMES = ['gpt-reserve'];
   const isModelBucket = (b) => NON_MODEL_LIMIT_NAMES.indexOf(b.name) < 0;
-  const weekly = additionalLimits.find((b) => typeof b.windowSeconds === 'number'
-    && b.windowSeconds >= WINDOW_SPLIT_SECONDS && isModelBucket(b));
-  // Fall back to the first bucket ONLY when NO bucket carries span metadata (legacy
-  // shape). If spans exist but none is weekly, there is no weekly bucket → return null;
-  // never mis-persist a 5h bucket into the 7d (omelette) slot.
-  const hasSpans = additionalLimits.some((b) => typeof b.windowSeconds === 'number');
-  const chosen = weekly || (hasSpans ? null : additionalLimits.find(isModelBucket) || null);
-  if (!chosen || typeof chosen.used !== 'number') return null;
-  return { utilization: chosen.used, resets_at: chosen.resetsAt || null, model: chosen.name || null };
+  // Usable percent is required to WIN, not just to be returned. The old code tested it after
+  // choosing, so a weekly bucket with a junk percent produced null and hid a perfectly good
+  // sibling. parseAdditionalLimits already drops those, so this is defence in depth.
+  const models = additionalLimits.filter((b) => isModelBucket(b) && typeof b.used === 'number');
+  if (!models.length) return null;
+  // `windowSeconds` arrives normalized (parseAdditionalLimits → windowSpan), so a positive number
+  // here means a span the SERVER will also accept. Re-checking `> 0` keeps a hand-built object in
+  // a test from asserting a contract the pipeline cannot actually produce.
+  const isKnownSpan = (b) => typeof b.windowSeconds === 'number' && b.windowSeconds > 0;
+  const weekly = models.find((b) => isKnownSpan(b) && b.windowSeconds >= WINDOW_SPLIT_SECONDS);
+  // The one behaviour change: no weekly bucket no longer means "store nothing". The row records
+  // the window length now, so a 5h (or spanless) bucket can ride the slot without implying 7d.
+  const chosen = weekly || models[0];
+  return {
+    utilization: chosen.used,
+    resets_at: chosen.resetsAt || null,
+    model: chosen.name || null,
+    // 🔴 The whole point. Without this the server stores a 5h bucket's utilization in a slot named
+    // seven_day_* with no way to tell, which is the mis-persist the old guard existed to prevent.
+    window_seconds: isKnownSpan(chosen) ? chosen.windowSeconds : null,
+  };
 }
 
 /**
@@ -518,13 +559,13 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     ...(force ? { force: true } : {}),
   };
 
-  // Model-scoped weekly limit (e.g. Codex 'GPT-5.3-Codex-Spark') rides the shared
-  // `seven_day_omelette` slot — same slot Claude reuses for its weekly_scoped model.
-  // The `model` name is transient (server epoch metadata keys it by provider; the
-  // snapshot row stores only utilization/resets_at). Only the primary org carries
-  // additionalLimits; extra workspaces have none → slot stays unset.
-  const scopedWeekly = pickScopedWeekly(org.additionalLimits);
-  if (scopedWeekly) payload.seven_day_omelette = scopedWeekly;
+  // Model-scoped limit (e.g. Codex 'GPT-5.3-Codex-Spark') rides the shared `seven_day_omelette`
+  // slot — the same slot Claude reuses for its weekly_scoped model. The slot name says 7d for
+  // historical reasons only; the row's `seven_day_omelette_window_seconds` says how long the
+  // window actually is, which is why a 5h bucket may ride it now (#926). Only the primary org
+  // carries additionalLimits; extra workspaces have none → slot stays unset.
+  const scopedModel = pickScopedModel(org.additionalLimits);
+  if (scopedModel) payload.seven_day_omelette = scopedModel;
 
   // Attach the next-billing date and any scheduled plan change so the server persists
   // them on this org's snapshot row (same `subscription` shape the Claude collector

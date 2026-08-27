@@ -184,9 +184,47 @@ async function applyDashNudgeState(response, now) {
   } catch { /* storage hiccup — the nudge is advisory, never break the collection cycle */ }
 }
 
+/**
+ * #966: remember (or forget) the "we moved your ★" notice the server puts on the ingest
+ * response. The dashboard reads the same two markers straight off /api/me; the extension
+ * cannot, because /api/me is session/Google-only and rejects ext_token (#745).
+ *
+ * 🔴 Absence is meaningful: the server omits `pin_move` once the move has been acknowledged
+ * (an explicit ★ pick clears the markers), so a response WITHOUT it must clear a stored
+ * record — otherwise acknowledging on the dashboard would leave the popup nagging forever.
+ * But only when we know whose response this is: `account` is the email THIS POST was for, so
+ * a ChatGPT POST for a different account on the same browser cannot wipe another account's
+ * notice. With no account, do nothing — the same rule dash_nudge uses.
+ */
+async function applyPinMoveState(response, now, account) {
+  const d = response && response.pin_move;
+  try {
+    if (d && typeof d === 'object' && d.account && d.moved_at && d.from_uuid) {
+      await chrome.storage.local.set({
+        pinMoveServer: {
+          account: d.account,
+          movedAt: d.moved_at,
+          fromUuid: d.from_uuid,
+          toUuid: d.to_uuid || null,
+          updatedAt: now,
+        },
+      });
+      return;
+    }
+    if (!account) return;
+    const { pinMoveServer = null } = await chrome.storage.local.get({ pinMoveServer: null });
+    if (pinMoveServer && pinMoveServer.account === account) {
+      await chrome.storage.local.remove('pinMoveServer');
+    }
+  } catch { /* storage hiccup — advisory state, never break the collection cycle */ }
+}
+
 export async function applyServerCadence(response, now = Date.now(), streamRef = null) {
   if (!response || typeof response !== 'object') return false;
   await applyDashNudgeState(response, now);
+  // `streamRef.account` is the email this POST carried — see applyPinMoveState on why the
+  // clear path needs it and the store path does not.
+  await applyPinMoveState(response, now, streamRef && streamRef.account);
   // Per-stream standby override for the stream THIS response answered. Same REPLACE
   // semantics as the global override: present → store; ABSENT → clear, so a server-side
   // rollback (flag off) restores full cadence on the very next POST instead of waiting out

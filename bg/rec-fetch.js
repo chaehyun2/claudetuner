@@ -11,6 +11,7 @@
 // `lastStatus.recommendation` and `lastStatus.recommendations_by_provider[provider][org||'-']`.
 
 import { authedFetch, getLastStatus, setStatus } from './storage.js';
+import { refreshRecNotice, updateBadgeForSelectedOrg } from './badge.js';
 
 /**
  * Fetch plan recommendations from the worker and persist them into lastStatus.
@@ -52,6 +53,13 @@ export async function fetchRecommendations(config) {
       recommendation,
       recommendations_by_provider,
     }));
+    // 🔴 THE AUTHORITATIVE DELIVERY PATH HAD NO REPAINT (#994 unit 2, Codex). This is where most
+    // recommendations actually arrive — the alarm caller just returns afterwards — so storing one
+    // and stopping meant the toolbar marker appeared a whole unrelated collection late, or never,
+    // if the next paint happened to see it suppressed. Recompute the derived state and repaint.
+    await refreshRecNotice();
+    const st = await getLastStatus();
+    if (st?.snapshot) await updateBadgeForSelectedOrg(st.snapshot);
   } catch (e) {
     console.warn('[rec-fetch] Failed to fetch recommendations:', e);
   }

@@ -347,6 +347,11 @@ const TRANSLATIONS = {
     'dash_nudge_paid_2': '지금 플랜이 과한지 부족한지 데이터로 확인해 보세요',
     'dash_nudge_paid_3': '여러 기기·서비스 사용량을 한 화면에서 비교할 수 있습니다',
     'dash_nudge_dismiss': '닫기',
+    // ★ auto-move notice (#966) — informational; the undo lives on the dashboard.
+    'pin_move_title': '대표 조직이 변경되었습니다',
+    'pin_move_msg': '이전 대표 조직이 수집을 멈춰서 지금 수집 중인 조직으로 옮겼습니다. 요약 플랜과 기본 화면이 이 조직 기준으로 바뀝니다.',
+    'pin_move_open_dash': '대시보드 열기',
+    'pin_move_hint': '에서 되돌리거나 다른 조직을 고를 수 있습니다.',
     'footer_help': '❔ 가이드',
     'footer_settings': '설정',
     'gauge_predict_collecting': '예측 수집 중',
@@ -868,6 +873,11 @@ const TRANSLATIONS = {
     'ob_collecting': 'Collecting...',
     'ob_guide_link': 'See setup guide →',
     'dash_nudge': 'See your trends & predictions on the dashboard',
+    // ★ auto-move notice (#966) — informational; the undo lives on the dashboard.
+    'pin_move_title': 'Your primary organization changed',
+    'pin_move_msg': 'Your previous primary organization stopped collecting, so we moved it to one that is. Your headline plan and default view now follow that organization.',
+    'pin_move_open_dash': 'Open the dashboard',
+    'pin_move_hint': 'to undo this or pick a different organization.',
     'dash_nudge_paid': 'Only on the dashboard: team comparison, 7-day forecasts, plan recommendations',
     'dash_nudge_paid_2': 'See whether your plan is over- or under-sized, from your own data',
     'dash_nudge_paid_3': 'Compare usage across all your devices and services in one place',
