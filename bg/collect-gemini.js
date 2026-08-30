@@ -2,6 +2,7 @@ import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemin
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
+import { noteProviderAttempt, noteProviderSuccess, noteProviderError } from './provider-state.js';
 
 // Gemini plan ID mapping (from jSf9Qc response first field).
 // FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
@@ -85,8 +86,12 @@ function geminiTimestampToResetTime(ts) {
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
  */
 export async function collectGemini(force = false, userManual = false) {
+  await noteProviderAttempt('gemini');
   const loggedIn = await isGeminiLoggedIn();
   if (!loggedIn) {
+    // See the ChatGPT twin: the signed-out precheck returns before any API call, so it never
+    // produced an `err_gemini_*` code and the commonest failure stayed invisible (#852).
+    await noteProviderError('gemini', 'err_gemini_not_logged_in');
     return { success: false, orgs: [] };
   }
 
@@ -95,6 +100,10 @@ export async function collectGemini(force = false, userManual = false) {
 
     if (!Array.isArray(data) || !Array.isArray(data[1])) {
       console.warn('[Claude Tuner] Gemini: unexpected jSf9Qc response');
+      // Same silent shape #852 is about: no throw, so no code, so nothing to show. The ChatGPT
+      // twin records this; leaving Gemini out would reopen the defect on one provider only
+      // (Codex DEPLOY-BLOCKER).
+      await noteProviderError('gemini', 'err_gemini_collect_failed');
       return { success: false, orgs: [] };
     }
 
@@ -267,9 +276,11 @@ export async function collectGemini(force = false, userManual = false) {
       console.log(`[Claude Tuner] Gemini delta-gate skip (${gate.reason})`);
     }
 
+    await noteProviderSuccess('gemini');
     return { success: true, orgs: [org] };
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection failed:', e.message);
+    await noteProviderError('gemini', e);
     return { success: false, orgs: [] };
   }
 }

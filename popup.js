@@ -6,6 +6,7 @@ import { getRecDismiss } from './bg/rec-dismiss.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { pinnedState } from './bg/analytics.js';
 import { isServerSyncGated, serverSyncWithheldReason, getLastStatus } from './bg/storage.js';
+import { displayableProviderError } from './bg/provider-state.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
@@ -468,6 +469,22 @@ async function renderLoginCta() {
     : scopeBlocked
       ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
       : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
+  // 🔴 Name the account that is about to be attributed. Logging in here does NOT ask which
+  // provider account to take — the server mints for whoever authenticates and, per THE RULE in
+  // bg/storage.js, everything this install collects then belongs to them. That is right for the
+  // owner of the machine and wrong for a shared one, where the Claude session may be someone
+  // else's. The page-initiated handoff asks a question in that case; the popup cannot (a login
+  // that interrogates you is worse than the gate it exists to lift), so it discloses instead.
+  const attribEl = document.getElementById('login-cta-attrib');
+  if (attribEl) {
+    const providerEmail = accountCache?.email || '';
+    if (providerEmail) {
+      attribEl.textContent = (t('login_cta_attrib') || '').replace('{0}', providerEmail);
+      attribEl.style.display = '';
+    } else {
+      attribEl.style.display = 'none';
+    }
+  }
   const feats = [t('login_cta_feat1'), t('login_cta_feat2'), t('login_cta_feat3')].filter(Boolean);
   const featsBox = document.getElementById('login-cta-feats');
   featsBox.textContent = ''; // build via DOM (no innerHTML sink)
@@ -616,6 +633,51 @@ async function checkCapDrops() {
   banner.classList.remove('hidden');
 }
 
+// Why a provider stopped collecting (#852).
+//
+// The 14 `err_*` codes the API layer throws were referenced nowhere outside the file that threw
+// them, so a failing provider was indistinguishable from one the user does not have — that is how
+// 문의 #190 reached support. This renders the stored reason, which is chosen for the ACTION it
+// implies: sign in / open a tab / just wait.
+//
+// 🔴 Never shown together with the permission banner above. "Permission not granted" and "signed
+// out" are different problems with different fixes, and stacking two amber blocks that both say
+// "do something about ChatGPT" is how #967 misdirected people to a service that was not broken.
+// Permission missing wins, because nothing else can even be attempted until it is granted.
+// The last permission set seen, so a re-render triggered by a storage change keeps the two banners
+// mutually exclusive without re-probing permissions.
+let _lastPermMissing = null;
+
+async function checkProviderErrors(permMissing) {
+  _lastPermMissing = permMissing || _lastPermMissing;
+  const banner = document.getElementById('prov-err-banner');
+  if (!banner) return;
+  banner.classList.add('hidden');
+  banner.innerHTML = '';
+  const [{ providerCollectionState = {} }, sync] = await Promise.all([
+    chrome.storage.local.get({ providerCollectionState: {} }),
+    chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true }),
+  ]);
+  const enabled = { chatgpt: sync.collectChatGPT !== false, gemini: sync.collectGemini !== false };
+  const lines = [];
+  for (const key of ['chatgpt', 'gemini']) {
+    if (!enabled[key]) continue;                 // the user turned this provider off — not a fault
+    if (permMissing && permMissing.has(key)) continue;   // the permission banner already owns this
+    const err = displayableProviderError(providerCollectionState[key]);
+    if (!err) continue;
+    lines.push(err.code);
+  }
+  if (!lines.length) return;
+  for (const code of lines) {
+    const colon = code.indexOf(':');
+    const text = colon > 0 ? t(code.slice(0, colon), code.slice(colon + 1)) : t(code);
+    const row = document.createElement('div');
+    row.textContent = text;
+    banner.appendChild(row);
+  }
+  banner.classList.remove('hidden');
+}
+
 // Check optional provider permissions and show banner if needed
 async function checkProviderPermissions() {
   const banner = document.getElementById('perm-banner');
@@ -624,13 +686,16 @@ async function checkProviderPermissions() {
   const missing = [];
   if (collectChatGPT) {
     const ok = await chrome.permissions.contains({ origins: ['https://chatgpt.com/*'] });
-    if (!ok) missing.push({ label: 'ChatGPT', origins: ['https://chatgpt.com/*'] });
+    if (!ok) missing.push({ key: 'chatgpt', label: 'ChatGPT', origins: ['https://chatgpt.com/*'] });
   }
   if (collectGemini) {
     const ok = await chrome.permissions.contains({ origins: ['https://gemini.google.com/*'] });
-    if (!ok) missing.push({ label: 'Gemini', origins: ['https://gemini.google.com/*'] });
+    if (!ok) missing.push({ key: 'gemini', label: 'Gemini', origins: ['https://gemini.google.com/*'] });
   }
-  if (missing.length === 0) { banner.classList.add('hidden'); return; }
+  // The set of providers blocked on permission, so the error banner below can stay silent about
+  // them — one problem, one message.
+  const missingKeys = new Set(missing.map(m => m.key));
+  if (missing.length === 0) { banner.classList.add('hidden'); return missingKeys; }
   const names = missing.map(m => m.label).join(', ');
   banner.innerHTML = '';
   banner.appendChild(document.createTextNode(t('perm_banner_text', names) || names + ' collection requires permission.'));
@@ -650,6 +715,7 @@ async function checkProviderPermissions() {
   });
   banner.appendChild(btn);
   banner.classList.remove('hidden');
+  return missingKeys;
 }
 
 
@@ -901,6 +967,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
       // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
       if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      // #852 — the provider failure reason is written by the SERVICE WORKER while the popup is
+      // open (a manual collect that fails right after granting permission is the common case).
+      // Piggy-backing on THIS listener rather than adding a second one: test/login-first-guard.mjs
+      // locates "the popup's local storage.onChanged listener" by shape, and a second one silently
+      // became the match — the guard then asserted its rules against a listener that has none.
+      if (area === 'local' && changes.providerCollectionState) checkProviderErrors(_lastPermMissing);
       // #789 — the re-auth widget needs the same treatment, on ITS inputs (independentAccount /
       // extToken / claudeLinkDone, plus the gate flag it asks isServerSyncGated about). Until now
       // its only callers were the initial render and a language switch, so a token cleared by a
@@ -939,7 +1011,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (document.visibilityState === 'visible' && state.popupNoticeList.length === 0) loadPopupAnnouncements();
   });
   loadOrgSelector();
-  checkProviderPermissions();
+  checkProviderPermissions().then(checkProviderErrors);
   checkCapDrops();
   loadFitnessMatrix();
 
@@ -1072,7 +1144,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null }, (result) => {
+    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
+      state.providerEmail = result.accountCache?.email || null;
       // Which Tuner account this install actually syncs into (see bg/ext-token-claims.js).
       // Skipped once the onChanged listener has already reported a token: this read was issued
       // earlier, so applying it now would replace a newer token with an older one.
@@ -1180,7 +1253,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // switch (checkProviderPermissions rebuilds the banner via innerHTML='' — no double-bind).
       renderReauth();
       renderLoginCta();
-      checkProviderPermissions();
+      checkProviderPermissions().then(checkProviderErrors);
       checkCapDrops();   // same reason — imperative t() text, rebuilt via innerHTML=''
       // Same reason: the sync-account note is imperative t() text with no data-i18n attribute.
       // It can't wait for the updateUI() below either — that only runs when lastStatus exists,

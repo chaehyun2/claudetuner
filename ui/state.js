@@ -18,6 +18,10 @@ export const state = {
   dashNudgeEvaluated: false, // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
   isIndependent: false, // signed in via email (no Claude account) — suppress all Claude-centric status/errors
   independentEmail: '', // independent account email (shown in the footer)
+  providerEmail: null, // The provider account this browser is signed in to (accountCache). NOT the
+                       // identity — see bg/storage.js THE RULE. Held only so the footer can say
+                       // when the two differ; a fresh install has no token and no provider email
+                       // yet, which is exactly when nothing can be compared.
   syncEmail: null, // Tuner account the ext_token binds to = where collected data actually LANDS.
                    // Diverges from the provider email after a provider account-email change
                    // (see bg/ext-token-claims.js). null until a token exists.

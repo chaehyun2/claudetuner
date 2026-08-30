@@ -593,6 +593,22 @@ export function renderSyncAccountNote() {
     return;
   }
   el.textContent = t('sync_account_note', sync);
+  // 🔴 ADDITIVE, never a replacement. The comparison that used to live here was removed because it
+  // short-circuited on an unknown provider address and went silent when the two matched — so a
+  // user who had just signed in was told nothing at all. The sentence above now always names the
+  // Tuner login; this only APPENDS when there is a real difference to report.
+  //
+  // WHY IT IS BACK. A fresh install mints its token before the extension has collected anything,
+  // so `collecting_email` is absent, the server's mismatch check never runs, and nobody is asked
+  // (live 2026-08-30: reinstall + an existing browser session did exactly this). Since the token
+  // is already issued by the time the provider account becomes known, the only honest move left
+  // is to say what happened — after the fact, where the user can see both addresses.
+  if (state.providerEmail && state.providerEmail.toLowerCase() !== String(sync).toLowerCase()) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'margin-top:3px;color:var(--text-muted)';
+    warn.textContent = t('sync_account_provider_note', state.providerEmail);
+    el.appendChild(warn);
+  }
   el.classList.remove('hidden');
 }
 

@@ -157,6 +157,13 @@ export async function mergeServerSnapshots(serverSnaps, currentPlan, orgUuid) {
           h5: s.five_hour_utilization,
           d7: s.seven_day_utilization,
           p: currentPlan,
+          // Carried for the same reason buildHistoryPoint carries it (bg/collect.js): the 5h
+          // reset identity is what lets projectFlatWindow read a boundary the value rose across.
+          // Both producers of this payload already send the column — /api/me (me.ts) and
+          // /api/users/:email (users.ts) — so this needed no server change; it was simply dropped
+          // on the floor here, which made BOOTSTRAPPED history disagree with freshly collected
+          // history even after the writer above was fixed.
+          r5: s.five_hour_resets_at || null,
           r7: s.seven_day_resets_at || null,
           org: orgUuid || null,
           eu: s.extra_usage_used ?? null,

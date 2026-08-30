@@ -10,6 +10,7 @@
 // restores each section to whatever its own logic last set (zero regression risk).
 import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, windowLabel } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
+import { popupForecastCache } from './prediction-core.js';
 import {
   calcPredictedAtReset, estimateCapHitTime, tierColor, tierSeverity, isAlertTier,
   projectionTier, windowAverageProjection, PROJECTION_TIERS,

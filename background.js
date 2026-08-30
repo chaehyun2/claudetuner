@@ -28,6 +28,7 @@ import {
 import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/collect.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
+import { getProviderState, displayableProviderError } from './bg/provider-state.js';
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
 
@@ -654,9 +655,11 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       // partly-working install becomes a dead one, which is precisely what guard [3] exists to
       // prevent. (Codex DEPLOY-BLOCKER — introduced by narrowing [2], not pre-existing.)
       //
-      // This also disposes of the "stale per-account state" worry: an upgrade can no longer change
-      // WHO the install is, only the scope of its token, so accountCache/selectedOrgId and friends
-      // stay valid by construction.
+      // This also disposes of the "stale per-account state" worry for the ORDINARY upgrade: it
+      // changes only the scope of the token, so accountCache/selectedOrgId stay valid.
+      // 🔴 THAT PREMISE DOES NOT HOLD FOR `identity_verified`. That flag exists precisely to let
+      // the server say "the user confirmed this install belongs to someone else now", so per-
+      // account state CAN go stale here and must be handled explicitly — see the link reset below.
       if (existing && message.identity_verified !== true && !local.email) {
         console.log('[Claude Tuner] recovery refused: cannot confirm the replaced token belongs to this account');
         sendResponse({ success: false, error: 'identity_unknown' });
@@ -668,6 +671,22 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       await setExtTokenNoDowngrade(message.ext_token);
       if (message.email) {
         await chrome.storage.local.set({ independentAccount: { email: message.email, name: message.name || '' } });
+      }
+      // 🔴 A local claudeAliasLink OUTRANKS the token when Claude snapshots pick their identity
+      // (bg/storage.js pickIngestIdentity: linkedCanonical || tokenEmail). It is cleared only by
+      // a same-device unlink, so a server-side unlink — dashboard Settings, or account deletion —
+      // leaves it orphaned here. Combine that with an identity-changing mint and every Claude POST
+      // carries the OLD canonical address under the NEW token: 403 email mismatch, Claude sync
+      // dead, right after the user clicked to confirm. The mint is the newer authenticated
+      // statement about who this install is, so a link that disagrees with it is stale by
+      // definition. ChatGPT/Gemini never consult the link and are unaffected.
+      if (message.email) {
+        const { claudeAliasLink = null } = await chrome.storage.local.get({ claudeAliasLink: null });
+        if (claudeAliasLink?.canonicalEmail
+            && String(claudeAliasLink.canonicalEmail).toLowerCase() !== String(message.email).toLowerCase()) {
+          await chrome.storage.local.remove('claudeAliasLink');
+          console.log('[Claude Tuner] stale claudeAliasLink cleared: it named a different canonical account than the new token');
+        }
       }
       await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
       console.log('[Claude Tuner] ext_token recovered from dashboard session');
@@ -761,10 +780,34 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         hasProviderPermission('chatgpt'),
         hasProviderPermission('gemini'),
       ]);
+      // Per-provider collection state (#852). Carried INSIDE each provider object, not as a
+      // sibling field: every existing reader — the welcome checklist, site/shared/ext-detect.js,
+      // site/shared/provider-connect.js — reaches for `providers[key]`, so a top-level `lastError`
+      // would be dropped on the floor by all of them (Codex review).
+      //
+      // `lastError` is what is worth SHOWING, not merely what is stored: displayableProviderError()
+      // applies the same staleness rule the popup uses, so the popup and the dashboard cannot
+      // disagree about whether a provider is currently broken.
+      const { collectChatGPT: cgEnabled = true, collectGemini: gmEnabled = true } =
+        await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+      const pstate = await getProviderState();
+      const provInfo = (key, hasPermission, enabled) => {
+        const st = pstate[key] || {};
+        const err = displayableProviderError(st);
+        return {
+          collected: collectedBy(key),
+          hasPermission,
+          enabled,
+          lastError: err ? err.code : null,
+          lastErrorAt: err ? err.at : null,
+          lastSuccessAt: st.lastSuccessAt || null,
+          lastAttemptAt: st.lastAttemptAt || null,
+        };
+      };
       const providers = {
-        claude: { collected: collectedBy('claude') || !!status?.success, hasPermission: true },
-        chatgpt: { collected: collectedBy('chatgpt'), hasPermission: chatgptPerm },
-        gemini: { collected: collectedBy('gemini'), hasPermission: geminiPerm },
+        claude: { collected: collectedBy('claude') || !!status?.success, hasPermission: true, enabled: true },
+        chatgpt: provInfo('chatgpt', chatgptPerm, cgEnabled !== false),
+        gemini: provInfo('gemini', geminiPerm, gmEnabled !== false),
       };
       const anyCollected = Object.values(providers).some(p => p.collected);
       sendResponse({

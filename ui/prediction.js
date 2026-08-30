@@ -4,7 +4,12 @@
 import { state, _filteredHistory } from './state.js';
 import { _isDark, formatResetAbsolute } from './util.js';
 import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
-import { diurnalProject7dAdaptive } from './diurnal.js';
+// The forecast maths moved to a pure module so the Worker can import it too (#1026). Re-exported
+// here so every existing call site keeps working unchanged.
+import {
+  calcPredictedAtReset, estimateCapHitTime, windowForecast, windowTier, popupForecastCache,
+} from './prediction-core.js';
+export { calcPredictedAtReset, estimateCapHitTime, windowForecast, windowTier };
 
 // The tier ladder and every verdict derived from it live in ui/usage-tiers.js — the SoT shared
 // with the dashboard through a generated twin. Re-exported here so existing importers (and the
@@ -22,150 +27,6 @@ export {
   FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
 };
 
-// === 7d projection memo =====================================================================
-// The `d7` branch of calcPredictedAtReset rebuilds the user's PERSONAL diurnal + weekly curve
-// from the FULL 30-day history on every call (ui/diurnal.js: personalActivityCurve +
-// activityNormalizedRate are both O(history)). renderOverview() calls it once per org and re-runs
-// on every chrome.storage.onChanged, so the identical model was rebuilt from scratch on every
-// repaint — measured at ~1.6ms per org for a 30-day history at the 5-minute sample cadence, and
-// ~8.7ms at 1-minute. Memoizing the result makes a repeat render (detail -> overview, or a
-// storage-event repaint) cost ~0.
-//
-// The memo deliberately lives HERE and not in ui/diurnal.js: that file is the canonical source
-// for the auto-generated dashboard twin site/shared/diurnal.js, so touching it would require
-// regenerating the twin and bumping every `shared/diurnal.js?v=` reference plus the service
-// worker CACHE_VERSION. Caching the composed result skips the whole model build anyway.
-//
-// Invalidation is caller-free: the key is a content fingerprint of every input, so any new data
-// point (or a changed util/reset) misses the cache. The ONE input not in the key is wall-clock
-// `now`, which is bounded instead by a short TTL. Worst-case staleness at the TTL is far below
-// what the UI can render: `predicted` drifts by ratePerMass x (one weight-hour x TTL) — under
-// 0.1%pt even for a user burning a full 7d window in a day, against a display that rounds to
-// whole percent; the limit ETA is hour-granular (formatResetAbsolute); and `hoursToReset`, the
-// one field shown at minute granularity, is recomputed fresh on every cache hit.
-const PRED_CACHE_MAX = 24;                  // orgs x windows x a couple of renders — bounds memory
-const PRED_CACHE_TTL_MS = 30000;            // max age of a served entry (see staleness note above)
-const PRED_CACHE_MIN_HOURS_TO_RESET = 0.25; // never serve a cached forecast this close to a reset
-const _predCache = new Map();               // fingerprint -> { at, value }; insertion order = LRU
-
-// Cheap O(1) content fingerprint of a history array. usageHistory is append-only with a front
-// trim and an occasional sorted server-snapshot merge (bg/storage.js), so any real change moves
-// the length, the first/last timestamps, or the newest sample's values. The midpoint sample and
-// the org tag are folded in so two orgs' distinct arrays cannot collide onto one key.
-function _predCacheKey(history, key, currentUtil, resetsAt) {
-  const n = history.length;
-  const first = history[0];
-  const last = history[n - 1];
-  const mid = history[n >> 1];
-  return `${key}|${currentUtil}|${resetsAt}|${n}|${first.t}|${last.t}|${last.org}`
-    + `|${last.h5}|${last.d7}|${last.r7}|${mid.t}|${mid.d7}`;
-}
-
-function _predCacheGet(cacheKey, nowMs) {
-  const hit = _predCache.get(cacheKey);
-  if (!hit) return null;
-  if (nowMs - hit.at > PRED_CACHE_TTL_MS) { _predCache.delete(cacheKey); return null; }
-  _predCache.delete(cacheKey);            // re-insert so the most recently used entry evicts last
-  _predCache.set(cacheKey, hit);
-  return hit.value;
-}
-
-function _predCacheSet(cacheKey, value, nowMs) {
-  if (_predCache.size >= PRED_CACHE_MAX) {
-    const oldest = _predCache.keys().next().value;
-    if (oldest !== undefined) _predCache.delete(oldest);
-  }
-  _predCache.set(cacheKey, { at: nowMs, value });
-}
-
-// Estimate when the current 100% episode began, for an already-capped window.
-// History is ascending by time; walk back from the newest sample while util is
-// still >= 100 and return the earliest such timestamp — the start of the run the
-// user is currently in. Null when history is empty or the newest sample isn't
-// capped. Approximate (history is sampled, and if the whole slice is >= 100 the
-// true start is earlier than we can see), so callers label the wait "약/~".
-export function estimateCapHitTime(history, key) {
-  if (!Array.isArray(history) || !history.length) return null;
-  let hitT = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const u = history[i][key];
-    if (u != null && u >= 100) hitT = history[i].t;
-    else break; // run of >=100 (walking back from now) ended → episode started after this
-  }
-  return hitT;
-}
-
-// Used by both gauge prediction and banner evaluation (and the overview cards).
-export function calcPredictedAtReset(history, key, currentUtil, resetsAt) {
-  if (!resetsAt || currentUtil === null || !history || history.length < 3) return null;
-
-  const now = Date.now();
-  const resetTime = new Date(resetsAt).getTime();
-  const hoursToReset = Math.max((resetTime - now) / 3600000, 0);
-  if (hoursToReset < 0.05) return null;
-
-  let rate, hoursDiff;
-
-  if (key === 'd7') {
-    // 7d: activity-normalized adaptive projection (docs/DESIGN-rate-estimator.md).
-    // Estimate the burn rate with a recency-weighted EWMA over ~48h of ACTIVITY time and
-    // project through the user's PERSONAL diurnal + weekly curve (global fallback when data
-    // is thin). Replaces the old thin/noisy last-6h flat window; the activity-mass model,
-    // discount-only clamp and remaining-mass floor are unchanged. Passing the full local
-    // history (extension keeps 30d) is what lets the personal curve be built.
-    //
-    // Memoized (see the "7d projection memo" block above): the model build is the expensive part
-    // of a renderOverview() pass. Skip the cache entirely near a reset, where the forecast is
-    // both shortest-lived and most sensitive.
-    const cacheKey = hoursToReset >= PRED_CACHE_MIN_HOURS_TO_RESET
-      ? _predCacheKey(history, key, currentUtil, resetsAt)
-      : null;
-    if (cacheKey) {
-      const cached = _predCacheGet(cacheKey, now);
-      // hoursToReset is recomputed from the live clock rather than served from the entry — it is
-      // the one field rendered at minute granularity (renderGaugePrediction's tooltip).
-      if (cached) return { ...cached, hoursToReset };
-    }
-    const samples = history
-      .filter(p => p.d7 != null && p.r7)
-      .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
-    const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: resetTime, nowMs: now });
-    if (!dp) return null;
-    const result = {
-      rate: dp.rate,
-      predicted: dp.predicted,
-      hoursToReset: dp.hoursToReset,
-      hoursDiff: dp.hoursDiff,
-      hoursTo100: dp.hoursTo100,
-    };
-    // Store a copy so a caller mutating the returned object can never poison the cache.
-    // A sub-hour observation window (a brand-new user, or the thin-data fallback) is NOT cached:
-    // renderGaugePrediction renders `hoursDiff` in whole MINUTES below 1h, which is fine enough
-    // to notice a TTL's worth of staleness — and such a short history is cheap to recompute.
-    if (cacheKey && dp.hoursDiff >= 1) _predCacheSet(cacheKey, { ...result }, now);
-    return result;
-  } else {
-    // 5h: the SHARED flat projection (ui/usage-tiers.js). The dashboard runs the same function on
-    // its own samples, so the two surfaces can no longer land in different tiers because one of
-    // them measured the rate differently. Only the sample mapping is per-runtime — here, local
-    // history; there, the snapshot rows.
-    const flat = projectFlatWindow({
-      samples: history.map((p) => ({ tMs: p.t, util: p[key], resetKey: key === 'h5' ? p.r5 : p.r7 })),
-      currentUtil,
-      hoursToReset,
-      nowMs: now,
-    });
-    if (!flat) return null;
-    return { rate: flat.rate, predicted: flat.predicted, hoursToReset, hoursDiff: flat.hoursDiff };
-  }
-
-  const predicted = currentUtil + (rate * hoursToReset);
-
-  return { rate, predicted, hoursToReset, hoursDiff };
-}
-
-// Prediction headline strip above the gauges (driven only by the 5h gauge).
-// Pass null to hide. tone 'is-alert' for the limit-reached forecast.
 export function setPredictHeadline(html, tone) {
   const el = document.getElementById('predict-headline');
   if (!el) return;
@@ -295,7 +156,10 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   }
 
   // Use common prediction function
-  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
+  // Scope the cache to the org currently selected in the popup. One popup only ever shows one
+  // account, but the cache no longer assumes that — see prediction-core.js.
+  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt,
+    { cache: popupForecastCache, scope: state.selectedOrgId || 'default' });
   if (!pred) {
     showCollecting();
     _renderDegradedLine(lineEl, currentUtil, key, resetsAt);
@@ -389,35 +253,6 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
     label.style.display = 'none';
   }
 }
-
-// THE verdict for one window, WITH the numbers behind it: the measured forecast when there is
-// one, the degraded projection when there is not, and null only when even that is impossible.
-// Returns { tier, predicted, rate, hoursTo100, measured } — a caller that DRAWS the projection and one
-// that LABELS it must not end up on different values, which is what happens when each derives
-// its own. `rate` is null on the degraded path (there is no measured rate to report).
-export function windowForecast(currentUtil, key, resetsAt, history) {
-  if (currentUtil == null || !resetsAt) return null;
-  // Already at the cap: there is no forecast past 100, and no pace verdict is true of someone
-  // who is blocked and waiting. AT_LIMIT is its own rung for exactly this — the old code took
-  // the loudest PACE rung here and told a stopped user they were "한도를 크게 넘는 페이스".
-  if (currentUtil >= 100) return { tier: AT_LIMIT_TIER, predicted: currentUtil, rate: null, hoursTo100: null, measured: false };
-  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
-  if (pred) {
-    return {
-      tier: projectionTier(pred.predicted), predicted: pred.predicted, rate: pred.rate,
-      hoursTo100: pred.hoursTo100 != null ? pred.hoursTo100 : null, measured: true,
-    };
-  }
-  const degraded = windowAverageProjection(currentUtil, key, resetsAt);
-  const tier = projectionTier(degraded);
-  return tier ? { tier, predicted: degraded, rate: null, hoursTo100: null, measured: false } : null;
-}
-
-// Tier-only convenience for callers that render nothing but the verdict.
-export function windowTier(currentUtil, key, resetsAt, history) {
-  return windowForecast(currentUtil, key, resetsAt, history)?.tier ?? null;
-}
-
 
 // === Status banner (6-tier pace) ===
 // Reads the SAME forecast as the gauges (calcPredictedAtReset — recent-rate for 5h, the

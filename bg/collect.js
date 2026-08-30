@@ -151,6 +151,20 @@ function buildHistoryPoint(snapshot, plan) {
     h5: snapshot.five_hour?.utilization ?? null,
     d7: snapshot.seven_day?.utilization ?? null,
     p: plan,
+    // 🔴 r5 IS NOT OPTIONAL METADATA — it is the 5h window's identity, and the shared flat
+    // projection (ui/usage-tiers.js projectFlatWindow) reads it to tell "this window reset" from
+    // "usage fell". Without it that function falls back to positive-delta-only, which cannot see
+    // a reset the value rose across: 49% -> reset -> 50% reads as +1 while the new cycle is
+    // already at 50. Claude was the ONLY producer omitting it — the dashboard passes it from
+    // snapshot rows, the widget Worker passes it, and the ChatGPT/Gemini history writers in
+    // background.js pass it — so the popup was the one surface answering differently for the same
+    // account (measured: 61.3 vs 112.9 on identical input, #1032).
+    //
+    // Safe to switch on: over 7 days of live snapshots the reset id moved WITHOUT a real reset in
+    // 54 of ~46,000 transitions (0.1%); 4-5.5h and >5.5h shifts account for the rest. The
+    // "utilization did not drop" cases the boundary rule now counts in full are genuine
+    // post-reset accumulation, which is exactly what the drop heuristic could not see.
+    r5: snapshot.five_hour?.resets_at || null,
     r7: snapshot.seven_day?.resets_at || null,
     org: snapshot.claude_org_uuid || null,
     eu: snapshot.extra_usage?.used_credits ?? null,

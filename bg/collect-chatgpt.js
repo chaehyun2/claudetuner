@@ -2,6 +2,7 @@ import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
+import { noteProviderAttempt, noteProviderSuccess, noteProviderError } from './provider-state.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -352,8 +353,13 @@ function pickScopedModel(additionalLimits) {
  * Fails silently (returns empty orgs) if user is not logged into ChatGPT.
  */
 export async function collectChatGPT(force = false, userManual = false) {
+  await noteProviderAttempt('chatgpt');
   const loggedIn = await isChatGPTLoggedIn();
   if (!loggedIn) {
+    // 🔴 Record it. This early return is the MOST COMMON failure — signed out of ChatGPT — and it
+    // happens before any API call, so it never produced one of the `err_chatgpt_*` codes. Exposing
+    // those codes without this would still leave the ordinary case invisible (#852).
+    await noteProviderError('chatgpt', 'err_chatgpt_not_logged_in');
     return { success: false, orgs: [] };
   }
 
@@ -362,6 +368,7 @@ export async function collectChatGPT(force = false, userManual = false) {
 
     if (!usage?.rate_limit) {
       console.warn('[Claude Tuner] ChatGPT: unexpected /wham/usage response');
+      await noteProviderError('chatgpt', 'err_chatgpt_collect_failed');
       return { success: false, orgs: [] };
     }
 
@@ -494,9 +501,13 @@ export async function collectChatGPT(force = false, userManual = false) {
       if (res) await exGate.commit();
     }
 
+    await noteProviderSuccess('chatgpt');
     return { success: true, orgs: [org, ...extraOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
+    // The reason dies here otherwise: the caller only sees `success:false`, and background.js
+    // catches that again with `.catch(() => {})`. Store it before it is lost (#852).
+    await noteProviderError('chatgpt', e);
     return { success: false, orgs: [] };
   }
 }

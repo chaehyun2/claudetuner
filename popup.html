@@ -540,6 +540,12 @@
   <div id="ct-popup-promos"></div>
   <div id="ct-popup-notices" style="display:none"></div>
   <div id="perm-banner" class="perm-banner hidden"></div>
+  <!-- Why a provider stopped collecting (#852). Its own block, NOT a row inside the org selector:
+       that selector only renders when `collectedOrgs` is non-empty and iterates real orgs, so a
+       provider that is failing to collect has no row there — exactly the user who needs this
+       (Codex review of the plan). Reuses .perm-banner styling: same "action needed" weight, and
+       its dark-theme rules already exist. -->
+  <div id="prov-err-banner" class="perm-banner hidden"></div>
   <!-- Orgs the server is dropping at the 3-org cap. Reuses .perm-banner: same "action needed"
        styling, and its dark-theme rules already exist. -->
   <div id="capdrop-banner" class="perm-banner hidden"></div>
@@ -564,6 +570,10 @@
       <div id="login-cta-title" class="cta-strong" style="font-size:13px;font-weight:700;line-height:1.35;margin-bottom:3px;padding-right:20px"></div>
       <div id="login-cta-msg" class="cta-sub" style="font-size:11.5px;line-height:1.45;margin-bottom:10px"></div>
       <div id="login-cta-feats" style="display:flex;flex-direction:column;gap:7px;margin-bottom:10px"></div>
+      <!-- Which provider account this install will hand over. Disclosure, not a gate: the popup
+           login is itself the user's explicit action, so it does not ask again — but on a shared
+           machine the account being absorbed may not be theirs, and until now nothing said so. -->
+      <div id="login-cta-attrib" class="cta-sub" style="display:none;font-size:11px;line-height:1.45;margin-bottom:10px;padding:7px 9px;border-radius:6px;background:var(--bg-subtle,#f6f5f4);color:var(--text-secondary)"></div>
       <div class="cta-arrow" style="text-align:center;line-height:1;margin:0 0 8px"><span style="font-size:15px">↓</span></div>
       <div id="login-cta-prompt" class="cta-sub" style="font-size:11px;font-weight:600;text-align:center;margin-bottom:7px"></div>
       <!-- One-click path. The email+code flow below still works and stays the fallback:
