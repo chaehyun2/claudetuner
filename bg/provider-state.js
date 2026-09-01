@@ -1,5 +1,11 @@
-// Per-provider collection state — the ONE place that answers "is ChatGPT/Gemini collecting, and
-// if not, why". Written by the collectors, read by the popup and (via `get_status`) by the web.
+// Per-provider collection state — the ONE place that answers "is this provider collecting, WHICH
+// account it is collecting, and if it is not, why". Written by the collectors, read by the popup
+// and (via `get_status`) by the web.
+//
+// Claude joined this store in #1038 for the ACCOUNT LABEL ONLY (success + `account`, never an
+// error — see the error note below, which still holds and is the reason that asymmetry exists).
+// The popup's login disclosure has to name every provider a login absorbs, and this is the only
+// place that knows all of them at collection time.
 //
 // WHY THIS EXISTS (#852)
 // ---------------------
@@ -124,8 +130,96 @@ export async function noteProviderAttempt(provider) {
  * error the user is looking at every time the alarm fires, so a permanently failing provider would
  * flash its reason and hide it again (Codex review).
  */
-export async function noteProviderSuccess(provider) {
-  return patch(provider, { lastSuccessAt: Date.now(), lastError: null });
+export async function noteProviderSuccess(provider, account) {
+  // `account` = the provider's own address AS IT WAS AT COLLECTION TIME (#1038). Recording it here
+  // rather than reading a cache later is the whole point: the popup used to disclose
+  // `accountCache?.email`, an 8-hour Claude profile cache, so it could name the account the user
+  // had BEFORE they switched — and it could only ever name Claude. This value is written by the
+  // code that just sent a snapshot for it, so it cannot disagree with what was actually collected.
+  // Undefined leaves the stored label untouched (a caller that does not know must not erase one).
+  const fields = { lastSuccessAt: Date.now(), lastError: null };
+  // 🔴 `accountAt` STAMPS WHEN THE LABEL WAS OBSERVED, and only an actual observation may move it.
+  // A caller that passes nothing leaves BOTH fields alone: "we collected, but we did not re-check
+  // which account" is a real state, and treating it as a fresh observation is what laundered a
+  // stale value into a permanently current one (Codex). Collection recency and label recency are
+  // different facts with different lifetimes, so they get different clocks.
+  //
+  // 🔴 THREE STATES, AND CALLERS PICK DELIBERATELY (Codex round 5 asked for this in writing):
+  //   undefined — "we did not look this cycle". Keeps the stored label AND its age. Claude's cache
+  //               hit is this: routine, expected, and the label is still the best thing we know.
+  //   an address — "we looked and it is X". Refreshes both.
+  //   null      — "we looked and it did not say". ERASES, so the disclosure omits the provider.
+  //               ChatGPT/Gemini pass their live `email` straight through, so a response that
+  //               carries no address lands here — and that is the intended reading: we got an
+  //               answer and the answer contained no account, which is not the same as not asking.
+  if (account !== undefined) {
+    fields.account = account || null;
+    fields.accountAt = account ? Date.now() : null;
+  }
+  return patch(provider, fields);
+}
+
+// TWO clocks, because the disclosure makes two claims and they can go stale independently:
+// "this provider is collecting" and "the account it collects is X".
+
+// (1) Is it still collecting? The alarm runs every 10 minutes by default (60 on the free plan), so
+// a success older than this means collection stopped — and a provider that stopped collecting is
+// not something a login is about to absorb. Generous against the cadence so a paused laptop does
+// not blank a correct disclosure.
+export const COLLECTING_TTL_MS = 3 * 60 * 60 * 1000;
+
+// (2) How old may the LABEL be? Bounded by how often the extension can actually re-check: the
+// Claude account is read from /api/account behind an 8-hour cache (bg/collect.js), so 8 hours is
+// the freshest this can honestly be without paying an extra API call on every cycle.
+//
+// 🔴 It is measured from the OBSERVATION, never from the collection. Those came out the same in an
+// earlier cut — a cache hit re-stamped the label — and that made the 3-hour bound unreachable: a
+// label could be indefinitely old while reading as current, because collection kept succeeding.
+// Codex's repro: two accounts in ONE team org, so the org-derived address never changes, the cache
+// never refreshes, and the popup names the account that is NOT signed in.
+export const ACCOUNT_LABEL_TTL_MS = 8 * 60 * 60 * 1000;
+
+// Display order. Fixed rather than object-key order so the disclosure does not reshuffle itself
+// between two openings of the same popup (storage key order follows write order).
+const ACCOUNT_DISPLAY = [
+  { provider: 'claude', label: 'Claude' },
+  { provider: 'chatgpt', label: 'ChatGPT' },
+  { provider: 'gemini', label: 'Gemini' },
+];
+
+/**
+ * Every provider this install is CURRENTLY collecting, with the account it is collecting.
+ *
+ * The single place that decides "fresh enough to disclose", for the same reason
+ * displayableProviderError() owns its own staleness rule: two consumers deriving it separately is
+ * how they end up disagreeing about what the user is being told.
+ *
+ * 🔴 A provider with no fresh success is OMITTED, not shown with a blank or a guess. The purpose of
+ * the disclosure is to tell the user which accounts get absorbed by a login; naming one that is no
+ * longer being collected is a false statement, and naming none is an honest silence.
+ */
+export function collectingAccounts(state, now) {
+  const t = typeof now === 'number' ? now : Date.now();
+  const all = state && typeof state === 'object' ? state : {};
+  const out = [];
+  for (const row of ACCOUNT_DISPLAY) {
+    const s = all[row.provider];
+    if (!s || typeof s !== 'object') continue;
+    if (typeof s.lastSuccessAt !== 'number' || (t - s.lastSuccessAt) > COLLECTING_TTL_MS) continue;
+    // 🔴 THE LAST THING THAT HAPPENED WINS. Signing out of a provider records an error and leaves
+    // the previous success standing, so a purely time-based rule keeps announcing "this browser
+    // collects ChatGPT b@x" for up to COLLECTING_TTL_MS after the user signed out of it — a
+    // present-tense sentence about something that stopped (Codex round 5). Stated as "the newest
+    // signal is a failure" rather than a list of fatal error codes: any failure means we are not
+    // collecting right now, and a provider that recovers says so within one alarm tick.
+    if (s.lastError && typeof s.lastError.at === 'number' && s.lastError.at > s.lastSuccessAt) continue;
+    if (!s.account) continue;
+    // A label with no observation time predates this field; treat it as unknown rather than
+    // grandfathering an age nobody recorded.
+    if (typeof s.accountAt !== 'number' || (t - s.accountAt) > ACCOUNT_LABEL_TTL_MS) continue;
+    out.push({ provider: row.provider, label: row.label, account: s.account });
+  }
+  return out;
 }
 
 /** Collection failed. `err` may be an Error, a string, or nothing (unknown → the generic code). */

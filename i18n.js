@@ -165,7 +165,7 @@ const TRANSLATIONS = {
     // Auth CTA (Phase 2 단계 4) — 인증 = 서버 데이터 전송 허가 (프라이버시-포지티브)
     'login_cta_title': '인증하고 서버 동기화 켜기',
     'login_cta_msg': '사용량은 지금도 이 브라우저에 저장됩니다. 이메일 인증 한 번으로 아래 기능이 켜집니다.',
-    'login_cta_attrib': '이 브라우저는 Claude에 로그인된 {0} 계정을 수집하고 있습니다. 로그인하면 이 사용량이 로그인한 계정으로 들어갑니다.',
+    'login_cta_attrib': '이 브라우저는 {0}의 사용량을 수집하고 있습니다. 로그인하면 앞으로 서버에 보내는 사용량이 전부 로그인한 계정으로 귀속됩니다.',
     'login_cta_prompt': '이메일 인증하고 시작하기',
     'login_cta_feat1': '집PC·회사PC 등 여러 브라우저·기기 사용량 통합 분석',
     'login_cta_feat2': '내 사용 패턴 기반 플랜 추천 · 일별·주별 트렌드 · 시간대별 히트맵',
@@ -720,7 +720,7 @@ const TRANSLATIONS = {
     // Login CTA (Phase 2 단계 4) — fresh install, additive login-first
     'login_cta_title': 'Turn on server sync',
     'login_cta_msg': 'Your usage is saved on this browser. Verify your email once to enable the features below.',
-    'login_cta_attrib': 'This browser collects {0}, the account signed in to Claude. After you log in, that usage will go to the account you log in as.',
+    'login_cta_attrib': 'This browser collects usage from {0}. After you log in, everything it sends from then on is attributed to the account you log in as.',
     'login_cta_prompt': 'Verify your email to start',
     'login_cta_feat1': 'Integrated analysis of usage across all your browsers & devices (home PC, work PC…)',
     'login_cta_feat2': 'Plan recommendations · daily/weekly trends · hourly activity heatmap',

@@ -276,7 +276,7 @@ export async function collectGemini(force = false, userManual = false) {
       console.log(`[Claude Tuner] Gemini delta-gate skip (${gate.reason})`);
     }
 
-    await noteProviderSuccess('gemini');
+    await noteProviderSuccess('gemini', email);
     return { success: true, orgs: [org] };
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection failed:', e.message);

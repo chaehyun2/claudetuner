@@ -15,7 +15,9 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
 
   if (tabs.length > 0) {
     try {
-      return await fetchGeminiViaTab(tabs[0].id, rpcId, params);
+      const viaTab = await fetchGeminiViaTab(tabs[0].id, rpcId, params);
+      _lastFetchTabId = tabs[0].id;
+      return viaTab;
     } catch (tabError) {
       tabErrorMsg = tabError.message;
       console.warn('[Claude Tuner] Gemini tab fetch failed, trying SW fallback:', tabErrorMsg);
@@ -28,7 +30,9 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
   // Fallback: service worker fetch with credentials: 'include'
   // .google.com cookies are automatically included via HTTP standard
   try {
-    return await fetchGeminiWithCredentials(rpcId, params);
+    const viaCreds = await fetchGeminiWithCredentials(rpcId, params);
+    _lastFetchTabId = null;   // this usage came from the DEFAULT cookie account, not a tab
+    return viaCreds;
   } catch (credError) {
     if (credError.message.startsWith('err_')) {
       throw credError;
@@ -156,6 +160,10 @@ async function fetchGeminiWithCredentials(rpcId, params) {
 }
 
 // Cached page HTML from SW fallback (reused by getGeminiUserInfo when no tab)
+// WHICH observation the last usage RPC came from: a tab id, or null for the service-worker
+// credentials fallback. getGeminiUserInfo() has to answer for the SAME account that produced the
+// usage — see the note there.
+let _lastFetchTabId = null;
 let _lastPageHtml = null;
 let _lastPageHtmlTs = 0;
 const PAGE_HTML_TTL_MS = 60_000; // 1 min
@@ -196,8 +204,24 @@ function parseBatchExecuteResponse(text, rpcId) {
 
 // === Extract user info from Gemini page (MAIN world) or cached HTML ===
 export async function getGeminiUserInfo() {
-  // Primary: extract from open tab (most reliable — has DOM access)
-  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+  // 🔴 THE LABEL MUST COME FROM THE SAME PLACE AS THE USAGE. This used to query tabs on its own,
+  // independently of how `fetchGeminiRpc` actually got the numbers — and those two can be different
+  // Google accounts, which is not exotic: multi-account (/u/0, /u/1) is ordinary. Concretely, a tab
+  // fetch that fails falls back to service-worker credentials, i.e. the DEFAULT cookie account B,
+  // while this function then read the still-open tab's DOM and reported A. The usage is B's and the
+  // name shown is A's.
+  //
+  // That mattered less while this only fed `provider_email`; #1038 puts it on screen as the answer
+  // to "which accounts does logging in absorb", so a mismatched name is now a false statement to
+  // the user. Same root as the three Claude defects on this branch: an email that LOOKS like the
+  // provider account but came from a different observation.
+  //
+  // `_lastFetchTabId === null` means the credentials fallback served the usage → the only honest
+  // source is the HTML that fallback itself fetched. Untouched when no usage fetch has run yet
+  // (the id starts null and the cached HTML is null too, so it degrades to "unknown").
+  const tabs = _lastFetchTabId === null
+    ? []
+    : (await chrome.tabs.query({ url: 'https://gemini.google.com/*' })).filter((t) => t.id === _lastFetchTabId);
   if (tabs.length > 0) {
     try {
       const results = await chrome.scripting.executeScript({

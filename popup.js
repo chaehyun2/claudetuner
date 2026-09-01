@@ -4,6 +4,7 @@ import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { getRecDismiss } from './bg/rec-dismiss.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
+import { getProviderState, collectingAccounts } from './bg/provider-state.js';
 import { pinnedState } from './bg/analytics.js';
 import { isServerSyncGated, serverSyncWithheldReason, getLastStatus } from './bg/storage.js';
 import { displayableProviderError } from './bg/provider-state.js';
@@ -477,9 +478,61 @@ async function renderLoginCta() {
   // that interrogates you is worse than the gate it exists to lift), so it discloses instead.
   const attribEl = document.getElementById('login-cta-attrib');
   if (attribEl) {
-    const providerEmail = accountCache?.email || '';
-    if (providerEmail) {
-      attribEl.textContent = (t('login_cta_attrib') || '').replace('{0}', providerEmail);
+    // 🔴 EVERY provider being collected, named at COLLECTION time (#1038). This used to read
+    // `accountCache?.email` — an 8-hour Claude profile cache — which was wrong three ways at once:
+    // it went stale across an account switch, it was empty on a fresh install that had already
+    // started collecting, and it could only ever say "Claude" while a login absorbs ChatGPT and
+    // Gemini too. The disclosure exists so a login does not take accounts the user was never told
+    // about, so naming a subset is the same failure as naming the wrong one.
+    // bg/provider-state.js owns the freshness rule; a provider that is not currently collecting is
+    // omitted rather than guessed at.
+    // 🔴 INTERSECTED WITH "would we still collect it". A recorded success survives its provider
+    // being switched off or having its host permission revoked, so for up to COLLECTING_TTL_MS the
+    // store still says "chatgpt: collecting" about a provider that no longer is — and the sentence
+    // this feeds is present tense (Codex round 4). Claude has no toggle and no optional permission,
+    // so only the two optional providers are filtered.
+    const sync = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+    const stillOn = { claude: true, chatgpt: sync.collectChatGPT !== false, gemini: sync.collectGemini !== false };
+    const ORIGINS = { chatgpt: ['https://chatgpt.com/*'], gemini: ['https://gemini.google.com/*'] };
+    const accounts = [];
+    for (const a of collectingAccounts(await getProviderState())) {
+      if (!stillOn[a.provider]) continue;
+      if (ORIGINS[a.provider]) {
+        // A revoked host permission stops collection just as hard as the toggle does.
+        const granted = await chrome.permissions.contains({ origins: ORIGINS[a.provider] }).catch(() => true);
+        if (!granted) continue;
+      }
+      accounts.push(a);
+    }
+    if (accounts.length) {
+      // Built as DOM NODES, not a string — the addresses get their own colour so the sentence can
+      // be scanned for "which accounts" without reading it whole (four lines of dense text was
+      // hard to parse). 🔴 `innerHTML` is not an option here: these addresses come from the
+      // providers, i.e. off the wire, and this box is the one place we deliberately show them.
+      // Every value goes in through textContent/createTextNode, so there is no markup path at all
+      // — which also means no `{0}` string interpolation to hijack (the sibling prompt in
+      // site/shared/ext-detect.js had exactly that bug).
+      attribEl.textContent = '';
+      const parts = (t('login_cta_attrib') || '').split('{0}');
+      const add = (txt, css) => {
+        if (!txt) return;
+        if (!css) { attribEl.appendChild(document.createTextNode(txt)); return; }
+        const el = document.createElement('span');
+        el.textContent = txt;
+        el.style.cssText = css;
+        attribEl.appendChild(el);
+      };
+      add(parts[0]);
+      accounts.forEach((a, i) => {
+        if (i) add(' · ', 'color:var(--text-muted)');
+        add(`${a.label} `);
+        // --accent is defined for BOTH themes (light #4f46e5 / dark #818CF8), so this stays
+        // readable on the subtle grey box either way. A hard-coded hue would not.
+        add(a.account, 'color:var(--accent);font-weight:600');
+      });
+      // A copy without the placeholder would otherwise silently drop the account list. Falls back
+      // to appending it, so a bad translation loses the sentence shape but never the disclosure.
+      add(parts.length > 1 ? parts.slice(1).join('{0}') : '');
       attribEl.style.display = '';
     } else {
       attribEl.style.display = 'none';
@@ -972,7 +1025,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Piggy-backing on THIS listener rather than adding a second one: test/login-first-guard.mjs
       // locates "the popup's local storage.onChanged listener" by shape, and a second one silently
       // became the match — the guard then asserted its rules against a listener that has none.
-      if (area === 'local' && changes.providerCollectionState) checkProviderErrors(_lastPermMissing);
+      // 🔴 AND the CTA — the disclosure inside it is built from this very key (#1038). The first
+      // popup of a fresh install is the exact case: the CTA renders on `showLoginPrompt` BEFORE any
+      // provider has collected, so the disclosure is empty, and the label that arrives seconds
+      // later would sit in storage unread until the next popup open. That is the "empty on a fresh
+      // install" failure this change exists to remove, reproduced one layer up (Codex).
+      if (area === 'local' && changes.providerCollectionState) { checkProviderErrors(_lastPermMissing); renderLoginCta(); }
       // #789 — the re-auth widget needs the same treatment, on ITS inputs (independentAccount /
       // extToken / claudeLinkDone, plus the gate flag it asks isServerSyncGated about). Until now
       // its only callers were the initial render and a language switch, so a token cleared by a

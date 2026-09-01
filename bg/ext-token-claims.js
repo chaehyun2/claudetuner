@@ -118,8 +118,10 @@ export function extTokenEmail(token) {
 }
 
 /**
- * WHICH login minted this token — 'ext_google' | 'ext_email' | 'dash_session' | 'api_key', or
- * undefined for a token predating the claim (worker utils/ext-token.ts, mintSrcFor()).
+ * WHICH login minted this token — 'ext_google' | 'ext_email' | 'dash_session' | 'dash_claim' |
+ * 'api_key', or undefined for a token predating the claim (worker utils/ext-token.ts,
+ * mintSrcFor()). 'dash_claim' is the dashboard handoff where the provider label differed and the
+ * user confirmed the take (#1037); it is as login-proven as 'dash_session'.
  *
  * 🔴 `scope === 'full'` is NOT by itself proof that a human logged in. The server's refresh rule
  * is `mintScope = api_key ? 'ingest' : incomingScope === 'ingest' ? 'ingest' : 'full'`

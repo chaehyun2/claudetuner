@@ -196,7 +196,23 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
     // `undefined` (UNKNOWN), NOT null: we couldn't read accounts/check, so we must not let the
     // send gate read a fetch failure as "pending cancelled" and force-store a spurious NULL over a
     // real scheduled change (send-gate.js treats undefined as unknown → no trigger).
-    return cached?.roster || { defaultAccountId: null, defaultRenewal: null, defaultPendingPlan: undefined, defaultPendingChangeDate: undefined, workspaces: [] };
+    //
+    // 🔴 BUT ONLY A ROSTER FOR THE ACCOUNT WE ARE ACTUALLY LOOKING AT. The cache-hit test above
+    // checks the fingerprint; this fallback used to ignore it, so a cycle where the user had
+    // switched to account B and `accounts/check` happened to fail would replay account A's
+    // workspaces — and they are then sent with B's email and B's identity, to the local store and
+    // to the server (Codex round 5). "Stale" is acceptable for the SAME account, where the only
+    // cost is a late plan change; for a DIFFERENT one it is fabricated data. An empty roster keeps
+    // the active org collecting and simply omits extra workspaces for this cycle.
+    const sameAccount = cached?.roster
+      && cached.extVer === extVer
+      && cached.activeAccountId === activeAccountId
+      && cached.activePlanType === activePlanType;
+    if (!sameAccount && cached?.roster) {
+      console.warn('[Claude Tuner] ChatGPT roster cache belongs to another account/plan — not reusing');
+    }
+    return (sameAccount ? cached.roster : null)
+      || { defaultAccountId: null, defaultRenewal: null, defaultPendingPlan: undefined, defaultPendingChangeDate: undefined, workspaces: [] };
   }
 }
 
@@ -501,7 +517,7 @@ export async function collectChatGPT(force = false, userManual = false) {
       if (res) await exGate.commit();
     }
 
-    await noteProviderSuccess('chatgpt');
+    await noteProviderSuccess('chatgpt', email);
     return { success: true, orgs: [org, ...extraOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);

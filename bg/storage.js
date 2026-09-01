@@ -271,7 +271,17 @@ export function getOrCreateInstallId() {
   return _installIdPromise;
 }
 
-const PROVEN_SRC = new Set(['ext_google', 'ext_email', 'dash_session']);
+// Which `src` values mean "a human proved this identity". 🔴 It is a LIST, not a prefix rule, and
+// every new server-side mint source has to be added here deliberately — the set decides whether an
+// install that later loses its token is treated as "was authenticated" (show the login CTA) or
+// "never was" (keep falling back to the shared key).
+// `dash_claim` = the dashboard handoff where the provider label differed and the user confirmed the
+// take (worker utils/ext-token.ts). It is exactly as proven as `dash_session` — same route, same
+// verified 30-day session — so leaving it out would tell serverSyncWithheldReason() that a
+// confirmed login never happened, and its install would silently fall back to the shared api_key
+// instead of surfacing the CTA. Fail-open, hence not a break for the fleet that predates this
+// build, but it is why the server change and this line ship together.
+const PROVEN_SRC = new Set(['ext_google', 'ext_email', 'dash_session', 'dash_claim']);
 
 export async function setExtToken(token) {
   // 🔴 `everHadProvenToken` means "this install has held a LOGIN-PROVEN token", and the
@@ -294,8 +304,10 @@ export async function setExtToken(token) {
   // 🔴 scope AND src. `full` alone is not proof: the server refreshes a LEGACY scope-less token
   // into `full` (snapshots.ts mintScope), so a grandfathered install that never logged in would be
   // marked and later have its sync withheld — the fail-CLOSED direction (Codex DEPLOY-BLOCKER).
-  // `src` is only one of these three when a human actually completed a login; it is absent for
-  // legacy and 'api_key' for shared-key TOFU. Unknown stays unmarked = today's behaviour.
+  // `src` is only one of the PROVEN_SRC values when a human actually completed a login; it is
+  // absent for legacy and 'api_key' for shared-key TOFU. Unknown stays unmarked = today's
+  // behaviour. (The set was three values until 'dash_claim' joined it — count it from the set,
+  // not from this sentence.)
   const proven = extTokenScope(token) === 'full' && PROVEN_SRC.has(extTokenSrc(token));
   await chrome.storage.local.set(proven ? { extToken: token, everHadProvenToken: true } : { extToken: token });
   // A token is now HELD, so any token-withheld retry episode is over. Clearing here — the one

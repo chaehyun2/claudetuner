@@ -18,6 +18,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { upsertClaudeOrg } from './org-merge.js';
+import { noteProviderSuccess } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
@@ -317,6 +318,38 @@ function syncNotificationPrefs(config, userEmail) {
 
 
 // === Org detection based on lastActiveOrg cookie ===
+
+/**
+ * Record that Claude collected, and WHICH account it collected (#1038).
+ *
+ * 🔴 `account` IS THE CLAUDE PROVIDER ADDRESS THIS CYCLE OBSERVED, NOT A RE-READ OF `accountCache`
+ * AND NOT `userEmail`.
+ * The first cut re-read the cache here, which looks equivalent and is not: the cache is only
+ * refreshed when the ORG-DERIVED address changes, so two accounts inside one org keep the first
+ * one for up to 8 hours — and re-stamping it on every successful collect would have laundered that
+ * stale value into a permanently "fresh" label, i.e. this change would have made the staleness it
+ * exists to remove unexpirable (Codex round 1). The second cut passed `userEmail`, which is worse
+ * still: it is REASSIGNED to the ingest identity before these call sites, so the popup would have
+ * disclosed the user's own login account as the thing being collected (Codex round 2).
+ * `claudeProviderEmail` is set only where the Claude account itself is determined.
+ *
+ * 'unknown' is the collector's own sentinel for "could not determine" and must not be disclosed —
+ * it becomes null, and bg/provider-state.js then omits the provider rather than naming nothing.
+ *
+ * 🔴 SUCCESS ONLY, NEVER AN ERROR. bg/provider-state.js is explicit that Claude failures must not
+ * live in that store: ui/render.js demotes a Claude error when another provider is healthy, and a
+ * Claude entry in the shared error slot would let that branch use the failing provider as evidence
+ * of health. This writes `lastSuccessAt`/`account` and nothing else.
+ */
+async function noteClaudeCollected(account) {
+  try {
+    // 🔴 `undefined`, NOT `null`, when this cycle observed nothing: null ERASES a label that is
+    // still within its own TTL, and "we did not look" is not "there is no account".
+    const observed = account && account !== 'unknown' ? account : undefined;
+    await noteProviderSuccess('claude', observed);
+  } catch (_) { /* disclosure bookkeeping must never fail a collection */ }
+}
+
 export async function getLastActiveOrgId() {
   try {
     const cookie = await chrome.cookies.get({ name: 'lastActiveOrg', url: 'https://claude.ai' });
@@ -475,6 +508,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
 
     // Extract email: prefer org with email_address, fallback to parsing from org.name
     let userEmail = 'unknown';
+    // 🔴 THE CLAUDE PROVIDER LABEL, KEPT SEPARATE FROM `userEmail` ON PURPOSE (#1038).
+    // `userEmail` starts as the Claude account but is REASSIGNED below to the ingest IDENTITY
+    // (resolveIngestIdentity: a verified link, then the ext_token's address). That is the account
+    // usage is filed under — the exact thing the disclosure contrasts the provider account WITH.
+    // Passing it as the label would make the popup say "this browser collects <your login>",
+    // which is both meaningless and hides the account actually being absorbed (Codex round 2).
+    let claudeProviderEmail = null;
     for (const o of orgList) {
       const e = o.email_address || o.owner?.email_address;
       if (e) { userEmail = e; break; }
@@ -525,6 +565,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       }
       if (acctCacheValid) {
         if (userEmail === 'unknown' && cache.email) userEmail = cache.email;
+        // 🔴 NO LABEL FROM A CACHE HIT. Nothing was verified this cycle: the usage below is
+        // fetched with the CURRENT cookie session, while `cache.email` is a profile read that can
+        // be up to 8 hours old — and the cache only refreshes when the ORG-DERIVED address moves,
+        // so two accounts inside one team org keep the first one indefinitely. Stamping it here
+        // would say "we checked, it is Alice" when Bob is the one signed in (Codex round 3).
+        // The previously observed label stays stored with its own timestamp and ages out on its
+        // own; `undefined` means "no new observation", which is different from "no account".
         seatTier = cache.seatTier || null;
         console.log('[Claude Tuner] Account (cached):', cache.email, 'seat:', seatTier);
       } else {
@@ -540,6 +587,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           ) || memberships[0];
           seatTier = membership?.seat_tier || null;
           if (acctEmail) userEmail = acctEmail;
+          if (acctEmail) claudeProviderEmail = acctEmail;   // fetched live this cycle
 
           // 🔴 A seat_tier the response did not carry is UNKNOWN — it is not "Team Standard" (#969).
           // Both readers of this cache collapse those two: refineTeamPlan() returns a bare 'Team',
@@ -873,6 +921,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
       await refreshRecNotice();
       await updateBadgeForSelectedOrg(snapshot);
+      // 🔴 The local-only path matters MORE than the synced one here: this is the withheld/gated
+      // install, i.e. exactly the population that gets shown the login CTA the disclosure sits in.
+      await noteClaudeCollected(claudeProviderEmail);
       return { success: true, snapshot, localOnly: true };
     }
 
@@ -1620,6 +1671,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
 
     _timings['TOTAL'] = Math.round(performance.now() - _t0);
     console.log(`[Claude Tuner] ⏱️ Timing (ms):`, JSON.stringify(_timings));
+    await noteClaudeCollected(claudeProviderEmail);
     return { success: true, snapshot };
 
   } catch (error) {
