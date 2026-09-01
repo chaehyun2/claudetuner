@@ -374,9 +374,9 @@ export function _updateUICore(status) {
       // utilization (a seat can carry resets_at with util === null) drops its stale
       // %/bar too, not just the reset line. renderGaugePrediction self-hides on null.
       _setGaugeValue('5h', util5h);
-      renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
+      renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at, s.five_hour?.window_seconds);
       _setGaugeValue('7d', util7d);
-      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
+      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at, s.seven_day?.window_seconds);
     } else {
       // Restore gauge DOM that may have been destroyed by org switching
       _restoreGaugeHTML(gaugeSection);
@@ -391,13 +391,13 @@ export function _updateUICore(status) {
       renderGaugeReset('7d', s.seven_day?.resets_at, util7d !== null);
       // 5h gauge
       _setGaugeValue('5h', util5h);
-      renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at);
+      renderGaugePrediction('5h', _filteredHistory(), 'h5', util5h, s.five_hour?.resets_at, s.five_hour?.window_seconds);
 
       // 7d gauge
       _setGaugeValue('7d', util7d);
       // Call prediction unconditionally (it self-hides on null util) so a stale 7d
       // prediction badge from a prior render is cleared, not just the value/reset.
-      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at);
+      renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at, s.seven_day?.window_seconds);
       if (util7d === null) {
         // Plan without 7d data (Free, Team, etc.): replace the cleared reset line
         // with the plan-specific no-7d message (_setGaugeValue already blanked the %).
@@ -408,7 +408,7 @@ export function _updateUICore(status) {
 
     // If a window is already maxed out, overwrite the strip with a plain "limit reached — wait
     // until {reset}" message (overrides the collecting teaser renderGaugePrediction may have set).
-    renderLimitReachedHeadline(util5h, s.five_hour?.resets_at, util7d, s.seven_day?.resets_at);
+    renderLimitReachedHeadline(util5h, s.five_hour?.resets_at, util7d, s.seven_day?.resets_at, s.five_hour?.window_seconds, s.seven_day?.window_seconds);
 
     // === Extra usage (collapsible) ===
     const extraSection = document.getElementById('extra-usage-section');
@@ -531,7 +531,7 @@ export function _updateUICore(status) {
     // _filteredHistory() scan). enterDetail() -> selectOrg() re-renders the banner, so nothing
     // stale can survive the trip back.
     if (!isEnterprise && !isDetailHidden()) {
-      renderStatusBanner(util5h, util7d, _filteredHistory(), s.five_hour?.resets_at, s.seven_day?.resets_at);
+      renderStatusBanner(util5h, util7d, _filteredHistory(), s.five_hour?.resets_at, s.seven_day?.resets_at, s.five_hour?.window_seconds, s.seven_day?.window_seconds);
     }
 
     // Peak hours banner

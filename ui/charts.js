@@ -252,8 +252,8 @@ export function drawCharts(history, plan, snapshot) {
   // snapshot and the UNSCALED history, exactly as the gauges use them: `sorted` below is
   // normalized to the current plan scale for DRAWING, and forecasting from that copy is what the
   // previous round had to undo.
-  const fc5h = windowForecast(snapshot?.five_hour?.utilization ?? null, 'h5', snapshot?.five_hour?.resets_at, sortedRaw);
-  const fc7d = windowForecast(snapshot?.seven_day?.utilization ?? null, 'd7', snapshot?.seven_day?.resets_at, sortedRaw);
+  const fc5h = windowForecast(snapshot?.five_hour?.utilization ?? null, 'h5', snapshot?.five_hour?.resets_at, sortedRaw, snapshot?.five_hour?.window_seconds);
+  const fc7d = windowForecast(snapshot?.seven_day?.utilization ?? null, 'd7', snapshot?.seven_day?.resets_at, sortedRaw, snapshot?.seven_day?.window_seconds);
 
   // 🔴 One array per window (#955). These used to be built once and handed to BOTH charts, so a
   // Max 20x user's WEEKLY chart drew the "Max 5x" boundary at 5/20 = 25% when it belongs at

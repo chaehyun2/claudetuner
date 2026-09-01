@@ -192,7 +192,7 @@ export function selectOrg(orgId, container) {
         document.getElementById('gauge-5h-fill').style.width = `${Math.min(util5h, 100)}%`;
         document.getElementById('gauge-5h-fill').style.background = gaugeColor(util5h);
         document.getElementById('gauge-5h-value').style.color = gaugeColor(util5h);
-        renderGaugePrediction('5h', hist, 'h5', util5h, resetsAt5h);
+        renderGaugePrediction('5h', hist, 'h5', util5h, resetsAt5h, orgData.w5s);
       } else {
         // Plan without a 5h window (e.g. ChatGPT Pro 5x 'prolite', which exposes
         // only a weekly limit). Show N/A and clear any stale fill/prediction the
@@ -202,14 +202,14 @@ export function selectOrg(orgId, container) {
         if (g5Val) { g5Val.textContent = 'N/A'; g5Val.style.color = '#9ca3af'; }
         const g5Fill = document.getElementById('gauge-5h-fill');
         if (g5Fill) g5Fill.style.width = '0';
-        renderGaugePrediction('5h', hist, 'h5', null, resetsAt5h); // self-hides on null
+        renderGaugePrediction('5h', hist, 'h5', null, resetsAt5h, orgData.w5s); // self-hides on null
       }
       if (util7d !== null && util7d !== undefined) {
         document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
         document.getElementById('gauge-7d-fill').style.width = `${Math.min(util7d, 100)}%`;
         document.getElementById('gauge-7d-fill').style.background = gaugeColor(util7d);
         document.getElementById('gauge-7d-value').style.color = gaugeColor(util7d);
-        renderGaugePrediction('7d', hist, 'd7', util7d, resetsAt7d);
+        renderGaugePrediction('7d', hist, 'd7', util7d, resetsAt7d, orgData.w7s);
       } else {
         // Plan without 7d data. Mirror the 5h else above: blank the value/fill AND
         // call renderGaugePrediction with null util so a stale 7d prediction badge/
@@ -222,10 +222,10 @@ export function selectOrg(orgId, container) {
         }
         const g7dFill = document.getElementById('gauge-7d-fill');
         if (g7dFill) g7dFill.style.width = '0';
-        renderGaugePrediction('7d', hist, 'd7', null, resetsAt7d); // self-hides on null
+        renderGaugePrediction('7d', hist, 'd7', null, resetsAt7d, orgData.w7s); // self-hides on null
       }
       // Maxed-window "limit reached \u2014 wait until {reset}" strip (same as the primary render path).
-      renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d);
+      renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d, orgData.w5s, orgData.w7s);
     }
 
     // === 3. Extra usage section (Claude Enterprise only) ===
@@ -483,7 +483,7 @@ export function selectOrg(orgId, container) {
       // static utilization rule) and hides itself when both UTILIZATIONS are null, so the caller
       // must not decide on its behalf that it has nothing to say. Note it does NOT hide when the
       // utilizations exist but both tiers come back null — it renders the static rule then.
-      renderStatusBanner(orgData.h5 ?? null, orgData.d7 ?? null, hist, resetsAt5h, resetsAt7d);
+      renderStatusBanner(orgData.h5 ?? null, orgData.d7 ?? null, hist, resetsAt5h, resetsAt7d, orgData.w5s, orgData.w7s);
     }
 
     // Peak hours banner (Claude only — not applicable to ChatGPT/Gemini)

@@ -186,7 +186,13 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
 // Returns { tier, predicted, rate, hoursTo100, measured } — a caller that DRAWS the projection and one
 // that LABELS it must not end up on different values, which is what happens when each derives
 // its own. `rate` is null on the degraded path (there is no measured rate to report).
-export function windowForecast(currentUtil, key, resetsAt, history) {
+// `spanSeconds` is the window length the PROVIDER reported for this slot — 2592000 for a
+// ChatGPT Free/Go 30-day "7d" window, null when the provider did not say (Claude, Gemini, any
+// client before 1.29.46), which falls back to the 5h/7d constants. It only reaches the DEGRADED
+// branch: the measured forecast derives its rate from timestamps and never assumes a length.
+// Threading it is #978 — before, `remaining` came from the real resets_at while the denominator
+// was hard-coded to 7 days, which inflated the projection inside ~6.3 days of a 30-day reset.
+export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds) {
   if (currentUtil == null || !resetsAt) return null;
   // Already at the cap: there is no forecast past 100, and no pace verdict is true of someone
   // who is blocked and waiting. AT_LIMIT is its own rung for exactly this — the old code took
@@ -199,12 +205,12 @@ export function windowForecast(currentUtil, key, resetsAt, history) {
       hoursTo100: pred.hoursTo100 != null ? pred.hoursTo100 : null, measured: true,
     };
   }
-  const degraded = windowAverageProjection(currentUtil, key, resetsAt);
+  const degraded = windowAverageProjection(currentUtil, key, resetsAt, spanSeconds);
   const tier = projectionTier(degraded);
   return tier ? { tier, predicted: degraded, rate: null, hoursTo100: null, measured: false } : null;
 }
 
 // Tier-only convenience for callers that render nothing but the verdict.
-export function windowTier(currentUtil, key, resetsAt, history) {
-  return windowForecast(currentUtil, key, resetsAt, history)?.tier ?? null;
+export function windowTier(currentUtil, key, resetsAt, history, spanSeconds) {
+  return windowForecast(currentUtil, key, resetsAt, history, spanSeconds)?.tier ?? null;
 }

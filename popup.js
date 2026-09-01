@@ -1099,7 +1099,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderDetailBanner(hist) {
     const s = state.currentSnapshot;
     if (hist.length < 3 || !s) return;
-    renderStatusBanner(s.five_hour?.utilization ?? null, s.seven_day?.utilization ?? null, hist, s.five_hour?.resets_at, s.seven_day?.resets_at);
+    renderStatusBanner(s.five_hour?.utilization ?? null, s.seven_day?.utilization ?? null, hist, s.five_hour?.resets_at, s.seven_day?.resets_at, s.five_hour?.window_seconds, s.seven_day?.window_seconds);
   }
 
   // Redraw the detail view's chart + status banner from the current state. Three call sites

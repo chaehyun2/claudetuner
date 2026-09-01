@@ -12,8 +12,7 @@ import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, w
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
 import { popupForecastCache } from './prediction-core.js';
 import {
-  calcPredictedAtReset, estimateCapHitTime, tierColor, tierSeverity, isAlertTier,
-  projectionTier, windowAverageProjection, PROJECTION_TIERS,
+  calcPredictedAtReset, estimateCapHitTime, tierColor, isAlertTier, degradedApprox,
   isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook,
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
@@ -101,8 +100,15 @@ function _planOrder(org) {
 
 // The inline "▸ X%" prediction badge — mirrors renderGaugePrediction()'s detail-gauge
 // badge exactly (gray/amber/red by projected level, green "▸ —" when stable).
-function _predictBadge(cur, pred) {
-  if (!pred) return ''; // insufficient history → no badge (matches detail "collecting" minus the ⏳)
+function _predictBadge(cur, pred, approx) {
+  // No measured forecast: show the coarse window-average badge when there IS one to show, and
+  // nothing when there is not. `approx` is decided ONCE by the caller (degradedApprox) and shared
+  // with the forecast line below, so the badge and the line cannot disagree — the card used to
+  // stay blank beside its own "⚠️ 리셋 시 120%" line (#1090). `~` marks it as an approximation.
+  if (!pred) {
+    if (cur >= 100 || approx == null) return '';
+    return `<span class="gauge-predict-inline" style="display:inline;color:${tierColor(approx)}">▸ ~${Math.round(Math.min(approx, 100))}%</span>`;
+  }
   // Already at the cap: a "predicted 100%" badge next to a 100% value is noise.
   if (cur >= 100) return '';
   const { rate, predicted } = pred;
@@ -121,9 +127,14 @@ function _predictBadge(cur, pred) {
 // org/plan (Free/Team 7d, unused Gemini window).
 // `label` is the RESOLVED window label, not an i18n key: the 7d slot can hold a 30-day window
 // (ChatGPT Free/Go, #954), so the caller decides via windowLabel() and this only renders it.
-function _gaugeRow(label, key, current, pred, resetAt, capHitMs) {
+function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
+  // ONE decision for this row: null when there is no measured forecast AND no coarse one worth
+  // speaking. Badge and forecast line both read it (#1090). `spanSeconds` is this org's reported
+  // window length — the card already labels the row from it, so it must also PROJECT from it or
+  // the label and the number describe different windows (#978).
+  const approx = pred ? null : degradedApprox(current, key, resetAt, spanSeconds);
   const valColor = gaugeColor(cur);
   let predFill = '';
   // Same gate as the badge above and as the detail gauge's fill: whatever counts as "stable"
@@ -154,22 +165,19 @@ function _gaugeRow(label, key, current, pred, resetAt, capHitMs) {
     nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(pred.predicted)};font-weight:600">⚠️ ${escHtml(t('predict_near_limit', Math.floor(pred.predicted)))}</div>`;
   } else if (pred && isRisingNotice(pred.predicted, pred.rate, current)) {
     nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(pred.predicted)}">📈 ${escHtml(t('predict_at_reset', Math.round(pred.predicted)))}</div>`;
-  } else if (!pred) {
-    // No measured forecast yet — fall back to the same coarse projection the banner and the
-    // detail gauge use, so a card is not the one surface staying silent. Level only, clamped for
-    // display, colour for severity (see _renderDegradedLine in ui/prediction.js).
-    const degraded = windowAverageProjection(current, key, resetAt);
-    const dTier = projectionTier(degraded);
-    if (dTier && tierSeverity(dTier) >= tierSeverity(PROJECTION_TIERS.find((x) => x.id === 'warming'))) {
-      const icon = isAlertTier(degraded) ? '⚠️' : '📈';
-      nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(degraded)}">${icon} ${escHtml(t('predict_at_reset', Math.round(Math.min(degraded, 100))))}</div>`;
-    }
+  } else if (approx != null) {
+    // No measured forecast yet — the same coarse projection the banner and the detail gauge use,
+    // so a card is not the one surface staying silent. Level only, clamped for display, colour for
+    // severity. The decision of WHETHER to speak is degradedApprox's, made once above and shared
+    // with the badge (see _predictBadge) — see ui/usage-tiers.js for why the floor is WARMING.
+    const icon = isAlertTier(approx) ? '⚠️' : '📈';
+    nearLimitLine = `<div class="gauge-sub" style="color:${tierColor(approx)}">${icon} ${escHtml(t('predict_at_reset', Math.round(Math.min(approx, 100))))}</div>`;
   }
   return '<div class="gauge-row">'
     + '<div class="gauge-header">'
     + `<span class="gauge-label">${escHtml(label)}</span>`
     + `<span class="gauge-value" style="color:${valColor}">${cur}%</span>`
-    + _predictBadge(cur, pred)
+    + _predictBadge(cur, pred, approx)
     + '</div>'
     + '<div class="gauge-bar">'
     + `<div class="gauge-fill" style="width:${Math.min(cur, 100)}%;background:${valColor}"></div>`
@@ -220,9 +228,9 @@ function _renderCard(org, hist) {
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
-    rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'));
+    rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
     const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
-    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'));
+    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'), org.w7s);
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`

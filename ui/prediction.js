@@ -2,7 +2,7 @@
 // Extracted from popup.js (refactor/popup-prediction). Leaf domain: depends only on shared state
 // (ui/state.js) and pure helpers (ui/util.js); i18n `t` is a global from i18n.js.
 import { state, _filteredHistory } from './state.js';
-import { _isDark, formatResetAbsolute } from './util.js';
+import { _isDark, formatResetAbsolute, windowUnitLabel } from './util.js';
 import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
 // The forecast maths moved to a pure module so the Worker can import it too (#1026). Re-exported
 // here so every existing call site keeps working unchanged.
@@ -18,12 +18,12 @@ import {
   PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
   isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap, windowAverageProjection,
   projectFlatWindow, FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
-  etaWithinWindow, pickWorstWindow,
+  etaWithinWindow, pickWorstWindow, degradedApprox,
 } from './usage-tiers.js';
 export {
   PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
   isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap,
-  etaWithinWindow, pickWorstWindow, projectFlatWindow, windowAverageProjection,
+  etaWithinWindow, pickWorstWindow, projectFlatWindow, windowAverageProjection, degradedApprox,
   FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
 };
 
@@ -42,10 +42,13 @@ export function setPredictHeadline(html, tone) {
 // fact). When BOTH windows are capped, name the one whose reset is LATEST — access stays
 // blocked until every capped window resets. Call AFTER the per-gauge renderGaugePrediction()
 // calls so it wins the strip. Returns true when a headline was set.
-export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d) {
+// `span5h`/`span7d`: the provider-reported window lengths, for the same reason the banner takes
+// them (#978) — this strip NAMES a window, and a ChatGPT Free/Go user at 100% would otherwise read
+// "7일 한도 도달" about a 30-day window while the gauge beside it is labelled 30일.
+export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d, span5h, span7d) {
   const capped = [];
-  if (util5h != null && util5h >= 100 && resets5h) capped.push({ label: t('win_5h'), reset: resets5h });
-  if (util7d != null && util7d >= 100 && resets7d) capped.push({ label: t('win_7d'), reset: resets7d });
+  if (util5h != null && util5h >= 100 && resets5h) capped.push({ label: windowUnitLabel(span5h) || t('win_5h'), reset: resets5h });
+  if (util7d != null && util7d >= 100 && resets7d) capped.push({ label: windowUnitLabel(span7d) || t('win_7d'), reset: resets7d });
   if (!capped.length) return false;
   capped.sort((a, b) => new Date(b.reset) - new Date(a.reset)); // latest reset = the binding window
   setPredictHeadline(t('predict_headline_reached', capped[0].label, formatResetAbsolute(capped[0].reset)), 'is-alert');
@@ -69,11 +72,12 @@ export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d) {
 // It always uses `predict_at_reset` (never "한도 근접"), clamped for display: the window average
 // can read 300% on a fast start, and "리셋 시 한도 근접 (~300%)" would be both wrong and alarming.
 // Severity rides on the colour instead. Only WARMING and above speak; below that, silence.
-function _renderDegradedLine(lineEl, currentUtil, key, resetsAt) {
+// Renders the value degradedApprox() already decided on — it does NOT decide again. The badge
+// beside this line is chosen from the same value, which is what stops the two from disagreeing
+// ("예측 수집 중" over "⚠️ 리셋 시 120%", #1090). Pass null to hide.
+function _renderDegradedLine(lineEl, degraded) {
   if (!lineEl) return;
-  const degraded = windowAverageProjection(currentUtil, key, resetsAt);
-  const tier = projectionTier(degraded);
-  if (!tier || tierSeverity(tier) < tierSeverity(PROJECTION_TIERS.find((x) => x.id === 'warming'))) {
+  if (degraded == null) {
     lineEl.style.display = 'none';
     return;
   }
@@ -99,7 +103,10 @@ function _renderProjectionLine(lineEl, predicted, rate, currentUtil) {
   }
 }
 
-export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
+// `spanSeconds`: the provider-reported window length for THIS slot (#978). Only the degraded
+// branch uses it; pass null/undefined and it falls back to the 5h/7d constants, which is right
+// for every provider that does not report one.
+export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, spanSeconds) {
   const marker = document.getElementById(`gauge-${id}-predict`);
   const label = document.getElementById(`gauge-${id}-predict-label`);
   const inlineEl = document.getElementById(`gauge-${id}-predict-inline`);
@@ -121,6 +128,32 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
       inlineEl.textContent = '\u25b8\u23f3';
       inlineEl.title = t('predict_tip_collecting');
       inlineEl.style.cursor = 'help';
+    }
+  };
+
+  // The same slot as showCollecting, saying the OTHER true thing: there is no measured rate, but
+  // the window average has a number worth showing — and the line below is already showing it.
+  // `~` marks it as an approximation so the badge never reads like a measured forecast (#1090).
+  const showApprox = (degraded) => {
+    hide();
+    if (inlineEl) {
+      inlineEl.style.display = 'inline';
+      inlineEl.style.color = tierColor(degraded);
+      inlineEl.textContent = `\u25b8 ~${Math.round(Math.min(degraded, 100))}%`;
+      inlineEl.title = t('predict_tip_approx');
+      inlineEl.style.cursor = 'help';
+    }
+  };
+
+  // ONE decision, three surfaces. Badge, line and headline all read this — recomputing it per
+  // surface is exactly how they came to contradict each other.
+  const approx = degradedApprox(currentUtil, key, resetsAt, spanSeconds);
+  const showFallback = () => {
+    // Order matters: show*() calls hide(), which would blank a line rendered before it.
+    if (approx != null) showApprox(approx); else showCollecting();
+    _renderDegradedLine(lineEl, approx);
+    if (id === '5h' && state.historyLoaded) {
+      setPredictHeadline(t(approx != null ? 'predict_headline_approx' : 'predict_headline_collecting'));
     }
   };
 
@@ -147,11 +180,9 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   // The forecast needs 2-3 data points, so a new user's first session has none —
   // the teaser conveys the (unique) upcoming value and a reason to come back.
   if (!history || history.length < 3) {
-    showCollecting();
-    _renderDegradedLine(lineEl, currentUtil, key, resetsAt);
-    // Only after history has actually loaded, else the teaser flashes on every
-    // popup open before the async history fetch resolves.
-    if (id === '5h' && state.historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
+    // The headline only speaks after history has actually loaded, else the teaser flashes on
+    // every popup open before the async fetch resolves — showFallback keeps that gate.
+    showFallback();
     return;
   }
 
@@ -161,9 +192,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
   const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt,
     { cache: popupForecastCache, scope: state.selectedOrgId || 'default' });
   if (!pred) {
-    showCollecting();
-    _renderDegradedLine(lineEl, currentUtil, key, resetsAt);
-    if (id === '5h' && state.historyLoaded) setPredictHeadline(t('predict_headline_collecting'));
+    showFallback();
     return;
   }
 
@@ -260,7 +289,10 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt) {
 // by a lot on a front-loaded window: 34% used 1h25m into a 5h window is "97% at reset" by
 // measured rate and "120%" by window average, and the popup used to show BOTH at once — a
 // silent gauge above a red "크게 초과" banner. One forecast, one verdict.
-export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) {
+// `span5h`/`span7d` are the provider-reported window lengths (#978) — the banner is the one
+// surface that speaks at EVERY tier, so a wrong denominator here is the loudest version of the
+// bug: a ChatGPT Free user 5 days from a 30-day reset read "105% — 한도 도달 예상" instead of 36%.
+export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, span5h, span7d) {
   const banner = document.getElementById('status-banner');
   if (!banner) return;
   if (util5h === null && util7d === null) { banner.classList.add('hidden'); return; }
@@ -269,15 +301,18 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) 
   // window that gets there sooner. This used to be hand-rolled here with a `>=` that always
   // preferred 5h on a tie — a different rule from the one the shared helper documents, which is
   // how 'both banners agree' quietly stops being true.
-  const candidate = (util, key, resetsAt, label) => {
-    const fc = windowForecast(util, key, resetsAt, history);
+  const candidate = (util, key, resetsAt, label, spanSeconds) => {
+    const fc = windowForecast(util, key, resetsAt, history, spanSeconds);
     if (!fc) return null;
     const hoursToReset = resetsAt ? (new Date(resetsAt).getTime() - Date.now()) / 3600000 : null;
     return { tier: fc.tier, eta: etaWithinWindow(fc.hoursTo100, hoursToReset), label };
   };
   const win = pickWorstWindow([
-    candidate(util5h, 'h5', resets5h, t('win_5h')),
-    candidate(util7d, 'd7', resets7d, t('win_7d')),
+    // 🔴 The LABEL comes from the same span as the projection. Static t('win_7d') here would tell
+    // a ChatGPT Free/Go user that their "7일" window is projected to 96% while the gauge beside it
+    // is labelled 30일 — the label/projection split this whole change exists to remove (#978).
+    candidate(util5h, 'h5', resets5h, windowUnitLabel(span5h) || t('win_5h'), span5h),
+    candidate(util7d, 'd7', resets7d, windowUnitLabel(span7d) || t('win_7d'), span7d),
   ]);
   let tier = win ? win.tier : undefined;
   const worstWindow = win ? win.label : undefined;
@@ -289,7 +324,9 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d) 
     const maxUtil = Math.max(util5h || 0, util7d || 0);
     if (maxUtil >= 95) {
       tier = { id: 'critical', css: 'red' };
-      const which = (util5h || 0) >= 95 ? t('win_5h') : t('win_7d');
+      const which = (util5h || 0) >= 95
+        ? (windowUnitLabel(span5h) || t('win_5h'))
+        : (windowUnitLabel(span7d) || t('win_7d'));
       text = t('pace_near_static', which);
     } else if (maxUtil >= 80) {
       tier = { id: 'warming', css: 'yellow' };

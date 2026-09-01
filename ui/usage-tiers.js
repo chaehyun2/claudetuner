@@ -217,11 +217,14 @@ const DEGRADED_MIN_ELAPSED_FRAC = 0.10;
 // to the end: exactly the estimate the deleted calcPaceTier made for EVERYONE, now demoted to a
 // fallback. It feeds the SAME ladder, so it can never invent a different scale.
 //
-// It does NOT follow that it "cannot contradict the gauges" — this comment claimed that and the
-// claim was wrong. When this speaks, the detail gauges and the overview cards are showing
-// "collecting", because they call calcPredictedAtReset directly and never see this fallback. So
-// the banner and the chart state a tier while the gauges beside them decline to. That is a
-// coverage gap between consumers, not a contradiction in the number, and it is still a gap.
+// It does NOT follow that it "cannot contradict the gauges" — an earlier version of this comment
+// claimed that and was wrong. The coverage gap it then described (only the banner and the chart
+// saw this fallback; the gauges and the overview cards called calcPredictedAtReset directly and
+// stayed silent) is CLOSED as of #1090: every consumer now reaches this through degradedApprox()
+// below — ui/prediction.js (detail gauge), ui/overview.js (cards) and the dashboard's makeCand.
+// 🔴 That correction is itself the lesson: the stale wording outlived the gap and sent a later
+// reader hunting for a bug that had already been fixed. If you close or reopen a gap here, edit
+// this paragraph in the SAME commit.
 //
 // It substitutes for EVERY null calcPredictedAtReset returns, not only thin history: also a reset
 // within ~3 minutes, and the 7d helper's own near-reset/invalid-input exits. That is deliberate
@@ -232,13 +235,15 @@ export function windowAverageProjection(currentUtil, key, resetsAt, spanSeconds)
   // 🔴 `spanSeconds` is the window length the PROVIDER reported for this slot; WINDOW_SECONDS is
   // only the fallback for when it did not (Claude, Gemini, any client before 1.29.46).
   //
-  // ⚠️ NOTHING PASSES IT YET — this is a seam, not a fix. Threading it means adding an argument to
-  // renderGaugePrediction (13 call sites), windowForecast (5), makeCand (2) and _renderDegradedLine
-  // (3), in BOTH twins. Doing only the cheap ones is worse than doing none: the popup gauge and the
-  // overview card would then state different tiers for the same account, which the comment at
-  // dashboard-render.js makeCand calls out as the thing to avoid. Measured impact today is 1 user
-  // (see the issue), so the threading waits for the next change that already touches these
-  // signatures. Until then this argument is inert and behaviour is byte-identical.
+  // ✅ THREADED (2026-09-01, #978). It sat here inert for weeks with a note saying nothing passed
+  // it, because threading meant touching four signatures at once and "doing only the cheap ones is
+  // worse than doing none" — a popup gauge and an overview card stating different tiers for one
+  // account is exactly what the dashboard-render.js makeCand comment warns against. What made it
+  // cheap was #1090: collapsing four independent degraded call sites into degradedApprox() left
+  // three signatures and a handful of call sites. Every surface now passes a span — the popup
+  // gauges, the status banner, the chart, the overview cards and the dashboard — so this argument
+  // is the ANSWER, and the constant below is the fallback for providers that report nothing
+  // (Claude, Gemini, any client before 1.29.46). Pinned by test/window-span-thread-guard.mjs.
   //
   // Getting this from a constant was wrong for ChatGPT Free/Go, whose 7d slot holds a 30-DAY
   // window (#954). `remaining` comes from the REAL resets_at, so mixing it with an assumed 7-day
@@ -255,6 +260,29 @@ export function windowAverageProjection(currentUtil, key, resetsAt, spanSeconds)
   const fraction = (windowSeconds - remaining) / windowSeconds;
   if (!(fraction >= DEGRADED_MIN_ELAPSED_FRAC) || fraction >= 1) return null;
   return currentUtil / fraction;
+}
+
+// The degraded projection AS A SPOKEN VALUE: the number when it is worth saying out loud, null
+// when it is not. Every surface that shows the fallback goes through here, so the badge, the line
+// and the card can never disagree about WHETHER there is something to say — before this, each
+// consumer re-derived that decision and the popup ended up showing "예측 수집 중" next to
+// "⚠️ 리셋 시 120%" on the same screen (#1090).
+//
+// The floor is WARMING, and it is deliberate: below that the fallback would announce a coarse
+// "you are fine" to a user we have no rate for, which is noise. The BANNER speaks at every tier
+// because a banner's job is to always render one verdict; a per-gauge line's is not. That
+// asymmetry is a choice, not an oversight — do not "fix" it by dropping the floor without
+// deciding what a comfortable-tier guess is worth.
+//
+// 🔴 And do not drop it for the OTHER reason either: `spanSeconds` is still unthreaded (see the
+// note above), so every extra tier this speaks at is extra exposure to the constant-window bug
+// (#978) on ChatGPT Free/Go 30-day windows. Widening the floor and fixing #978 are one change.
+export function degradedApprox(currentUtil, key, resetsAt, spanSeconds) {
+  const degraded = windowAverageProjection(currentUtil, key, resetsAt, spanSeconds);
+  const tier = projectionTier(degraded);
+  if (!tier) return null;
+  const floor = PROJECTION_TIERS.find((x) => x.id === 'warming');
+  return tierSeverity(tier) >= tierSeverity(floor) ? degraded : null;
 }
 
 // === Picking what to say when both windows have an opinion ===================================

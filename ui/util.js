@@ -42,12 +42,23 @@ export function formatWindowShort(seconds) {
  * Full gauge label: '30일 사용률' / '30-Day Usage'.
  * Returns null when there is no span (caller falls back to t('usage_5h') / t('usage_7d')).
  */
-export function formatWindowLabel(seconds) {
+/**
+ * The reported window as a bare UNIT — '5시간' / '30일' / '5-Hour' / '30-Day' — or null when the
+ * provider reported nothing. Split out of formatWindowLabel because the STATUS BANNER names the
+ * window in a sentence and must use the same words as the gauge label above it: the banner used
+ * static t('win_7d') while projecting from the real span, so a ChatGPT Free/Go user read a
+ * "7일" verdict about a 30-day window (#978, caught in review).
+ */
+export function windowUnitLabel(seconds) {
   if (!isSpan(seconds)) return null;
-  const unit = seconds < WINDOW_DAY
+  return seconds < WINDOW_DAY
     ? t('window_hours', Math.round(seconds / WINDOW_HOUR))
     : t('window_days', Math.round(seconds / WINDOW_DAY));
-  return t('usage_window', unit);
+}
+
+export function formatWindowLabel(seconds) {
+  const unit = windowUnitLabel(seconds);
+  return unit == null ? null : t('usage_window', unit);
 }
 
 /**
