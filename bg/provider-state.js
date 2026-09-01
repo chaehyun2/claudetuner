@@ -27,6 +27,8 @@
 // produced an `err_*` code at all. Surfacing the 14 codes without this would still leave the
 // ordinary "signed out of ChatGPT" case invisible (Codex review of the plan, #852).
 
+import { sendGAEvent } from './analytics.js';
+
 const KEY = 'providerCollectionState';
 
 // Display suppression: an error nobody has re-attempted in this long is history, not a diagnosis.
@@ -104,13 +106,18 @@ export async function getProviderState() {
 // A promise chain is enough: there is one service worker, so this is the only writer.
 let _patchChain = Promise.resolve();
 
+// `fields` may be an object, or a function of the previous state. The function form exists so a
+// DECISION and the stamp recording it land in the SAME serialized transition: computing the
+// decision outside and stamping it in a second patch lets a concurrent writer read the pre-stamp
+// value and decide the same thing again (Codex reproduced a double GA send that way).
 function patch(provider, fields) {
   const run = async () => {
     const all = await getProviderState();
     const cur = (all[provider] && typeof all[provider] === 'object') ? all[provider] : {};
-    all[provider] = Object.assign({}, cur, fields);
+    const resolved = typeof fields === 'function' ? fields(cur) : fields;
+    all[provider] = Object.assign({}, cur, resolved);
     await chrome.storage.local.set({ [KEY]: all });
-    return all[provider];
+    return { prev: cur, next: all[provider] };
   };
   // Chain off the previous patch, and never let one failure break the chain for the next caller.
   const next = _patchChain.then(run, run);
@@ -120,7 +127,7 @@ function patch(provider, fields) {
 
 /** An attempt started. Recorded even when it then fails — "when did we last try" is half of a diagnosis. */
 export async function noteProviderAttempt(provider) {
-  return patch(provider, { lastAttemptAt: Date.now() });
+  return (await patch(provider, { lastAttemptAt: Date.now() })).next;
 }
 
 /**
@@ -222,11 +229,62 @@ export function collectingAccounts(state, now) {
   return out;
 }
 
+// How often the same standing failure may be reported. A failing provider retries on every alarm
+// tick, so reporting each one would measure our polling interval, not users. Once a day per
+// (provider, reason) makes a day's event count read as "how many installs are stuck on this".
+export const PROVIDER_GA_THROTTLE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Tell GA why a provider is failing — the ONLY place that does.
+ *
+ * 🔴 Why the extension and not the server (#1021): the web already reports this via `pc_reason`,
+ * but the web only sees people who OPEN the dashboard (~46% in 30 days, #804) — and somebody whose
+ * collection is broken has less reason to visit, so the missing half is biased toward exactly the
+ * population being measured. The extension sees every install. It also costs no worker, no D1 and
+ * no AE, which is what ruled the server options out.
+ *
+ * 🔴 Only whitelisted codes reach this — `normalizeProviderError` ran first — so a raw API body
+ * cannot become a GA dimension value. (`bg/collect.js` still sends Claude's raw `errorMsg` as
+ * `collect_fail.error`; that is unregistered and separate, see #1021.)
+ */
+// The HTTP status is dropped everywhere below: `auth_failed:401` and `auth_failed:403` are ONE
+// reason to GA and to the user-facing copy alike.
+//
+// 🔴 The throttle must compare the SAME value it reports. Comparing the full code let 401→403 read
+// as "a changed reason", firing immediately while GA saw two identical `auth_failed` events — the
+// 24h rule silently broken for the one code that carries a status (Codex DEPLOY-BLOCKER).
+function baseReason(code) {
+  return String(code || '').split(':')[0];
+}
+
+function shouldReportFailure(prev, code, now) {
+  const was = prev && prev.lastError;
+  const sameAsBefore = !!was && baseReason(was.code) === baseReason(code);
+  const lastSent = (prev && prev.gaSentAt) || 0;
+  // A CHANGED reason is news and goes out immediately; an unchanged one waits out the throttle.
+  return !(sameAsBefore && (now - lastSent) < PROVIDER_GA_THROTTLE_MS);
+}
+
 /** Collection failed. `err` may be an Error, a string, or nothing (unknown → the generic code). */
 export async function noteProviderError(provider, err) {
   const code = normalizeProviderError(provider, err);
   if (!code) return null;
-  return patch(provider, { lastError: { code, at: Date.now() } });
+  const now = Date.now();
+  let report = false;
+  // Decide AND stamp in one transition — see patch(). Two concurrent failures otherwise both read
+  // the pre-stamp `gaSentAt` and both send.
+  const { next } = await patch(provider, (prev) => {
+    report = shouldReportFailure(prev, code, now);
+    const fields = { lastError: { code, at: now } };
+    if (report) fields.gaSentAt = now;
+    return fields;
+  });
+  // Fired OUTSIDE the serialized chain: GA must never delay or block a collection cycle.
+  // ⚠️ `gaSentAt` therefore records the ATTEMPT, not a confirmed delivery — sendGAEvent swallows
+  // its own failures. A blocked GA request costs one day of that reason, which is the right trade
+  // against holding the write chain open on a network call (Codex FOLLOW-UP, accepted).
+  if (report) sendGAEvent('provider_collect_fail', { provider, reason: baseReason(code) });
+  return next;
 }
 
 /**
