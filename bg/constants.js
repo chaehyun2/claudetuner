@@ -169,11 +169,11 @@ export const HEARTBEAT_FLOOR_MIN_MS = 60 * 60 * 1000;      // heartbeat clamp lo
 // as two independent gates and sent more than one person hunting for a 3h check that does not exist.
 export const HEARTBEAT_FLOOR_MAX_MS = 140 * 60 * 1000;     // heartbeat clamp upper bound (< chart gap CLAUDE_GAP_MS 140min / 6h disconnection email) — exclusive
 export const CADENCE_TTL_MS = 12 * 60 * 60 * 1000;         // 12h: a server override not reconfirmed within this decays to the hardcoded default
-// After a need_history backfill attempt, suppress re-triggering for this long. At a
-// slow (idle/dormant) cadence the 6h history window structurally holds < 30 points, so
-// needHistory would otherwise stay true forever and bypass the adaptive tier gate —
-// pinning the primary org to active cadence and defeating the idle/dormant backoff.
-export const HISTORY_BACKFILL_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h
+// (HISTORY_BACKFILL_COOLDOWN_MS lived here. It rate-limited the history backfill, which is
+// retired — #1081. Its note is worth keeping as evidence: at idle/dormant cadence the 6h window
+// structurally holds < 30 points, so the trigger was PERMANENTLY true for those installs. That is
+// why it could not identify the people backfill was for, and why the cooldown had to exist at all
+// — it was holding back a forced POST that fired on nearly everyone.)
 
 // === Error classification ===
 export const ACTIONABLE_ERRORS = ['err_session_expired', 'err_no_cookies', 'err_auth_failed'];

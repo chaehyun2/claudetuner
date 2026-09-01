@@ -141,51 +141,10 @@ export async function appendUsageHistory(point) {
   });
 }
 
-// Merge server snapshots into local history (r7 data bootstrap)
-export async function mergeServerSnapshots(serverSnaps, currentPlan, orgUuid) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get({ usageHistory: [] }, (result) => {
-      const history = result.usageHistory;
-      const existingTimes = new Set(history.map(p => Math.round(p.t / 60000))); // Deduplicate at minute granularity
-      let added = 0;
-      for (const s of serverSnaps) {
-        const t = new Date(s.collected_at).getTime();
-        const tMin = Math.round(t / 60000);
-        if (existingTimes.has(tMin)) continue;
-        history.push({
-          t,
-          h5: s.five_hour_utilization,
-          d7: s.seven_day_utilization,
-          p: currentPlan,
-          // Carried for the same reason buildHistoryPoint carries it (bg/collect.js): the 5h
-          // reset identity is what lets projectFlatWindow read a boundary the value rose across.
-          // Both producers of this payload already send the column — /api/me (me.ts) and
-          // /api/users/:email (users.ts) — so this needed no server change; it was simply dropped
-          // on the floor here, which made BOOTSTRAPPED history disagree with freshly collected
-          // history even after the writer above was fixed.
-          r5: s.five_hour_resets_at || null,
-          r7: s.seven_day_resets_at || null,
-          org: orgUuid || null,
-          eu: s.extra_usage_used ?? null,
-          el: s.extra_usage_limit ?? null,
-        });
-        existingTimes.add(tMin);
-        added++;
-      }
-      if (added > 0) {
-        history.sort((a, b) => a.t - b.t);
-        const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
-        const trimmed = history.filter((p) => p.t > cutoff);
-        chrome.storage.local.set({ usageHistory: trimmed }, () => {
-          console.log(`[Claude Tuner] Merged ${added} server snapshots into local history`);
-          resolve();
-        });
-      } else {
-        resolve();
-      }
-    });
-  });
-}
+// RETIRED (2026-09-01, #1081): mergeServerSnapshots lived here and merged server snapshot rows
+// into local usageHistory. Its only caller was the history backfill in bg/collect.js, which was
+// dead end-to-end for four months and has been removed — see the retirement note there for why
+// reviving it was rejected on measurement rather than taste.
 
 export async function getUsageHistory() {
   return new Promise((resolve) => {

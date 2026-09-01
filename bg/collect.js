@@ -3,7 +3,7 @@ import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_TIMEOUT_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
-  HISTORY_BACKFILL_COOLDOWN_MS, DEFAULT_SERVER_URL,
+  DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } from './upgrade-gate.js';
@@ -21,7 +21,7 @@ import { upsertClaudeOrg } from './org-merge.js';
 import { noteProviderSuccess } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, mergeServerSnapshots, authedFetch, simplePost, simpleAuthedPost, getExtToken, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -927,12 +927,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       return { success: true, snapshot, localOnly: true };
     }
 
-    // Request server snapshots if local history lacks recent 6h data
-    const { usageHistory: _histCheck = [], historyEmptyUntil = 0 } = await chrome.storage.local.get({ usageHistory: [], historyEmptyUntil: 0 });
-    const sixHoursAgo = Date.now() - 6 * 3600000;
-    const recent6h = _histCheck.filter(p => p.t > sixHoursAgo);
-    const needHistory = recent6h.length < 30 && Date.now() > historyEmptyUntil;
-    const body = { ...snapshot, ...(force ? { force: true } : {}), ...(needHistory ? { need_history: true } : {}) };
+    const body = { ...snapshot, ...(force ? { force: true } : {}) };
 
     // === Primary org delta-gated send ===
     // We gate ONLY the server POST; the local UI/history/badge below still run
@@ -957,15 +952,14 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       resetsAt7d: snapshot.seven_day?.resets_at ?? null,
       extraUsage: snapshot.extra_usage ?? null,
     };
-    // force (manual/welcome) and needHistory (sparse local history → must backfill,
-    // already rate-limited by historyEmptyUntil) always post. Otherwise the shared
-    // gate decides: changed (10min min-interval) OR the 1h heartbeat floor.
+    // force (manual/welcome) always posts. Otherwise the shared gate decides:
+    // changed (10min min-interval) OR the 1h heartbeat floor.
     // Primary reuses lastPollAt as "last sent" — updateOrgPollState below runs only
     // in this send branch, so lastValues/lastPollAt already track the last POST.
     const primaryCadence = await getCadence(Date.now(), { uuid: bestOrg?.uuid, provider: 'claude' });
     const { send: primaryDue, changed: primaryChanged, reason: primaryGateReason } = shouldSendSnapshot(
       primaryState.lastValues, primaryState.lastPollAt, primaryCurrentValues,
-      { force: force || needHistory, sendFloorMs: primaryCadence.sendFloorMs, heartbeatFloorMs: primaryCadence.heartbeatFloorMs },
+      { force, sendFloorMs: primaryCadence.sendFloorMs, heartbeatFloorMs: primaryCadence.heartbeatFloorMs },
     );
     if (!primaryDue) {
       console.log(`[Claude Tuner] Primary delta-gate skip (${primaryGateReason})`);
@@ -990,13 +984,6 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           await chrome.storage.local.set({ orgPollState: cur });
         }
       };
-
-      // need_history backfill: claim the cooldown at ATTEMPT time (not only on a
-      // successful response) so a non-OK or thrown POST can't leave needHistory
-      // true and re-trigger a forced send every tick (defeating the gate — #220).
-      if (needHistory) {
-        await chrome.storage.local.set({ historyEmptyUntil: Date.now() + HISTORY_BACKFILL_COOLDOWN_MS });
-      }
 
     // authBlocked (401 login_required) backoff — bg/storage.js. Checked HERE rather than at the
     // top-level skipServer gate because only here is the identity the POST will actually claim
@@ -1248,33 +1235,41 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         await updateBadgeForSelectedOrg(snapshot);
       }
 
-      // Merge server recent snapshots (history backfill)
-      if (needHistory) {
-        if (result.recent_snapshots && result.recent_snapshots.length > 0) {
-          await mergeServerSnapshots(result.recent_snapshots, plan, snapshot.claude_org_uuid);
-        } else if (await getExtToken()) {
-          // /api/me requires a Bearer session token (ext_token); the API_KEY
-          // fallback would always 401. Skip when tokenless to avoid wasted
-          // requests — a fresh ext_token is issued via the snapshot POST (TOFU),
-          // so the next cycle can bootstrap history once authed.
-          try {
-            const orgParam = snapshot.claude_org_uuid ? `?org=${encodeURIComponent(snapshot.claude_org_uuid)}` : '';
-            const meResp = await authedFetch(config, `${config.serverUrl}/api/me${orgParam}`, {
-              headers: { 'X-User-Email': snapshot.user_email },
-            });
-            if (meResp.ok) {
-              const meData = await meResp.json();
-              if (meData.recent_snapshots && meData.recent_snapshots.length > 0) {
-                await mergeServerSnapshots(meData.recent_snapshots, plan, snapshot.claude_org_uuid);
-              }
-            }
-          } catch (e) {
-            console.warn('[Claude Tuner] Failed to fetch /api/me for history bootstrap:', e.message);
-          }
-        }
-        // (historyEmptyUntil cooldown is now claimed at POST-attempt time above,
-        // so it's set on success/non-OK/throw alike — no need to set it here.)
-      }
+      // RETIRED (2026-09-01, #1080/#1081): history backfill — the whole mechanism, not just its
+      // broken half. What used to sit here merged `result.recent_snapshots` from the snapshot POST
+      // response into local history, with an `/api/me` fallback when the response carried none.
+      // Both halves were dead, and the feature was measured before deleting rather than assumed:
+      //
+      //  1. The FALLBACK could never succeed (#1080). It asked `/api/me` with an ext_token, and
+      //     `/api/me`+`/api/me/*` are mounted under googleAuthMiddleware (worker/src/index.ts),
+      //     which takes ONLY `iss:'claudetuner'` session JWTs or Google ID tokens — an ext_token is
+      //     `iss:'claudetuner-ext'`, so it 401'd by construction, ~6,234 times a day. Its own
+      //     comment asserted the opposite, which is how the same mistake shipped three times
+      //     (#745, #747, #1080). 🔴 Do NOT "fix" that by widening /api/me to ext_tokens: pre-enforce
+      //     TOFU minted them for any claimed email and ~533 are still live, so that would let their
+      //     holders read other people's usage (#764, watched by test/authz-guard.mjs).
+      //  2. The RESPONSE branch was inert too. The worker stopped answering `need_history` in
+      //     dc47d6b8 (2026-04-24) six hours after 3fb6830e added it, so `result.recent_snapshots`
+      //     was never present. Backfill had been dead end-to-end for four months.
+      //  3. Reviving it was rejected on EVIDENCE, not taste (#1081). Local history appends every
+      //     alarm tick regardless of the send gate, and the 5h forecast needs 3 history points at
+      //     the caller (calcPredictedAtReset, ui/prediction-core.js) of which 2 must span 30 min
+      //     under a lookback that widens to Infinity (projectFlatWindow, ui/usage-tiers.js) — so a
+      //     quiet account with an old history still gets a measured forecast, and only the first
+      //     ~30 minutes after an install or a data reset are degraded (and even then
+      //     windowAverageProjection feeds the SAME tier ladder). The 7d model has
+      //     its own thin-data fallback and wants 48h of activity plus 14+ days of curve, which 6h
+      //     of backfill cannot move. ⇒ reviving would have added a read to the ingest hot path to
+      //     buy 30 minutes on one gauge.
+      //  4. The trigger could not even find the people it was for: `need_history` fired on
+      //     `recent6h.length < 30`, which at idle/dormant cadence is PERMANENTLY true (see the old
+      //     HISTORY_BACKFILL_COOLDOWN_MS note), while the population whose forecast is actually
+      //     degraded is "installed in the last half hour". It also forced a POST past the delta
+      //     gate for everyone it fired on — a real cost paid for nothing.
+      //
+      // The legacy `historyEmptyUntil` storage key is deliberately NOT deleted from users'
+      // profiles. Removing this code is reversible; wiping storage is not, and nobody reads it.
+      // Pinned by test/ext-api-me-guard.mjs.
     }).catch((e) => {
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
       rollbackPrimary().catch(() => {}); // transient network failure → retry next tick

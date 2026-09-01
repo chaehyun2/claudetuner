@@ -458,10 +458,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Data reset button
   document.getElementById('reset-btn').addEventListener('click', () => {
     if (!confirm(t('reset_confirm'))) return;
-    // Also clear historyEmptyUntil so the next collect can immediately backfill the
-    // wiped sparkline — otherwise an active need_history cooldown would suppress the
-    // bootstrap for up to 6h, leaving the chart empty (see HISTORY_BACKFILL_COOLDOWN_MS).
-    chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState', 'historyEmptyUntil'], () => {
+    // `historyEmptyUntil` is no longer listed here: history backfill is retired (#1081), so
+    // nothing reads that key and clearing it would be a no-op. The key is left in users' storage
+    // on purpose — removing code is reversible, wiping storage is not.
+    chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState'], () => {
       showToast(t('reset_done'));
       document.getElementById('history-count').textContent = '0';
       document.getElementById('last-collected').textContent = '-';

@@ -85,7 +85,7 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
   prevValues = prevValues || {};
   // Always compute the real change (vs last sent) — callers use it to set the
   // is_heartbeat flag and to drive the adaptive tier, which must NOT be told
-  // "changed" just because a forced/needHistory send bypassed the gate.
+  // "changed" just because a forced send bypassed the gate.
   // sendFloorMs / heartbeatFloorMs default to the hardcoded constants; callers that
   // resolved a server override (via getCadence) pass the steered values in.
   const changed = hasOrgUsageChanged(prevValues, currentValues);
