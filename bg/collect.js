@@ -18,7 +18,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { upsertClaudeOrg } from './org-merge.js';
-import { noteProviderSuccess } from './provider-state.js';
+import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
@@ -1857,7 +1857,24 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     updateBadgeError();
     await checkCollectFailNotification(errorMsg);
 
-    sendGAEvent('collect_fail', { error: errorMsg.slice(0, 100) });
+    // 🔴 THE REASON GOES ON THE SHARED `provider_collect_fail` AXIS, not on this event.
+    // `error` carried `errorMsg.slice(0, 100)` — a raw API fragment, and never registered as a GA4
+    // custom dimension, so it could not be queried at all: 208,135 events over two days
+    // (2026-09-02..03) with an unreadable cause, and GA4 has no retroactive registration, so the
+    // backlog stays unreadable forever (#1021 → #1143). It also meant Claude — the largest
+    // population — was the one provider missing from the reason breakdown the other two have.
+    //
+    // This event stays as the UNTHROTTLED volume counter it has always been (its history is
+    // continuous only if the name and cadence do not change); the reason is whitelisted, carries
+    // no free text, and is throttled to once per reason per day like ChatGPT's and Gemini's.
+    sendGAEvent('collect_fail');
+    // 🔴 NOT AWAITED, and the reason is what comes NEXT in this block: the failure heartbeat, which
+    // is what the server turns into a disconnection email. The reporter swallows its own rejections
+    // but it still awaits a `chrome.storage.local.set`, and a storage write that hangs rather than
+    // fails would hold this catch block open — converting a reported failure into a silent one,
+    // which is the exact class of defect this change exists to remove (Codex DEPLOY-BLOCKER). Same
+    // rule the GA send itself follows: telemetry never delays a collection cycle.
+    reportClaudeCollectFail(error);
 
     // Send heartbeat at most once per HEARTBEAT_INTERVAL_MS (1 hour — this comment said "every 6
     // hours" until #980; the constant has been 1 h and the stale figure was live-misread once).

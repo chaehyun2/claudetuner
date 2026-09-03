@@ -219,7 +219,14 @@ export async function noteProviderSuccess(provider, account) {
   // had BEFORE they switched — and it could only ever name Claude. This value is written by the
   // code that just sent a snapshot for it, so it cannot disagree with what was actually collected.
   // Undefined leaves the stored label untouched (a caller that does not know must not erase one).
-  const fields = { lastSuccessAt: Date.now(), lastError: null };
+  // 🔴 `gaReason: null` KEEPS CLAUDE COMPARABLE TO THE OTHER TWO. ChatGPT and Gemini throttle
+  // against `lastError`, which this line clears, so a provider that recovers and then breaks again
+  // reports the SAME reason immediately — the recovery ended the episode. Claude throttles against
+  // `gaReason` (it writes no `lastError`; see CLAUDE_GA_REASON_CODES), so without clearing it here
+  // a fail→succeed→fail-the-same-way sequence would stay silent for the rest of the 24h window and
+  // Claude's reason counts would mean something different from the other two (Codex DEPLOY-BLOCKER).
+  // Harmless for the providers that do not use the field: nothing writes it for them.
+  const fields = { lastSuccessAt: Date.now(), lastError: null, gaReason: null };
   // 🔴 `accountAt` STAMPS WHEN THE LABEL WAS OBSERVED, and only an actual observation may move it.
   // A caller that passes nothing leaves BOTH fields alone: "we collected, but we did not re-check
   // which account" is a real state, and treating it as a fresh observation is what laundered a
@@ -346,12 +353,15 @@ function baseReason(code) {
   return String(code || '').split(':')[0];
 }
 
-function shouldReportFailure(prev, code, now) {
-  const was = prev && prev.lastError;
-  const sameAsBefore = !!was && baseReason(was.code) === baseReason(code);
-  const lastSent = (prev && prev.gaSentAt) || 0;
+// 🔴 THE PREVIOUS REASON IS PASSED IN, not read off `prev.lastError`. Claude reports on the GA
+// axis WITHOUT writing `lastError` (see CLAUDE_GA_REASON_CODES), so a hard-coded field read would
+// have compared every Claude failure against `undefined` — "always a changed reason" — and fired
+// on every alarm tick, measuring our polling interval instead of installs. One throttle, two
+// callers, each naming the field it actually keeps.
+function shouldReportFailure(prevReason, gaSentAt, code, now) {
+  const sameAsBefore = !!prevReason && baseReason(prevReason) === baseReason(code);
   // A CHANGED reason is news and goes out immediately; an unchanged one waits out the throttle.
-  return !(sameAsBefore && (now - lastSent) < PROVIDER_GA_THROTTLE_MS);
+  return !(sameAsBefore && (now - (gaSentAt || 0)) < PROVIDER_GA_THROTTLE_MS);
 }
 
 /** Collection failed. `err` may be an Error, a string, or nothing (unknown → the generic code). */
@@ -363,7 +373,7 @@ export async function noteProviderError(provider, err) {
   // Decide AND stamp in one transition — see patch(). Two concurrent failures otherwise both read
   // the pre-stamp `gaSentAt` and both send.
   const { next } = await patch(provider, (prev) => {
-    report = shouldReportFailure(prev, code, now);
+    report = shouldReportFailure(prev && prev.lastError && prev.lastError.code, prev && prev.gaSentAt, code, now);
     const fields = { lastError: { code, at: now } };
     if (report) fields.gaSentAt = now;
     return fields;
@@ -374,6 +384,84 @@ export async function noteProviderError(provider, err) {
   // against holding the write chain open on a network call (Codex FOLLOW-UP, accepted).
   if (report) sendGAEvent('provider_collect_fail', { provider, reason: baseReason(code) });
   return next;
+}
+
+// ── Claude: the reason axis only (#1143) ────────────────────────────────────────────────────
+//
+// 🔴 DELIBERATELY NOT AN ENTRY IN `PROVIDER_ERROR_CODES`, and the separation is the whole design.
+// That table is a DISPLAY contract: test/provider-error-guard.mjs binds every code in it to an
+// i18n string and to the web's actionable list, and `noteProviderError` writes `lastError` — which
+// `listCollectingAccounts` reads as "stop naming this provider" and `liveProviderErrors` reads as
+// "show a banner". Claude already has all of that on `lastStatus` (bg/storage.js), which
+// ui/render.js owns and demotes against; a second copy is the double-messaging trap this file's
+// header warns about, and it would change what the popup's login disclosure says as a SIDE EFFECT
+// of adding telemetry. Claude joined this store for the account label alone, and still has.
+//
+// So Claude gets the reason on the GA axis and nothing else: same event, same already-registered
+// dimensions (`provider`, `reason`), no new display state, no new i18n.
+//
+// The names mirror the throws in bg/api.js, which already carry `err_*` codes — they simply lack
+// the provider segment every GA reason has. test/claude-ga-reason-guard.mjs asserts the two sets
+// stay equal, so a new throw there cannot quietly normalise to the catch-all.
+export const CLAUDE_GA_REASON_CODES = [
+  'err_claude_auth_failed',
+  'err_claude_cloudflare',
+  'err_claude_no_cookies',
+  'err_claude_rate_limit',
+  'err_claude_session_expired',
+  'err_claude_collect_failed',   // the catch-all; unknown errors normalise to this
+];
+
+/**
+ * A Claude collection error → exactly one whitelisted GA reason.
+ *
+ * 🔴 THE SAME SECURITY BOUNDARY AS `normalizeProviderError`, and it is not theoretical here:
+ * bg/api.js interpolates `text.slice(0, 500)` of a Claude API response into one of its messages,
+ * and bg/collect.js used to send that straight to GA as `collect_fail.error`. Anything
+ * unrecognised collapses to the generic code rather than travelling.
+ *
+ * The HTTP status is dropped for the reason it is dropped everywhere else in this file:
+ * `auth_failed:401` and `auth_failed:403` are ONE reason to GA and to the user alike.
+ */
+export function normalizeClaudeGaReason(err) {
+  const raw = (err && err.message) || (typeof err === 'string' ? err : '');
+  const key = baseReason(raw);
+  // bg/api.js throws provider-less codes (`err_rate_limit`); a GA reason carries the segment.
+  const code = key.indexOf('err_') === 0 ? `err_claude_${key.slice(4)}` : '';
+  return CLAUDE_GA_REASON_CODES.indexOf(code) >= 0 ? code : 'err_claude_collect_failed';
+}
+
+/**
+ * Claude collection failed → tell GA why, and touch nothing else.
+ *
+ * Shares the 24h-per-reason throttle with the other providers so a day's `provider_collect_fail`
+ * count means the same thing for all three ("installs stuck on this reason"). It throttles against
+ * the last REPORTED reason, kept in `gaReason`, because Claude writes no `lastError` to compare to.
+ *
+ * ⚠️ Same trade as `noteProviderError`: `gaSentAt` records the ATTEMPT (sendGAEvent swallows its
+ * own failures), so a blocked GA request costs one day of that reason.
+ */
+export async function reportClaudeCollectFail(err) {
+  // 🔴 THIS ONE SWALLOWS, unlike noteProviderError, and the difference is the CALLER. The other
+  // collectors call that at the very end of their own catch; this runs inside bg/collect.js's
+  // catch, UPSTREAM of the failure heartbeat — the signal the server turns into a disconnection
+  // email. A rejecting storage write would skip it, so a telemetry fault would silently convert a
+  // collection failure into a SILENT one, which is the whole class of defect #1143 is about.
+  try {
+    const code = normalizeClaudeGaReason(err);
+    const now = Date.now();
+    let report = false;
+    // Decide AND stamp inside one serialized transition, for the reason patch() documents.
+    const { next } = await patch('claude', (prev) => {
+      report = shouldReportFailure(prev && prev.gaReason, prev && prev.gaSentAt, code, now);
+      return report ? { gaSentAt: now, gaReason: code } : {};
+    });
+    if (report) sendGAEvent('provider_collect_fail', { provider: 'claude', reason: code });
+    return next;
+  } catch (e) {
+    console.log(`[Claude Tuner] claude fail-reason report skipped: ${e && e.message}`);
+    return null;
+  }
 }
 
 /** A snapshot POST failed for a reason no other surface reports. Ignores anything unlisted. */

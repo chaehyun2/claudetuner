@@ -106,18 +106,44 @@ const MAX_EXTRA_WORKSPACES = 5;
  *
  * Returns { defaultAccountId, defaultRenewal, workspaces: [...] } where
  * `workspaces` excludes:
- *   - the active/default account (already collected with usage via /wham/usage),
+ *   - the account /wham/usage just collected, under EITHER identifier (see below),
  *   - deactivated accounts (expired/left workspaces — "unused orgs" we skip),
  *   - accounts the current session can't access.
+ *
+ * 🔴 `activeAccountId` is /wham/usage's `account_id` — the id the primary snapshot is actually
+ * keyed by — and it is NOT always accounts/check's `default`. The two endpoints resolve the
+ * "active" account independently, and when they disagree (or `accounts.default` is missing, so
+ * `defaultAccountId` is null and excludes nothing) the account we just collected WITH usage gets
+ * re-enumerated here as an extra workspace and sent again with usage null, ~0.7s later. The
+ * latest_snapshot upsert is last-write-wins on collected_at, so that second row overwrites the
+ * real one and the dashboard shows the plan with no usage while the popup — which renders from
+ * local history — looks fine (문의 #191, #1144: 9 users, one at 100% utilization).
+ *
+ * So the anchor is the entry for `activeAccountId` when accounts/check carries one, falling back
+ * to `default`. That also fixes the same mismatch's quieter half: `defaultRenewal`/`defaultPending`
+ * are attached to the PRIMARY org, so anchoring on the wrong account stamped another account's
+ * renewal date and scheduled plan change onto it.
  */
-export function parseAccountsRoster(data) {
+export function parseAccountsRoster(data, activeAccountId = null) {
   const accounts = data?.accounts || {};
   const def = accounts.default || null;
+  // The entry describing the account /wham/usage reported on, when accounts/check names it. It
+  // may be absent: `usage.account_id` is sometimes a `user-…` id while accounts/check keys by
+  // account UUID, and those never match — in which case `default` remains the only anchor we have.
+  //
+  // 🪤 `default` is an ALIAS: it repeats one real entry under a second key, so two values can carry
+  // the same account_id and a bare `Object.values(...).find` would pick whichever came first (Codex
+  // FOLLOW-UP). Search the canonical UUID-keyed entries only — if the alias is the sole match, the
+  // `|| def` fallback below reaches the same object anyway, so nothing is lost by skipping it.
+  const activeEntry = activeAccountId
+    ? (Object.entries(accounts).find(([k, a]) => k !== 'default' && a?.account?.account_id === activeAccountId) || [])[1] || null
+    : null;
+  const anchor = activeEntry || def;
   // The `default` alias carries the real account UUID of the active account, which
   // lets us exclude it from the extra-workspace list (its usage comes from /wham/usage).
   const defaultAccountId = def?.account?.account_id || null;
-  const defaultRenewal = def?.entitlement?.renews_at || null;
-  const defaultPending = parseChatGPTScheduledChange(def);
+  const defaultRenewal = anchor?.entitlement?.renews_at || null;
+  const defaultPending = parseChatGPTScheduledChange(anchor);
 
   const order = Array.isArray(data?.account_ordering) && data.account_ordering.length
     ? data.account_ordering
@@ -128,7 +154,11 @@ export function parseAccountsRoster(data) {
     const a = accounts[id];
     const acc = a?.account;
     if (!acc) continue;
+    // Both identifiers, not just `default`: either one matching means /wham/usage already
+    // collected this account WITH usage, so enumerating it here would duplicate it as a
+    // usage-null snapshot under the very same org key (#1144).
     if (acc.account_id === defaultAccountId) continue; // active account → /wham/usage handles it
+    if (activeAccountId && acc.account_id === activeAccountId) continue; // ditto, per /wham/usage
     if (acc.is_deactivated) continue;                  // expired/left workspace → skip (unused)
     if (a.can_access_with_session === false) continue; // session can't read this account
     workspaces.push({
@@ -181,7 +211,9 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
   }
   try {
     const data = await fetchChatGPTApi('/backend-api/accounts/check/v4-2023-04-27');
-    const roster = parseAccountsRoster(data);
+    // The active id is part of the cache fingerprint above, so a cached roster was always parsed
+    // against the same active account it is served for — the exclusion cannot go stale here.
+    const roster = parseAccountsRoster(data, activeAccountId);
     // One line per (at most hourly) refresh: what the LIVE response carried. This is the
     // signal that was missing while diagnosing the null-pending incident — it separates
     // "the API didn't return a scheduled change" from "we parsed/sent it wrong" at a glance.
@@ -479,7 +511,16 @@ export async function collectChatGPT(force = false, userManual = false) {
     // user belongs to beyond the active account. Per-workspace usage needs a
     // per-account token (/wham/usage is scoped to the JWT's active account), so
     // these carry plan + renewal only — usage stays null until a later phase.
-    const extraOrgs = roster.workspaces.slice(0, MAX_EXTRA_WORKSPACES).map((ws) => ({
+    //
+    // 🔴 The `ws.accountId !== org.uuid` filter is the invariant itself, stated where the two
+    // sends are visible together: ONE CYCLE NEVER SENDS TWO SNAPSHOTS FOR THE SAME ORG KEY. The
+    // roster already excludes the active account, but that exclusion depends on accounts/check
+    // agreeing with /wham/usage about which account is active — and it is exactly that agreement
+    // that failed in #1144. This check needs no such agreement: it compares the id the primary
+    // snapshot was keyed by against the id each extra send would be keyed by. Keep both.
+    const extraOrgs = roster.workspaces
+      .filter((ws) => ws.accountId !== org.uuid)
+      .slice(0, MAX_EXTRA_WORKSPACES).map((ws) => ({
       uuid: ws.accountId,
       name: ws.name || 'ChatGPT Workspace',
       email: email || null,
