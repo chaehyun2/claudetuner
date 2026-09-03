@@ -199,14 +199,48 @@ export function notifCategoryFromId(notifId) {
  * notifications while measuring notification volume would be its own punchline. The returned
  * promise is for tests, not for sequencing.
  */
-export function createCountedNotification(notifId, opts, category) {
+export function createCountedNotification(notifId, opts, category, supersedes) {
   return new Promise((resolve) => {
     chrome.notifications.create(notifId, opts, (id) => {
       if (chrome.runtime.lastError || !id) { resolve(null); return; }
       bumpNotifCounter(category, 'sent');
+      // 🔴 REPLACE, NEVER JUST REMOVE (#1132, Codex DEPLOY-BLOCKER). The superseded cards are
+      // dropped only once the browser has CONFIRMED the successor exists. Clearing first looked
+      // equivalent and is not: create() can fail (revoked permission, OS-level block), and the
+      // callers cannot retry — collect-fail has already advanced its stage, the usage alert has
+      // already written `usageAlertState[stateKey] = true`. The user would be left with neither
+      // the old card nor the new one, having previously had a visible warning.
+      //
+      // It lives HERE rather than at the call sites so the ordering cannot be got wrong by the
+      // next person to add a family: passing the list is the only way to express superseding.
+      if (supersedes && supersedes.length) clearSupersededNotifications(supersedes);
       resolve(id);
     });
   });
+}
+
+/**
+ * Drop the notifications a new one REPLACES (#1132).
+ *
+ * Chrome only substitutes automatically when the id is identical, and several of our families
+ * deliberately vary the id so a click can be attributed to the right stage or severity
+ * (`auth-blocked-r2` vs `auth-blocked`, `usage-alert-warn-…` vs `usage-alert-danger-…`). Those
+ * stages SUPERSEDE each other — "the collection has been down for 24 hours" says everything "…for
+ * 4 hours" said — so without this they simply queue up beside one another. On Windows they sit in
+ * the notification centre until dismissed by hand, which is how somebody returning from sleep
+ * finds five of ours waiting.
+ *
+ * ⚠️ It costs the superseded notification its chance to be clicked, so a family's CTR is measured
+ * against fewer live cards. That is the intended trade: the baseline (2026-08-21..09-03) was
+ * 314k sends earning 1,234 clicks — 0.39% — so the cards being removed are cards nobody acted on.
+ *
+ * Never awaited and never throws: clearing is best-effort housekeeping, and a notification that
+ * fails to clear must not stop the new one from being shown.
+ */
+export function clearSupersededNotifications(ids) {
+  for (const id of ids) {
+    try { chrome.notifications.clear(id); } catch (e) { /* best effort */ }
+  }
 }
 
 const NOTIF_EVENT_ENDPOINT = `${DEFAULT_SERVER_URL}/api/event`;
@@ -493,6 +527,9 @@ export async function checkAuthBlockedLadder(now = Date.now()) {
   if (!slot.granted) return;
 
   const notifId = `auth-blocked-r${stage}`;
+  // Rung N replaces every earlier card of the same episode (#1132). The ladder is already bounded
+  // at 4 and spaced >=72h, but nothing ever removed a rung once shown, so a 24-day block left FOUR
+  // of our notifications sitting in the OS notification centre at once.
   const opts = {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
@@ -542,7 +579,18 @@ export async function checkAuthBlockedLadder(now = Date.now()) {
   if (stillBlocked !== true) {
     chrome.notifications.clear(notifId);
     await undo();
+    return;
   }
+
+  // Only NOW do the earlier cards of this episode go away (#1132). Two orderings were wrong before
+  // this one:
+  //   clear-then-create → create() fails (revoked permission, OS block) and the user is left with
+  //                       NOTHING, having had a sticky `auth-blocked` fault card a moment earlier.
+  //                       Stage 1 is a fault report; losing it is strictly worse than a duplicate.
+  //   clear rung `stage` → the off-by-one that removes the card just created.
+  // 🪤 EARLIER rungs only, r2..r(stage-1) — test/authblock-ladder-guard.mjs caught that mistake.
+  clearSupersededNotifications(
+    ['auth-blocked', ...Array.from({ length: Math.max(0, stage - 2) }, (_, i) => `auth-blocked-r${i + 2}`)]);
   // No logNotification() — claimNudgeSlot already wrote this notification's log entry.
 }
 
@@ -652,7 +700,14 @@ export async function checkCollectFailNotification(errorMsg) {
     opts.buttons = [{ title: await bt('cf_btn_open') }];
   }
 
-  createCountedNotification(notifId, opts, 'collect-fail');
+  // The stages of ONE episode: "down for 24 hours" says everything "down for 4 hours" said, so the
+  // earlier cards are replaced rather than stacked (#1132). Ids stay distinct because the click
+  // attribution needs them; the superseding is explicit instead — and applied only after the
+  // successor is confirmed, because this function advances `collectFailState.stage` below and
+  // therefore never retries.
+  createCountedNotification(notifId, opts, 'collect-fail',
+    ['collect-fail-firstrun', 'collect-fail-first', 'collect-fail-reminder', 'collect-fail-final']
+      .filter((id) => id !== notifId));
   logNotification('collect-fail');
 
   collectFailState.stage = targetStage;
@@ -698,6 +753,15 @@ export async function checkUsageAlerts(snapshot) {
         // Still prefixed with NOTIF_ID_ALERT, so background.js's settings-button branch
         // (startsWith(NOTIF_ID_ALERT)) keeps matching.
         const severity = threshold >= thresholdDanger ? 'danger' : 'warn';
+        // 🔴 Same WINDOW, higher severity → the warning is superseded, not repeated beside it
+        // (#1132). Only in that direction: a warn firing while a danger card is up would be older
+        // news, and alertThresholds is ordered danger-first so that cannot happen anyway.
+        // Passed as `supersedes` rather than cleared here: `usageAlertState[stateKey] = true` is
+        // written below whether or not create() succeeded, so a clear-then-fail would leave the
+        // user with neither card and nothing that fires again until utilisation drops 10 points.
+        const supersedes = severity === 'danger'
+          ? [`${NOTIF_ID_ALERT}-warn-${key}_${thresholdWarn}`]
+          : undefined;
         createCountedNotification(`${NOTIF_ID_ALERT}-${severity}-${stateKey}`, {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
@@ -705,7 +769,7 @@ export async function checkUsageAlerts(snapshot) {
           message: await bt(i18nKey, util.toFixed(1)) + '\n' + await bt('notif_settings_hint'),
           buttons: [{ title: await bt('notif_settings_btn') }],
           priority: threshold >= thresholdDanger ? 2 : 1,
-        }, `usage-${severity}`);
+        }, `usage-${severity}`, supersedes);
         logNotification(`usage-${severity}`);
         usageAlertState[stateKey] = true;
       } else if (util < threshold - 10 && alreadyNotified) {
@@ -847,7 +911,10 @@ export async function sendWeeklyReport() {
   const avg5h = h5vals.length > 0 ? h5vals.reduce((a, b) => a + b, 0) / h5vals.length : 0;
   const peak5h = h5vals.length > 0 ? Math.max(...h5vals) : 0;
 
-  createCountedNotification('weekly-report-' + Date.now(), {
+  // 🔴 A STABLE id (#1132): last week's report is not information any more, and a unique id per
+  // send meant every one of them stayed on screen. The `weekly-report-` prefix is load-bearing —
+  // notifCategoryFromId() matches on it.
+  createCountedNotification('weekly-report-latest', {
     type: 'basic',
     iconUrl: 'icons/icon128.png',
     title: await bt('weekly_title'),

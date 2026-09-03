@@ -6,6 +6,12 @@ export const SITE_URL = 'https://claudetuner.com';
 
 export const ALARM_NAME = 'claude-usage-poll';
 export const ALARM_EXPIRE_PREFIX = 'claude-expire-';
+// The reset windows that get their own expire alarms — and, since #1132, their own notification
+// ids (`reset-soon-<key>`). SHARED so the scheduler and the alarm handler cannot drift: a key the
+// scheduler emits but the handler does not know would silently produce no notification, and a key
+// the handler accepts but nothing schedules is an id we cannot describe. test/notif-no-stack-guard
+// pins the scheduler's literals against this list.
+export const RESET_ALARM_KEYS = ['5h', '7d', 'design', 'sonnet'];
 export const ALARM_BOOST = 'claude-boost-poll';
 export const ALARM_WEEKLY_REPORT = 'weekly-report';
 export const ALARM_REC = 'claude-rec-poll';
@@ -55,6 +61,16 @@ export const SEAT_TIER_MAP = { 'team_standard': 'Team Standard', 'team_tier_1': 
 // change with whatever order collection happened to write into `collectedOrgs`.
 export const PROVIDER_LABELS = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini' };
 export const PROVIDER_ORDER = ['claude', 'chatgpt', 'gemini'];
+
+// Where a user goes to sign in / open a tab for each provider. Derived from the API bases above
+// rather than re-typed: a link that disagrees with the host we actually collect from would send
+// someone to fix the wrong account. Consumed by the popup's collection-fault banner, which is the
+// only place that turns an `err_*` code into a destination.
+export const PROVIDER_SITE_URLS = {
+  claude: CLAUDE_API_BASE,
+  chatgpt: CHATGPT_API_BASE,
+  gemini: GEMINI_API_BASE,
+};
 
 // Client headers required for Claude.ai API requests
 export const ANTHROPIC_HEADERS = { 'anthropic-client-platform': 'web_claude_ai', 'anthropic-client-version': '1.0.0' };
@@ -215,6 +231,10 @@ export const BG_I18N = {
     weekly_title: '주간 사용 리포트',
     win_5h: '5시간',
     win_7d: '7일',
+    // 모델별 주간 한도(#1134). `design`/`sonnet` 슬롯은 계정마다 다른 모델을 담으므로 이름은
+    // 스냅샷에서 온다. 🔴 모델명만 쓰면 한도가 아니라 모델 얘기로 읽히므로 "주간"을 붙인다 —
+    // 이 문장이 존재하는 이유가 7일 한도 알림과 구별되는 것이다.
+    win_scoped: '{0} 주간',
     cf_title: '수집 중단',
     cf_paused_title: '수집 일시 중단',
     cf_session_msg: '세션이 만료되었습니다. Claude.ai에 다시 로그인해주세요.',
@@ -290,6 +310,7 @@ export const BG_I18N = {
     weekly_title: 'Weekly Usage Report',
     win_5h: '5-hour',
     win_7d: '7-day',
+    win_scoped: '{0} weekly',
     cf_title: 'Collection stopped',
     cf_paused_title: 'Collection paused',
     cf_session_msg: 'Session expired. Please sign in to Claude.ai again.',

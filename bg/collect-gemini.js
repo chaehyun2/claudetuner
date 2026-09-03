@@ -2,7 +2,8 @@ import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemin
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
-import { noteProviderAttempt, noteProviderSuccess, noteProviderError } from './provider-state.js';
+import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
+         noteProviderSendError, noteProviderSendOk } from './provider-state.js';
 
 // Gemini plan ID mapping (from jSf9Qc response first field).
 // FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
@@ -95,6 +96,8 @@ export async function collectGemini(force = false, userManual = false) {
     return { success: false, orgs: [] };
   }
 
+  // Per-cycle send outcome — same rule as the ChatGPT twin.
+  const sendOutcome = { failed: null, ok: 0 };
   try {
     const data = await fetchGeminiRpc('jSf9Qc', '[]');
 
@@ -267,8 +270,9 @@ export async function collectGemini(force = false, userManual = false) {
       // POST force so the server stores it instead of dropping it via usage-only dedup (which keys
       // on h5/d7/r7, not plan). Mirrors the ChatGPT collector; an unrelated Claude-triggered global
       // force does NOT force-store a flat Gemini snapshot (shouldForceProviderPost).
-      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual) }).catch(e => {
+      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome }).catch(e => {
         console.warn('[Claude Tuner] Gemini snapshot send failed:', e.message);
+        sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
       });
       if (res) await gate.commit();
@@ -277,6 +281,8 @@ export async function collectGemini(force = false, userManual = false) {
     }
 
     await noteProviderSuccess('gemini', email);
+    if (sendOutcome.failed) await noteProviderSendError('gemini', sendOutcome.failed);
+    else if (sendOutcome.ok) await noteProviderSendOk('gemini');
     return { success: true, orgs: [org] };
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection failed:', e.message);
@@ -286,7 +292,7 @@ export async function collectGemini(force = false, userManual = false) {
 }
 
 // Send Gemini snapshot to server (same /api/snapshots endpoint)
-async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false } = {}) {
+async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendOutcome = null } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -342,5 +348,17 @@ async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false } = {}
   // and ext_token rotation — critical for independent accounts whose provider
   // snapshots are their only server contact. Returns the server result on
   // success, or null on any failure (caller uses this to gate the commit).
-  return await postSnapshot(config, payload);
+  // #1020: a send that never lands is invisible otherwise — the popup keeps showing local data
+  // while the dashboard stays empty. `postSnapshot` only calls this for failures that have no
+  // other surface; everything auth/upgrade/deletion related already raises its own popup state.
+  //
+  // 🔴 The outcome is ACCUMULATED for the whole cycle, not applied per POST. One provider can send
+  // several snapshots (primary + extra workspaces); clearing on each success let a later workspace
+  // 2xx erase the primary's failure, so the user was told everything was fine while their main
+  // account never reached the server (Codex DEPLOY-BLOCKER).
+  return await postSnapshot(config, payload, (code) => {
+    if (!sendOutcome) return;
+    if (code) sendOutcome.failed = sendOutcome.failed || code;
+    else sendOutcome.ok += 1;
+  });
 }

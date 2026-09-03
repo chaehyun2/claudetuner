@@ -43,6 +43,25 @@
     .perm-banner button:hover { background: #92400e; }
     [data-theme="dark"] .perm-banner { background: #422006; border-color: #b45309; color: #fde68a; }
     [data-theme="dark"] .perm-banner button { background: #d97706; }
+    /* #prov-err-banner is the ONE .perm-banner that builds MULTIPLE rows (one per failing
+       provider), and since #1105 a row can carry an "open the site" button. Inline, that button
+       landed wherever the sentence happened to end — sometimes orphaned at the start of the next
+       line, directly above the NEXT provider's sentence, so it read as belonging to the wrong one.
+       Flex gives the button its own line under its own text, and the row gap makes the grouping
+       unambiguous. Scoped to this banner: the single-row banners (#perm-banner, #capdrop-banner)
+       have no such ambiguity and keep their compact inline button.
+       🪤 The ID selector outranks `.hidden`, so a future attempt to hide ONE row by adding
+       `.hidden` to it would not work — hide by not appending it (Codex caveat). */
+    #prov-err-banner > div { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
+    #prov-err-banner > div + div { margin-top: 6px; }
+    #prov-err-banner > div > button { margin-left: 0; }
+    /* The dismissal (#1130) sits beside "Open ChatGPT" and must not compete with it: fixing the
+       problem is the outcome we want, waving it away is the escape hatch. Same size and hit area,
+       quieter fill — so it is discoverable without reading as the recommended action. */
+    #prov-err-banner button.prov-err-dismiss { background: transparent; color: inherit; border: 1px solid currentColor; opacity: .75; font-weight: 500; }
+    #prov-err-banner button.prov-err-dismiss:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
+    [data-theme="dark"] #prov-err-banner button.prov-err-dismiss { background: transparent; }
+    [data-theme="dark"] #prov-err-banner button.prov-err-dismiss:hover { background: rgba(253, 230, 138, .16); }
     [data-theme="dark"] .btn-primary:disabled { background: #3730a3; color: #818cf8; }
     [data-theme="dark"] #privacy-row { background: #1a1500; }
     [data-theme="dark"] #privacy-row .label { color: #fde68a; }
@@ -964,8 +983,32 @@
     <div id="user-info" class="user-info" style="margin-top:0"></div>
     <a href="https://claudetuner.com/dashboard/settings/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none;display:flex;align-items:center" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
     <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="footer_help"></a>
-    <!-- Independent (email) accounts: sign-out lives in the footer next to the account email -->
-    <a id="independent-signout" href="#" class="hidden" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none" data-i18n="sign_out">Sign out</a>
+    <!-- Independent (email) accounts: the account-switch control lives in the footer next to the
+         account email. It no longer carries a "Sign out" role — see #sync-pause-panel below. -->
+    <a id="independent-signout" href="#" class="hidden" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none" data-i18n="account_switch_cta">Switch account</a>
+    <!-- #1119 — stop sending WITHOUT destroying the credential. Label and data-i18n key are both
+         set from popup.js on every render (pause ⇄ resume), the same rule #independent-signout
+         lives by: a live language switch re-applies every [data-i18n] from the markup, so a role
+         that owns only its text gets silently relabelled into a promise it does not keep. -->
+    <a id="sync-pause-toggle" href="#" class="hidden" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="sync_pause_cta">Pause sync</a>
+  </div>
+
+  <!-- #1119 — the sync-pause surface. Two jobs, one panel:
+         · while paused it is ALWAYS visible and carries the resume button, because the state must
+           be visible and undoable in the same place. It is deliberately NOT gated on the control
+           that offers the pause: `isIndependent` is derived from collectedOrgs and can flip after
+           a pause (a Claude org arriving is enough), and a resume button that disappears with it
+           would recreate the exact dead end this feature exists to remove.
+         · while running it is hidden, and the footer link opens it as a confirm — the sentence
+           there is the only place the user learns that the paused period is not backfilled. -->
+  <div id="sync-pause-panel" class="warn-banner hidden" style="margin-top:8px">
+    <div class="warn-msg" id="sync-pause-msg" style="font-size:11.5px;line-height:1.45"></div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button id="sync-pause-go" class="btn-primary"
+        style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;font-weight:600;border:none;cursor:pointer"></button>
+      <button id="sync-pause-cancel" type="button" class="hidden"
+        style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer"></button>
+    </div>
   </div>
 
   <!-- Which Tuner account the data actually lands in. Shown whenever we know it — the provider
@@ -984,6 +1027,51 @@
         style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;font-weight:600;border:none;cursor:pointer"></button>
       <button id="account-switch-cancel" type="button"
         style="flex:1;padding:7px;border-radius:6px;font-size:11.5px;background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer"></button>
+    </div>
+  </div>
+
+  <!-- #1109 — the way back for an install a cross-label claim moved to another account.
+       A DELIBERATELY SEPARATE surface from the three above, not a widened gate on any of them:
+         · the login CTA and the re-auth widget both hide whenever a token exists, and these
+           installs hold one (a login-proven `dash_claim` token);
+         · the footer "다른 계정으로 전환" renders only when serverSyncGrandfathered === false,
+           and an existing install is stamped `true` on update (background.js) — so a claimed
+           install of that vintage has NO entry point at all, which is the whole bug.
+       It is also a different ACTION: the footer control removes the token first, which for a
+       PROVEN_SRC install means everHadProvenToken keeps the api_key fallback withheld and, with
+       API_KEY_INGEST_ENABLED=enforce, nothing re-mints — collection just stops. This one only ever
+       ADDS a login (bg/storage.js setExtToken replaces the token in place). Nothing here clears a
+       token, and nothing should be added that does.
+       Collapsed to a single link by default: the population that meant to claim must not be nagged,
+       but the door has to stay visible for the one who misclicked. -->
+  <div id="claim-switch" class="hidden" style="margin-top:6px;text-align:center">
+    <a id="claim-switch-link" href="#" style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none"></a>
+    <div id="claim-switch-panel" class="warn-banner hidden" style="margin-top:8px;text-align:left">
+      <div class="warn-title" id="claim-switch-title"></div>
+      <div class="warn-msg" id="claim-switch-msg" style="font-size:11.5px;line-height:1.45"></div>
+      <!-- Its own line, never folded into the sentence above: it states what does NOT happen
+           (the history does not follow), which is the part a reader assumes wrongly. -->
+      <div id="claim-switch-keep" class="warn-hint" style="font-size:11px;line-height:1.45;margin:6px 0 8px"></div>
+      <!-- Same one-click path as the other two login surfaces, from the shared template. -->
+      <div id="claim-switch-google-slot"></div>
+      <div id="claim-switch-or" class="warn-hint" style="text-align:center;font-size:10.5px;margin-bottom:7px;opacity:.8"></div>
+      <div id="claim-switch-step-email">
+        <input id="claim-switch-email" type="email" autocomplete="email" inputmode="email"
+          style="width:100%;box-sizing:border-box;padding:9px 10px;margin-bottom:4px;border:1px solid var(--border);border-radius:8px;font-size:13px;text-align:center" />
+        <!-- Shown only when the previous account was NOT recorded: names the provider address as
+             what it is (a hint), instead of asserting it was the previous Tuner account. -->
+        <div id="claim-switch-hint" class="warn-hint" style="font-size:10.5px;line-height:1.4;margin-bottom:6px;text-align:center;overflow-wrap:anywhere"></div>
+        <button id="claim-switch-send" class="btn-primary" style="width:100%;padding:9px;border-radius:8px;font-size:12.5px;font-weight:700;border:none;cursor:pointer"></button>
+      </div>
+      <div id="claim-switch-step-verify" class="hidden">
+        <input id="claim-switch-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+          style="width:100%;box-sizing:border-box;padding:9px;margin-bottom:6px;border:1px solid var(--border);border-radius:8px;font-size:15px;letter-spacing:4px;text-align:center" />
+        <button id="claim-switch-verify" class="btn-primary" style="width:100%;padding:9px;border-radius:8px;font-size:12.5px;font-weight:700;border:none;cursor:pointer"></button>
+        <button id="claim-switch-resend" type="button" style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
+      </div>
+      <div id="claim-switch-status" class="warn-hint" style="margin-top:7px;text-align:center"></div>
+      <button id="claim-switch-close" type="button"
+        style="width:100%;padding:7px;margin-top:5px;background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer"></button>
     </div>
   </div>
 

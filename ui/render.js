@@ -43,16 +43,29 @@ function _setGaugeValue(id, util) {
 // A healthy-looking status is painted HERE and nowhere else, so a future fourth site cannot
 // reintroduce the lie by copying one of the other three. The guard pins that the literal
 // 'status-dot green' appears only in this function.
-function paintHealthy(indicator, statusText, withheld, body) {
-  indicator.className = withheld ? 'status-dot amber' : 'status-dot green';
+// `paused` (#1119) is a FOURTH state and a separate parameter, not a fifth value of `withheld`:
+// `withheld` means "no usable credential, log in" and every caller of serverSyncWithheldReason()
+// acts on it that way, while a paused install holds a valid token and its remedy is one click in
+// this same popup. Both paint amber — nothing is reaching the server either way, and that is the
+// fact the dot exists to tell — but the words differ, because the words are the actionable part.
+function paintHealthy(indicator, statusText, withheld, body, paused = false) {
+  indicator.className = withheld || paused ? 'status-dot amber' : 'status-dot green';
   // 🔴 The label must stay SHORT. The status bar also appends the collection time and the next
   // poll ("· 방금 / ⏳ 59분 후"), so a sentence here gets ellipsised — and the first version lost
   // exactly the actionable half ("⚠ 로컬 전용 · 로그인해야 …"), which defeats the point of
   // saying anything. The consequence lives in the tooltip and in the login card right below.
-  statusText.textContent = withheld ? `⚠ ${t('status_local_only')}${body ? ` · ${body}` : ''}` : `✓ ${body}`;
+  // Withheld outranks paused when both hold: a paused user whose token also went missing needs to
+  // know a login is required, because resuming alone will not start the sync back up.
+  const holdLabel = withheld ? t('status_local_only') : paused ? t('status_sync_paused') : '';
+  statusText.textContent = holdLabel ? `⚠ ${holdLabel}${body ? ` · ${body}` : ''}` : `✓ ${body}`;
   // Cleared on the healthy path: a stale tooltip would outlive its cause, which is the same
   // latch-shaped bug this whole area exists to remove.
   statusText.title = withheld ? t('status_local_only_tip') : '';
+  // Fills the ELSE of the line above rather than rewriting it: that assignment's set-and-cleared
+  // shape is what test/local-only-status-guard.mjs pins (a tooltip that outlives its cause is the
+  // bug this area exists to remove), and the pause tooltip has to obey the same rule — so it is
+  // only ever written where that line has just cleared the slot.
+  if (!withheld && paused) statusText.title = t('status_sync_paused_tip');
   if (withheld) noteSurface('local_only_status');
 }
 
@@ -108,6 +121,9 @@ export function _updateUICore(status) {
       // not reach the server either. Claude-specific FAILURES stay hidden here (irrelevant to
       // them, #944), but "nothing is reaching the server" is not Claude-specific.
       const _w = status.serverWithheld || null;
+      // #1119 — provider-only installs pause through the same control, and nothing they collect
+      // reaches the server while it stands either.
+      const _p = status.syncPaused === true;
       // Top status shows collection freshness ("✓ 3m ago / ⏳ Nm") like the Claude
       // path; the provider name/plan goes in the "current plan" row below. Derive
       // last-collected from this org's latest usage-history point (providers don't
@@ -115,9 +131,9 @@ export function _updateUICore(status) {
       const orgPoints = (state.usageHistory || []).filter(p => p.org === provOrg.uuid);
       const lastT = orgPoints.reduce((m, p) => Math.max(m, p.t || 0), 0);
       if (lastT) {
-        paintHealthy(indicator, statusText, _w, formatTimeAgo(lastT));
+        paintHealthy(indicator, statusText, _w, formatTimeAgo(lastT), _p);
         // Countdown suppressed while withheld — see appendNextPoll's contract.
-        if (!_w) {
+        if (!_w && !_p) {
           chrome.alarms.get('claude-usage-poll', (alarm) => {
             if (alarm && alarm.scheduledTime) {
               const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
@@ -126,7 +142,7 @@ export function _updateUICore(status) {
           });
         }
       } else {
-        paintHealthy(indicator, statusText, _w, label || '');
+        paintHealthy(indicator, statusText, _w, label || '', _p);
       }
       // Surface which provider account is being tracked in the "current plan"
       // row (independent users have no Claude render to reveal it otherwise).
@@ -182,7 +198,7 @@ export function _updateUICore(status) {
 
     if (demoteOrg) {
       const label = _providerOrgLabel(demoteOrg);
-      paintHealthy(indicator, statusText, status.serverWithheld || null, label || '');
+      paintHealthy(indicator, statusText, status.serverWithheld || null, label || '', status.syncPaused === true);
       if (onboarding) onboarding.classList.add('hidden');
 
       const dismissBtn = document.getElementById('error-dismiss');
@@ -291,13 +307,14 @@ export function _updateUICore(status) {
     // user's only theory. Usage still renders below — flipping `status.success` instead would
     // skip this whole block and blank the popup for exactly the people who need it.
     const withheld = status.serverWithheld || null;
+    const paused = status.syncPaused === true;
     const modeLabel = status.fetchMode === 'cookie' ? ` (${t('cookie_mode')})` : '';
-    paintHealthy(indicator, statusText, withheld, `${formatTimeAgo(status.timestamp)}${withheld ? '' : modeLabel}`);
+    paintHealthy(indicator, statusText, withheld, `${formatTimeAgo(status.timestamp)}${withheld || paused ? '' : modeLabel}`, paused);
     // Show next collection schedule + boost status — but NOT while withheld: the countdown is a
     // promise that something will be sent, and nothing will be. "⏳ 59분 후" on a gated install
     // reads as "it will fix itself shortly", which is the opposite of what we need the user to
     // understand. Suppressing it also frees the width that was ellipsising the local-only label.
-    if (!withheld) chrome.alarms.get('claude-usage-poll', (alarm) => {
+    if (!withheld && !paused) chrome.alarms.get('claude-usage-poll', (alarm) => {
       if (alarm && alarm.scheduledTime) {
         const mins = Math.max(1, Math.round((alarm.scheduledTime - Date.now()) / 60000));
         chrome.alarms.get('claude-usage-boost', (boost) => {

@@ -184,6 +184,29 @@ const TRANSLATIONS = {
     'account_switch_confirm': '지금까지 수집된 사용량은 {0} 계정에 그대로 남습니다. 새 계정에는 전환 시점부터 쌓이며, 두 계정의 데이터는 합쳐지지 않습니다.',
     'account_switch_go': '전환하기',
     'account_switch_cancel': '취소',
+    // 귀속(dash_claim)으로 수집 계정이 바뀐 설치의 되돌리기 진입점 (#1109).
+    // 🔴 site/shared/ext-detect.js의 CT_CLAIM_TEXT와 같은 규칙을 지킨다: 「로그아웃하면 돌아간다」·
+    // 「재설치하면 돌아간다」·「계정을 연결하면 합쳐진다」는 셋 다 금지 문구다(각각 수집 영구 정지·
+    // 무질문 재귀속·별칭 해소를 부른다). 여기서 제안하는 길은 「이전 계정으로 새로 로그인」 하나뿐이고,
+    // 이미 쌓인 기록이 따라오지 않는다는 사실을 문구가 먼저 말한다.
+    'claim_switch_link': '다른 계정으로 전환',
+    // 토큰이 만료된 경우: 이 줄이 그 설치가 보여주는 유일한 것이다(reauth 위젯·로그인 CTA는 토큰의
+    // 「존재」만 보고 숨고, serverSyncWithheldReason도 만료를 정상으로 읽는다). 전환을 권하기 전에
+    // 상태부터 말한다 — 지금 아무것도 서버로 가지 않는다는 사실이 먼저다.
+    'claim_switch_link_expired': '로그인이 만료됨 — 다시 로그인',
+    'claim_switch_title': '수집 계정 전환',
+    'claim_switch_now': '지금 이 브라우저의 사용량은 {0} 계정에 쌓입니다.',
+    'claim_switch_now_expired': '이 브라우저는 {0} 계정으로 수집하도록 되어 있지만, 로그인이 만료되어 지금은 서버로 전송되지 않습니다.',
+    'claim_switch_back_known': '{0} 계정으로 로그인하면 앞으로 수집되는 사용량이 {0} 계정으로 갑니다.',
+    'claim_switch_back_unknown': '이전에 사용량이 쌓이던 계정으로 로그인하면, 앞으로 수집되는 사용량이 그 계정으로 갑니다.',
+    // 🔴 결과가 먼저, 안심은 그 다음 (#1113). 「옮겨지지 않습니다」로 끝나면 사실이지만 사용자가
+    // 실제로 겪는 일을 말하지 않는다 — 전환하고 나면 다른 계정의 대시보드 앞에 서게 되고, 거기서
+    // {0}의 기록은 사라진 것처럼 보인다. 그 문장이 먼저 온다. 「전부」처럼 범위를 넘겨짚지 않는 것도
+    // 같은 이유: snapshots 보존이 20일이라 되찾아 볼 수 있는 것은 일별 사용량 기반 화면이다.
+    'claim_switch_keep': '전환하면 {0} 계정에 쌓인 기록은 전환한 계정의 대시보드에서 보이지 않습니다. 기록이 지워지는 것은 아닙니다 — {0} 계정에 그대로 있고, {0} 계정으로 로그인하면 일별 사용량 화면에서 볼 수 있습니다.',
+    'claim_switch_hint': '이 브라우저가 로그인한 제공자 계정: {0}',
+    'claim_switch_close': '닫기',
+    'claim_switch_success': '전환했습니다 — 곧 새 계정으로 동기화됩니다.',
     // Scope-blocked variant (Phase 2 단계 5): 수집 전용(ingest) 토큰이 full 전용 기능을 호출해
     // 403 scope_insufficient를 받은 경우 — 이미 동기화는 되고 있으므로 "잠긴 기능" 관점의 문구
     'login_cta_scope_title': '이 기능은 이메일 인증이 필요합니다',
@@ -474,6 +497,22 @@ const TRANSLATIONS = {
     // === provider 수집 실패 사유 (#852) ===
     // 확장이 던지던 err_* 코드들이 어디에도 안 나와 「ChatGPT 칸이 그냥 비어 있음」으로만 보였다.
     // 문구는 원인별로 **다른 행동**을 시켜야 의미가 있다 — 로그인 / 탭 열기 / 기다리기.
+    // === 서버 전송 실패 (#1020) — 수집은 됐는데 claudetuner.com에 안 들어간 경우 ===
+    // 팝업엔 로컬 데이터가 보이지만 대시보드는 비어 있다. 할 일은 provider가 아니라 '기다리기'다.
+    // 🔴 {0} = 영향받은 provider 목록("ChatGPT · Gemini"). 없으면 두 provider가 실패했을 때
+    // 글자까지 같은 문장이 두 줄 뜨고, 각 줄의 「그만 보기」가 어느 쪽인지 알 수 없다(#1134).
+    // 웹(site/shared/provider-connect.js)은 처음부터 {0}를 넣고 있었다 — 여기만 빠져 있었다.
+    'err_send_server': '{0} 사용량은 수집됐지만 Claude Tuner 서버에 저장되지 못했습니다. 잠시 후 자동으로 다시 시도합니다.',
+    'err_send_rejected': '{0} 사용량은 수집됐지만 서버가 저장을 거부했습니다. 계속되면 문의해 주세요.',
+    'err_send_failed': '{0} 사용량은 수집됐지만 서버에 연결하지 못했습니다. 네트워크를 확인해 주세요.',
+    // The button beside each reason above. Only rendered for reasons that GOING TO THE SITE
+    // fixes — see PROVIDER_ERROR_ACTIONABLE in bg/provider-state.js.
+    'prov_err_open': '{0} 열기',
+    // 이 안내를 끄는 버튼(#1130). 🔴 "다시 알리지 않음"이 아니라 "한동안 숨김"이라고 말할 것 —
+    // 스누즈는 30일이고 수집이 성공하면 즉시 풀린다. 영구 차단으로 읽히면 실제로 고장 났을 때
+    // "껐으니 내 탓"이라고 오해하게 되고, 반대로 기간을 안 밝히면 왜 다시 떴는지 알 수 없다.
+    'prov_err_dismiss': '그만 보기',
+    'prov_err_dismiss_title': '이 안내를 30일 동안 숨깁니다. 수집이 다시 되면 자동으로 사라집니다.',
     'err_chatgpt_not_logged_in': 'ChatGPT에 로그인되어 있지 않습니다. chatgpt.com에 로그인해 주세요.',
     'err_chatgpt_auth_failed': 'ChatGPT 인증에 실패했습니다 ({0}). chatgpt.com에서 다시 로그인해 주세요.',
     'err_chatgpt_cloudflare': 'Cloudflare 보호로 차단되었습니다. chatgpt.com 탭을 열어두면 해결됩니다.',
@@ -484,7 +523,11 @@ const TRANSLATIONS = {
     'err_gemini_not_logged_in': 'Gemini에 로그인되어 있지 않습니다. gemini.google.com에 로그인해 주세요.',
     'err_gemini_auth_failed': 'Gemini 인증에 실패했습니다 ({0}). gemini.google.com에서 다시 로그인해 주세요.',
     'err_gemini_cloudflare': '보호 정책으로 차단되었습니다. gemini.google.com 탭을 열어두면 해결됩니다.',
-    'err_gemini_no_at_token': 'Gemini 인증 토큰을 읽지 못했습니다. gemini.google.com 탭을 열어두면 해결됩니다.',
+    // 🔴 이 코드에 도달했다 = **탭이 이미 열려 있다**. `isGeminiLoggedIn()`이 탭 존재만으로 통과시키고,
+    // 로그인 안 된 페이지는 200을 주지만 `SNlM0e`가 없다 ⇒ 십중팔구 「로그아웃」이지 「토큰 읽기 실패」가
+    // 아니다. 종전 문구는 "탭을 열어두면 해결됩니다"였는데, 그 탭은 이미 열려 있다 — #967과 같은
+    // 「이미 한 일을 다시 시키는」 안내였다(09-02 실측 235명).
+    'err_gemini_no_at_token': 'Gemini 로그인 상태를 확인해 주세요. 탭은 열려 있지만 로그인되어 있지 않은 것 같습니다.',
     'err_gemini_page_fetch': 'Gemini 페이지를 불러오지 못했습니다. gemini.google.com 탭을 열고 다시 시도해 주세요.',
     'err_gemini_rate_limit': 'Gemini 요청 제한에 걸렸습니다. 잠시 후 자동으로 재시도됩니다.',
     'err_gemini_session_expired': 'Gemini 세션이 만료되었습니다. gemini.google.com에 다시 로그인해 주세요.',
@@ -568,6 +611,22 @@ const TRANSLATIONS = {
     'confirm_warning_upgrade': '⚠ 확인을 누르면 요금제가 즉시 변경되고 Anthropic에서 결제가 청구됩니다. 결제와 환불은 Anthropic 정책을 따르며, 되돌리기 어려울 수 있습니다.',
     // Independent account
     'independent_signed_in_as': '로그인 계정:',
+    // ── #1119 동기화 일시중단 ──────────────────────────────────────────────────────────────
+    // 🔴 결과를 먼저, 안심은 나중에 (#1113). 그리고 이 문구가 반드시 정확히 말해야 하는 두 가지:
+    //   ① 지금까지 보낸 기록은 그대로 있다 (사용자가 「내 데이터가 지워지나?」로 오해하면 안 된다)
+    //   ② 멈춰 있는 동안의 사용량은 재개해도 채워지지 않는다 — 스냅샷은 시점 기록이고 재개는
+    //      그때의 스냅샷부터 보내므로, 그 구간은 대시보드에 빈다. 여기서 「나중에 다 올라간다」고
+    //      말하면 지키지 못할 약속이 된다.
+    // 「로그아웃」·「재설치」·「계정을 연결하면」은 쓰지 않는다: 셋 다 이 확장에서는 사용자를 지금보다
+    // 나쁜 곳으로 보내는 문장이다(site/shared/ext-detect.js CT_CLAIM_TEXT 위 주석).
+    'sync_pause_cta': '동기화 일시중단',
+    'sync_resume_cta': '동기화 재개',
+    'sync_pause_confirm': '멈추면 지금부터 수집되는 사용량이 대시보드·팀 리포트에 올라가지 않고, 멈춰 있는 동안의 사용량은 재개한 뒤에도 채워지지 않습니다. 지금까지 보낸 기록은 그대로 있고 로그인도 그대로 유지됩니다 — 「동기화 재개」를 한 번 누르면 다시 보내기 시작합니다.',
+    'sync_paused_msg': '동기화를 멈춰 두었습니다. 수집은 계속되지만 이 브라우저에만 저장되고, 멈춰 있는 동안의 사용량은 재개한 뒤에도 대시보드·팀 리포트에 채워지지 않습니다. 지금까지 보낸 기록은 그대로 있습니다.',
+    'sync_pause_go': '일시중단',
+    'sync_pause_cancel': '취소',
+    'status_sync_paused': '동기화 멈춤',
+    'status_sync_paused_tip': '수집은 계속되지만 이 브라우저에만 저장 중 — 「동기화 재개」를 누르면 다시 보냅니다. 지금까지 보낸 기록은 그대로 있습니다',
     'sign_out': '로그아웃',
   },
   en: {
@@ -741,6 +800,30 @@ const TRANSLATIONS = {
     'account_switch_confirm': 'Usage collected so far stays under {0}. The new account starts from the moment you switch, and the two are never merged.',
     'account_switch_go': 'Switch account',
     'account_switch_cancel': 'Cancel',
+    // The way back for an install whose collection was moved by a cross-label claim (#1109).
+    // 🔴 Same rule as CT_CLAIM_TEXT in site/shared/ext-detect.js: "sign out and it goes back",
+    // "reinstall and it goes back" and "link the accounts and they merge" are all BANNED — they
+    // stop collection permanently, silently re-bind to the receiver, and resolve the old account
+    // away, respectively. The only path offered here is a fresh login as the previous account, and
+    // the copy says up front that the history already recorded does not follow.
+    'claim_switch_link': 'Switch to another account',
+    // Expired token: this row is the only thing such an install shows (the re-auth widget and the
+    // login CTA both hide on the mere PRESENCE of a token, and serverSyncWithheldReason reads an
+    // expired one as healthy). State comes before the offer — nothing is reaching the server.
+    'claim_switch_link_expired': 'Login expired — sign in again',
+    'claim_switch_title': 'Switch the collecting account',
+    'claim_switch_now': 'Right now this browser\'s usage is recorded under {0}.',
+    'claim_switch_now_expired': 'This browser is set to collect for {0}, but its login has expired, so nothing is reaching the server right now.',
+    'claim_switch_back_known': 'Sign in as {0} and usage collected from now on goes to {0}.',
+    'claim_switch_back_unknown': 'Sign in as the account it used to go to, and usage collected from now on goes there.',
+    // 🔴 Consequence first, reassurance second (#1113). "is not moved" is true and useless as a
+    // description of what happens: after the switch the user is standing on a different account's
+    // dashboard, where the {0} history looks gone. Say that first. And no "all of it" — snapshots
+    // are on a 20-day retention, so what comes back is the daily-usage-backed screens.
+    'claim_switch_keep': 'If you switch, the usage recorded under {0} does not appear on the dashboard of the account you switch to. Nothing is deleted — it stays under {0}, and signing in as {0} shows it on the daily usage screens.',
+    'claim_switch_hint': 'Provider account signed in on this browser: {0}',
+    'claim_switch_close': 'Close',
+    'claim_switch_success': 'Switched — syncing to the new account will start shortly.',
     // Scope-blocked variant (Phase 2 step 5): a collect-only (ingest) token called a full-only
     // feature and got 403 scope_insufficient — sync already works, so the pitch is the locked feature
     'login_cta_scope_title': 'This feature needs email verification',
@@ -1021,6 +1104,13 @@ const TRANSLATIONS = {
     // Error messages (keys from background.js)
     'err_rate_limit': 'Claude.ai rate limited. Will retry automatically.',
     // === provider collection failure reasons (#852) ===
+    // === send failures (#1020) ===
+    'err_send_server': "{0} usage was collected but couldn't be saved to Claude Tuner. It will retry shortly.",
+    'err_send_rejected': '{0} usage was collected but the server rejected it. Please contact us if this continues.',
+    'err_send_failed': "{0} usage was collected but we couldn't reach the server. Please check your connection.",
+    'prov_err_open': 'Open {0}',
+    'prov_err_dismiss': 'Dismiss',
+    'prov_err_dismiss_title': 'Hides this notice for 30 days. It clears as soon as collection succeeds.',
     'err_chatgpt_not_logged_in': "You're not signed in to ChatGPT. Please sign in at chatgpt.com.",
     'err_chatgpt_auth_failed': 'ChatGPT authentication failed ({0}). Please sign in again at chatgpt.com.',
     'err_chatgpt_cloudflare': 'Blocked by Cloudflare protection. Keeping a chatgpt.com tab open fixes this.',
@@ -1031,7 +1121,7 @@ const TRANSLATIONS = {
     'err_gemini_not_logged_in': "You're not signed in to Gemini. Please sign in at gemini.google.com.",
     'err_gemini_auth_failed': 'Gemini authentication failed ({0}). Please sign in again at gemini.google.com.',
     'err_gemini_cloudflare': 'Blocked by protection. Keeping a gemini.google.com tab open fixes this.',
-    'err_gemini_no_at_token': "Couldn't read the Gemini auth token. Keeping a gemini.google.com tab open fixes this.",
+    'err_gemini_no_at_token': "Please check that you're signed in to Gemini — the tab is open but doesn't look signed in.",
     'err_gemini_page_fetch': "Couldn't load the Gemini page. Open a gemini.google.com tab and try again.",
     'err_gemini_rate_limit': 'Gemini rate limited. Will retry automatically.',
     'err_gemini_session_expired': 'Your Gemini session expired. Please sign in again at gemini.google.com.',
@@ -1099,6 +1189,14 @@ const TRANSLATIONS = {
     'confirm_warning_upgrade': "⚠ Confirming changes your plan immediately and Anthropic charges you right away. Billing and refunds follow Anthropic's policy and may be hard to undo.",
     // Independent account
     'independent_signed_in_as': 'Signed in as',
+    'sync_pause_cta': 'Pause sync',
+    'sync_resume_cta': 'Resume sync',
+    'sync_pause_confirm': 'While paused, usage collected from now on does not reach the dashboard or team report, and that stretch is not filled in after you resume. What you have already sent stays there, and you stay signed in — one tap on "Resume sync" starts sending again.',
+    'sync_paused_msg': 'Sync is paused. Collection keeps running but stays in this browser, and the usage from this stretch will not be filled in on the dashboard or team report after you resume. What you have already sent stays there.',
+    'sync_pause_go': 'Pause',
+    'sync_pause_cancel': 'Cancel',
+    'status_sync_paused': 'Sync paused',
+    'status_sync_paused_tip': 'Still collecting, but saved in this browser only — tap "Resume sync" to start sending again. What you have already sent stays there',
     'sign_out': 'Sign out',
   },
 };

@@ -22,7 +22,7 @@
 // stale server state, and the banner would render from it. (Codex.)
 import { getUpgradeBlock } from './upgrade-gate.js';
 import { isServerBackedOff } from './send-gate.js';
-import { serverSyncWithheldReason } from './storage.js';
+import { serverSyncWithheldReason, isServerSyncPaused } from './storage.js';
 import { getCadence, isCollectionPaused } from './cadence-config.js';
 
 /**
@@ -38,6 +38,10 @@ export async function isServerSyncStalled() {
   if (await getUpgradeBlock()) return true;   // 426 — extension too old to be accepted
   if (await isServerBackedOff()) return true; // 5xx / network — waiting out a backoff
   if (await serverSyncWithheldReason()) return true; // login-first OR token-lost — never POSTs until a login
+  // #1119 — the user paused sending. Snapshots are genuinely not reaching the server, so this
+  // answers true; what must NOT happen is the "reconnect" nudges treating a deliberate choice as a
+  // fault. Callers of this function all read it as "do not raise a connection alarm".
+  if (await isServerSyncPaused()) return true;
   // Server-driven collection pause — bg/collect.js skips the whole cycle while it stands.
   // 🔴 Via getCadence()/isCollectionPaused(), NOT a raw key read: `collectPauseUntil` lives INSIDE
   // the cadence object, so `storage.get(['collectPauseUntil'])` returns nothing and the check would

@@ -2,7 +2,8 @@ import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
 import { normalizeResetTime } from './api.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
-import { noteProviderAttempt, noteProviderSuccess, noteProviderError } from './provider-state.js';
+import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
+         noteProviderSendError, noteProviderSendOk } from './provider-state.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -379,6 +380,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     return { success: false, orgs: [] };
   }
 
+  // Per-cycle send outcome. Applied once at the end, so a later workspace's success cannot erase
+  // an earlier failure (see sendChatGPTSnapshot).
+  const sendOutcome = { failed: null, ok: 0 };
   try {
     const usage = await fetchChatGPTApi('/backend-api/wham/usage');
 
@@ -455,8 +459,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     if (gate.send) {
       // Commit only on a confirmed-successful POST so a failed send leaves the
       // gate unadvanced and the next cycle retries (no silent drop of a change).
-      const res = await sendChatGPTSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual) }).catch(e => {
+      const res = await sendChatGPTSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome }).catch(e => {
         console.warn('[Claude Tuner] ChatGPT snapshot send failed:', e.message);
+        sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
       });
       if (res) {
@@ -510,14 +515,20 @@ export async function collectChatGPT(force = false, userManual = false) {
       // even for ChatGPT-only users (must not overwrite the users row's plan). A
       // plan/pending change (or a user-manual collect) marks the POST force so the server
       // stores it rather than deduping this usage-null workspace heartbeat.
-      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true, force: shouldForceProviderPost(exGate.reason, userManual) }).catch((e) => {
+      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true, force: shouldForceProviderPost(exGate.reason, userManual), sendOutcome }).catch((e) => {
         console.warn('[Claude Tuner] ChatGPT workspace snapshot send failed:', e.message);
+        sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
       });
       if (res) await exGate.commit();
     }
 
     await noteProviderSuccess('chatgpt', email);
+    // 🔴 ANY failed POST in this cycle keeps the send axis red, even if others succeeded. A
+    // provider sends several snapshots (primary + extra workspaces); clearing per POST let a later
+    // workspace 2xx erase the primary's failure (Codex DEPLOY-BLOCKER).
+    if (sendOutcome.failed) await noteProviderSendError('chatgpt', sendOutcome.failed);
+    else if (sendOutcome.ok) await noteProviderSendOk('chatgpt');
     return { success: true, orgs: [org, ...extraOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
@@ -531,7 +542,7 @@ export async function collectChatGPT(force = false, userManual = false) {
 // Send ChatGPT snapshot to server (same /api/snapshots endpoint)
 // Uses ext_token email (Claude email) as user_email for server identity,
 // preserves ChatGPT email in provider_email for reference.
-async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false, force = false } = {}) {
+async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false, force = false, sendOutcome = null } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -612,5 +623,17 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // and ext_token rotation — critical for independent accounts whose provider
   // snapshots are their only server contact. Returns the server result on
   // success, or null on any failure (caller uses this to gate the commit).
-  return await postSnapshot(config, payload);
+  // #1020: a send that never lands is invisible otherwise — the popup keeps showing local data
+  // while the dashboard stays empty. `postSnapshot` only calls this for failures that have no
+  // other surface; everything auth/upgrade/deletion related already raises its own popup state.
+  //
+  // 🔴 The outcome is ACCUMULATED for the whole cycle, not applied per POST. One provider can send
+  // several snapshots (primary + extra workspaces); clearing on each success let a later workspace
+  // 2xx erase the primary's failure, so the user was told everything was fine while their main
+  // account never reached the server (Codex DEPLOY-BLOCKER).
+  return await postSnapshot(config, payload, (code) => {
+    if (!sendOutcome) return;
+    if (code) sendOutcome.failed = sendOutcome.failed || code;
+    else sendOutcome.ok += 1;
+  });
 }

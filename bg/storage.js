@@ -497,6 +497,49 @@ export async function serverSyncWithheldReason() {
 }
 
 
+// ── User-chosen sync pause (#1119) ────────────────────────────────────────────────────────────
+//
+// 🔴 A SEPARATE AXIS FROM serverSyncWithheldReason() ABOVE, DELIBERATELY. Folding "the user turned
+// sync off" into that function is the obvious move and it is wrong three times over:
+//   1. Every consumer reads a non-null reason as "show a login/recovery surface" — the re-auth
+//      widget (`gated`), the login CTA (`withheldMini`), bg/block-state.js (token_lost and
+//      login_first are both AUTH causes). A paused install holds a valid token; sending it to a
+//      login screen answers a question nobody asked, and would change the gates of two surfaces
+//      that exist for a different population.
+//   2. That function's first line is `if (extToken) return null` — "withheld" there means NO
+//      USABLE CREDENTIAL. A pause keeps the credential, so making it answer would invert the
+//      predicate every one of those callers was written against.
+//   3. bg/analytics.js authState() reports its values as a GA dimension, and the
+//      login_first / token_lost split is joined against series recorded before this build (#1023
+//      sizing, the Phase 2 adoption curves). A new value in that slot silently invalidates the
+//      comparison — the same hazard bg/collect.js already refuses for `collect_success`.
+//
+// 🔴 AND IT NEVER TOUCHES A CREDENTIAL. That is the whole feature. The footer control this
+// replaces removed `extToken` + `independentAccount`, and under API_KEY_INGEST_ENABLED=enforce
+// (live 2026-09-01) that is not reversible: a PROVEN_SRC token leaves `everHadProvenToken` set,
+// serverSyncWithheldReason() then answers 'token_lost' and withholds even the shared-key
+// fallback, and nothing re-mints. So pausing writes ONE boolean and resuming removes it.
+// test/sync-pause-guard.mjs pins that neither path can grow a credential write.
+export const SYNC_PAUSE_KEY = 'serverSyncPaused';
+
+/** True while the user has explicitly paused server sync. Local collection keeps running. */
+export async function isServerSyncPaused() {
+  // Array form, never `get({ k: undefined })` — Chrome drops an object-form key whose default is
+  // undefined, which is what made the login-first gate a no-op (#785/#787).
+  const { [SYNC_PAUSE_KEY]: paused } = await chrome.storage.local.get([SYNC_PAUSE_KEY]);
+  return paused === true;
+}
+
+/**
+ * Turn the pause on or off. Resume is a KEY REMOVAL and nothing else — no re-login, no re-mint,
+ * no token write — which is what makes "one click to undo" true rather than aspirational.
+ */
+export async function setServerSyncPaused(paused) {
+  if (paused === true) await chrome.storage.local.set({ [SYNC_PAUSE_KEY]: true });
+  else await chrome.storage.local.remove(SYNC_PAUSE_KEY);
+}
+
+
 /**
  * Build auth headers for server requests.
  * Uses ext_token (Bearer) if available, otherwise falls back to shared API key.
@@ -850,7 +893,14 @@ export async function simpleAuthedPost(config, url, payload) {
  *
  * Returns the parsed result object on success, or null on any error/auth path.
  */
-export async function postSnapshot(config, payload) {
+/**
+ * @param onSendFailure optional (code) => void, called ONLY for failures no other surface reports.
+ *
+ * 🔴 A callback rather than an import: `provider-state.js` imports `analytics.js`, which imports
+ * THIS file — recording from here directly would close that cycle. The caller owns the recording,
+ * this function owns knowing which failures are already spoken for (#1020).
+ */
+export async function postSnapshot(config, payload, onSendFailure) {
   if (!config.serverUrl) return null;
   // login-first / token-lost gate (ChatGPT/Gemini path — Claude is gated in collect.js). An
   // install that has not authenticated, OR that HELD a token and lost it, shows usage locally (the
@@ -863,6 +913,28 @@ export async function postSnapshot(config, payload) {
     await chrome.storage.local.set({ showLoginPrompt: true });
     return null;
   }
+  // 🔴 #1119 — THE USER'S OWN PAUSE, AND IT BELONGS HERE, NOT IN THE COLLECTORS. bg/collect.js
+  // gates the CLAUDE POST inside collectAndSend, but background.js runs mergeChatGPTOrgs /
+  // mergeGeminiOrgs afterwards and they reach the server through this function — so a pause that
+  // lived only in collect.js stopped Claude while ChatGPT and Gemini usage kept flowing, with the
+  // popup saying "동기화 멈춤". Not a partial feature: a screen telling the user something false.
+  // (Codex DEPLOY-BLOCKER.)
+  //
+  // This is the single chokepoint for every ChatGPT/Gemini POST — the same reason the two backoff
+  // checks below live here rather than in each collector — so a FOURTH provider is covered on the
+  // day it is written. Copying the condition into each collector is how this was missed once.
+  //
+  // 🔴 AFTER the withheld gate, never before: that gate raises `showLoginPrompt`, and a paused
+  // install that ALSO lost its token still needs the login CTA — resuming alone would not start
+  // its sync back up. Ordering it this way leaves the withheld path byte-for-byte unchanged.
+  //
+  // 🔴 And it does NOT touch `showLoginPrompt` itself. A paused user is logged in; raising the CTA
+  // at them answers a question nobody asked.
+  //
+  // Returning null (rather than calling onSendFailure) is what the withheld and backoff gates
+  // already do: the caller has appended local history, so usage still renders — only the send
+  // stops — and the cycle is not reported as a send FAILURE, which it is not.
+  if (await isServerSyncPaused()) return null;
   // Both persistent-block backoffs. This is the single chokepoint for every ChatGPT/Gemini POST,
   // so one check each covers both providers and any future caller. Like the login-first gate
   // above, the caller has already appended local history — usage still renders, only the send
@@ -927,11 +999,16 @@ export async function postSnapshot(config, payload) {
     // 5xx → server/D1 overload: extend the shared backoff. (401/403/410 returned
     // above are persistent per-user issues, not server health — they don't back off.)
     if (response.status >= 500) await noteServerFailure();
+    // Everything that returned earlier has its own popup state (login prompt, authBlocked,
+    // needsFullLogin/needsReauth, account_deleted, the 426 upgrade block). THIS branch is the one
+    // that only ever produced the console line above — the silence #1020 is about.
+    if (onSendFailure) onSendFailure(response.status >= 500 ? 'err_send_server' : 'err_send_rejected');
     return null;
   }
 
   const result = await response.json().catch(() => ({}));
   await noteServerSuccess(); // confirmed-healthy POST clears any backoff
+  if (onSendFailure) onSendFailure(null);   // accepted → the caller clears its send error
   // Drop the CTA flag once auth demonstrably works again — but ONLY on evidence of a
   // TOKEN, not on any 2xx. A plain accepted api_key POST does not prove recovery: when the
   // [C1] guard's D1 read times out it fails open on ingest (extTokenAllowed=false, NO 401,

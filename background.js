@@ -1,7 +1,7 @@
 // === ES Module Imports ===
 import { sendGAEvent, pinnedState, authState } from './bg/analytics.js';
 import {
-  ALARM_NAME, ALARM_EXPIRE_PREFIX, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
+  ALARM_NAME, ALARM_EXPIRE_PREFIX, RESET_ALARM_KEYS, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   LOCAL_ACTIVE_INTERVAL_MINUTES, LOCAL_BACKGROUND_INTERVAL_MINUTES,
   VISIBILITY_THROTTLE_MS, POPUP_COLLECT_THROTTLE_MS,
@@ -13,8 +13,8 @@ import {
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { diurnalProject7dAdaptive } from './ui/diurnal.js';
 import { bt } from './bg/i18n.js';
-import { extTokenEmail, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, reconcileProviderRecs, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
+import { getConfig, getLastStatus, setStatus, getUsageHistory, appendUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, reconcileProviderRecs, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
@@ -25,12 +25,13 @@ import {
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
-import { collectAndSend as _collectAndSend, getLastActiveOrgId } from './bg/collect.js';
+import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
-import { getProviderState, displayableProviderError } from './bg/provider-state.js';
+import { getProviderState, displayableProviderError, snoozeProviderError } from './bg/provider-state.js';
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
+import { maybeSendInstallBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -484,7 +485,22 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // it is no longer "a fast force_collect leaks an api_key POST", it is "a fast force_collect is
     // needlessly withheld and shows a login CTA to someone we were about to grandfather". Writing
     // first keeps both failure modes out of reach.
-    await chrome.storage.local.set({ serverSyncGrandfathered: false });
+    // `installFirstSeenAt` rides the SAME set() as the gate flag rather than taking a write of its
+    // own — this branch's whole ordering argument is that nothing awaited comes between the event
+    // and that first write, and a second await would reopen the window the comment above closes.
+    //
+    // 🔴 NEVER BACKFILL THIS. It is written HERE, in the 'install' branch, and nowhere else — not
+    // on 'update', not on startup, not lazily at first read. The obvious "improvement" is to stamp
+    // installs that have no value the first time they run a build that has this key, and that
+    // would date every one of the ~1,000 installs already gated to whenever they adopted this
+    // release: a retention curve manufactured out of the rollout curve, wrong in the direction
+    // that looks right. An ABSENT value is the honest answer and a load-bearing one — a NULL
+    // `first_seen_at` in unverified_install_beacons is precisely what lets an analyst separate
+    // pre-existing installs from genuinely new ones instead of averaging the two cohorts (#1122).
+    await chrome.storage.local.set({
+      serverSyncGrandfathered: false,
+      installFirstSeenAt: new Date().toISOString(),
+    });
     // Only force the welcome page's language when the user has *explicitly* set
     // the extension language. On 'auto' (the default), pass no param and let the
     // welcome page self-detect via navigator.language — the same signal the popup
@@ -665,6 +681,31 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         sendResponse({ success: false, error: 'identity_unknown' });
         return;
       }
+      // #1109 — REMEMBER WHAT THIS INSTALL IS BEING MOVED AWAY FROM, BEFORE THE MOVE.
+      //
+      // `dash_claim` is the only src that means "the labels differed and a human confirmed the
+      // take" (worker/src/utils/ext-token.ts), i.e. the one handoff that re-points a working
+      // install at a DIFFERENT account. The popup's switch-back entry point has to name the account
+      // it would return to, and after the next four lines nothing in storage still knows it: the
+      // token is replaced here and `independentAccount` is overwritten with the receiver below.
+      // So it is recorded first, or not at all.
+      //
+      // Its own resolveSyncIdentity() call rather than `local`: that one is deliberately blanked
+      // for an identity_verified handoff — which is exactly the confirmed-claim case — so reading
+      // it would record nothing for the population this exists for. Kept inside the `dash_claim`
+      // branch so the ordinary upgrade path pays for no extra storage read.
+      if (extTokenSrc(message.ext_token) === 'dash_claim') {
+        const prev = (await resolveSyncIdentity()).email;
+        const receiver = String(message.email || extTokenEmail(message.ext_token) || '');
+        // Written even when we cannot answer (removed), never left stale: a later claim that
+        // resolves no previous identity must not inherit an older claim's answer and put a wrong
+        // address in front of the user.
+        if (prev && receiver && prev.toLowerCase() !== receiver.toLowerCase()) {
+          await chrome.storage.local.set({ claimPrevAccount: { email: prev, at: Date.now() } });
+        } else {
+          await chrome.storage.local.remove('claimPrevAccount');
+        }
+      }
       // Canonical writer, not a raw set(): it is the one choke point that ends a token-withheld
       // retry episode (clears TOKEN_RETRY_KEY) and refuses a full→ingest downgrade. Its own comment
       // already claims to cover "dashboard recovery" — this path was quietly bypassing it.
@@ -791,9 +832,13 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       const { collectChatGPT: cgEnabled = true, collectGemini: gmEnabled = true } =
         await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
       const pstate = await getProviderState();
+      // Same rule as the popup (#1136): a paused install reports no SEND failure, because it was
+      // asked to stop sending. This is what the dashboard reads, so both surfaces stay in step —
+      // otherwise the popup would go quiet while claudetuner.com kept accusing the save path.
+      const syncPaused = await isServerSyncPaused();
       const provInfo = (key, hasPermission, enabled) => {
         const st = pstate[key] || {};
-        const err = displayableProviderError(st);
+        const err = displayableProviderError(st, undefined, syncPaused);
         return {
           collected: collectedBy(key),
           hasPermission,
@@ -1003,7 +1048,36 @@ async function setupAlarm() {
   await updatePollAlarm();
   await scheduleWeeklyReport();
   await scheduleRecFetch();
+  await scheduleInstallBeacon();
   await updateAdFlushAlarm(); // periodic ad impression/click counter flush (design §5.4)
+}
+
+// Gated-install beacon alarm (#1122) — twice a day. Only a login-first / token-lost install ever
+// sends anything; maybeSendInstallBeacon() returns immediately for everyone else, so the alarm can
+// be scheduled unconditionally for the whole fleet.
+const ALARM_INSTALL_BEACON = 'installBeacon';
+const INSTALL_BEACON_PERIOD_MINUTES = 720; // 12h
+
+// 🔴 A PER-INSTALL FIXED OFFSET, hashed from install_id — not scheduleRecFetch's Math.random().
+// The two alarms answer different problems. The rec fetch only needs its FIRST fire de-synced, and
+// once created it never reschedules, so a random phase is enough. This alarm is recreated whenever
+// the alarm is missing (a fresh install, a CWS update, storage loss), and a fresh random draw each
+// time re-clusters the fleet around the update window it is supposed to spread away from. A hash
+// of the install id gives each install one permanent slot in the 12h period, stable across every
+// service-worker restart.
+async function scheduleInstallBeacon() {
+  const existing = await chrome.alarms.get(ALARM_INSTALL_BEACON);
+  if (existing) return; // already scheduled — recreating would reset its period
+  const installId = await getOrCreateInstallId().catch(() => null);
+  if (!installId) return; // no id → nothing to key the offset (or the payload) on; retry next start
+  // +1 for the same reason TOKEN_RETRY_BASE_MS is a whole minute (bg/constants.js): Chrome clamps
+  // sub-minute alarm delays, so an offset of 0 would not mean "now" anyway.
+  const offsetMin = 1 + beaconJitterMinutes(installId, INSTALL_BEACON_PERIOD_MINUTES);
+  chrome.alarms.create(ALARM_INSTALL_BEACON, {
+    delayInMinutes: offsetMin,
+    periodInMinutes: INSTALL_BEACON_PERIOD_MINUTES,
+  });
+  console.log(`[install-beacon] Alarm scheduled (offset ${offsetMin}m, then every 12h)`);
 }
 
 // Plan recommendation fetch alarm (~6h). Recs now arrive via GET /api/recommendations rather than
@@ -1408,6 +1482,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await fetchRecommendations(config);
     return;
   }
+  // Gated-install beacon (#1122, twice a day). Self-gating: it returns immediately unless server
+  // sync is being withheld, so this dispatch costs one storage read on an install that syncs
+  // normally. Never throws — the module swallows its own failures.
+  if (alarm.name === ALARM_INSTALL_BEACON) {
+    // The module swallows its own send failures; this .catch() covers the one thing it cannot —
+    // its first statement is the gate read (that ordering is the safety property, so it cannot sit
+    // inside a try), and a rejected storage read there would otherwise reject this whole listener.
+    await maybeSendInstallBeacon().catch((e) => console.warn('[install-beacon]', e && e.message));
+    return;
+  }
   // Ad counter flush (flushAdCounters already serializes through _adEnqueue).
   // Notification counters ride the SAME alarm rather than adding one of their own: both are
   // low-value-per-row telemetry, and a second alarm would double the wake-ups to say half as
@@ -1420,15 +1504,36 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // Handle expire alarms (5min-before notification, 2min/1min/at-reset collection, post-reset notification)
   if (alarm.name.startsWith(ALARM_EXPIRE_PREFIX)) {
     console.log(`[Claude Tuner] Expire alarm fired: ${alarm.name}`);
+    // Which limit this alarm is about — `claude-expire-<key>-<suffix>` (#1132).
+    //
+    // 🔴 It goes in the notification ID. Chrome REPLACES a notification whose id already exists,
+    // so a stable id is the whole mechanism by which yesterday's "5h limit resetting soon" makes
+    // way for today's. The previous `reset-soon-${Date.now()}` was unique every time, so nothing
+    // ever replaced anything: 5h resets ~4.8×/day and each one fires notify5 + after, which is
+    // ~70 undismissed toasts a week piling up in the OS notification centre. Measured over the 14
+    // days to 2026-09-03: reset-soon 133,074 sends + reset-done 126,949 = 82.7% of ALL our
+    // notifications, earning 808 clicks between them (0.31%).
+    //
+    // Per KEY, not per window: `7d`, `design` and `sonnet` are three different limits (and today
+    // share one sentence — see #1133), so collapsing them onto one id would let one silently
+    // replace another. Same key replacing itself is the only substitution that is always true.
+    // 🔴 WHITELISTED AGAINST THE SCHEDULER'S OWN LIST, not merely shape-checked. A shape check
+    // (`/^[a-z0-9]{1,12}$/`) accepts anything that looks like a key, so a stale `claude-expire-team-
+    // after` alarm from another build would mint `reset-done-team` and show 7d-worded copy for a
+    // limit this build cannot name (Codex FOLLOW-UP). An unknown key means we do not know which
+    // limit it is about, and a notification we cannot word correctly is worse than none — the
+    // collection below still runs.
+    const rawKey = alarm.name.slice(ALARM_EXPIRE_PREFIX.length).replace(/-(?:notify5|pre1|after)$/, '');
+    const resetKey = RESET_ALARM_KEYS.includes(rawKey) ? rawKey : null;
 
     // Notification 5 minutes before reset
     if (alarm.name.includes('-notify5')) {
       const { notifyResetSoon = true } = await chrome.storage.sync.get({ notifyResetSoon: true });
-      if (notifyResetSoon) {
-        const is5h = alarm.name.includes('-5h-');
-        const win = await bt(is5h ? 'win_5h' : 'win_7d');
+      const soonWin = resetKey ? await resolveResetWindow(resetKey) : null;
+      if (notifyResetSoon && soonWin) {
+        const win = soonWin.label;
         const ctxLabel = await getResetNotifContext();
-        const usage = await getCurrentUsageForWindow(is5h ? '5h' : '7d');
+        const usage = soonWin.util;
         const prefix = usage != null ? await bt('reset_soon_usage_prefix', usage) : '';
         const opts = {
           type: 'basic',
@@ -1439,7 +1544,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           priority: 1,
         };
         if (ctxLabel) opts.contextMessage = ctxLabel;
-        createCountedNotification(`reset-soon-${Date.now()}`, opts, 'reset-soon');
+        createCountedNotification(`reset-soon-${resetKey}`, opts, 'reset-soon');
         logNotification('reset-soon');
       }
       return;
@@ -1448,8 +1553,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // Notification right after reset
     if (alarm.name.includes('-after')) {
       const { notifyResetDone = true } = await chrome.storage.sync.get({ notifyResetDone: true });
-      if (notifyResetDone) {
-        const win = await bt(alarm.name.includes('-5h-') ? 'win_5h' : 'win_7d');
+      const doneWin = resetKey ? await resolveResetWindow(resetKey) : null;
+      if (notifyResetDone && doneWin) {
+        const win = doneWin.label;
         const ctxLabel = await getResetNotifContext();
         const opts = {
           type: 'basic',
@@ -1460,7 +1566,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           priority: 1,
         };
         if (ctxLabel) opts.contextMessage = ctxLabel;
-        createCountedNotification(`reset-done-${Date.now()}`, opts, 'reset-done');
+        createCountedNotification(`reset-done-${resetKey}`, opts, 'reset-done');
         logNotification('reset-done');
       }
     }
@@ -1486,6 +1592,42 @@ async function buildResetContextLabel() {
 async function getResetNotifContext() {
   const { _resetNotifContext = null } = await chrome.storage.local.get('_resetNotifContext');
   return _resetNotifContext;
+}
+
+/**
+ * What a reset alarm key is ABOUT, as a label and a percentage (#1134).
+ *
+ * `5h`/`7d` are fixed windows and their wording is static. `design`/`sonnet` are slots holding
+ * whichever model-scoped weekly limits the account has, so their label lives in the snapshot and
+ * is stashed by scheduleExpireAlarms(). A scoped key with nothing stashed returns null — the
+ * caller must then say NOTHING rather than fall back to the 7-day wording, which is the
+ * indistinguishable message this exists to remove.
+ *
+ * @returns {{label: string, util: number|null}|null}
+ */
+async function resolveResetWindow(key) {
+  if (key === '5h' || key === '7d') {
+    return {
+      label: await bt(key === '5h' ? 'win_5h' : 'win_7d'),
+      util: await getCurrentUsageForWindow(key),
+    };
+  }
+  const { _resetNotifScoped = {} } = await chrome.storage.local.get({ _resetNotifScoped: {} });
+  const slot = _resetNotifScoped && typeof _resetNotifScoped === 'object' ? _resetNotifScoped[key] : null;
+  // 🔴 STORAGE IS NOT A TYPE SYSTEM (the rule the auth ladder already states). The writer stores a
+  // trimmed string, but this value crosses a persistence boundary that outlives the build that
+  // wrote it: a shape change in either direction — an older worker reading a newer stash mid-
+  // update, or the reverse — lands here. A truthiness check would then put whatever it found into
+  // the title, so `{ model: 123 }` renders "123 weekly" and an object renders "[object Object]
+  // weekly" (Codex FOLLOW-UP). Anything that is not a usable name means the same thing an absent
+  // slot means: we cannot say which limit this is, so we say nothing.
+  const model = slot && typeof slot === 'object' && typeof slot.model === 'string' ? slot.model.trim() : '';
+  if (!model) return null;
+  // "Opus 주간" / "Opus weekly" — the model name alone would read as a model, not a limit window.
+  return {
+    label: await bt('win_scoped', model),
+    util: (typeof slot.util === 'number' && isFinite(slot.util)) ? Math.round(slot.util) : null,
+  };
 }
 
 // Read current utilization (%) for the primary org and given window ('5h' | '7d').
@@ -1589,7 +1731,34 @@ async function scheduleExpireAlarms(snapshot) {
 
   // Stash provider/org context so the alarm-fire notification can show it.
   const ctxLabel = await buildResetContextLabel();
-  await chrome.storage.local.set({ _resetNotifContext: ctxLabel || null });
+  // ...and WHICH LIMIT each scoped key is, which only the snapshot knows (#1134).
+  //
+  // 🔴 `design` and `sonnet` are not windows, they are SLOTS. resolveScopedWeeklySlots() assigns
+  // whichever model-scoped weekly limits the account has (`limits[].scope.model.display_name`) to
+  // two fixed slots, so the same key means "Opus" on one account and "Fable" on another — and can
+  // change under one account. The alarm handler sees only the alarm NAME, so without this it fell
+  // back to the generic 7-day wording and printed the SAME sentence for `7d`, `design` and
+  // `sonnet`: three different limits, one indistinguishable message.
+  //
+  // The utilisation rides along for the same reason. `getCurrentUsageForWindow()` reads the
+  // primary org's `d7`, which is the OVERALL weekly figure — so a notification about the Opus
+  // limit opened with the account's total weekly percentage. Wrong number, stated confidently.
+  //
+  // Written from the same snapshot that scheduled the alarms, so the label and the reset time it
+  // describes always come from one observation.
+  const scoped = {};
+  for (const [key, slot] of [['design', snapshot.seven_day_omelette], ['sonnet', snapshot.seven_day_sonnet]]) {
+    // No model name → we cannot say which limit this is. Recorded as absent, and the notification
+    // is skipped rather than worded generically: an unnameable limit's card is indistinguishable
+    // from the real 7-day one, which is the defect, not a lesser version of it. Collection alarms
+    // are unaffected — only the two notification alarms go quiet.
+    if (!slot || typeof slot.model !== 'string' || !slot.model.trim()) continue;
+    scoped[key] = {
+      model: slot.model.trim().slice(0, 40),
+      util: (typeof slot.utilization === 'number' && isFinite(slot.utilization)) ? slot.utilization : null,
+    };
+  }
+  await chrome.storage.local.set({ _resetNotifContext: ctxLabel || null, _resetNotifScoped: scoped });
 }
 
 // === Visibility + Popup/Panel open handlers ===
@@ -1644,6 +1813,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     markRecNoticeSeenFromStatus()
       .then(() => collectAndSend({ skipServer: true }))
       .then((result) => sendResponse(result));
+    return true;
+  }
+  // #1119 — the popup just paused or resumed server sync. Tell the server so its "collection
+  // stopped" reminders (and the 6h disconnection mail, whose 3rd escalation goes to the ORG ADMIN)
+  // stop treating a deliberate choice as a fault. Fire-and-forget: the hourly heartbeat carries the
+  // same live value, so a lost report costs at most one cycle.
+  if (message.type === 'SYNC_PAUSE_CHANGED') {
+    reportSyncPauseState().then((ok) => sendResponse({ ok }));
+    return true;
+  }
+  // The popup's × on a provider failure banner (#1130).
+  //
+  // 🔴 The WRITE happens here, not in the popup, even though the popup could import the same
+  // function. `patch()` in bg/provider-state.js serializes read-modify-write on one storage key
+  // with a module-level promise chain, and that is only sufficient because there is exactly ONE
+  // writer — the service worker. A popup writing directly would be a second, uncoordinated writer
+  // against a collector that patches the same key on every alarm tick: whichever side read first
+  // would clobber the other's field, and the field most likely to be lost is the dismissal the
+  // user just clicked — the banner would simply come back.
+  if (message.type === 'SNOOZE_PROVIDER_ERROR') {
+    snoozeProviderError(message.provider, message.code)
+      .then((next) => sendResponse({ ok: !!next }))
+      .catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (message.type === 'MANUAL_COLLECT') {

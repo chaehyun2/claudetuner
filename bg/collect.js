@@ -21,7 +21,7 @@ import { upsertClaudeOrg } from './org-merge.js';
 import { noteProviderSuccess } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -368,6 +368,99 @@ export async function getLastActiveOrgId() {
 // overlap. Each caller still gets its OWN run's result; a throw doesn't break the
 // chain (next run proceeds either way).
 let _collectChain = Promise.resolve();
+// ── POST /api/heartbeat — ONE sender, two callers (#1119) ─────────────────────────────────────
+//
+// Extracted rather than copied: the failure-path heartbeat and the pause/resume edge report build
+// the same body against the same endpoint, and a second hand-maintained copy is precisely how the
+// three `authedFetch` variants drifted (#745). The body is the contract the server reads
+// (index.ts POST /api/heartbeat), so it has exactly one construction site.
+//
+// 🔴 `sync_paused` IS ALWAYS SENT, on every heartbeat, and that is the safety property the server
+// migration leans on. The server writes `sync_paused = COALESCE(?, sync_paused)`, so each heartbeat
+// overwrites the stored flag with the client's LIVE state. Since the reminder crons all require a
+// recent `last_heartbeat_at`, and this is the only request that writes it, an account can only be
+// reminded if it heartbeated recently — i.e. the flag the crons read is never older than the last
+// heartbeat. A resumed install therefore cannot be silenced: the failure that would trigger the
+// reminder is what produces the heartbeat that clears the flag.
+//
+// Returns true only on a 2xx. Never throws.
+// `error_code` of the pause/resume edge report. 🔴 SHARED CONTRACT WITH THE WORKER
+// (index.ts SYNC_PAUSE_HEARTBEAT_CODE): the server excludes a heartbeat carrying this code from
+// the 6h "연결이 끊겼습니다" decision, because this request is a STATE NOTIFICATION and says
+// nothing about whether collection works. Changing it on one side only re-opens the mail.
+const SYNC_PAUSE_HEARTBEAT_CODE = 'sync_pause_change';
+
+async function postHeartbeat(cfg, { email, errorCode, extVersion, syncPaused }) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), HEARTBEAT_TIMEOUT_MS);
+  try {
+    const resp = await authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, error_code: errorCode, ext_version: extVersion, sync_paused: syncPaused }),
+      signal: ac.signal,
+    });
+    return !!resp?.ok;
+  } catch (_) {
+    // Network error / abort — false, which is what the caller's backoff is for.
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Tell the server the user just paused or resumed server sync (#1119).
+ *
+ * WHY AN EDGE REPORT AT ALL, given every heartbeat already carries the flag: the heartbeat only
+ * fires from the FAILURE path of collectAndSend, so a paused install that keeps collecting fine
+ * would never report the pause. That is mostly harmless — no heartbeat also means the reminder
+ * crons cannot see it — but it leaves one real hole: an install that pauses shortly after a run of
+ * collection failures still has a fresh `last_heartbeat_at` and a stale `sync_paused = 0`, and can
+ * be reminded before its next failure would have set the flag. This closes it.
+ *
+ * 🔴 SAME SEND GATE AS THE HEARTBEAT — `accountCache?.email`, via the same resolver. Widening it to
+ * `independentAccount` would make installs that stay silent today start heartbeating, and their
+ * requests go out on the SHARED API KEY, which enlarges the `hb_gate` shadow population feeding the
+ * pending HEARTBEAT_IDENTITY_ENFORCE decision (#758). Fixing one thing must not redefine the
+ * population another decision rests on. (Same argument as the failure-path comment below.)
+ *
+ * 🔴 DOES NOT TOUCH `lastHeartbeatAt`. This is an EXTRA report, not one of the hourly ones —
+ * stamping the throttle here would let a pause click postpone a real failure heartbeat by an hour.
+ *
+ * Best-effort: a lost edge report is not a failure mode, because the next hourly heartbeat carries
+ * the same live value.
+ */
+export async function reportSyncPauseState() {
+  try {
+    const cfg = await getConfig();
+    if (!cfg.serverUrl || !cfg.apiKey) return false;
+    const { accountCache } = await chrome.storage.local.get('accountCache');
+    // 🔴 THE SAME EXPRESSION SHAPE AS THE FAILURE-PATH HEARTBEAT, not merely the same intent:
+    // test/ingest-identity-guard.mjs checks every heartbeat identity site for the gate-then-resolve
+    // ternary (#834 + the Codex population-widening DEPLOY-BLOCKER), and two spellings of one rule
+    // is how a guard ends up checking only the site it happened to find first.
+    const hbEmail = accountCache?.email
+      ? await resolveIngestIdentity(accountCache.email, await readLinkedCanonical(accountCache.email))
+      : null;
+    if (!hbEmail) return false;
+    return await postHeartbeat(cfg, {
+      email: hbEmail,
+      // Not an error — this report exists to carry `sync_paused`. It doubles as the marker the
+      // SERVER uses to keep this heartbeat out of the disconnection-mail decision (worker
+      // index.ts SYNC_PAUSE_HEARTBEAT_CODE — the two literals are one contract, like
+      // `code: 'ext_token_invalid'`). It lands in `last_error_code`, which is honest for a paused
+      // install ("quiet because the user paused") and is cleared by the next successful ingest
+      // (snapshot-service.ts sets it to NULL).
+      errorCode: SYNC_PAUSE_HEARTBEAT_CODE,
+      extVersion: chrome.runtime.getManifest().version,
+      syncPaused: await isServerSyncPaused(),
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
 export function collectAndSend(opts = {}) {
   const run = () => collectAndSendImpl(opts);
   const p = _collectChain.then(run, run);
@@ -890,10 +983,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     const withheldReason = await serverSyncWithheldReason();
     const blockServerNewUser = !!withheldReason;
     if (blockServerNewUser) await chrome.storage.local.set({ showLoginPrompt: true });
+    // #1119 — the user's OWN choice to stop sending, read from its own key (bg/storage.js) and
+    // never from the gate above: they hold a valid token, so `showLoginPrompt` must stay untouched
+    // or a pause would raise a login CTA at someone who is already logged in.
+    const userPaused = await isServerSyncPaused();
 
-    // 4. Send to server (local save only when skipServer/boost, or gated new user)
-    if (skipServer || blockServerNewUser) {
-      console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? `login required for server sync: ${withheldReason}` : 'boost mode'})`);
+    // 4. Send to server (local save only when skipServer/boost, gated new user, or user-paused)
+    if (skipServer || blockServerNewUser || userPaused) {
+      console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? `login required for server sync: ${withheldReason}` : userPaused ? 'user paused server sync' : 'boost mode'})`);
+      // Hoisted so the GA event below reports the SAME fetch mode the status records, without a
+      // second chrome.tabs.query on a path that runs on every alarm tick.
+      const withheldFetchMode = (await chrome.tabs.query({ url: 'https://claude.ai/*' })).length > 0 ? 'tab' : 'cookie';
       await setStatus({
         success: true,
         // 🔴 The COLLECTION succeeded; the SERVER SYNC did not. Recording only `success: true`
@@ -905,12 +1005,51 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // gate. setStatus REPLACES lastStatus, so a later synced collect drops this field —
         // it can never latch.
         serverWithheld: withheldReason || null,
+        // #1119 — a DIFFERENT fact from serverWithheld: this collect reached the server's door and
+        // was held back by the user, not by a missing credential. Written on the same replace-only
+        // status (setStatus REPLACES lastStatus) so it can never latch past its cause, and derived
+        // from the key rather than hardcoded so boost mode stays unflagged, exactly as the field
+        // above does.
+        syncPaused: userPaused,
         timestamp: Date.now(),
         lastSuccessTimestamp: Date.now(),
         snapshot: snapshot,
         recommendation: (await getLastStatus())?.recommendation || null,
-        fetchMode: (await chrome.tabs.query({ url: 'https://claude.ai/*' })).length > 0 ? 'tab' : 'cookie',
+        fetchMode: withheldFetchMode,
       });
+      // This branch RETURNS below, so it never reaches the `collect_success` event at the end of
+      // this function — which is why the gated population's collection was unobservable: we knew
+      // HOW MANY installs were gated (extension_loaded + auth) but nothing about whether they
+      // were actually collecting. This event is the only report they ever file.
+      //
+      // 🔴 A SEPARATE event name, not `collect_success` with a flag. Widening collect_success to
+      // cover withheld collects would move ~13% of the install base into a metric that has been
+      // read as "synced collects" everywhere it has ever been quoted (#1023 sizing, the Phase 2
+      // adoption curves), silently invalidating every comparison against its own history.
+      //
+      // Gated on blockServerNewUser, NOT on the shared `if` above: boost mode (`skipServer`) is a
+      // deliberate local-only collect, not a gate, and folding it in would inflate the population
+      // this exists to size — the same distinction the serverWithheld field above already makes.
+      //
+      // `reason` reuses the custom dimension already registered for extension_installed, so the
+      // login_first / token_lost split is queryable without a GA4 schema change.
+      //
+      // 🔴 POSITION IS LOAD-BEARING: sendGAEvent is fire-and-forget (no await, errors swallowed),
+      // and an in-flight fetch does not keep an MV3 service worker alive. Sitting here, several
+      // awaited storage operations still follow and hold the worker up while the beacon flushes.
+      // Moved down next to the `return` — which reads tidier — it would be dropped whenever the
+      // worker idles out first, i.e. it would UNDERCOUNT exactly the population it exists to
+      // count. `collect_success` gets away with fire-and-forget because ~400 lines follow it.
+      if (blockServerNewUser) {
+        sendGAEvent('collect_withheld', { reason: withheldReason, plan: snapshot.plan, fetch_mode: withheldFetchMode });
+      } else if (userPaused) {
+        // 🔴 ITS OWN EVENT NAME, for the reason the block above spells out: `collect_withheld` is
+        // read as "installs that CANNOT sync" everywhere it has been quoted, and a user who chose
+        // this is a different population with a different remedy. Same reporting position (several
+        // awaited storage writes still follow) so the fire-and-forget beacon flushes before the
+        // MV3 worker idles out.
+        sendGAEvent('collect_paused', { plan: snapshot.plan, fetch_mode: withheldFetchMode });
+      }
       // Keep collectedOrgs fresh so sidebar/input get this collection
       // (storage.onChanged on collectedOrgs triggers pushSidebarUsage).
       const { collectedOrgs: prevOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
@@ -1685,6 +1824,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // logging out of claude.ai turned "⚠ 로컬 전용" back into "✓ Gemini Work".
       // "Is my data reaching the server?" does not become No-and-then-Yes because a fetch failed.
       serverWithheld: await serverSyncWithheldReason(),
+      // Same argument, same fix: the pause is independent of whether THIS collection worked, so a
+      // failed collect must not write a status that reads "not paused".
+      syncPaused: await isServerSyncPaused(),
     });
 
     // On collection failure: show error badge + check collect-fail notification
@@ -1747,21 +1889,14 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // See bg/heartbeat.js for why losing these specifically biases the numbers one way.
           let delivered = false;
           if (hbEmail) {
-            const ac = new AbortController();
-            const timer = setTimeout(() => ac.abort(), HEARTBEAT_TIMEOUT_MS);
-            try {
-              const resp = await authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email: hbEmail, error_code: errorMsg.split(':')[0].slice(0, 50), ext_version: ver }),
-                signal: ac.signal,
-              });
-              delivered = !!resp?.ok;
-            } catch (_) {
-              // Network error / abort — delivered stays false, which is the whole point.
-            } finally {
-              clearTimeout(timer);
-            }
+            delivered = await postHeartbeat(cfg, {
+              email: hbEmail,
+              errorCode: errorMsg.split(':')[0].slice(0, 50),
+              extVersion: ver,
+              // #1119 — the live pause state on EVERY heartbeat. See postHeartbeat's contract for
+              // why this, and not the edge report, is what makes a stale server flag impossible.
+              syncPaused: await isServerSyncPaused(),
+            });
           }
           if (delivered) {
             await chrome.storage.local.set({ lastHeartbeatAt: Date.now() });

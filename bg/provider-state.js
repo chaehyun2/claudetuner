@@ -28,6 +28,7 @@
 // ordinary "signed out of ChatGPT" case invisible (Codex review of the plan, #852).
 
 import { sendGAEvent } from './analytics.js';
+import { PROVIDER_LABELS, PROVIDER_SITE_URLS } from './constants.js';
 
 const KEY = 'providerCollectionState';
 
@@ -36,11 +37,41 @@ const KEY = 'providerCollectionState';
 // collected at all, e.g. the setting was switched off while it was failing.)
 export const PROVIDER_ERROR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// How long a DISMISSED reason stays quiet.
+//
+// WHY A DISMISSAL EXISTS AT ALL (#1130)
+// -------------------------------------
+// #1112 removed the banner for a provider this install NEVER collected. What it could not remove
+// is the other half: somebody who collected ChatGPT once, signed out, and does not intend to sign
+// back in. That is a true statement ("you are not signed in") repeated on every popup open, with
+// no way to make it stop — 608 installs sat on `err_chatgpt_not_logged_in` in the 14 days to
+// 2026-09-03, and one dashboard account was shown the same line 15 times in a single day.
+//
+// 🔴 Deliberately the SAME 30 days as the web's CT_PROVIDER_CONNECT_SNOOZE_MS, and for the same
+// reason stated there: long enough that somebody who does not use the provider is not nagged,
+// short enough that somebody who starts using it again is told why it is not collecting. Two
+// surfaces inventing two silences is how they end up disagreeing about what the user was told.
+export const PROVIDER_ERROR_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+
 // 🔴 Only these codes may be stored. A raw `e.message` can carry an API response fragment
 // (bg/api-chatgpt.js includes `text.slice(0, 500)` in one throw), and this state is handed to the
 // web through `get_status` — so anything unrecognised becomes the generic code instead of being
 // passed through (Codex review). Keep in sync with the throws in bg/api-{chatgpt,gemini}.js and
 // with the i18n keys; test/provider-error-guard.mjs asserts all three agree.
+// Sending is a SEPARATE axis from collecting (#1020). The provider API can answer perfectly and
+// the snapshot still never reaches claudetuner.com — the popup shows local data while the dashboard
+// stays empty, which is the same "two surfaces disagree" shape this module exists to prevent.
+//
+// 🔴 Only failures NOBODY ELSE reports live here. Withheld-by-login-first, authBlocked,
+// needsFullLogin, needsReauth, account_deleted and the 426 upgrade block all raise their own popup
+// state already (verified: each is read by popup.js). Recording those again would say the same
+// thing twice, in two voices, with two different fixes — the double-messaging trap.
+export const PROVIDER_SEND_ERROR_CODES = [
+  'err_send_server',     // 5xx — our server or D1 is unhealthy. The user waits.
+  'err_send_rejected',   // some other non-ok status; nothing actionable is known
+  'err_send_failed',     // the POST threw (offline, DNS, TLS)
+];
+
 export const PROVIDER_ERROR_CODES = {
   chatgpt: [
     'err_chatgpt_not_logged_in',   // precheck — no session cookie and no open tab
@@ -62,6 +93,50 @@ export const PROVIDER_ERROR_CODES = {
     'err_gemini_collect_failed',
   ],
 };
+
+// Which reasons are fixed BY GOING TO THE PROVIDER, and therefore deserve a link there.
+//
+// The copy for every one of these already names the site ("chatgpt.com에 로그인해 주세요") and gave
+// no way to get there — the same gap the dashboard closed for its own surfaces in #1020. This is
+// the popup half of that fix, so the two must agree: test/provider-error-guard.mjs asserts this
+// list is set-equal to CT_PROVIDER_CONNECT_ACTIONABLE in site/shared/provider-connect.js. The web
+// module cannot be imported here (classic global script vs extension ESM), so the guard is what
+// keeps the single policy single.
+//
+// 🔴 `rate_limit` is deliberately absent: the fix is to wait, and a button labelled "Open ChatGPT"
+// would send someone to do the one thing that cannot help — the misdirection #967 is about.
+// 🔴 `err_send_*` is absent for a different reason: those failures are OURS (our server rejected
+// the snapshot, or the network to us is down). They carry no provider segment at all, so the
+// parse below rejects them before this list is consulted.
+export const PROVIDER_ERROR_ACTIONABLE = [
+  'not_logged_in', 'session_expired', 'auth_failed',   // sign in again
+  'cloudflare', 'no_cookies', 'no_at_token', 'page_fetch', 'collect_failed',   // open a tab there
+];
+
+/**
+ * The destination a stored error code should offer, or null when going there cannot help.
+ *
+ * 🔴 The URL comes from the constants table, never from the code string: the code is the only part
+ * of this state that originated outside our own throw sites, and nothing derived from it may reach
+ * an href.
+ *
+ * @param {string} code e.g. `err_gemini_not_logged_in` or `err_chatgpt_auth_failed:401`
+ * @returns {{provider: string, label: string, url: string}|null}
+ */
+export function providerErrorAction(code) {
+  if (!code || typeof code !== 'string') return null;
+  const key = code.split(':')[0];                     // drop the HTTP status; the link never uses it
+  const m = /^err_(chatgpt|gemini)_(.+)$/.exec(key);
+  if (!m) return null;
+  const [, provider, reason] = m;
+  // Only codes this module actually stores. An unrecognised one is not a destination we can vouch
+  // for, and silence is the safe answer.
+  if ((PROVIDER_ERROR_CODES[provider] || []).indexOf(key) < 0) return null;
+  if (PROVIDER_ERROR_ACTIONABLE.indexOf(reason) < 0) return null;
+  const url = PROVIDER_SITE_URLS[provider];
+  if (!url) return null;
+  return { provider, label: PROVIDER_LABELS[provider] || provider, url };
+}
 
 /**
  * Reduce a thrown error to a storable code.
@@ -163,7 +238,21 @@ export async function noteProviderSuccess(provider, account) {
     fields.account = account || null;
     fields.accountAt = account ? Date.now() : null;
   }
-  return patch(provider, fields);
+  // 🔴 The dismissal dies with the episode it silenced (#1130) — but only the READ episode.
+  // A dismissal that outlived recovery would carry over to the NEXT time this provider breaks: a
+  // × clicked in September would silently withhold an October regression, and nothing on screen
+  // could tell the user a message was suppressed. The × means "not this, not now", never "never
+  // again".
+  //
+  // 🔴 And ONLY the read axis, because that is all this success is evidence of. Reading the
+  // provider says nothing about whether our own server accepted the snapshot — the collectors
+  // call this BEFORE they apply the send outcome (bg/collect-chatgpt.js, bg/collect-gemini.js),
+  // so clearing everything here turned a 30-day dismissal of `err_send_server` into one that
+  // expired on the very next successful read, seconds later (Codex DEPLOY-BLOCKER). The send axis
+  // is cleared by noteProviderSendOk(), which is the success that actually means it.
+  return (await patch(provider, (prev) => Object.assign(
+    {}, fields, { errorSnooze: keepSnoozes(prev.errorSnooze, (r) => isSendReason(r)) },
+  ))).next;
 }
 
 // TWO clocks, because the disclosure makes two claims and they can go stale independently:
@@ -287,19 +376,164 @@ export async function noteProviderError(provider, err) {
   return next;
 }
 
+/** A snapshot POST failed for a reason no other surface reports. Ignores anything unlisted. */
+export async function noteProviderSendError(provider, code) {
+  if (!PROVIDER_ERROR_CODES[provider]) return null;
+  if (PROVIDER_SEND_ERROR_CODES.indexOf(code) < 0) return null;
+  return (await patch(provider, { lastSendError: { code, at: Date.now() } })).next;
+}
+
+/** A snapshot POST was accepted → the send channel is healthy again. */
+export async function noteProviderSendOk(provider) {
+  if (!PROVIDER_ERROR_CODES[provider]) return null;
+  // Clears the SEND dismissals only, for the mirror of the reason noteProviderSuccess() clears
+  // only the read ones: an accepted POST is evidence about our server, not about whether the user
+  // is signed in to the provider.
+  return (await patch(provider, (prev) => ({
+    lastSendOkAt: Date.now(),
+    lastSendError: null,
+    errorSnooze: keepSnoozes(prev.errorSnooze, (r) => !isSendReason(r)),
+  }))).next;
+}
+
 /**
  * The error worth SHOWING, or null.
  *
  * Separate from what is stored, so the popup and the web agree on staleness without each
  * re-deriving it. `null` means "nothing to say" — never "everything is fine".
  */
-export function displayableProviderError(state, now) {
-  const e = state && state.lastError;
+function liveError(e, okAt, now) {
   if (!e || !e.code) return null;
-  const t = typeof now === 'number' ? now : Date.now();
-  if (typeof e.at !== 'number' || (t - e.at) > PROVIDER_ERROR_TTL_MS) return null;
+  if (typeof e.at !== 'number' || (now - e.at) > PROVIDER_ERROR_TTL_MS) return null;
   // A success after the error means the error is over even if nothing cleared it (defensive: the
-  // clear above is the primary path, but a write that lost a race must not resurrect a fixed fault).
-  if (typeof state.lastSuccessAt === 'number' && state.lastSuccessAt >= e.at) return null;
+  // clear is the primary path, but a write that lost a race must not resurrect a fixed fault).
+  if (typeof okAt === 'number' && okAt >= e.at) return null;
   return e;
+}
+
+/**
+ * 🔴 READ failure wins over SEND failure. If the provider API itself is not answering there is
+ * nothing to send, so reporting "we could not reach our server" would name a downstream symptom
+ * and send the user to fix the wrong thing. Consumers get ONE answer — they render a message, not
+ * a diagnosis — while the two axes stay separate in storage so we can still tell them apart.
+ */
+export function displayableProviderError(state, now, syncPaused) {
+  return liveProviderErrors(state, now, syncPaused)[0] || null;
+}
+
+/**
+ * Every live failure, in the precedence order above — read first, then send.
+ *
+ * Exists for the one consumer that can DECLINE the first answer: the popup, where a reason may be
+ * dismissed (#1130). Collapsing to a single value there meant a dismissed read failure took the
+ * provider's whole row with it, muting a live `err_send_*` the user had never dismissed — a
+ * different problem, with a different fix, silenced by a click that was not about it (Codex
+ * DEPLOY-BLOCKER). Precedence and staleness stay HERE rather than being re-derived at the call
+ * site; the caller only chooses how far down the list to look.
+ */
+export function liveProviderErrors(state, now, syncPaused) {
+  const t = typeof now === 'number' ? now : Date.now();
+  if (!state) return [];
+  const out = [];
+  const read = liveError(state.lastError, state.lastSuccessAt, t);
+  if (read) out.push(read);
+  // 🔴 A PAUSED INSTALL HAS NO SEND FAILURES TO REPORT (#1136). `serverSyncPaused` means the user
+  // deliberately stopped sending; postSnapshot() then returns before the POST, so no cycle can
+  // clear a `lastSendError` written before the pause — neither `noteProviderSendOk` (needs a 2xx)
+  // nor `noteProviderSuccess` (which preserves the send axis on purpose) touches it. The stale
+  // error therefore stands for its full 7-day TTL, and the popup showed "collected, but couldn't
+  // be saved to Claude Tuner" NEXT TO the panel saying the user paused saving: a fault report for
+  // something they asked for, which is the #967 shape (Codex SHIP-BLOCKER, cross-unit review of
+  // #1119 × #1020).
+  //
+  // 🔴 Suppressed at READ, not cleared at the pause transition. Three reasons: storage.js cannot
+  // import this module (`provider-state → analytics → storage` is a cycle the file already
+  // documents at its onSendFailure callback), a read-time rule also covers an in-flight POST whose
+  // failure lands just after the flip, and the stored fact stays whole — so resuming restores the
+  // last thing we actually observed rather than a value we deleted. The READ axis is untouched:
+  // "you are signed out of ChatGPT" is true whether or not we are sending.
+  if (syncPaused !== true) {
+    const send = liveError(state.lastSendError, state.lastSendOkAt, t);
+    if (send) out.push(send);
+  }
+  return out;
+}
+
+// ── Dismissal (#1130) ───────────────────────────────────────────────────────────────────────
+//
+// 🔴 Kept OUT of displayableProviderError() on purpose, even though every popup caller pairs the
+// two. That function is also what `get_status` hands to claudetuner.com, and the web runs its OWN
+// snooze — keyed per ACCOUNT, because a dismissal on a shared machine must not silence the next
+// person who signs in there. This one is keyed per INSTALL. Folding it in would export an
+// install-wide silence into an account-scoped surface: one browser's × would hide a real fault
+// from a different account's dashboard, and nothing on that screen could explain the silence.
+// Consumers that want the dismissal ask for it; the stored fact stays whole for everyone else.
+
+const isSendReason = (reason) => PROVIDER_SEND_ERROR_CODES.indexOf(reason) >= 0;
+
+/** A live snooze is one that has not run out AND could have been written by this code. */
+function snoozeLive(until, now) {
+  // Both ends matter, and both err toward SHOWING. Not in the future → it ran out. Further out
+  // than the window → nothing this code writes could land there, so it is a corrupt or tampered
+  // value (or the clock moved backwards) and honouring it would mute a fault for years. Same rule,
+  // and the same reasoning, as _ctProviderConnectLive() on the web.
+  return typeof until === 'number' && until > now && until <= now + PROVIDER_ERROR_SNOOZE_MS;
+}
+
+/** The still-live entries `keep` selects, as a fresh object. Expired ones are dropped either way. */
+function keepSnoozes(snooze, keep, now) {
+  const t = typeof now === 'number' ? now : Date.now();
+  const out = {};
+  if (!snooze || typeof snooze !== 'object') return out;
+  for (const reason of Object.keys(snooze)) {
+    if (snoozeLive(snooze[reason], t) && keep(reason)) out[reason] = snooze[reason];
+  }
+  return out;
+}
+
+/**
+ * Is this reason currently dismissed?
+ *
+ * 🔴 A MAP of reason → expiry, not one dismissal per provider. The two axes fail independently
+ * (bg/storage.js can report a send failure for a provider that read perfectly), so they must be
+ * dismissible independently: with a single slot, dismissing the send failure overwrote the read
+ * dismissal and the message the user had already waved away came back.
+ *
+ * 🔴 Matched on the REASON, not the whole code, and not the provider alone:
+ *   - the HTTP status is dropped, so dismissing `auth_failed:401` also covers `:403` — one reason
+ *     to the user, exactly as baseReason() already defines it for GA;
+ *   - a DIFFERENT failure is news and speaks. Silencing the provider outright would mean
+ *     dismissing "you are not signed in" also hides "we could not reach our server", which is a
+ *     different problem with a different fix and nothing to do with what the user waved away.
+ */
+export function providerErrorSnoozed(state, code, now) {
+  const t = typeof now === 'number' ? now : Date.now();
+  const s = state && state.errorSnooze;
+  if (!s || typeof s !== 'object' || !code) return false;
+  return snoozeLive(s[baseReason(code)], t);
+}
+
+/**
+ * Dismiss the reason currently shown for `provider` (the popup's ×).
+ *
+ * Keyed by the reason it silenced rather than a bare timestamp, so the predicate above can tell a
+ * dismissed failure from a new one. Ignores anything that is not a code we store — the × can only
+ * ever be attached to a rendered error, so an unrecognised value is a bug, not a user action, and
+ * a bug must not be able to mute something no reader recognises.
+ *
+ * The map is bounded by construction: a key can only be one of this provider's whitelisted codes
+ * or a send code, and expired entries are dropped on every write.
+ */
+export async function snoozeProviderError(provider, code) {
+  if (!PROVIDER_ERROR_CODES[provider]) return null;
+  const reason = baseReason(code);
+  if (!reason) return null;
+  const known = (PROVIDER_ERROR_CODES[provider] || []).indexOf(reason) >= 0 || isSendReason(reason);
+  if (!known) return null;
+  return (await patch(provider, (prev) => {
+    const now = Date.now();
+    const next = keepSnoozes(prev.errorSnooze, () => true, now);
+    next[reason] = now + PROVIDER_ERROR_SNOOZE_MS;
+    return { errorSnooze: next };
+  })).next;
 }
