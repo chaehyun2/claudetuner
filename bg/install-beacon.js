@@ -21,6 +21,16 @@ import { getConfig, getOrCreateInstallId, serverSyncWithheldReason } from './sto
 
 const BEACON_PATH = '/api/install-beacon';
 
+/** Matches postHeartbeat's idiom (bg/collect.js). Without it a hung POST stalls whichever handler
+ *  called us — which, since the first-observation trigger below runs INSIDE collection, would mean
+ *  telemetry delaying the thing it is meant to observe. */
+const BEACON_TIMEOUT_MS = 10_000;
+
+/** Do not fire a second first-observation beacon within this window, whatever the reason says. The
+ *  reason is read from storage and could in principle flap; this bounds the damage to one extra
+ *  request per hour, which stays inside the server's per-install daily cap even in the worst case. */
+const FIRST_OBS_MIN_INTERVAL_MS = 60 * 60 * 1000;
+
 /**
  * Pick the local record this beacon describes.
  *
@@ -100,13 +110,30 @@ function compact(obj) {
 export async function maybeSendInstallBeacon() {
   const withheldReason = await serverSyncWithheldReason();
   if (!withheldReason) return;   // 🔴 gate open → normal ingest owns this install. Never both.
+  await sendInstallBeaconForReason(withheldReason);
+}
 
+/**
+ * Send for a gate reason the CALLER already observed. Does not re-read the gate.
+ *
+ * 🔴 Why the split exists (Codex, 1.29.58): the first-observation path stamps its throttle and then
+ * sends. When the send re-read the gate itself, a conversion landing in between — the collector saw
+ * the gate closed, the user logged in, the sender then saw it open — burned the throttle stamp and
+ * sent NOTHING, and the 12h alarm afterwards also returned on the open gate. Zero rows, which is
+ * the exact hole the first-observation trigger was added to close, recreated in a narrower window.
+ *
+ * A reason observed moments ago in the same tick is a true fact about the past: this install WAS
+ * gated when we looked. Recording it is correct even if the user converted in the meantime — that
+ * is the conversion we most want to see. Only the ALARM path re-reads the gate, because there the
+ * previous observation is up to 12 hours old and the install may long since have converted.
+ */
+async function sendInstallBeaconForReason(withheldReason, onAboutToSend) {
   try {
     const installId = await getOrCreateInstallId();
-    if (!installId) return;      // the row's only identity; without it there is nothing to record
+    if (!installId) return { sent: false, rich: false };  // the row's only identity
 
     const config = await getConfig();
-    if (!config.serverUrl) return;
+    if (!config.serverUrl) return { sent: false, rich: false };
 
     const { lastStatus, collectedOrgs, installFirstSeenAt } = await chrome.storage.local.get({
       lastStatus: null, collectedOrgs: [], installFirstSeenAt: null,
@@ -143,16 +170,115 @@ export async function maybeSendInstallBeacon() {
 
     // 🔴 No credential of any kind. Plain JSON POST to a route that reads none — see the header
     // note. A guard test asserts this file carries no credential-header vocabulary at all.
-    const res = await fetch(`${config.serverUrl}${BEACON_PATH}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    console.log(`[install-beacon] sent (${withheldReason}) → ${res.status}`);
+    // 🔴 RICH = the payload carries something beyond bare identity. A beacon fired from setupAlarm on
+    // a brand-new install has no collection behind it yet, so it can only report id/reason/version —
+    // still worth sending (existence and date are what retention needs), but it must not be allowed
+    // to satisfy the throttle forever, or a fast converter's ONLY row is the empty one.
+    const rich = !!(src.email || src.plan || src.orgUuid || num(src.h5) !== undefined || num(src.d7) !== undefined);
+
+    // 🔴 The caller stamps its throttle HERE — after every "return before sending" prerequisite has
+    // passed, and before the request. Stamping earlier consumed the one allowed attempt when there
+    // was no install_id or no serverUrl yet; stamping after would let a failed send retry on the
+    // next collection tick, which is the request storm this file's contract forbids. A failed or
+    // aborted fetch is still a spent attempt — the 12h alarm is the retry.
+    if (onAboutToSend) await onAboutToSend(rich);
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), BEACON_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${config.serverUrl}${BEACON_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      console.log(`[install-beacon] sent (${withheldReason}, ${rich ? 'rich' : 'thin'}) → ${res.status}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    return { sent: true, rich };
   } catch (e) {
     // Swallowed on purpose: this runs inside an alarm handler shared with collection, and a throw
     // here would abort work that matters far more than telemetry.
     console.warn('[install-beacon] send failed:', e && e.message);
+  }
+  return { sent: false, rich: false };
+}
+
+/**
+ * Send ONE beacon as soon as a gated collection is observed, then leave the 12h alarm to the rest.
+ *
+ * 🔴 WHY THIS EXISTS — without it the fastest converters are systematically invisible, which is the
+ * opposite of what this feature is for. The alarm's first fire is `1 + hash(install_id) % 720`
+ * minutes, i.e. uniform across ~12 hours (background.js scheduleInstallBeacon). An install that
+ * passes through the gate FASTER than its own offset files no report at all: the alarm eventually
+ * runs, finds the gate open, and returns.
+ *
+ * That is not a rare corner. #1023's welcome page opens ON INSTALL and exists to get the user
+ * logged in right there, so the conversions that work are concentrated in the first minutes — the
+ * exact window the alarm cannot see. For a user who converts 15 minutes in, the miss probability is
+ * 705/720 ≈ 98%. The resident gated population was never at risk (they do not convert, so their
+ * alarm always eventually fires); what was missing is precisely the population whose behaviour
+ * #1122 was built to measure. Found by a post-deploy audit, fixed in 1.29.58.
+ *
+ * Throttled on two keys so this cannot become a per-collection request (collection runs every few
+ * minutes): once per gate REASON, and never twice within FIRST_OBS_MIN_INTERVAL_MS. The reason is
+ * part of the key because `login_first` → `token_lost` is a real transition worth observing
+ * promptly, not a duplicate of an earlier observation.
+ *
+ * 🔴 CALL IT FROM EVERY PLACE THE GATE IS OBSERVED, not just from a successful Claude collection.
+ * The first version of this fix hooked only the Claude local-only branch, which left three
+ * populations still filing nothing: provider-only installs (ChatGPT/Gemini never reach that
+ * branch), installs whose Claude collection FAILS before it, and installs that convert before any
+ * collection runs at all. background.js therefore also calls this with no argument on install,
+ * update and startup — the earliest observation available, and the only one a never-collecting
+ * install ever gets. A thin row (id, reason, version, first_seen_at) is worth far more than none:
+ * retention and conversion need existence and a date, and the 12h alarm fills in usage later for
+ * whoever stays gated.
+ *
+ * `reason` is optional. Pass it when the caller has just observed the gate (avoids a redundant
+ * read and, more importantly, avoids the conversion race that made this stamp-then-refuse); omit it
+ * and this reads the gate itself and returns quietly when it is open. Never throws.
+ */
+export async function maybeSendFirstGatedBeacon(reason) {
+  try {
+    // eslint-disable-next-line no-param-reassign — an omitted reason means "you look".
+    if (!reason) reason = await serverSyncWithheldReason();
+    if (!reason) return;
+    const { installBeaconFirstSentFor, installBeaconFirstSentAt, installBeaconFirstSentRich } =
+      await chrome.storage.local.get({
+        installBeaconFirstSentFor: null, installBeaconFirstSentAt: 0, installBeaconFirstSentRich: false,
+      });
+    // 🔴 The reason alone must NOT close the door — that is what made the fix preempt itself. On a
+    // fresh install setupAlarm() fires before any collection exists, so that first beacon can only
+    // carry id/reason/version. If "this reason was reported" ended it there, the richer beacon from
+    // the first gated collection would be refused and a fast converter's ONLY row would be the empty
+    // one: for a 15-minute conversion just 15/720 ≈ 2.1% of installs would get usage in time.
+    // So ONE upgrade is allowed — thin → rich — and after that the reason is closed.
+    if (installBeaconFirstSentFor === reason && installBeaconFirstSentRich) return;
+    const upgrading = installBeaconFirstSentFor === reason && !installBeaconFirstSentRich;
+
+    // The hourly floor bounds repeats of the SAME observation; the thin→rich upgrade is a different
+    // observation and is allowed through it (collection typically lands minutes after install). It
+    // can happen at most once, so the worst case is two sends — well inside the server's 4/day.
+    const last = Number(installBeaconFirstSentAt) || 0;
+    if (!upgrading && last && Date.now() - last < FIRST_OBS_MIN_INTERVAL_MS) return;
+
+    // 🔴 sendInstallBeaconForReason, NOT maybeSendInstallBeacon — the latter re-reads the gate, and a
+    // conversion landing between the observation above and that read would consume the stamp while
+    // sending nothing (and the 12h alarm would then also return on the open gate). The reason we hold
+    // is a true fact about a moment that has already passed.
+    // The stamp is written by the callback, which the sender runs only once every no-request
+    // prerequisite has passed and immediately before the request — see its comment.
+    await sendInstallBeaconForReason(reason, async (rich) => {
+      await chrome.storage.local.set({
+        installBeaconFirstSentFor: reason,
+        installBeaconFirstSentAt: Date.now(),
+        installBeaconFirstSentRich: rich,
+      });
+    });
+  } catch (e) {
+    console.warn('[install-beacon] first-observation send skipped:', e && e.message);
   }
 }
 

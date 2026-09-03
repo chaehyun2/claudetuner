@@ -22,6 +22,8 @@ import { noteProviderSuccess } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+// #1122 — install-beacon imports only from storage.js, so this does not close an import cycle.
+import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -1050,6 +1052,28 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // MV3 worker idles out.
         sendGAEvent('collect_paused', { plan: snapshot.plan, fetch_mode: withheldFetchMode });
       }
+
+      // #1122 — file this install's FIRST server-side report now, rather than waiting for the 12h
+      // alarm whose first fire is spread uniformly across ~12 hours. An install that passes through
+      // the gate faster than its own offset files nothing at all, and #1023's welcome page exists to
+      // make exactly that happen within minutes of install ⇒ the alarm alone is blind to the
+      // conversions the recovery work produces. Throttled inside (once per gate reason, ≥1h apart),
+      // so this is not a per-collection request.
+      //
+      // 🔴 ITS OWN BLOCK, not folded into the GA branch above, for two independent reasons:
+      //   1. Different transport, different failure semantics — GA is fire-and-forget and tolerates
+      //      being dropped; this is an AWAITED POST that must not be, and awaiting it inside a
+      //      branch whose comment argues for fire-and-forget positioning would read as a
+      //      contradiction of that argument.
+      //   2. test/local-only-status-guard.mjs pins the GA branch's SHAPE — its mutations match
+      //      `if (blockServerNewUser) { sendGAEvent(…) }` as a single-statement block, so any
+      //      statement added in there silently stops those mutations from applying and four of them
+      //      report "NOT caught" while testing nothing. Keep this out of that block.
+      //
+      // 🔴 Awaited on purpose: an in-flight fetch does not keep an MV3 worker alive, and this POST
+      // is heavier than a GA beacon. It cannot stall collection (the send carries its own
+      // AbortController timeout) and it cannot throw (it swallows everything internally).
+      if (blockServerNewUser) await maybeSendFirstGatedBeacon(withheldReason);
       // Keep collectedOrgs fresh so sidebar/input get this collection
       // (storage.onChanged on collectedOrgs triggers pushSidebarUsage).
       const { collectedOrgs: prevOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });

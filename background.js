@@ -31,7 +31,7 @@ import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { getProviderState, displayableProviderError, snoozeProviderError } from './bg/provider-state.js';
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
-import { maybeSendInstallBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
+import { maybeSendInstallBeacon, maybeSendFirstGatedBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -1049,6 +1049,15 @@ async function setupAlarm() {
   await scheduleWeeklyReport();
   await scheduleRecFetch();
   await scheduleInstallBeacon();
+  // #1122 — the EARLIEST gate observation, and for some installs the only one they ever produce.
+  // scheduleInstallBeacon() above only ARMS the 12h alarm, whose first fire lands uniformly across
+  // ~12h, so an install that converts sooner files nothing. The collection-path trigger closes that
+  // for successful Claude collects only — NOT for provider-only installs (ChatGPT/Gemini never
+  // reach that branch), installs whose Claude collect fails before it, or installs that convert
+  // before any collection runs. setupAlarm() runs on install, update and startup, so hooking it
+  // here reaches all of them. Self-gating and throttled internally (once per gate reason, ≥1h
+  // apart): a no-op for logged-in installs, and it cannot repeat on every service-worker wake.
+  await maybeSendFirstGatedBeacon();
   await updateAdFlushAlarm(); // periodic ad impression/click counter flush (design §5.4)
 }
 
