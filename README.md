@@ -5,7 +5,8 @@
 <h1 align="center">Claude Tuner</h1>
 
 <p align="center">
-  Track your Claude, ChatGPT & Gemini usage limits in real time — one extension, every AI, personal and team.
+  Know <i>when</i> you'll hit your Claude, ChatGPT & Gemini limits — live gauges, reset forecasts,
+  and the usage history none of them show you. One extension, every AI, personal and team.
 </p>
 
 <p align="center">
@@ -30,6 +31,7 @@
 AI rate limits are opaque — you don't know how much you've used, when it resets, or whether your plan is right for you. And most people now juggle more than one AI. Claude Tuner fixes that.
 
 - **See every limit** — live 5h / 7d usage gauges with reset countdowns for Claude, ChatGPT (Codex), and Gemini, all in one popup
+- **Claude Code counts too** — claude.ai, the desktop app, and Claude Code all draw from one subscription pool, so your CLI burn shows up in the same gauges. Anthropic exposes that pool as a single number, so it's a combined total, not a per-surface split
 - **Predict resets** — know if you'll hit the cap before the window rolls over, with sharpened 7-day projection accuracy
 - **Find the right plan** — "what if" simulations across Pro, Max 5x, and Max 20x, with independent 5h / 7d evaluation
 - **Monitor your team** — free dashboard covering Claude, ChatGPT & Gemini, with per-member analytics, breach tracking, group comparisons, and access controls for who sees what
@@ -64,8 +66,8 @@ AI rate limits are opaque — you don't know how much you've used, when it reset
 - Usage prediction at reset based on consumption rate — with a redesigned, more accurate 7-day projection (diurnal re-weighting + adaptive smoothing)
 - Configurable threshold notifications (80%, 95%)
 - Weekly usage reports via email
-- Estimated token breakdown (Opus / Sonnet / Haiku)
-- Peak hours indicator (weekday 12:00–18:00 UTC)
+- Estimated token breakdown per model
+- Model-scoped weekly limit tracking (Anthropic rotates which model gets its own weekly bucket)
 - Real-time 429 rate limit detection
 </details>
 
@@ -153,7 +155,7 @@ You ──→ Claude.ai / ChatGPT / Gemini ──→ Claude Tuner extension ─�
                                            (gauges & alerts)     (charts, team, insights)
 ```
 
-1. **Collect** — The extension reads your usage data from Claude.ai, ChatGPT, and Gemini (no conversation content, ever)
+1. **Collect** — The extension reads the same account usage endpoint claude.ai itself uses, plus ChatGPT and Gemini (no conversation content, ever). Because the Claude subscription pool is shared, this includes usage spent in Claude Code and the desktop app
 2. **Analyze** — Snapshots are sent to the API server, which stores history and computes analytics
 3. **Display** — View real-time gauges in the popup, or dive deep on the [web dashboard](https://claudetuner.com/dashboard)
 
