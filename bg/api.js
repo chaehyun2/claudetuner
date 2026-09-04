@@ -93,7 +93,10 @@ export async function fetchViaTab(tabId, fullUrl, options) {
     const body = result?.body || '';
     const msgText = result?.message || '';
     if (!options.quiet) {
-      console.debug(`[Claude Tuner] Tab API fallback: url=${fullUrl}, status=${status}, message=${msgText}`);
+      // `body` is logged here because it is no longer thrown: this line is the only place the
+      // detail survives, and it stays local (console) rather than travelling to a user-facing
+      // string or a GA dimension.
+      console.debug(`[Claude Tuner] Tab API fallback: url=${fullUrl}, status=${status}, message=${msgText}, body=${String(body).slice(0, 300)}`);
     }
 
     if (status === 401 || status === 403) {
@@ -102,7 +105,24 @@ export async function fetchViaTab(tabId, fullUrl, options) {
     if (status === 429) {
       throw new Error('err_rate_limit');
     }
-    throw new Error(msgText || `Claude API error (${status}): ${body}`);
+    // 🔴 A CODE, NOT THE BODY. This used to throw `msgText || "Claude API error (503): {…}"`, and
+    // that string is what the popup SHOWS (ui/render.js translates `err_*` keys and falls through
+    // to the raw text otherwise) and what the failure reason reports as (#1143). So a Claude API
+    // response fragment was both user-facing copy and — before #1143 — a GA parameter value. It
+    // also made the reason axis useless: 54% of Claude failures landed in the catch-all on the
+    // first day it was readable (#1162). The detail is still on the console.debug line above.
+    //
+    // No finite status means the injected fetch itself failed (offline, DNS, TLS) — a network
+    // fault, not an HTTP one, and the two need different copy: one says "check your connection",
+    // the other "we will retry".
+    // 🪤 TWO DIFFERENT "no status" CASES, and calling both `err_network` would be wrong. `!result`
+    // means the injected script returned nothing at all (the tab navigated away, scripting was
+    // denied) — nothing was even attempted, so the catch-all is the honest answer. `result._err`
+    // with no status is the injected fetch REJECTING, which is the network fault.
+    if (!result) throw new Error('err_collect_failed');
+    const httpStatus = Number(status);
+    if (!Number.isFinite(httpStatus)) throw new Error('err_network');
+    throw new Error(httpStatus >= 500 ? `err_server:${httpStatus}` : `err_http:${httpStatus}`);
   }
 
   return result.data;
@@ -136,7 +156,17 @@ export async function fetchWithCookies(url, options = {}) {
     fetchOpts.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
   }
 
-  const resp = await fetch(url, fetchOpts);
+  // A rejecting fetch (offline, DNS, TLS, aborted) threw a raw `TypeError: Failed to fetch`, which
+  // then travelled the same two paths as the bodies above: shown to the user, and normalised to the
+  // catch-all reason. It is one of the few failures the user can actually act on, so it gets its
+  // own code.
+  let resp;
+  try {
+    resp = await fetch(url, fetchOpts);
+  } catch (e) {
+    console.debug(`[Claude Tuner] cookie fetch failed: ${e && e.message}`);
+    throw new Error('err_network');
+  }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
@@ -149,7 +179,12 @@ export async function fetchWithCookies(url, options = {}) {
     if (resp.status === 429) {
       throw new Error('err_rate_limit');
     }
-    throw new Error(`Claude API error (${resp.status}): ${text.slice(0, 500)}`);
+    // Same rule as the tab path above: a code, never `text.slice(0, 500)` of a Claude response.
+    // 🔴 `text` is still READ — the await is what drains the body so the connection can be reused,
+    // and dropping it would change fetch behaviour, not just logging. It is logged rather than
+    // thrown so the detail survives for diagnosis without becoming user copy or a GA value.
+    console.debug(`[Claude Tuner] cookie fetch ${resp.status}: ${String(text).slice(0, 300)}`);
+    throw new Error(resp.status >= 500 ? `err_server:${resp.status}` : `err_http:${resp.status}`);
   }
 
   const contentType = resp.headers.get('content-type') || '';

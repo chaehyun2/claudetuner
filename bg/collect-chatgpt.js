@@ -117,7 +117,14 @@ const MAX_EXTRA_WORKSPACES = 5;
  * re-enumerated here as an extra workspace and sent again with usage null, ~0.7s later. The
  * latest_snapshot upsert is last-write-wins on collected_at, so that second row overwrites the
  * real one and the dashboard shows the plan with no usage while the popup — which renders from
- * local history — looks fine (문의 #191, #1144: 9 users, one at 100% utilization).
+ * local history — looks fine (#1144: 9 users measured, one at 100% utilization).
+ *
+ * 🪤 #1144 was opened off 문의 #191, but do NOT read that inquiry as a report of THIS bug. The
+ * inquiries table carries no IP/UA/session/logged-in email, so nothing links an inquiry to an
+ * account, and a SECOND live defect produces the same "popup fine, dashboard empty" complaint:
+ * chart-utils.js `isWeeklyScopedRow` drops the scoped slot below a ~104,000s window, and OpenAI
+ * moved the Codex bucket to 18,000s (255 users). The word "codex" in #191 fits that one better.
+ * This fix stands on the measured duplicate rows, not on knowing who wrote #191.
  *
  * So the anchor is the entry for `activeAccountId` when accounts/check carries one, falling back
  * to `default`. That also fixes the same mismatch's quieter half: `defaultRenewal`/`defaultPending`

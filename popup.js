@@ -2469,7 +2469,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             chrome.runtime.sendMessage({ type: 'GET_STATUS' }, updateUI);
           }, 2000);
         } else {
-          statusEl.textContent = res?.error || t('collect_fail');
+          // Same translation as every other error surface — a raw `err_http:400` here is a code
+          // where a sentence belongs (Codex FOLLOW-UP, #1162).
+          statusEl.textContent = _tErr(res?.error) || t('collect_fail');
           statusEl.style.color = '#dc2626';
         }
       });
@@ -2519,10 +2521,26 @@ function updateUI(status) {
 // These two overwrite the status line from outside the render (action confirmations, failures),
 // so they must drop the tooltip the render may have attached — otherwise a "취소되었습니다" toast
 // keeps a hover that says the install is local-only. (Codex, PR #948.)
+/**
+ * An `err_*` code → its localized sentence; anything else unchanged.
+ *
+ * 🔴 COLON-AWARE, and that is the whole reason this exists as a function. Codes that carry a
+ * status (`err_auth_failed:401`, and since #1162 `err_server:503` / `err_http:400`) are ONE key
+ * plus an argument — `t('err_server:503')` finds no such key and paints the bare code where a
+ * sentence belongs. ui/render.js has always split them for the banner; the popup's action paths
+ * did not, and #1162 widened the set of codes that reach them (Codex FOLLOW-UP).
+ */
+function _tErr(msg) {
+  const raw = String(msg || '');
+  if (!raw.startsWith('err_')) return msg;
+  const colon = raw.indexOf(':');
+  return colon > 0 ? t(raw.slice(0, colon), raw.slice(colon + 1)) : t(raw);
+}
+
 function showError(msg) {
   document.getElementById('status-indicator').className = 'status-dot red';
   // Translate if i18n key, otherwise display as-is
-  const translated = msg && msg.startsWith('err_') ? t(msg) : msg;
+  const translated = _tErr(msg);
   const el = document.getElementById('status-text');
   el.textContent = translated;
   el.title = '';

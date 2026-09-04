@@ -226,7 +226,7 @@ export async function noteProviderSuccess(provider, account) {
   // a fail→succeed→fail-the-same-way sequence would stay silent for the rest of the 24h window and
   // Claude's reason counts would mean something different from the other two (Codex DEPLOY-BLOCKER).
   // Harmless for the providers that do not use the field: nothing writes it for them.
-  const fields = { lastSuccessAt: Date.now(), lastError: null, gaReason: null };
+  const fields = { lastSuccessAt: Date.now(), lastError: null, gaReason: null, gaSkipReason: null };
   // 🔴 `accountAt` STAMPS WHEN THE LABEL WAS OBSERVED, and only an actual observation may move it.
   // A caller that passes nothing leaves BOTH fields alone: "we collected, but we did not re-check
   // which account" is a real state, and treating it as a fresh observation is what laundered a
@@ -409,6 +409,13 @@ export const CLAUDE_GA_REASON_CODES = [
   'err_claude_no_cookies',
   'err_claude_rate_limit',
   'err_claude_session_expired',
+  // #1162: promoted out of the catch-all. On the first readable day (2026-09-04) `collect_failed`
+  // held 54% of Claude failures — the axis existed but could not say what was wrong, because
+  // bg/api.js still threw prose for every non-2xx and every network fault. These three name the
+  // three things the prose was hiding, and the status number is dropped as everywhere else.
+  'err_claude_server',           // 5xx from claude.ai — we retry, the user does nothing
+  'err_claude_http',             // any other non-2xx; nothing more specific is known
+  'err_claude_network',          // the fetch itself rejected: offline, DNS, TLS
   'err_claude_collect_failed',   // the catch-all; unknown errors normalise to this
 ];
 
@@ -460,6 +467,52 @@ export async function reportClaudeCollectFail(err) {
     return next;
   } catch (e) {
     console.log(`[Claude Tuner] claude fail-reason report skipped: ${e && e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Why Claude is NOT BEING COLLECTED AT ALL — the half no failure axis can see (#1162).
+ *
+ * 🔴 A SKIP IS NOT A FAILURE, so it gets its own event rather than another `provider_collect_fail`
+ * reason. `background.js` decides not to attempt Claude when the install looks like a non-Claude
+ * user (no claude.ai session, no cached profile, no Claude org, but provider orgs present). No
+ * attempt means no exception, and no exception means the failure axis — and the failure heartbeat,
+ * and `users.last_error_code` — stay empty. From outside, an install in that state is
+ * indistinguishable from one that is collecting fine. Folding it into `provider_collect_fail`
+ * would fix the blindness by corrupting the counts it borrowed.
+ *
+ * The two reasons answer different questions on purpose:
+ *   no_session   a STANDING state → throttled daily, so a day's count reads as "installs silent"
+ *   org_pruned   a TRANSITION → not throttled, so a day's count reads as "installs that went
+ *                silent today". It only fires when a row was actually removed, and after it the
+ *                gate is self-sustaining (no Claude org ⇒ skip ⇒ no attempt ⇒ nothing to re-add)
+ *                until the user signs back in to claude.ai.
+ *
+ * 🔴 ITS OWN THROTTLE FIELDS. Sharing `gaSentAt` with the failure axis would let a daily skip
+ * consume the slot a real failure needed, and the two would silence each other in alternation.
+ */
+export const CLAUDE_SKIP_REASONS = ['no_session', 'org_pruned'];
+
+export async function reportClaudeCollectSkipped(reason) {
+  if (CLAUDE_SKIP_REASONS.indexOf(reason) < 0) return null;
+  // Same swallow, same reason as reportClaudeCollectFail: this runs inside the collection
+  // orchestration, upstream of the ChatGPT/Gemini merges, and telemetry must never hold them.
+  try {
+    if (reason === 'org_pruned') {
+      sendGAEvent('provider_collect_skipped', { provider: 'claude', reason });
+      return null;
+    }
+    const now = Date.now();
+    let report = false;
+    const { next } = await patch('claude', (prev) => {
+      report = shouldReportFailure(prev && prev.gaSkipReason, prev && prev.gaSkipAt, reason, now);
+      return report ? { gaSkipAt: now, gaSkipReason: reason } : {};
+    });
+    if (report) sendGAEvent('provider_collect_skipped', { provider: 'claude', reason });
+    return next;
+  } catch (e) {
+    console.log(`[Claude Tuner] claude skip report skipped: ${e && e.message}`);
     return null;
   }
 }

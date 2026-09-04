@@ -69,6 +69,27 @@ function paintHealthy(indicator, statusText, withheld, body, paused = false) {
   if (withheld) noteSurface('local_only_status');
 }
 
+/**
+ * Should the "Open Claude.ai" hint be hidden for this error?
+ *
+ * 🔴 The hint is an INSTRUCTION, so it may only appear when going there is the fix. Rate limit was
+ * excluded for exactly that reason from the start; #1162 added two codes with the same shape — a
+ * 5xx is claude.ai's own outage (we retry on our own) and a network fault is this browser's
+ * connection. Telling either user to open a tab is the #967 misdirection: a control that cannot
+ * help, next to a fault it does not address.
+ *
+ * 🔴 ONE FUNCTION BECAUSE THERE ARE TWO BANNERS — the hard failure and the soft "Claude
+ * disconnected" notice both paint this hint, and the soft one forced it visible. A rule written at
+ * only one of them is not a rule.
+ *
+ * Compares the BASE code: `err_server:503` never equals the literal it is tested against.
+ */
+function _hintHidden(errKey) {
+  const base = String(errKey || '').split(':')[0];
+  return base === 'err_rate_limit' || base === 'err_server' || base === 'err_network'
+    || String(errKey || '').includes('Rate Limit');
+}
+
 export function _updateUICore(status) {
   // Always show version
   const userInfoEl = document.getElementById('user-info');
@@ -214,9 +235,14 @@ export function _updateUICore(status) {
       noteSurface('error_banner_soft');
       if (errorTitle) errorTitle.textContent = t('claude_disconnected_title');
       errorMsg.textContent = t('claude_disconnected_secondary');
-      // Keep the "Open Claude.ai" hint (still useful to reconnect), drop timing noise.
+      // Keep the "Open Claude.ai" hint (still useful to reconnect), drop timing noise —
+      // 🔴 EXCEPT for the faults going there cannot fix. This branch forced the hint visible
+      // unconditionally, so the suppression written for the hard banner did not reach it: a
+      // mixed-provider install (ChatGPT/Gemini healthy, Claude 5xx) got the soft notice AND
+      // "open Claude.ai and check your login" for an outage on Claude's side (Codex
+      // DEPLOY-BLOCKER). One rule, both banners — that is what `_hintHidden` is for.
       const errorHint = errorBanner.querySelector('.error-hint');
-      if (errorHint) errorHint.style.display = '';
+      if (errorHint) errorHint.style.display = _hintHidden(status.error) ? 'none' : '';
       const timingElSoft = document.getElementById('error-timing');
       if (timingElSoft) timingElSoft.innerHTML = '';
       // Show + bind the dismiss (×) button (only for this soft, non-critical notice).
@@ -253,7 +279,7 @@ export function _updateUICore(status) {
     noteSurface('error_banner');
     // Hide "Open Claude.ai" hint for Rate Limit/retry errors (not a login issue)
     const errorHint = errorBanner.querySelector('.error-hint');
-    const hideHint = errKey === 'err_rate_limit' || errKey.includes('Rate Limit');
+    const hideHint = _hintHidden(errKey);
     if (errorHint) {
       errorHint.style.display = hideHint ? 'none' : '';
     }

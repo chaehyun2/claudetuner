@@ -541,6 +541,12 @@ const TRANSLATIONS = {
     'err_session_expired': 'Claude.ai 세션이 만료되었습니다. 다시 로그인해주세요.',
     'err_cloudflare': 'Cloudflare 보호로 차단되었습니다. Claude.ai 탭을 열어주세요.',
     'err_collect_failed': '수집 실패. Claude.ai를 새로고침하거나 다시 로그인해주세요.',
+    // #1162 — 종전엔 이 세 경우가 Claude API 응답 본문을 그대로 화면에 띄웠다(`Claude API error
+    // (503): {"error":…}`). 사용자가 할 일이 서로 다르므로 문구도 갈라 둔다: 기다리기 / 잠시 후
+    // 재시도 / 연결 확인.
+    'err_server': 'Claude.ai 서버 오류 ({0}). 잠시 후 자동으로 재시도됩니다.',
+    'err_http': 'Claude.ai 응답 오류 ({0}). 잠시 후 다시 시도해주세요.',
+    'err_network': 'Claude.ai에 연결하지 못했습니다. 인터넷 연결을 확인해주세요.',
     'err_last_success': '마지막 성공',
     'err_last_attempt': '마지막 시도',
     'err_next_attempt': '다음 시도',
@@ -1135,6 +1141,9 @@ const TRANSLATIONS = {
     'err_session_expired': 'Session expired. Please sign in to Claude.ai again.',
     'err_cloudflare': 'Blocked by Cloudflare protection. Please open a Claude.ai tab.',
     'err_collect_failed': 'Collection failed. Please refresh Claude.ai or sign in again.',
+    'err_server': 'Claude.ai server error ({0}). Will retry automatically.',
+    'err_http': 'Unexpected response from Claude.ai ({0}). Please try again shortly.',
+    'err_network': "Couldn't reach Claude.ai. Please check your internet connection.",
     'err_last_success': 'Last success',
     'err_last_attempt': 'Last attempt',
     'err_next_attempt': 'Next attempt',

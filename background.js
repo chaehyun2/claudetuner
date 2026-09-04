@@ -28,7 +28,7 @@ import {
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
-import { getProviderState, displayableProviderError, snoozeProviderError } from './bg/provider-state.js';
+import { getProviderState, displayableProviderError, snoozeProviderError, reportClaudeCollectSkipped } from './bg/provider-state.js';
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
 import { maybeSendInstallBeacon, maybeSendFirstGatedBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
@@ -355,6 +355,13 @@ async function collectAndSend(opts) {
     } else if (skipClaude) {
       const prev = await getLastStatus();
       if (prev?.error) { await setStatus(null); resetIcon(); }
+      // #1162 — SAY THAT WE SKIPPED. This branch is deliberately silent to the USER (that is the
+      // whole point: a non-Claude user must not be shown "session expired"), and it was equally
+      // silent to us: no attempt, no exception, so no `provider_collect_fail`, no failure
+      // heartbeat, no `users.last_error_code`. A real Claude user who signs out long enough to
+      // land here therefore disappears from every signal we have. Not awaited — telemetry must
+      // not delay the ChatGPT/Gemini merges below (same rule as the failure reporter).
+      reportClaudeCollectSkipped('no_session');
     }
     // Claude was attempted (because a session cookie was present) and failed with
     // an AUTH/session error, yet there's no Claude account backing it
@@ -371,6 +378,12 @@ async function collectAndSend(opts) {
       const pruned = cur.filter(o => (o.provider || 'claude') !== 'claude');
       if (pruned.length !== cur.length) {
         await chrome.storage.local.set({ collectedOrgs: pruned });
+        // #1162 — THE MOMENT AN INSTALL GOES SILENT. Removing the Claude org makes `hasClaudeOrg`
+        // false, which is one of the four conditions of `skipClaude` above — so from the next
+        // cycle Claude is not attempted at all, and this transition is the last observable thing
+        // that happens before the silence. Unthrottled: it only fires when a row was actually
+        // removed, and each occurrence is one install entering that state.
+        reportClaudeCollectSkipped('org_pruned');
       }
       const prevStale = await getLastStatus();
       if (prevStale?.error) { await setStatus(null); resetIcon(); }
