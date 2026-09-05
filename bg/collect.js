@@ -1833,8 +1833,23 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     return { success: true, snapshot };
 
   } catch (error) {
-    const errorMsg = error.message || 'Unknown error';
-    console.error('[Claude Tuner] Collection failed:', errorMsg);
+    const rawMsg = error.message || 'Unknown error';
+    console.error('[Claude Tuner] Collection failed:', rawMsg);
+    // 🔴 EVERYTHING BELOW USES THE CODE, NEVER THE PROSE (#1176). bg/api.js throws codes, but this
+    // catch also sees exceptions from the collection logic itself — a null org, an unexpected
+    // response shape — and those carry a raw JS message. That message was: painted in the popup
+    // (ui/render.js falls through to the raw string), sent to the SERVER as `users.last_error_code`
+    // (the heartbeat below slices 50 chars of it), and normalised into the GA catch-all. So the
+    // last place a Claude API fragment or a `Cannot read properties of undefined` could reach a
+    // user — or our own database — is here.
+    //
+    // 🪤 It is not merely cosmetic: `err_claude_collect_failed` held 54% of Claude failure reasons
+    // after #1162 promoted the HTTP ones, and this branch is one of the three candidates for that
+    // mass (#1176). Giving it its own name is what makes the next readout able to say which.
+    //
+    // Codes pass through untouched, so ACTIONABLE_ERRORS matching (bg/constants.js) and
+    // background.js's `_isAuthError` prefix test keep working on exactly the values they expect.
+    const errorMsg = rawMsg.startsWith('err_') ? rawMsg : 'err_unclassified';
     const prevStatus = await getLastStatus();
     await setStatus({
       error: errorMsg,
@@ -1874,7 +1889,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // fails would hold this catch block open — converting a reported failure into a silent one,
     // which is the exact class of defect this change exists to remove (Codex DEPLOY-BLOCKER). Same
     // rule the GA send itself follows: telemetry never delays a collection cycle.
-    reportClaudeCollectFail(error);
+    // 🔴 THE NORMALISED CODE, NOT THE CAUGHT ERROR. Passing `error` here sent the raw message to
+    // the GA normaliser, which does not recognise it and collapses it to the catch-all — so
+    // `err_claude_unclassified` could never fire and the very bucket this change adds would have
+    // measured nothing, while the popup and the server correctly showed the code (Codex
+    // DEPLOY-BLOCKER). One value, three sinks: that is the property.
+    reportClaudeCollectFail(errorMsg);
 
     // Send heartbeat at most once per HEARTBEAT_INTERVAL_MS (1 hour — this comment said "every 6
     // hours" until #980; the constant has been 1 h and the stale figure was live-misread once).

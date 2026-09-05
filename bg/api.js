@@ -46,7 +46,11 @@ export async function fetchClaudeApi(path, options = {}) {
     if (cookieError.message.startsWith('err_')) {
       throw cookieError;
     }
-    throw new Error('err_collect_failed');
+    // 🔴 BOTH TRANSPORTS FAILED and the cookie path did not say why in a code we know. #1176 named
+    // it instead of leaving it in the catch-all: after that issue every throw in this file carries
+    // a code, so reaching here at all means something threw a shape we did not anticipate — and a
+    // bucket that says so is worth more than one that says "collection failed".
+    throw new Error('err_fallback_exhausted');
   }
 }
 
@@ -117,9 +121,10 @@ export async function fetchViaTab(tabId, fullUrl, options) {
     // the other "we will retry".
     // 🪤 TWO DIFFERENT "no status" CASES, and calling both `err_network` would be wrong. `!result`
     // means the injected script returned nothing at all (the tab navigated away, scripting was
-    // denied) — nothing was even attempted, so the catch-all is the honest answer. `result._err`
-    // with no status is the injected fetch REJECTING, which is the network fault.
-    if (!result) throw new Error('err_collect_failed');
+    // denied); `result._err` with no status is the injected fetch REJECTING, which is the network
+    // fault. #1176 gave the first its own code — it was sitting in the catch-all, which is exactly
+    // the bucket we were trying to empty.
+    if (!result) throw new Error('err_tab_no_result');
     const httpStatus = Number(status);
     if (!Number.isFinite(httpStatus)) throw new Error('err_network');
     throw new Error(httpStatus >= 500 ? `err_server:${httpStatus}` : `err_http:${httpStatus}`);

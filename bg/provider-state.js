@@ -416,7 +416,25 @@ export const CLAUDE_GA_REASON_CODES = [
   'err_claude_server',           // 5xx from claude.ai — we retry, the user does nothing
   'err_claude_http',             // any other non-2xx; nothing more specific is known
   'err_claude_network',          // the fetch itself rejected: offline, DNS, TLS
-  'err_claude_collect_failed',   // the catch-all; unknown errors normalise to this
+  // #1176: what the remaining catch-all was hiding. After #1162 promoted the HTTP paths,
+  // `collect_failed` still held 54% of Claude reasons.
+  //
+  // 🔴 THE BIGGEST PART WAS NOT A MISSING CODE — IT WAS A MISSING MAPPING. bg/collect.js throws
+  // four codes of its own, every one of them already user-facing with ko/en copy, and every one of
+  // them fell into the catch-all because this whitelist only ever looked at bg/api.js. The guard
+  // now scans both files, which is how they surfaced at all.
+  'err_claude_no_orgs',          // organizations fetch came back empty — usually signed out
+  'err_claude_api_only',         // API-only org: nothing to monitor by design
+  'err_claude_no_monitorable',   // no org on a plan we can read
+  'err_claude_usage_failed',     // the usage endpoint itself failed
+  // …and the three genuinely unnamed paths:
+  'err_claude_tab_no_result',    // the injected script returned nothing (tab moved, scripting denied)
+  'err_claude_fallback_exhausted', // tab AND cookie both failed, cookie without a code
+  'err_claude_unclassified',     // an exception from the collection logic, not the API layer
+  // 🔴 SHOULD NOW APPROACH ZERO. Every throw carries a code and bg/collect.js labels the rest, so
+  // a non-trivial count here means a path nobody has accounted for — it is a detector now, not a
+  // bucket.
+  'err_claude_collect_failed',
 ];
 
 /**

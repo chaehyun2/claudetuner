@@ -87,7 +87,12 @@ function paintHealthy(indicator, statusText, withheld, body, paused = false) {
  */
 function _hintHidden(errKey) {
   const base = String(errKey || '').split(':')[0];
+  // `err_unclassified` joins them for a different reason (#1176): we do not know what went wrong,
+  // so "open Claude.ai and check your login status" is a guess presented as an instruction — and
+  // the copy for that code deliberately says only "contact us if it keeps happening". A hint that
+  // contradicts the sentence above it is worse than no hint (Codex FOLLOW-UP).
   return base === 'err_rate_limit' || base === 'err_server' || base === 'err_network'
+    || base === 'err_unclassified'
     || String(errKey || '').includes('Rate Limit');
 }
 
