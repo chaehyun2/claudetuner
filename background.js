@@ -19,6 +19,7 @@ import { fetchClaudeApi } from './bg/api.js';
 import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
+import { SEND_CODE_REASON, sendCodeReasonFromThrown } from './bg/send-code-error.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification } from './bg/notifications.js';
 import {
   detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
@@ -2082,8 +2083,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // === Independent Account: email signup/login ===
   if (message.type === 'REQUEST_MAGIC_LINK') {
     (async () => {
+      // Declared OUTSIDE the try so the catch can name the address that failed. A `const` inside
+      // the try is block-scoped, and reading it from the catch is a ReferenceError — which would
+      // replace the error being reported with a different one.
+      let config;
       try {
-        const config = await getConfig();
+        config = await getConfig();
         const resp = await fetch(`${config.serverUrl}/api/auth/magic-link`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2093,14 +2098,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             lang: message.lang || 'en',
           }),
         });
-        const data = await resp.json();
+        // Tolerate a non-JSON body: a bare `.json()` throws into the catch below, which would
+        // report a server that ANSWERED as one that was never reached — the single distinction
+        // this path exists to make (#1172). `null`, not `{}`, so "no parsable body" stays
+        // tellable apart from "an object without the field".
+        const data = await resp.json().catch(() => null);
         if (!resp.ok) {
-          sendResponse({ success: false, error: data.error || 'server_error' });
+          // `status` is what the caller classifies on: only the server knows the difference
+          // between "we could not mail it" (503) and "you asked too often" (429), and the string
+          // body alone never carried it.
+          sendResponse({ success: false, status: resp.status, error: data?.error || 'server_error' });
+          return;
+        }
+        // 🔴 A 2xx is NOT success — `{ sent: true }` is (worker/src/routes/auth.ts). Tolerating an
+        // unparsable body without also pinning the success contract turns "200 + HTML from the
+        // wrong host" into "Code sent", parking the user on a verify screen for a code nobody
+        // sent. That host is not hypothetical: claudetuner.com answers 200 + HTML on every unknown
+        // path, so a `serverUrl` missing the `api.` prefix lands exactly here.
+        if (data?.sent !== true) {
+          console.error('[Claude Tuner] magic-link: 2xx without the success contract', config?.serverUrl, resp.status);
+          sendResponse({ success: false, status: resp.status, reason: SEND_CODE_REASON.BAD_RESPONSE });
           return;
         }
         sendResponse({ success: true, purpose: data.purpose });
       } catch (e) {
-        sendResponse({ success: false, error: e.message });
+        // Logging is the point — this catch was silent, so a fetch that never left the browser
+        // left the service worker console CLEAN, and every diagnosis started from "there is no
+        // error in the console" and went looking for the fault somewhere else (#1172).
+        // The reason is derived, not assumed: only a fetch that never completed is the network.
+        // The server address goes HERE, not into the user-facing sentence: `server-url` is a
+        // hidden input, so telling the user to check it names a control they do not have. The
+        // person who can act on it is reading this console.
+        console.error('[Claude Tuner] magic-link request failed:', config?.serverUrl, e);
+        sendResponse({ success: false, reason: sendCodeReasonFromThrown(e), detail: e.message });
       }
     })();
     return true;
@@ -2118,9 +2148,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             client: 'extension',
           }),
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => null);
         if (!resp.ok) {
-          sendResponse({ success: false, error: data.error || 'invalid_code' });
+          sendResponse({ success: false, status: resp.status, error: data?.error || 'invalid_code' });
+          return;
+        }
+        // 🔴 A 2xx with an unusable body must not fall through to setExtToken(undefined): that
+        // stores a broken token and reads to every later check as a successful login. Both fields
+        // are required because both are consumed — `email` becomes independentAccount.email, and a
+        // missing one would silently register an account with no address. The success contract is
+        // `{ ext_token, email, name }` (worker/src/routes/auth.ts).
+        if (!data?.ext_token || !data.email) {
+          console.error('[Claude Tuner] verify-code: 2xx without the success contract', config?.serverUrl, resp.status);
+          sendResponse({ success: false, status: resp.status, reason: SEND_CODE_REASON.BAD_RESPONSE });
           return;
         }
         // Store independent account + login-proven ext_token (scope:'full'). This opens the
@@ -2140,7 +2180,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
-        sendResponse({ success: false, error: e.message });
+        // Same reason as the request path above: a silent catch here is why "the console is
+        // clean" stopped meaning anything (#1172). ⚠️ This try also wraps the storage writes that
+        // follow a successful verify, so the reason is derived rather than assumed — a failing
+        // chrome.storage write is not the network and must not be described as one.
+        console.error('[Claude Tuner] verify-code request failed:', e);
+        sendResponse({ success: false, reason: sendCodeReasonFromThrown(e), detail: e.message });
       }
     })();
     return true;

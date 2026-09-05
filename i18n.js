@@ -136,10 +136,13 @@ const TRANSLATIONS = {
     'email_link_code_ph': '6자리 코드',
     'email_link_sent': '{0}(으)로 인증 코드를 보냈습니다.',
     'email_link_success': '연결되었습니다 — 곧 Claude 사용량 수집이 시작됩니다.',
-    'email_link_err': '코드를 보내지 못했습니다. 다시 시도해 주세요.',
+    // 785의 「연결 실패」 전용. 발송 실패 분기는 #1172에서 bg/send-code-error.js로 옮겨졌고,
+    // 그때까지 이 키는 코드를 보낸 적도 없는 자리에서 「코드를 보내지 못했습니다」라고 말하고 있었다.
+    'email_link_err': '연결하지 못했습니다. 다시 시도해 주세요.',
     'email_link_err_code': '6자리 코드를 입력하세요.',
     'email_link_err_invalid': '잘못되었거나 만료된 코드입니다. 새 코드를 요청하세요.',
     'email_link_err_claimed': '이 Claude 계정은 다른 계정에 연결되어 있습니다.',
+    'email_link_err_rejected': '이 Claude 계정은 지금 연결할 수 없습니다. 수집이 한 번 성공하면 이 안내는 사라집니다.',
     'email_link_err_auth': '먼저 다시 로그인해 주세요.',
     'email_link_status': 'Claude 계정 {0} 연결됨',
     'email_link_unlink': '연결 해제',
@@ -162,6 +165,13 @@ const TRANSLATIONS = {
     'reauth_error_code': '6자리 코드를 입력하세요.',
     'reauth_error_invalid': '잘못되었거나 만료된 코드입니다. 새 코드를 요청하세요.',
     'reauth_error_rate': '요청이 너무 많습니다. 몇 분 후 다시 시도해 주세요.',
+    // 코드 발송 실패 사유별 문구 (#1172). 종전에는 rate limit 외 전부가 `reauth_error` 한 문장이라
+    // 사용자도 우리도 원인을 볼 수 없었다. 사유 판정은 bg/send-code-error.js 한 곳에만 있다.
+    'code_err_network': '서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.',
+    'code_err_mail': '서버가 메일을 보내지 못했습니다. 몇 분 후 다시 시도해 주세요.',
+    'code_err_server': '서버 오류로 코드를 보내지 못했습니다. 몇 분 후 다시 시도해 주세요.',
+    'code_err_ext': '확장 프로그램이 요청을 보내지 못했습니다. chrome://extensions에서 새로고침한 뒤 다시 시도해 주세요.',
+    'code_err_bad_response': '서버가 예상과 다른 응답을 보냈습니다. 잠시 후 다시 시도해 주세요.',
     // Auth CTA (Phase 2 단계 4) — 인증 = 서버 데이터 전송 허가 (프라이버시-포지티브)
     'login_cta_title': '인증하고 서버 동기화 켜기',
     'login_cta_msg': '사용량은 지금도 이 브라우저에 저장됩니다. 이메일 인증 한 번으로 아래 기능이 켜집니다.',
@@ -762,10 +772,13 @@ const TRANSLATIONS = {
     'email_link_code_ph': '6-digit code',
     'email_link_sent': 'Verification code sent to {0}.',
     'email_link_success': 'Linked — Claude usage will start syncing shortly.',
-    'email_link_err': 'Could not send the code. Please try again.',
+    // The link-failure case only (see the ko note): the send-failure branches moved to
+    // bg/send-code-error.js in #1172.
+    'email_link_err': 'Could not link. Please try again.',
     'email_link_err_code': 'Enter the 6-digit code.',
     'email_link_err_invalid': 'Invalid or expired code. Request a new one.',
     'email_link_err_claimed': 'This Claude account is linked to a different account.',
+    'email_link_err_rejected': "This Claude account can't be linked right now. This notice clears once a collection succeeds.",
     'email_link_err_auth': 'Please sign in again first.',
     'email_link_status': 'Claude account {0} linked',
     'email_link_unlink': 'Unlink',
@@ -784,6 +797,14 @@ const TRANSLATIONS = {
     'reauth_error_code': 'Enter the 6-digit code.',
     'reauth_error_invalid': 'Invalid or expired code. Request a new one.',
     'reauth_error_rate': 'Too many requests. Please wait a few minutes and try again.',
+    // Per-reason copy for a failed code request (#1172). Everything that was not a rate limit used
+    // to collapse into `reauth_error`, so neither the user nor we could see the cause. The
+    // classification lives in exactly one place: bg/send-code-error.js.
+    'code_err_network': "Couldn't reach the server. Please check your internet connection.",
+    'code_err_mail': "The server couldn't send the email. Please try again in a few minutes.",
+    'code_err_server': 'The server returned an error. Please try again in a few minutes.',
+    'code_err_ext': "The extension couldn't send the request. Reload it at chrome://extensions and try again.",
+    'code_err_bad_response': 'The server sent an unexpected response. Please try again in a few minutes.',
     // Login CTA (Phase 2 단계 4) — fresh install, additive login-first
     'login_cta_title': 'Turn on server sync',
     'login_cta_msg': 'Your usage is saved on this browser. Verify your email once to enable the features below.',

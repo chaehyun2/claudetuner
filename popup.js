@@ -10,6 +10,7 @@ import { isServerSyncGated, serverSyncWithheldReason, getLastStatus, isServerSyn
 import { liveProviderErrors, providerErrorAction, providerErrorSnoozed } from './bg/provider-state.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
+import { sendCodeReasonFromMessage, sendCodeErrorCopy, verifyCodeErrorCopy } from './bg/send-code-error.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
@@ -147,10 +148,13 @@ async function renderReauthWidget() {
           stepVer.classList.remove('hidden');
           status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
           codeInput.focus();
-        } else if (res && res.error === 'rate_limited') {
-          status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
         } else {
-          status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+          // 🔴 `chrome.runtime.lastError` is read HERE, inside the callback — Chrome clears it on
+          // return, and it is the only evidence that the message never reached the service worker.
+          // All three send surfaces route through the same classifier so they cannot drift apart
+          // again (#1172).
+          const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError));
+          status.textContent = t(copy.key) || copy.fallback;
         }
       }
     );
@@ -182,7 +186,11 @@ async function renderReauthWidget() {
           chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
           setTimeout(() => location.reload(), 1200);
         } else {
-          status.textContent = t('reauth_error_invalid') || 'Invalid or expired code. Request a new one.';
+          // The default is still "invalid or expired code" — that IS what a rejected code is. Only
+          // the states that are not about the code (dead message channel, unreachable server, a
+          // 2xx that was not our API) override it, decided in bg/send-code-error.js (#1172).
+          const copy = verifyCodeErrorCopy(res, chrome.runtime.lastError);
+          status.textContent = t(copy.key) || copy.fallback;
         }
       });
     };
@@ -497,10 +505,11 @@ async function renderClaimSwitchWidget() {
         stepEmail.classList.add('hidden'); stepVerify.classList.remove('hidden');
         status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
         codeInput.focus();
-      } else if (res && res.error === 'rate_limited') {
-        status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
       } else {
-        status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+        // See the re-auth widget above: lastError is read inside the callback, and the reason →
+        // copy step lives in bg/send-code-error.js rather than here (#1172).
+        const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError));
+        status.textContent = t(copy.key) || copy.fallback;
       }
     });
   };
@@ -530,7 +539,11 @@ async function renderClaimSwitchWidget() {
           chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
           setTimeout(() => location.reload(), 1200);
         } else {
-          status.textContent = t('reauth_error_invalid') || 'Invalid or expired code. Request a new one.';
+          // The default is still "invalid or expired code" — that IS what a rejected code is. Only
+          // the states that are not about the code (dead message channel, unreachable server, a
+          // 2xx that was not our API) override it, decided in bg/send-code-error.js (#1172).
+          const copy = verifyCodeErrorCopy(res, chrome.runtime.lastError);
+          status.textContent = t(copy.key) || copy.fallback;
         }
       });
     };
@@ -941,10 +954,11 @@ async function renderLoginCta() {
         stepEmail.classList.add('hidden'); stepVerify.classList.remove('hidden');
         status.textContent = t('reauth_code_sent', email) || `Code sent to ${email}.`;
         codeInput.focus();
-      } else if (res && res.error === 'rate_limited') {
-        status.textContent = t('reauth_error_rate') || 'Too many requests. Please wait a few minutes and try again.';
       } else {
-        status.textContent = t('reauth_error') || 'Could not send the code. Please try again.';
+        // See the re-auth widget above: lastError is read inside the callback, and the reason →
+        // copy step lives in bg/send-code-error.js rather than here (#1172).
+        const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError));
+        status.textContent = t(copy.key) || copy.fallback;
       }
     });
   };
@@ -975,7 +989,11 @@ async function renderLoginCta() {
           chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
           setTimeout(() => location.reload(), 1200);
         } else {
-          status.textContent = t('reauth_error_invalid') || 'Invalid or expired code. Request a new one.';
+          // The default is still "invalid or expired code" — that IS what a rejected code is. Only
+          // the states that are not about the code (dead message channel, unreachable server, a
+          // 2xx that was not our API) override it, decided in bg/send-code-error.js (#1172).
+          const copy = verifyCodeErrorCopy(res, chrome.runtime.lastError);
+          status.textContent = t(copy.key) || copy.fallback;
         }
       });
     };

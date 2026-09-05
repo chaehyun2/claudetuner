@@ -10,6 +10,7 @@ import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from '.
 import { _providerOrgLabel } from './org-selector.js';
 import { _authedFetch } from './auth.js';
 import { getUpgradeBlock } from '../bg/upgrade-gate.js';
+import { sendCodeReasonFromStatus, sendCodeReasonFromThrown, sendCodeErrorCopy } from '../bg/send-code-error.js';
 
 function _applyTeamOnboarding(onboarding) {
   if (!state.onboardOrgName || !onboarding) return;
@@ -835,12 +836,34 @@ function _wireEmailLink(claudeEmail) {
         } else if (res.status === 401) {
           status.textContent = t('email_link_err_auth') || 'Please sign in again first.';
           restore();
+        } else if (res.status === 400) {
+          // 🔴 NOT the shared 400 → "enter a valid email". That rule is true where the address is
+          // typed; here it comes from stored state, so the two 400s this endpoint returns ("a
+          // valid claude_email is required" and "already matches your account") both mean the
+          // banner offering this button is stale — and telling the user to fix an address the UI
+          // does not let them edit is the #967 misdirection again. (Codex follow-up on #1172.)
+          // 🔴 The copy does NOT say "reopen the popup": reopening only re-reads the stored
+          // verdict, and `claudeEmailMismatch` is cleared by an ACCEPTED server POST
+          // (bg/collect.js), not by a render. Naming an action that cannot work is the failure
+          // mode this whole change is about. (Codex.)
+          status.textContent = t('email_link_err_rejected') || "This Claude account can't be linked right now. This notice clears once a collection succeeds.";
+          restore();
         } else {
-          status.textContent = t('email_link_err') || 'Could not send the code. Please try again.';
+          // 409, 401 and 400 above keep their own sentences — each names a state the user can act
+          // on. Everything else goes through the shared classifier, so "could not send the code"
+          // stops standing for six different faults at once (#1172).
+          const copy = sendCodeErrorCopy(sendCodeReasonFromStatus(res.status));
+          status.textContent = t(copy.key) || copy.fallback;
           restore();
         }
-      } catch {
-        status.textContent = t('email_link_err') || 'Could not send the code. Please try again.';
+      } catch (e) {
+        // Logged rather than swallowed: a silent catch is why "no error in the console" stopped
+        // being evidence of anything (#1172). The reason is DERIVED — _authedFetch can also throw
+        // after the server answered (its 401 path writes chrome.storage), and calling that "check
+        // your connection" would be a confident wrong answer.
+        console.error('[Claude Tuner] claude-link request failed:', e);
+        const copy = sendCodeErrorCopy(sendCodeReasonFromThrown(e));
+        status.textContent = t(copy.key) || copy.fallback;
         restore();
       }
     });
