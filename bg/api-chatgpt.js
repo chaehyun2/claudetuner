@@ -40,7 +40,7 @@ async function fetchChatGPTViaTab(tabId, fullUrl) {
     func: async (url) => {
       try {
         // Step 1: Get Bearer token from session endpoint
-        const sessionResp = await fetch('/api/auth/session', { credentials: 'include' });
+        const sessionResp = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
         if (!sessionResp.ok) {
           return { _err: true, status: sessionResp.status, message: 'session_fetch_failed' };
         }
@@ -102,6 +102,7 @@ async function fetchChatGPTWithCookies(url) {
   // Step 1: Get Bearer token via session endpoint
   const sessionResp = await fetch(`${CHATGPT_API_BASE}/api/auth/session`, {
     headers: { ...commonHeaders, 'Accept': 'application/json' },
+    cache: 'no-store',
   });
   if (!sessionResp.ok) {
     if (sessionResp.status === 403) throw new Error('err_chatgpt_cloudflare');
@@ -119,6 +120,7 @@ async function fetchChatGPTWithCookies(url) {
       'Authorization': 'Bearer ' + session.accessToken,
       'Accept': 'application/json',
     },
+    cache: 'no-store',
   });
 
   if (!resp.ok) {

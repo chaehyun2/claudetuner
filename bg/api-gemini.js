@@ -111,6 +111,7 @@ async function fetchGeminiWithCredentials(rpcId, params) {
   // Step 1: Fetch page HTML to extract AT token (SNlM0e)
   const pageResp = await fetch(`${GEMINI_API_BASE}/app`, {
     credentials: 'include',
+    cache: 'no-store',
   });
 
   if (pageResp.redirected && (pageResp.url.includes('accounts.google') || pageResp.url.includes('signin'))) {
@@ -145,6 +146,7 @@ async function fetchGeminiWithCredentials(rpcId, params) {
       'X-Same-Domain': '1',
     },
     body,
+    cache: 'no-store',
   });
 
   if (!resp.ok) {
@@ -284,6 +286,9 @@ export async function isGeminiLoggedIn() {
       method: 'HEAD',
       credentials: 'include',
       redirect: 'manual',
+      // A cached 200 here would report "logged in" for a signed-out user — this probe's
+      // whole job is to read live auth state, so it is the last fetch that may be cached.
+      cache: 'no-store',
     });
     // 200 = logged in, 0 (opaque redirect) or 3xx = not logged in
     return resp.status === 200;

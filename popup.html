@@ -244,6 +244,27 @@
        model-scoped limit crosses SCOPED_ESCALATE_PCT — so it costs 0px for the ~95% of
        accounts whose scoped limit is idle. Colour comes from gaugeColor inline. */
     .ov-scoped { margin-top: 5px; font-size: 10.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    /* === User-collapsible sections (#1190) === */
+    .ct-collapse-head { display: flex; align-items: center; gap: 5px; cursor: pointer; padding: 5px 10px;
+      font-size: 10.5px; font-weight: 700; color: var(--text-secondary); user-select: none; }
+    .ct-collapse-head:hover { color: var(--text-primary); }
+    .ct-collapse-title { flex-shrink: 0; }
+    .ct-chevron { font-size: 9px; color: var(--text-muted); transition: transform .15s; flex-shrink: 0; }
+    .ct-collapsed .ct-chevron { transform: rotate(-90deg); }
+    /* The section's own body is the ONLY thing collapse touches — whether the SECTION shows at all
+       stays owned by its existing logic (renderAdditionalLimits / renderFitnessMatrix). */
+    .ct-collapsed > #additional-limits-body, .ct-collapsed > #fm-content { display: none; }
+    /* The WRAPPER carries the card chrome so the header sits inside the card — matching the
+       fitness section, whose header is inside .fm-card. Without this the two collapsibles read as
+       different components: one titled above its box, one titled inside it. */
+    .ct-collapsible.ct-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
+    .ct-collapsible.ct-card > .gauge-card { background: none; border: none; border-radius: 0;
+      margin-bottom: 0; padding-top: 2px; }
+    /* The summary stands in for the body while collapsed, so collapsing "Fable 0%" does not hide
+       the number itself — the whole card is one number, and a bare title would be a downgrade. */
+    .ct-collapse-summary { display: none; flex: 1; text-align: right; font-weight: 650;
+      color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ct-collapsed .ct-collapse-summary { display: block; }
     .ov-unlimited { font-size: 11px; font-weight: 500; color: var(--text-secondary); padding: 4px 0; display: inline-block; }
 
     /* Top tab switcher (모아 보기 | 자세히) — always visible for multi-account users. */
@@ -857,11 +878,27 @@
   </div>
 
   <!-- Additional per-feature limits: ChatGPT Codex weekly + Claude's scoped model, e.g. Fable
-       (#1181). Filled by org-selector.js. -->
-  <div id="additional-limits-section" class="gauge-card" style="display:none;margin-bottom:10px"></div>
+       (#1181). Filled by org-selector.js; user-collapsible (#1190).
+       The gauge-card moved to the BODY on purpose — it is `display:flex` (gauges sit in a row),
+       so a header placed inside it would become a third column instead of a heading. -->
+  <div id="additional-limits-section" class="ct-collapsible ct-card" style="display:none;margin-bottom:10px">
+    <div class="ct-collapse-head" data-collapse="addl" role="button" tabindex="0" aria-expanded="true"
+         aria-controls="additional-limits-body" data-i18n-title="collapse_toggle_title">
+      <span class="ct-chevron" aria-hidden="true">▾</span>
+      <span class="ct-collapse-title" data-i18n="collapse_model_limits"></span>
+      <span class="ct-collapse-summary"></span>
+    </div>
+    <div id="additional-limits-body" class="gauge-card"></div>
+  </div>
 
   <!-- 플랜 적합도 매트릭스 -->
-  <div id="fitness-section" class="fm-card hidden">
+  <div id="fitness-section" class="fm-card ct-collapsible hidden">
+    <div class="ct-collapse-head" data-collapse="fitness" role="button" tabindex="0" aria-expanded="true"
+         aria-controls="fm-content" data-i18n-title="collapse_toggle_title">
+      <span class="ct-chevron" aria-hidden="true">▾</span>
+      <span class="ct-collapse-title" data-i18n="collapse_plan_fit"></span>
+      <span class="ct-collapse-summary"></span>
+    </div>
     <div id="fm-content" class="fm-skeleton" data-i18n="fm_collecting"></div>
   </div>
 

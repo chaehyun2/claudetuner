@@ -474,6 +474,9 @@ const TRANSLATIONS = {
     'org_pin_hint': '📌으로 메인 조직 고정',
     'org_cap_hint': '조직이 3개를 초과합니다 — 활성 3개 선택하기 →',
     // Plan fitness matrix
+    'collapse_model_limits': '모델별 한도',
+    'collapse_plan_fit': '플랜 추천',
+    'collapse_toggle_title': '접기 / 펴기',
     'fm_col_plan': '플랜',
     'fm_window_24h': '최근\n24시간',
     'fm_window_7d': '최근\n7일',
@@ -1105,6 +1108,9 @@ const TRANSLATIONS = {
     'org_pin_hint': 'Pin 📌 to set main org',
     'org_cap_hint': 'More than 3 orgs — pick your active 3 →',
     // Fitness matrix
+    'collapse_model_limits': 'Model limits',
+    'collapse_plan_fit': 'Plan fit',
+    'collapse_toggle_title': 'Collapse / expand',
     'fm_col_plan': 'Plan',
     'fm_window_24h': 'Last\n24h',
     'fm_window_7d': 'Last\n7d',

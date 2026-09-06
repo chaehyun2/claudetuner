@@ -3,6 +3,7 @@
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
 import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
+import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -92,11 +93,14 @@ function renderOrgSelector(container, orgs) {
  */
 export function renderAdditionalLimits(additionalLimits) {
   const addlSection = document.getElementById('additional-limits-section');
-  if (!addlSection) return;
+  const addlBody = document.getElementById('additional-limits-body');
+  if (!addlSection || !addlBody) return;
   const limits = Array.isArray(additionalLimits) ? additionalLimits : [];
   if (!limits.length) {
+    // Hide the SECTION (header included) and clear only the BODY — wiping the section would
+    // delete the collapse header, and it never comes back: nothing re-creates static markup.
     addlSection.style.display = 'none';
-    addlSection.innerHTML = '';
+    addlBody.innerHTML = '';
     return;
   }
   const windowLabel = (sec) => {
@@ -106,7 +110,10 @@ export function renderAdditionalLimits(additionalLimits) {
     return Math.round(sec / 60) + 'm';
   };
   addlSection.style.display = '';
-  addlSection.innerHTML = limits.map((lim) => {
+  applyCollapseState(addlSection, 'addl');
+  // Stands in for the body while collapsed, so the number survives collapsing.
+  setCollapseSummary(addlSection, limits.map(l => `${l.name} ${Math.max(0, Math.min(Math.round(l.used), 100))}%`).join(' · '));
+  addlBody.innerHTML = limits.map((lim) => {
     const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
     const color = gaugeColor(lim.used);
     const win = windowLabel(lim.windowSeconds);

@@ -14,6 +14,7 @@ import { sendCodeReasonFromMessage, sendCodeErrorCopy, verifyCodeErrorCopy } fro
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
+import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
@@ -1323,6 +1324,10 @@ function updateThemeBtn(mode) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
+  // Before ANY section renders: the remembered collapse state must be in hand so a collapsed
+  // section is painted collapsed, not painted open and then snapped shut on every popup open.
+  await loadCollapseState();
+  initCollapsibles();
   // Load the active dismissal before anything renders: _shouldSuppressRec reads it synchronously,
   // so a rec arriving ahead of this would draw a card the user already dismissed (#1004).
   state.recDismiss = await getRecDismiss();

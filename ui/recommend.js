@@ -2,6 +2,7 @@
 // Leaf domain (does not call org-selector/prediction). Imports shared state + selectors, pure
 // helpers, and the auth fetch wrapper; i18n `t` and CT_CONFIG are globals from classic scripts.
 import { state, _isNonClaudePrimarySelected } from './state.js';
+import { applyCollapseState } from './collapsible.js';
 import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util.js';
 import { _authedFetch } from './auth.js';
 import { isServerSyncStalled } from '../bg/server-reach.js';
@@ -64,6 +65,7 @@ function renderFitnessMatrix(data) {
     return;
   }
   section.classList.remove('hidden');
+  applyCollapseState(section, 'fitness');
 
   let html = '<table class="fm-table"><thead><tr>';
   html += '<th>' + t('fm_col_plan') + '</th>';
