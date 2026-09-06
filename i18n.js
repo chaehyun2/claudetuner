@@ -11,6 +11,7 @@ const TRANSLATIONS = {
     'status_local_only': '로컬 전용',
     'status_local_only_tip': '이 브라우저에만 저장 중 — 로그인해야 대시보드·팀 리포트에 반영됩니다',
     'min_later_check': '분 후',
+    'ov_scoped_high': '{0} 한도 {1}% 사용',
     'usage_5h': '5시간 사용률',
     'usage_7d': '7일 사용률',
     // Window labels derived from the reported span, for plans whose window is not the slot's
@@ -657,6 +658,7 @@ const TRANSLATIONS = {
     'status_local_only': 'Local only',
     'status_local_only_tip': 'Saved in this browser only — sign in to sync to the dashboard and team report',
     'min_later_check': 'm',
+    'ov_scoped_high': '{0} limit at {1}%',
     'usage_5h': '5-Hour Usage',
     'usage_7d': '7-Day Usage',
     'usage_window': '{0} Usage',

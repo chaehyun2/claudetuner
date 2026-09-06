@@ -156,7 +156,18 @@ export async function fetchWithCookies(url, options = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const fetchOpts = { method, headers };
+  // 🔴 `no-store` is not optional here — it is what makes this transport answer the same question
+  // as the tab one (fetchViaTab sets it too). A snapshot's whole value is that it is a reading
+  // taken NOW: collected_at is stamped after this call returns (bg/collect.js), so ANY stale body
+  // arrives wearing a fresh timestamp and the chart goes backwards.
+  //
+  // What was actually observed live on 2026-09-05 is that symptom, not its mechanism: one install
+  // re-posted its 2h-old 10/40/1 reading with collected_at=05:18 carrying a five_hour_resets_at of
+  // 05:00 that had already expired — 7 minutes after another install of the same account had
+  // correctly read the post-reset 0. The HTTP cache is one path that produces exactly that, and
+  // the one this line closes; it was not proven to be the path taken. Upstream/CDN staleness is
+  // not covered here, and a server-side guard is tracked separately.
+  const fetchOpts = { method, headers, cache: 'no-store' };
   if (options.body && method !== 'GET') {
     fetchOpts.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
   }

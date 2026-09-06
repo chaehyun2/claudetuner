@@ -201,6 +201,47 @@ function _spendRow(org) {
     + `<div class="gauge-sub">$${used} / $${limit}</div></div>`;
 }
 
+// Model-scoped limits (Claude "Fable", ChatGPT Codex) only escalate onto the overview card
+// once they are worth acting on. The overview is a one-card-per-account master screen with a
+// 340px viewport, so a permanent third gauge would spend everyone's vertical budget on a limit
+// that is idle for almost everyone: measured 2026-09-06, of 2,517 accounts reporting a scoped
+// Claude limit only 128 (5%) were at >=50% and 50 (2%) at >=80%.
+//
+// The detail view carries the always-on gauge (ui/org-selector.js `additional-limits-section`),
+// so nothing is hidden — this line is the ESCALATION, not the display. Threshold matches
+// gaugeColor's amber step so the card turns amber exactly when the detail gauge does.
+const SCOPED_ESCALATE_PCT = 50;
+
+// Provider-neutral by construction: `additionalLimits` is the same field ChatGPT's Codex bucket
+// already populates, so a Codex bucket near its cap escalates identically. Branching on provider
+// here would be an artificial distinction — the reader cares that A limit is nearly spent.
+//
+// 🪤 This escalates ANY per-feature bucket, including non-model ones like ChatGPT's 'gpt-reserve'
+// banked-reset pool — and that is deliberate, NOT an oversight of the exclusion list in
+// site/shared/chart-utils.js (`NON_MODEL_SLOT_NAMES`). That list exists because the CHART would
+// draw such a bucket as a series under a MODEL label, asserting something false about it. Here no
+// model label is asserted: the bucket's own name is printed verbatim, which is what the detail
+// gauge below already does for the same bucket. Being at 95% of a real limit is worth surfacing
+// whatever kind of limit it is, so copying that list across the site/extension runtime boundary
+// would buy a maintenance burden and a drift risk to suppress correct information.
+function _scopedEscalationRow(org) {
+  const limits = Array.isArray(org.additionalLimits) ? org.additionalLimits : [];
+  // A nameless bucket is dropped rather than drawn blank: the escalation's whole job is to say
+  // WHICH limit is nearly spent, and "  95%" under the gauges answers a different question.
+  const hot = limits.filter(l => l && typeof l.name === 'string' && l.name.trim()
+    && typeof l.used === 'number' && l.used >= SCOPED_ESCALATE_PCT);
+  if (!hot.length) return '';
+  // Worst first, and only the worst is shown: a second line would defeat the space budget this
+  // whole design exists to respect.
+  hot.sort((a, b) => b.used - a.used);
+  const worst = hot[0];
+  const pct = Math.min(Math.round(worst.used), 100);
+  const color = gaugeColor(pct);
+  const label = t('ov_scoped_high', worst.name, pct);
+  return `<div class="ov-scoped" style="color:${color}" title="${escHtml(label)}">`
+    + `${escHtml(worst.name)} ${pct}%</div>`;
+}
+
 // `hist` is this org's pre-bucketed history slice (see _historyByOrg).
 function _renderCard(org, hist) {
   const provider = org.provider || 'claude';
@@ -242,6 +283,7 @@ function _renderCard(org, hist) {
     + '<span class="ov-chevron" aria-hidden="true">›</span>'
     + '</div>'
     + `<div class="ov-gauges">${rows}</div>`
+    + _scopedEscalationRow(org)
     + '</div>';
 }
 

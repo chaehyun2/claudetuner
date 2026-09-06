@@ -240,6 +240,10 @@
     /* 5h/7d sit side by side inside each card, mirroring the detail gauge-card. */
     .ov-gauges { display: flex; gap: 10px; }
     .ov-gauges .gauge-row { flex: 1; min-width: 0; }
+    /* Scoped-limit escalation line (#1181). Sits under the 5h/7d pair, present only when a
+       model-scoped limit crosses SCOPED_ESCALATE_PCT — so it costs 0px for the ~95% of
+       accounts whose scoped limit is idle. Colour comes from gaugeColor inline. */
+    .ov-scoped { margin-top: 5px; font-size: 10.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
     .ov-unlimited { font-size: 11px; font-weight: 500; color: var(--text-secondary); padding: 4px 0; display: inline-block; }
 
     /* Top tab switcher (모아 보기 | 자세히) — always visible for multi-account users. */
@@ -852,7 +856,8 @@
     </div>
   </div>
 
-  <!-- Additional per-feature limits (e.g. ChatGPT Codex weekly). Filled by org-selector.js. -->
+  <!-- Additional per-feature limits: ChatGPT Codex weekly + Claude's scoped model, e.g. Fable
+       (#1181). Filled by org-selector.js. -->
   <div id="additional-limits-section" class="gauge-card" style="display:none;margin-bottom:10px"></div>
 
   <!-- 플랜 적합도 매트릭스 -->

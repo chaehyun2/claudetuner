@@ -72,6 +72,56 @@ function renderOrgSelector(container, orgs) {
   });
 }
 
+/**
+ * Paint the per-feature limit gauges (ChatGPT Codex weekly, Claude's scoped model e.g. "Fable").
+ *
+ * 🔴 EXPORTED because `selectOrg()` is not the only render path, and assuming it was is what
+ * made #1181's fix a no-op for most Claude users. popup.js only calls selectOrg() when the
+ * selected org DIFFERS from the Claude snapshot's org (popup.js ~L1728) — so a non-Claude org
+ * always went through here, while the PRIMARY Claude org renders via render.js `_updateUICore`
+ * instead. That is why this section could stay ChatGPT-only for so long without anyone noticing
+ * the Claude half was unreachable: the one provider that skips this function is Claude.
+ *
+ * Fed by two collectors into one provider-neutral renderer: ChatGPT parses /wham/usage's
+ * additional_rate_limits (bg/collect-chatgpt.js parseAdditionalLimits), and Claude projects its
+ * `limits[]` weekly_scoped slots through bg/scoped-limits.js. Orgs with neither lack the field,
+ * so this shows only where relevant.
+ *
+ * A falsy/empty list HIDES the section — required, not cosmetic: the element is shared by every
+ * org, so leaving stale markup would show the previous org's limits under the current org's name.
+ */
+export function renderAdditionalLimits(additionalLimits) {
+  const addlSection = document.getElementById('additional-limits-section');
+  if (!addlSection) return;
+  const limits = Array.isArray(additionalLimits) ? additionalLimits : [];
+  if (!limits.length) {
+    addlSection.style.display = 'none';
+    addlSection.innerHTML = '';
+    return;
+  }
+  const windowLabel = (sec) => {
+    if (typeof sec !== 'number' || sec <= 0) return '';
+    if (sec % 86400 === 0) return (sec / 86400) + 'd';
+    if (sec % 3600 === 0) return (sec / 3600) + 'h';
+    return Math.round(sec / 60) + 'm';
+  };
+  addlSection.style.display = '';
+  addlSection.innerHTML = limits.map((lim) => {
+    const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
+    const color = gaugeColor(lim.used);
+    const win = windowLabel(lim.windowSeconds);
+    const label = escHtml(lim.name) + (win ? ` <span style="color:var(--text-muted);font-weight:400">(${win})</span>` : '');
+    const reset = lim.resetsAt
+      ? `<div class="gauge-sub" style="margin-top:3px">↻ ${escHtml(formatResetAbsolute(lim.resetsAt))}</div>`
+      : '';
+    return '<div class="gauge-row">'
+      + '<div class="gauge-header"><span class="gauge-label">' + label + '</span>'
+      + '<span class="gauge-value" style="color:' + color + '">' + pct + '%</span></div>'
+      + '<div class="gauge-bar"><div class="gauge-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+      + reset + '</div>';
+  }).join('');
+}
+
 export function selectOrg(orgId, container) {
   if (container) {
     container.querySelectorAll('.org-option').forEach(el => {
@@ -260,40 +310,8 @@ export function selectOrg(orgId, container) {
       }
     }
 
-    // === 3b. Additional per-feature limits (e.g. ChatGPT Codex weekly) ===
-    // The active ChatGPT account org carries `additionalLimits` (parsed from
-    // /wham/usage's additional_rate_limits). Other providers/orgs lack the field,
-    // so this naturally shows only where relevant. Display-only (not persisted).
-    const addlSection = document.getElementById('additional-limits-section');
-    if (addlSection) {
-      const limits = Array.isArray(orgData.additionalLimits) ? orgData.additionalLimits : [];
-      if (limits.length) {
-        const windowLabel = (sec) => {
-          if (typeof sec !== 'number' || sec <= 0) return '';
-          if (sec % 86400 === 0) return (sec / 86400) + 'd';
-          if (sec % 3600 === 0) return (sec / 3600) + 'h';
-          return Math.round(sec / 60) + 'm';
-        };
-        addlSection.style.display = '';
-        addlSection.innerHTML = limits.map((lim) => {
-          const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
-          const color = gaugeColor(lim.used);
-          const win = windowLabel(lim.windowSeconds);
-          const label = escHtml(lim.name) + (win ? ` <span style="color:var(--text-muted);font-weight:400">(${win})</span>` : '');
-          const reset = lim.resetsAt
-            ? `<div class="gauge-sub" style="margin-top:3px">↻ ${escHtml(formatResetAbsolute(lim.resetsAt))}</div>`
-            : '';
-          return '<div class="gauge-row">'
-            + '<div class="gauge-header"><span class="gauge-label">' + label + '</span>'
-            + '<span class="gauge-value" style="color:' + color + '">' + pct + '%</span></div>'
-            + '<div class="gauge-bar"><div class="gauge-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
-            + reset + '</div>';
-        }).join('');
-      } else {
-        addlSection.style.display = 'none';
-        addlSection.innerHTML = '';
-      }
-    }
+    // === 3b. Additional per-feature limits (ChatGPT Codex weekly, Claude's scoped model) ===
+    renderAdditionalLimits(orgData.additionalLimits);
 
     // === 4. Subscription / Pending plan (Claude + ChatGPT) ===
     const pendingRow = document.getElementById('pending-row');

@@ -8,9 +8,24 @@
 // so its Claude org was never listed — and with a Gemini/ChatGPT org present from the provider
 // path, ui/render.js read `_providerOnly` as true forever and hid Claude from its own user.
 
+import { scopedLimitsForDisplay } from './scoped-limits.js';
+
 /** Fields this collection can refresh, shared by insert and update so the two cannot drift. */
 function freshFields(snapshot, prev = {}, now) {
+  // Model-scoped weekly limits (#1181). MUST be here and not only on the multi-org merge path:
+  // this function is the ONLY writer of collectedOrgs for a local-only install (sync withheld or
+  // boost mode), and those are precisely the users who cannot fall back to the dashboard instead.
+  //
+  // 🔴 Deliberately does NOT fall back to `prev` the way h5/d7 do on the lines below. A scoped
+  // limit is optional-presence data: the model rotates, a downgrade removes the bucket, and
+  // `limits[]` is simply absent from some polls. Keeping the last value would leave a local-only
+  // install asserting "Fable 100%" forever after the bucket went away, and — worse — would make
+  // this writer disagree with the collect.js writer, which publishes the current observation.
+  // That exact divergence between the two collectedOrgs writers is what hid this feature from
+  // gated installs in the first place (Codex round 1). Latest observation wins, in both writers.
+  const scoped = scopedLimitsForDisplay(snapshot);
   return {
+    additionalLimits: scoped.length ? scoped : null,
     h5: snapshot.five_hour?.utilization ?? prev.h5 ?? null,
     d7: snapshot.seven_day?.utilization ?? prev.d7 ?? null,
     resetsAt5h: snapshot.five_hour?.resets_at ?? prev.resetsAt5h ?? null,

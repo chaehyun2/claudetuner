@@ -6,6 +6,7 @@ import {
   DEFAULT_SERVER_URL,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
+import { scopedLimitsForDisplay } from './scoped-limits.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } from './upgrade-gate.js';
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
 import { applyPinMoveTitle } from './badge.js';
@@ -1114,6 +1115,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       resetsAt5h: snapshot.five_hour?.resets_at ?? null,
       resetsAt7d: snapshot.seven_day?.resets_at ?? null,
       extraUsage: snapshot.extra_usage ?? null,
+      // Same display-only carry as the extra-org loop, and for the same reason: an org that is
+      // primary today can be an EXTRA org tomorrow (the primary is re-resolved each round), and
+      // the extra path's skip branch repaints from this cache. Without it the scoped gauge blinks
+      // out until that org's next due poll. Inert for the gates (named-field comparison).
+      scopedLimits: scopedLimitsForDisplay(snapshot),
     };
     // force (manual/welcome) always posts. Otherwise the shared gate decides:
     // changed (10min min-interval) OR the 1h heartbeat floor.
@@ -1587,6 +1593,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         resetsAt5h: snapshot.five_hour?.resets_at || null,
         resetsAt7d: snapshot.seven_day?.resets_at || null,
         extraUsage: snapshot.extra_usage || null,
+        additionalLimits: scopedLimitsForDisplay(snapshot),
       };
       const failedOrgs = [];
       const skippedOrgs = []; // Orgs skipped by adaptive polling
@@ -1615,6 +1622,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
               resetsAt5h: pollState.lastValues.resetsAt5h || null,
               resetsAt7d: pollState.lastValues.resetsAt7d || null,
               extraUsage: pollState.lastValues.extraUsage || null,
+              // Cached alongside the rest: adaptive polling can skip this org for hours, and
+              // dropping the scoped gauge on a skipped tick would make it blink in and out.
+              additionalLimits: pollState.lastValues.scopedLimits || [],
             };
           }
           continue;
@@ -1632,6 +1642,14 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           const acctCache = await chrome.storage.local.get({ accountCache: null });
           const extraSeatTier = acctCache.accountCache?.allSeatTiers?.[extraOrg.uuid] || null;
 
+          // Computed once here (not from extraSnapshot, which is built further down) and reused
+          // by both sinks below, so the cached copy and the rendered copy can never disagree.
+          const extraScoped = resolveScopedWeeklySlots(extraUsage);
+          const extraScopedLimits = scopedLimitsForDisplay({
+            seven_day_omelette: extraScoped.omelette,
+            seven_day_sonnet: extraScoped.sonnet,
+          });
+
           // Adaptive polling: compare current values with previous
           const currentValues = {
             h5: extraUsage.five_hour?.utilization ?? null,
@@ -1641,6 +1659,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             resetsAt5h: normalizeResetTime(extraUsage.five_hour?.resets_at) || null,
             resetsAt7d: normalizeResetTime(extraUsage.seven_day?.resets_at) || null,
             extraUsage: normalizeExtraUsage(extraUsage.extra_usage),
+            // Display-only carry so a poll SKIPPED by the adaptive tier can still paint the
+            // scoped gauge from cache. Inert for both gates: hasOrgUsageChanged and
+            // shouldSendSnapshot compare named fields (h5/d7/extraUsed/resets*), never the
+            // whole object — so adding a key here cannot perturb tier or heartbeat.
+            scopedLimits: extraScopedLimits,
           };
           // Tier uses change-vs-last-poll (consecutive flat polls → back off).
           const usageChanged = hasOrgUsageChanged(pollState.lastValues, currentValues);
@@ -1685,6 +1708,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             resetsAt5h: normalizeResetTime(extraUsage.five_hour?.resets_at) || null,
             resetsAt7d: normalizeResetTime(extraUsage.seven_day?.resets_at) || null,
             extraUsage: normalizeExtraUsage(extraUsage.extra_usage),
+            additionalLimits: extraScopedLimits,
           };
           // Save extra org history too (for per-org view)
           await appendUsageHistory(buildHistoryPoint(extraSnapshot, extraPlan));
@@ -1817,6 +1841,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           resetsAt5h: orgUsageMap[o.uuid]?.resetsAt5h ?? null,
           resetsAt7d: orgUsageMap[o.uuid]?.resetsAt7d ?? null,
           extraUsage: orgUsageMap[o.uuid]?.extraUsage ?? null,
+          // Model-scoped weekly limits (Fable, #1181). Same field ChatGPT/Codex already uses,
+          // so ui/org-selector.js renders it with no provider branch.
+          additionalLimits: orgUsageMap[o.uuid]?.additionalLimits ?? null,
           updatedAt: Date.now(),
         });
       }

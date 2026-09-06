@@ -7,7 +7,7 @@ import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
-import { _providerOrgLabel } from './org-selector.js';
+import { _providerOrgLabel, renderAdditionalLimits } from './org-selector.js';
 import { _authedFetch } from './auth.js';
 import { getUpgradeBlock } from '../bg/upgrade-gate.js';
 import { sendCodeReasonFromStatus, sendCodeReasonFromThrown, sendCodeErrorCopy } from '../bg/send-code-error.js';
@@ -372,6 +372,23 @@ export function _updateUICore(status) {
     if (state.selectedOrgId && state.selectedOrgId !== s.claude_org_uuid) {
       return;
     }
+
+    // Per-feature limit gauges for the PRIMARY Claude org (#1181 follow-up).
+    //
+    // 🔴 This line is the whole reason the Fable gauge is reachable at all. popup.js calls
+    // selectOrg() — which paints this section — only when the selected org DIFFERS from the
+    // Claude snapshot's org, so the primary Claude org has always rendered through here instead.
+    // Feeding `additionalLimits` from the collector (#1181) was therefore a no-op for the most
+    // common case: a single-org Claude user opened the popup and saw no scoped gauge at all.
+    // Caught by the pre-upload batch review, not by either unit review — neither commit is wrong
+    // on its own; the gap is between the producer and the one render path nobody had to touch
+    // while the section was ChatGPT-only.
+    //
+    // Read from collectedOrgs (matched on the snapshot's own org uuid, not the possibly-stale
+    // isPrimary flag) so both render paths display the SAME stored value — projecting the
+    // snapshot again here would be a second source that could disagree with selectOrg's.
+    const _primaryOrgEntry = (state.collectedOrgs || []).find(o => o.uuid === s.claude_org_uuid);
+    renderAdditionalLimits(_primaryOrgEntry?.additionalLimits);
 
     // Reset the headline; the gauge branches below re-show it via
     // renderGaugePrediction('5h'), or leave it hidden (usage-based Enterprise).
