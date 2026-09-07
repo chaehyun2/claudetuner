@@ -744,6 +744,32 @@
   const NON_MODEL_BUCKET_NAMES = ['gpt-reserve'];
   function isNonModelBucket(name) { return NON_MODEL_BUCKET_NAMES.indexOf(name) >= 0; }
 
+  // Provider slugs that have a real product name. Drawing the raw slug is what #1213 objects to on
+  // the sidebar and what `gpt-reserve` did in the popup: a reader seeing `gpt-reserve 0%` beside a
+  // weekly gauge at 100% has no way to learn what it is.
+  //
+  // 🔴 A RENAME IS NOT A CLAIM. This maps a slug to the vendor's own name for the same bucket and
+  // changes nothing about the number, which these surfaces have always drawn straight from the
+  // payload. Do NOT grow it into interpretation ("you can keep working") — THAT would be a claim,
+  // and nothing we have observed supports it: `reached_type` was 'none' on all 1,207 accounts over
+  // 7 days (AE cg_obs, measured 2026-09-08), so we have never once seen this population actually
+  // blocked. Same bar bg/sidebar-usage.js applies to `reachedType`. See #1312.
+  //
+  // Unlocalised on purpose — these are proper nouns. The descriptive gloss beside the name is the
+  // translated half, and it lives in the surface that draws it.
+  // 🔴 null-prototype + own-key check, because the KEY IS PROVIDER-CONTROLLED. A plain object
+  // literal answers `BUCKET_DISPLAY_NAMES['constructor']` with a FUNCTION, and 'toString' /
+  // '__proto__' likewise — so a bucket named any of those would return a non-string that
+  // escHtml() throws on (killing the whole popup section) or that renders as '[object Object]'.
+  // The parent commit had no lookup at all and drew those slugs fine, so a bare `obj[name]` here
+  // would be a REGRESSION, not merely a latent edge case.
+  const BUCKET_DISPLAY_NAMES = Object.assign(Object.create(null), { 'gpt-reserve': 'Luna Reserve' });
+  function bucketDisplayName(name) {
+    return Object.prototype.hasOwnProperty.call(BUCKET_DISPLAY_NAMES, name)
+      ? BUCKET_DISPLAY_NAMES[name]
+      : name;
+  }
+
   globalThis.__ctUsageCore = {
     gaugeColor,
     planDisplayName,
@@ -754,6 +780,7 @@
     detectLang,
     cgUsageNote,
     isNonModelBucket,
+    bucketDisplayName,
     isContextValid,
     createInstanceGuard,
     PRED_MIN_DELTA,

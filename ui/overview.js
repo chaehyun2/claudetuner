@@ -217,7 +217,9 @@ const SCOPED_ESCALATE_PCT = 50;
 // here would be an artificial distinction — the reader cares that A limit is nearly spent.
 //
 // 🪤 This escalates ANY per-feature bucket, including non-model ones like ChatGPT's 'gpt-reserve'
-// banked-reset pool — and that is deliberate, NOT an oversight of the exclusion list in
+// (OpenAI's Luna Reserve — a separate fallback allowance, NOT the "banked-reset pool" an earlier
+// version of this comment called it; see bg/collect-chatgpt.js pickScopedModel) — and that is
+// deliberate, NOT an oversight of the exclusion list in
 // site/shared/chart-utils.js (`NON_MODEL_SLOT_NAMES`). That list exists because the CHART would
 // draw such a bucket as a series under a MODEL label, asserting something false about it. Here no
 // model label is asserted: the bucket's own name is printed verbatim, which is what the detail

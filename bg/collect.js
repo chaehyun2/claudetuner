@@ -9,10 +9,9 @@ import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSu
 import { scopedLimitsForDisplay } from './scoped-limits.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } from './upgrade-gate.js';
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
-import { applyPinMoveTitle } from './badge.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
-import { updateBadge, updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, refreshRecNotice } from './badge.js';
+import { updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, refreshRecNotice } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification, createCountedNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
@@ -22,7 +21,7 @@ import { upsertClaudeOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtToken, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 // #1122 — install-beacon imports only from storage.js, so this does not close an import cycle.
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 

@@ -91,6 +91,15 @@ function renderOrgSelector(container, orgs) {
  * A falsy/empty list HIDES the section — required, not cosmetic: the element is shared by every
  * org, so leaving stale markup would show the previous org's limits under the current org's name.
  */
+// Single-sourced with the sidebar through the classic core popup.html loads for exactly this
+// reason (see its comment at the <script src="usage-shared.js"> tag). The slug fallback keeps
+// today's behaviour if the core is somehow absent — a missing pretty name must never blank the
+// row that carries the number.
+function bucketDisplayName(name) {
+  const core = globalThis.__ctUsageCore;
+  return (core && core.bucketDisplayName) ? core.bucketDisplayName(name) : name;
+}
+
 export function renderAdditionalLimits(additionalLimits) {
   const addlSection = document.getElementById('additional-limits-section');
   const addlBody = document.getElementById('additional-limits-body');
@@ -112,12 +121,14 @@ export function renderAdditionalLimits(additionalLimits) {
   addlSection.style.display = '';
   applyCollapseState(addlSection, 'addl');
   // Stands in for the body while collapsed, so the number survives collapsing.
-  setCollapseSummary(addlSection, limits.map(l => `${l.name} ${Math.max(0, Math.min(Math.round(l.used), 100))}%`).join(' · '));
+  // Display name, not the raw slug — `gpt-reserve` told the reader nothing (#1312). The percent is
+  // untouched: this surface has always drawn whatever the provider sent, and still does.
+  setCollapseSummary(addlSection, limits.map(l => `${bucketDisplayName(l.name)} ${Math.max(0, Math.min(Math.round(l.used), 100))}%`).join(' · '));
   addlBody.innerHTML = limits.map((lim) => {
     const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
     const color = gaugeColor(lim.used);
     const win = windowLabel(lim.windowSeconds);
-    const label = escHtml(lim.name) + (win ? ` <span style="color:var(--text-muted);font-weight:400">(${win})</span>` : '');
+    const label = escHtml(bucketDisplayName(lim.name)) + (win ? ` <span style="color:var(--text-muted);font-weight:400">(${win})</span>` : '');
     const reset = lim.resetsAt
       ? `<div class="gauge-sub" style="margin-top:3px">↻ ${escHtml(formatResetAbsolute(lim.resetsAt))}</div>`
       : '';

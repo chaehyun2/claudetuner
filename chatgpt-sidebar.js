@@ -32,6 +32,16 @@
   let _enabled = null;
   let _mounted = false;
   let _data = null; // { plan, h5, d7, r5, r7, pred5h, pred7d, lang }
+  // Collapse state for the extras section. Defaults to EXPANDED so the rows #1312 just made
+  // visible do not disappear behind a control the user never touched; once they choose, the choice
+  // is what persists. Mirrored into storage rather than read on every render because renderContent
+  // runs on a timer and storage.local.get is async — a read there would flash the wrong state.
+  let _extrasCollapsed = false;
+  // 🔴 The storage read in init() is async, and the user can hit the toggle before it lands. Without
+  // this the late callback overwrites their choice with the stored value and the panel disagrees
+  // with what is on disk (measured by Codex, ordering the callbacks by hand). Whoever settles the
+  // state FIRST wins; the loser must not re-apply.
+  let _extrasStateSettled = false;
   let _lang = 'en';
   let _notices = [];      // active announcements (shared source as claude.ai)
   let _lastSeenId = null; // last seen notice id (persisted)
@@ -51,14 +61,22 @@
       tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.\n\n' + NOTE,
       tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.\n\n' + NOTE,
       tip_pred: '현재 속도 기준,\n리셋 시점 예상 사용률.', tip_brand: 'Claude Tuner',
-      // 🔴 Names BOTH kinds. Gate rows sit under this heading, and buildGateRow's comment spends six
-      // lines insisting a gated model is not a usage meter — a heading reading only 「기능별 한도」
-      // would re-assert exactly that, in the part of the UI the user actually reads.
-      addl_title: '기능별 한도·모델 상태',
+      // 🔴 Names ALL THREE kinds. Gate rows sit under this heading, and buildGateRow's comment
+      // spends six lines insisting a gated model is not a usage meter — a heading reading only
+      // 「기능별 한도」 would re-assert exactly that, in the part of the UI the user actually reads.
+      // #1312 added the third kind: a separate ALLOWANCE (Luna Reserve), which is not a per-feature
+      // limit either, so the heading widened again instead of absorbing it under 「한도」.
+      addl_title: '추가 사용량·모델 상태',
       tip_addl: 'ChatGPT가 이 기능에만 따로 매기는 한도입니다.\n위 계정 사용량과 별개로 셉니다.',
+      // 🔴 Says what Reserve IS, not what it lets you do. No wording may imply "you can keep
+      // working past your limit": we have never observed an account in this population actually
+      // blocked (reached_type was 'none' on all 1,207, AE cg_obs 2026-09-08). See #1312.
+      reserve_note: '예비 사용량',
+      tip_reserve: '정상 한도와 별개로 주어지는 예비 사용량입니다.\nGPT-5.6 Luna로만 쓸 수 있고, 자체 한도가 있습니다.',
       gated: '지금 사용 불가',
       tip_gated: 'ChatGPT가 이 모델을 지금 막아둔 상태입니다.\n사용량 퍼센트가 아니라 가용 여부입니다.',
       gated_until: '까지',
+      addl_toggle: '추가 사용량 접기/펼치기',
     },
     en: {
       title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...',
@@ -66,11 +84,14 @@
       tip_5h: 'Usage in the last 5-hour window.\nResets periodically.\n\n' + NOTE_EN,
       tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.\n\n' + NOTE_EN,
       tip_pred: 'Estimated usage at reset\nbased on current pace.', tip_brand: 'Claude Tuner',
-      addl_title: 'Per-feature limits & model status',
+      addl_title: 'Additional usage & model status',
       tip_addl: 'A limit ChatGPT meters for this feature alone.\nCounted separately from the account usage above.',
+      reserve_note: 'reserve allowance',
+      tip_reserve: 'A reserve allowance granted separately from your regular limits.\nIt runs GPT-5.6 Luna only and has its own limit.',
       gated: 'Unavailable now',
       tip_gated: 'ChatGPT is gating this model right now.\nThis is availability, not a usage percentage.',
       gated_until: 'until',
+      addl_toggle: 'Collapse/expand additional usage',
     },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
@@ -264,7 +285,16 @@
     return Math.round(sec / 60) + 'm';
   }
 
-  // A per-feature limit bucket (Codex Spark, gpt-reserve, …) from `additional_rate_limits[]`.
+  // One bucket from `additional_rate_limits[]` — that array is the container for every allowance
+  // computed independently of the account's own windows, so it mixes per-feature model limits
+  // (Codex Spark) with separate allowances (gpt-reserve / Luna Reserve). BOTH render here (#1312).
+  //
+  // 🔴 The kind decides the WORDS, not whether the row exists. `tip_addl` says "a limit ChatGPT
+  // meters for this feature" — true of Spark, false of Reserve — so the tooltip is routed by
+  // `isNonModelBucket`, and Reserve carries a gloss beside its name. That routing is why the shared
+  // exclusion list still has a consumer here after #1312 stopped using it to FILTER: it classifies
+  // now. Dropping the routing would put Reserve under a sentence calling it a per-feature limit,
+  // which is the false claim the filter originally existed to prevent.
   // Deliberately NOT buildLimitRow(): these carry no prediction (we keep no history per bucket) and
   // must not be mistaken for the account windows, so they render smaller and under their own label.
   function buildBucketRow(lim) {
@@ -273,11 +303,16 @@
     const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
     const color = CORE.gaugeColor(lim.used);
     const win = windowLabel(lim.windowSeconds);
+    const isReserve = !!(CORE.isNonModelBucket && CORE.isNonModelBucket(lim && lim.name));
+    // A proper noun alone ("Luna Reserve") is opaque to a reader who has never met the feature, so
+    // the gloss is the localised half while the name itself is not (see BUCKET_DISPLAY_NAMES).
+    const shown = (CORE.bucketDisplayName ? CORE.bucketDisplayName(lim.name) : lim.name)
+      + (isReserve ? ` · ${t('reserve_note')}` : '');
     const labelRow = document.createElement('div');
     labelRow.className = 'ct-cg-label-row';
     labelRow.innerHTML = `
       <span class="ct-cg-label-left">
-        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(lim.name)}${win ? ` (${CORE.escapeHtml(win)})` : ''}</span>
+        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(shown)}${win ? ` (${CORE.escapeHtml(win)})` : ''}</span>
         <span class="ct-cg-pct" style="color:${color}">${pct}%</span>
       </span>
     `;
@@ -286,7 +321,7 @@
     bar.className = 'ct-cg-bar';
     bar.innerHTML = `<div class="ct-cg-bar-track"><div class="ct-cg-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
     row.appendChild(bar);
-    attachTip(row, 'tip_addl');
+    attachTip(row, isReserve ? 'tip_reserve' : 'tip_addl');
     return row;
   }
 
@@ -349,32 +384,54 @@
     // Per-feature buckets and gated models, under one shared heading so they read as a different
     // KIND of number from the two account windows above — which is the whole point: a user at 100%
     // on the weekly window who can still chat needs to see that the other meters are separate.
-    // 🔴 Non-model buckets are filtered OUT here, not upstream. `parseAdditionalLimits()` returns
-    // the array unfiltered (the popup shows everything), and the exclusion lived only inside
-    // pickScopedModel() — so feeding `_data.addl` straight in would list 'gpt-reserve' under a
-    // heading that says these are per-feature LIMITS. It is not one: it is the bucket we
-    // deliberately keep out of the scoped slot, whose meaning we cannot even name from data
-    // (see pickScopedModel's comment), and whose utilization is ~always 0. The dashboard already
-    // excludes it from both of its surfaces on purpose (test/feature-limit-card-guard.mjs).
+    // 🔴 NOTHING IS FILTERED OUT HERE ANY MORE (#1312). This used to drop non-model buckets so
+    // 'gpt-reserve' could not appear under a heading calling it a per-feature LIMIT. The heading no
+    // longer says that ('추가 사용량·모델 상태'), buildBucketRow routes Reserve to its own wording,
+    // and the slug now renders as "Luna Reserve" — so the reason to hide it is gone, and hiding it
+    // cost something real: the POPUP has always drawn this bucket (ui/org-selector.js renders
+    // parseAdditionalLimits() unfiltered), so the two extension surfaces disagreed about whether a
+    // number the provider sent exists at all.
     //
-    // ⚠️ The POPUP still shows it — ui/org-selector.js renders parseAdditionalLimits() output
-    // unfiltered. That is not an oversight to fix here: the popup lists the buckets under a plain
-    // collapse header without asserting they are limits, so the label is not making a false claim
-    // there. Stated explicitly because an earlier version of this comment said "all three surfaces
-    // agree", which was simply untrue for a response whose only bucket is gpt-reserve.
-    const addl = (Array.isArray(_data.addl) ? _data.addl : [])
-      .filter((b) => !(CORE.isNonModelBucket && CORE.isNonModelBucket(b && b.name)));
+    // 🪤 Re-adding a filter here is not the way to fix a future wording problem. If a bucket's
+    // meaning does not fit the heading, widen the heading or route the wording — dropping the row
+    // makes the surfaces disagree again, silently. (The DASHBOARD still excludes it, and that is a
+    // different judgement about a different surface: test/feature-limit-card-guard.mjs.)
+    const addl = Array.isArray(_data.addl) ? _data.addl : [];
     const extras = [
       ...addl,
       ...(Array.isArray(_data.gates) ? _data.gates : []),
     ];
     if (extras.length) {
-      const head = document.createElement('div');
+      // A real <button>, not a clickable <div>: this is the only control in the panel body, and a
+      // div with an onclick is unreachable by keyboard and announces nothing. `type="button"` is
+      // load-bearing — the panel can land inside a host <form> and the UA default is "submit",
+      // which would navigate chatgpt.com away on the first click.
+      const head = document.createElement('button');
+      head.type = 'button';
       head.className = 'ct-cg-subhead text-token-text-tertiary';
-      head.textContent = t('addl_title');
+      head.title = t('addl_toggle');
+      head.setAttribute('aria-label', t('addl_toggle'));
+      const body = document.createElement('div');
+      body.className = 'ct-cg-extras';
+      body.id = 'ct-cg-extras-body';
+      head.setAttribute('aria-controls', body.id);
+      head.innerHTML = `
+        <span class="ct-cg-subhead-title">${CORE.escapeHtml(t('addl_title'))}</span>
+        <span class="ct-cg-subhead-sum" id="ct-cg-extras-sum"></span>
+        <svg class="ct-cg-subhead-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      `;
+      for (const lim of addl) body.appendChild(buildBucketRow(lim));
+      for (const g of (_data.gates || [])) body.appendChild(buildGateRow(g));
+      // Built here, not inside applyExtrasCollapsed, because it is a property of THIS data — the
+      // toggle must not have to recompute it, and a stale summary outliving a refresh would show
+      // numbers the expanded rows disagree with.
+      head.dataset.ctSummary = [
+        ...addl.map((b) => `${CORE.bucketDisplayName ? CORE.bucketDisplayName(b.name) : b.name} ${Math.max(0, Math.min(Math.round(b.used), 100))}%`),
+        ...(_data.gates || []).map((g) => `${g.model} · ${t('gated')}`),
+      ].join(' · ');
+      head.addEventListener('click', toggleExtras);
       frag.appendChild(head);
-      for (const lim of addl) frag.appendChild(buildBucketRow(lim));
-      for (const g of (_data.gates || [])) frag.appendChild(buildGateRow(g));
+      frag.appendChild(body);
     }
 
     const footer = document.createElement('div');
@@ -409,9 +466,53 @@
     frag.appendChild(footer);
 
     hideTooltip(); // the old rows (tooltip owners) are about to be replaced
+    // The toggle is destroyed and rebuilt on every background poll. A keyboard user focused on it
+    // would silently lose focus to <body> mid-interaction, so the next Enter/Space goes nowhere.
+    const refocusToggle = !!(document.activeElement
+      && document.activeElement.classList
+      && document.activeElement.classList.contains('ct-cg-subhead')
+      && content.contains(document.activeElement));
     content.innerHTML = '';
     content.appendChild(frag);
+    // The section is rebuilt from scratch on every refresh, so the remembered state has to be
+    // re-applied every time — otherwise a background poll silently re-expands what the user closed.
+    applyExtrasCollapsed();
+    if (refocusToggle) {
+      const again = content.querySelector('.ct-cg-subhead');
+      if (again) again.focus();
+    }
     updateBellBadge();
+  }
+
+  // Apply `_extrasCollapsed` to whatever is on screen right now. Safe to call when the section is
+  // absent (no buckets, no gates) — every lookup is null-guarded.
+  function applyExtrasCollapsed() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const btn = panel.querySelector('.ct-cg-subhead');
+    const body = panel.querySelector('.ct-cg-extras');
+    if (!btn || !body) return;
+    // `hidden` is the state; CSS only says what "not hidden" looks like. Driving `style.display`
+    // instead would fight the stylesheet and leave nothing for assistive tech to read.
+    body.hidden = _extrasCollapsed;
+    btn.setAttribute('aria-expanded', _extrasCollapsed ? 'false' : 'true');
+    const sum = btn.querySelector('.ct-cg-subhead-sum');
+    // The summary exists only to carry the numbers THROUGH the collapse, so it is empty while the
+    // rows themselves are visible — otherwise every value is on screen twice.
+    if (sum) sum.textContent = _extrasCollapsed ? (btn.dataset.ctSummary || '') : '';
+    // 🔴 `aria-label` on the button OVERRIDES its child text, so the summary a sighted user can
+    // read while collapsed is invisible to a screen reader unless it is referenced explicitly.
+    // Described-by, not labelled-by: the button's NAME is still the toggle action; the numbers are
+    // supporting detail. Removed when expanded, where the rows themselves carry the values.
+    if (sum && _extrasCollapsed && sum.textContent) btn.setAttribute('aria-describedby', sum.id);
+    else btn.removeAttribute('aria-describedby');
+  }
+
+  function toggleExtras() {
+    _extrasCollapsed = !_extrasCollapsed;
+    applyExtrasCollapsed();
+    try { chrome.storage.local.set({ ct_cg_extras_collapsed: _extrasCollapsed }); } catch { /* context dead */ }
+    hideTooltip(); // rows just moved under/out of the cursor
   }
 
   // ── Announcements (shared source/logic with claude.ai) ──
@@ -587,6 +688,19 @@
 
   function onStorageChanged(changes, area) {
     if (!isCurrent()) return;
+    // The extras collapse lives in `local` (it is per-device UI state, not a synced preference), so
+    // it needs its own arm — the `sync` early-return below drops every local event. Without this a
+    // second chatgpt.com tab keeps the old state indefinitely: the section is rebuilt on every poll
+    // from a module variable that nothing updates.
+    if (area === 'local') {
+      if (changes.ct_cg_extras_collapsed) {
+        _extrasCollapsed = changes.ct_cg_extras_collapsed.newValue === true;
+        _extrasStateSettled = true;
+        applyExtrasCollapsed();
+        hideTooltip();
+      }
+      return;
+    }
     if (area !== 'sync') return;
     if (changes.chatgptSidebarUsageEnabled) {
       _enabled = changes.chatgptSidebarUsageEnabled.newValue !== false;
@@ -628,8 +742,19 @@
 
   // ── Init ──
   function init() {
-    chrome.storage.local.get({ ct_last_seen_notice_id: null }, (local) => {
+    chrome.storage.local.get({ ct_last_seen_notice_id: null, ct_cg_extras_collapsed: false }, (local) => {
       _lastSeenId = local.ct_last_seen_notice_id;
+      // 🔴 A superseded instance must not touch the panel a NEW one just mounted: this callback
+      // outlives teardown, and without the check it re-applies a dead instance's state.
+      if (!isCurrent()) return;
+      if (_extrasStateSettled) return;   // the user already chose while this read was in flight
+      _extrasStateSettled = true;
+      _extrasCollapsed = local.ct_cg_extras_collapsed === true;
+      // The panel may already be drawn — init's storage read is async and renderContent does not
+      // wait for it. Re-apply in place instead of re-rendering: a full re-render here would drop
+      // the tooltip owners mid-hover for a state that changed nothing else.
+      applyExtrasCollapsed();
+      if (_extrasCollapsed) hideTooltip();   // rows just went under a hover that may be open
     });
     chrome.storage.sync.get({ lang: 'auto', chatgptSidebarUsageEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;

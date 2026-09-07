@@ -471,23 +471,44 @@ function pickScopedModel(additionalLimits) {
   // nor outrank a real model bucket when both are present; the popup still shows them via
   // parseAdditionalLimits.
   //
-  // 🔴 THE EXCLUSION IS RIGHT; AN EARLIER VERSION OF THIS COMMENT EXPLAINED IT WRONG. It called
-  // 'gpt-reserve' "OpenAI's banked-reset pool", which we never had evidence for — and the live
-  // payload argues against it: the bucket carries `metered_feature: 'base_model_inference'` and
-  // `normal_model_slug: 'gpt-5.6-luna'` (captured 2026-09-07), while banked reset credits arrive
-  // in a SEPARATE top-level field, `rate_limit_reset_credits`. It looks far more like the base-
-  // model (chat) meter than like a reset pool.
+  // WHAT 'gpt-reserve' ACTUALLY IS (settled 2026-09-08): OpenAI's **Luna Reserve** — a separate
+  // fallback allowance that engages only AFTER the regular 5h/weekly limits are exhausted, on
+  // selected Plus/Pro accounts, and that runs GPT-5.6 Luna and nothing else. Official wording:
+  // "regular usage supports the models available with your plan, and Luna Reserve provides
+  // additional usage only with Luna after regular usage is exhausted." Corroborated by
+  // openai/codex#42217 (a /status showing `gpt-reserve Weekly limit: 100% left` beside
+  // `Weekly limit: 0% left`) and #42830 (Reserve activation overrides the composer model to
+  // `gpt-reserve`). See docs/CHATGPT-USAGE-SEMANTICS.md.
   //
-  // We still cannot decide between the two from data, and that is not for want of looking: across
-  // 71 accounts / 662 rows (08-22~09-07) its utilization is essentially all zero — and since chat
-  // has had no cap since 2026-08-06, "reset pool nobody used" and "chat meter that cannot rise"
-  // predict the same zeros. The window that could have separated them closed before our first
-  // observation. Excluding it is correct EITHER WAY: a reset pool is not a model limit, and a chat
-  // meter pinned at zero carries no signal.
+  // 🪤 TWO EARLIER VERSIONS OF THIS COMMENT GUESSED, AND BOTH GUESSED WRONG. The first called it
+  // "OpenAI's banked-reset pool" (no evidence; banked reset credits arrive in a SEPARATE top-level
+  // field, `rate_limit_reset_credits`). The second replaced that with "looks far more like the
+  // base-model (chat) meter", reasoning from `metered_feature: 'base_model_inference'` — but
+  // codex#42830 observes the Reserve bucket carrying exactly that metered_feature, so the field is
+  // Reserve's own labelling, not a chat meter. Do not read meaning out of payload field names
+  // here; that inference has now failed twice on this one bucket.
   //
-  // ⚠️ Which is also why it is worth observing (#1184). If OpenAI ever re-caps chat, this bucket
-  // starts carrying a value and nothing in the current pipeline would notice — the client drops
-  // the array and the server stores only the winner. See docs/CHATGPT-USAGE-SEMANTICS.md.
+  // 🔴 THE ZEROS ARE CONSISTENT WITH THIS, NOT EXPLAINED BY IT. Across 71 accounts / 662 rows
+  // (08-22~09-07) utilization is essentially all zero, and a reserve that only accrues after the
+  // regular allowance is burnt would look like that — but we never checked whether those accounts
+  // ever exhausted their regular limit, whether they had Reserve access at all, or whether they
+  // used a supported surface, and the sample is biased (only old clients stored this bucket). So
+  // the cause of the zeros is UNVERIFIED. Do not treat a zero here as self-evidently correct: if
+  // an account demonstrably ran past its regular limit into Reserve and this still reads 0, that
+  // is a collection defect, not the expected value. Equally, a NON-zero reading while regular
+  // usage is still available would refute the whole identification above — reopen it then.
+  //
+  // THE EXCLUSION STANDS, on reasons that are per-surface and worth keeping distinct (#1312 will
+  // need them separated):
+  //   - scoped slot: it is a single WINNER slot, so letting a non-model bucket win would displace
+  //     a real model bucket. (The slot itself no longer implies "weekly" — it records
+  //     `window_seconds`, see the note above — so "it would assert a weekly limit" is NOT the
+  //     reason.)
+  //   - 7d chart: the chart draws plan-quota guide lines, which mean nothing for an allowance that
+  //     is not the plan's quota.
+  //   - feature-limit card: it frames its number as one of the account's per-feature LIMITS, and
+  //     an independent fallback allowance is not one.
+  // It is NOT excluded for being unnameable any more — it has a name now; display is #1312.
   // Kept INSIDE the function: scripts/scoped-weekly-slots.test.mjs compiles this body in
   // isolation, so an outer constant would have to be stubbed there and could drift.
   const NON_MODEL_LIMIT_NAMES = ['gpt-reserve'];

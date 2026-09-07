@@ -66,6 +66,38 @@ html.dark, html.dark-oled {
   margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,.07);
 }
 html.dark .ct-cg-subhead { border-top-color: rgba(255,255,255,.1); }
+/* The heading is a real <button> so it is keyboard- and screen-reader reachable; these rules undo
+   the UA button chrome without changing the look the <div> had. `width: 100%` is !important for the
+   same reason the action icons' sizing is (see the note above): a host rule can reach a classless
+   button, and this one is not classless but the host page is not ours to predict. */
+button.ct-cg-subhead {
+  display: flex; align-items: center; gap: 6px;
+  width: 100% !important; box-sizing: border-box;
+  padding-left: 0; padding-right: 0; padding-bottom: 0;
+  border-left: none; border-right: none; border-bottom: none;
+  background: none; color: inherit; font-family: inherit; text-align: left; cursor: pointer;
+}
+button.ct-cg-subhead:hover { opacity: .75; }
+.ct-cg-subhead-title { flex: none; }
+/* Stands in for the rows while collapsed, so the numbers survive collapsing — the same contract
+   the popup's collapse summary has. Ellipsised because a Pro account can carry two buckets and a
+   gated model, and the sidebar is narrow. */
+.ct-cg-subhead-sum {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 400; letter-spacing: 0; text-transform: none; opacity: .8;
+}
+.ct-cg-subhead-chev { flex: none; margin-left: auto; transition: transform .15s ease; }
+button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rotate(90deg); }
+/* 🔴 `:not([hidden])`, NOT a bare `.ct-cg-extras { display: flex }`. An author-origin display rule
+   BEATS the UA sheet's `[hidden] { display: none }`, so the bare form would leave the body
+   permanently open and the toggle would look broken. Same trap the dashboard hit on `.label-note`
+   (docs/CHATGPT-USAGE-SEMANTICS.md). */
+.ct-cg-extras:not([hidden]) { display: flex; flex-direction: column; gap: 6px; }
+/* Belt to that braces: the UA `[hidden]` rule is weak enough for a host `div { display: block }` to
+   beat it, which would leave the collapsed body visible. Stating the hidden case ourselves at class
+   specificity puts it out of reach of any element-level host rule. */
+.ct-cg-extras[hidden] { display: none !important; }
 .ct-cg-limit-sub { gap: 3px; }
 .ct-cg-limit-sub .ct-cg-name { font-size: 11px; }
 .ct-cg-limit-sub .ct-cg-pct { font-size: 11px; }
