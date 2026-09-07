@@ -58,6 +58,18 @@ html.dark, html.dark-oled {
 .ct-cg-message { font-size: 12px; padding: 2px 0; }
 
 .ct-cg-limit { display: flex; flex-direction: column; gap: 4px; }
+/* Per-feature buckets and gated models (#1184/#1209 follow-up). Visually subordinate to the two
+   account windows on purpose: they are a different KIND of meter, and a user at 100% on the weekly
+   window needs to see at a glance that these are counted separately. */
+.ct-cg-subhead {
+  font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,.07);
+}
+html.dark .ct-cg-subhead { border-top-color: rgba(255,255,255,.1); }
+.ct-cg-limit-sub { gap: 3px; }
+.ct-cg-limit-sub .ct-cg-name { font-size: 11px; }
+.ct-cg-limit-sub .ct-cg-pct { font-size: 11px; }
+.ct-cg-limit-sub .ct-cg-bar { height: 4px; }
 .ct-cg-label-row {
   display: flex;
   align-items: center;

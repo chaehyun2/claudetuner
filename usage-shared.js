@@ -713,6 +713,37 @@
     return h;
   }
 
+  // ── What the ChatGPT account percentage does NOT include ──
+  //
+  // 🔴 CANONICAL COPY FOR THE EXTENSION. Two panels are injected into chatgpt.com at once
+  // (chatgpt-sidebar.js and chatgpt-input.js, both in background.js CHATGPT_INJECT), and they
+  // render the SAME number. Marking one and not the other is worse than marking neither: the user
+  // compares them and reads the unmarked one as "so THIS is the chat gauge". Keeping the string
+  // here is what makes "both panels say the same thing" structural instead of a thing to remember.
+  //
+  // OpenAI dropped the text-chat message cap on 2026-08-06 and on 08-25 reinstated a 5h cap for
+  // Codex / ChatGPT Work only, so this percentage counts everything EXCEPT text chat. Two users
+  // (문의 #195, #196) read it as chat usage, and our first reply to #195 got it wrong too.
+  //
+  // ⚠️ The dashboard has its OWN copy — `gauge_note_chatgpt` in site/dashboard/dashboard-i18n.js.
+  // That is a runtime boundary (CWS extension vs CF Pages), so the copy is unavoidable; the drift
+  // is not. test/chatgpt-astra-obs-guard.mjs asserts the two stay word-for-word identical.
+  //
+  // 🪤 No double quote in either locale: consumers interpolate this into a title="..." attribute,
+  // where one would truncate the tooltip mid-sentence.
+  const CG_USAGE_NOTE = {
+    ko: '이 값에는 Codex 등 텍스트 채팅 외 사용이 포함됩니다. 텍스트 채팅은 2026년 8월부터 한도가 없어 이 수치에 잡히지 않습니다.',
+    en: 'This includes usage outside text chat, such as Codex. Text chat has had no cap since August 2026, so it is not counted here.',
+  };
+  function cgUsageNote(lang) { return CG_USAGE_NOTE[lang] || CG_USAGE_NOTE.en; }
+
+  // Buckets in `additional_rate_limits[]` that are NOT per-feature model limits, and so must not be
+  // listed under a heading that calls them limits. Shared by every extension surface that renders
+  // that array; the dashboard keeps its own copy as NON_MODEL_SLOT_NAMES (site/shared/chart-utils.js)
+  // because it is a separate deploy, and the guard pins the two together.
+  const NON_MODEL_BUCKET_NAMES = ['gpt-reserve'];
+  function isNonModelBucket(name) { return NON_MODEL_BUCKET_NAMES.indexOf(name) >= 0; }
+
   globalThis.__ctUsageCore = {
     gaugeColor,
     planDisplayName,
@@ -721,6 +752,8 @@
     buildResetCellInner,
     escapeHtml,
     detectLang,
+    cgUsageNote,
+    isNonModelBucket,
     isContextValid,
     createInstanceGuard,
     PRED_MIN_DELTA,

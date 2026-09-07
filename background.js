@@ -2535,7 +2535,31 @@ async function buildSidebarUsageData(reqOrgId, provider) {
   // by plan (these seats report 0% windows, not null), so trust the stored flag.
   const noLimits = !!orgData?.noLimits;
 
-  return { plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits };
+  // Per-feature buckets and provider-declared model gates ride along for the in-page panels.
+  // 🔴 ChatGPT ONLY, by construction rather than by convention: the note the sidebar draws next to
+  // these ("the percentage excludes text chat") is true for ChatGPT and false for Claude, whose
+  // gauge really is all usage. `wantProvider` is the resolved provider, not a non-Claude catch-all
+  // — the same distinction #1209's guard pins down on the dashboard, where gating on "not Claude"
+  // would have put the note on Gemini.
+  const isChatGPT = wantProvider === 'chatgpt';
+  const addl = isChatGPT && Array.isArray(orgData?.additionalLimits) ? orgData.additionalLimits : null;
+  const gates = isChatGPT && Array.isArray(orgData?.modelGates) ? orgData.modelGates : null;
+
+  return {
+    plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
+    addl: addl && addl.length ? addl : null,
+    gates: gates && gates.length ? gates : null,
+    // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now
+    // collect — the provider's own answer to "is anything actually exhausted", which is the
+    // question behind 문의 #195/#196 — but no panel reads it yet, and a populated field with no
+    // reader is worse than an absent one: the next person assumes a consumer exists.
+    //
+    // It is also not ready to be shown. Every observation we have of it is `null` (n=1, the live
+    // 2026-09-07 capture); we have never seen it carry a value in production. Telling a user at
+    // 100% "nothing is blocked" on the strength of a field we have never seen populated is exactly
+    // the kind of unvalidated claim this whole change exists to stop making. The AE `cg_obs`
+    // stream collects it now — wire the UI once the readout says what values actually occur.
+  };
 }
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)

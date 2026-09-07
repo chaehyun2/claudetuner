@@ -38,20 +38,39 @@
   let _ads = [];          // selected in-house ad banners for this placement
 
   // ── i18n (minimal) ──
+  // The "what this percentage excludes" note is NOT declared here. It lives on CORE
+  // (usage-shared.js `cgUsageNote`) because the composer strip injected into the same page renders
+  // the same number and must say the same thing — see that comment for why one copy matters.
+  const NOTE = CORE.cgUsageNote ? CORE.cgUsageNote('ko') : '';
+  const NOTE_EN = CORE.cgUsageNote ? CORE.cgUsageNote('en') : '';
+
   const I18N = {
     ko: {
       title: '사용량', session: '세션 (5h)', weekly: '주간', no_data: '데이터 수집 중...',
       dashboard: '대시보드 열기', settings: '설정', notices: '공지사항',
-      tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.',
-      tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.',
+      tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.\n\n' + NOTE,
+      tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.\n\n' + NOTE,
       tip_pred: '현재 속도 기준,\n리셋 시점 예상 사용률.', tip_brand: 'Claude Tuner',
+      // 🔴 Names BOTH kinds. Gate rows sit under this heading, and buildGateRow's comment spends six
+      // lines insisting a gated model is not a usage meter — a heading reading only 「기능별 한도」
+      // would re-assert exactly that, in the part of the UI the user actually reads.
+      addl_title: '기능별 한도·모델 상태',
+      tip_addl: 'ChatGPT가 이 기능에만 따로 매기는 한도입니다.\n위 계정 사용량과 별개로 셉니다.',
+      gated: '지금 사용 불가',
+      tip_gated: 'ChatGPT가 이 모델을 지금 막아둔 상태입니다.\n사용량 퍼센트가 아니라 가용 여부입니다.',
+      gated_until: '까지',
     },
     en: {
       title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...',
       dashboard: 'Open dashboard', settings: 'Settings', notices: 'Notices',
-      tip_5h: 'Usage in the last 5-hour window.\nResets periodically.',
-      tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.',
+      tip_5h: 'Usage in the last 5-hour window.\nResets periodically.\n\n' + NOTE_EN,
+      tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.\n\n' + NOTE_EN,
       tip_pred: 'Estimated usage at reset\nbased on current pace.', tip_brand: 'Claude Tuner',
+      addl_title: 'Per-feature limits & model status',
+      tip_addl: 'A limit ChatGPT meters for this feature alone.\nCounted separately from the account usage above.',
+      gated: 'Unavailable now',
+      tip_gated: 'ChatGPT is gating this model right now.\nThis is availability, not a usage percentage.',
+      gated_until: 'until',
     },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
@@ -235,6 +254,71 @@
     return row;
   }
 
+  // Compact window label for a per-feature bucket ("5h" / "7d"). Same rule as the popup's
+  // ui/org-selector.js windowLabel — the provider MOVED the Codex bucket from 604800 to 18000 on
+  // 2026-08-20 (#926), so the length is data and must be shown, never assumed from the slot name.
+  function windowLabel(sec) {
+    if (typeof sec !== 'number' || sec <= 0) return '';
+    if (sec % 86400 === 0) return (sec / 86400) + 'd';
+    if (sec % 3600 === 0) return (sec / 3600) + 'h';
+    return Math.round(sec / 60) + 'm';
+  }
+
+  // A per-feature limit bucket (Codex Spark, gpt-reserve, …) from `additional_rate_limits[]`.
+  // Deliberately NOT buildLimitRow(): these carry no prediction (we keep no history per bucket) and
+  // must not be mistaken for the account windows, so they render smaller and under their own label.
+  function buildBucketRow(lim) {
+    const row = document.createElement('div');
+    row.className = 'ct-cg-limit ct-cg-limit-sub';
+    const pct = Math.max(0, Math.min(Math.round(lim.used), 100));
+    const color = CORE.gaugeColor(lim.used);
+    const win = windowLabel(lim.windowSeconds);
+    const labelRow = document.createElement('div');
+    labelRow.className = 'ct-cg-label-row';
+    labelRow.innerHTML = `
+      <span class="ct-cg-label-left">
+        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(lim.name)}${win ? ` (${CORE.escapeHtml(win)})` : ''}</span>
+        <span class="ct-cg-pct" style="color:${color}">${pct}%</span>
+      </span>
+    `;
+    row.appendChild(labelRow);
+    const bar = document.createElement('div');
+    bar.className = 'ct-cg-bar';
+    bar.innerHTML = `<div class="ct-cg-bar-track"><div class="ct-cg-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
+    row.appendChild(bar);
+    attachTip(row, 'tip_addl');
+    return row;
+  }
+
+  // A model the provider is currently gating (`model_usage[slug].available === false`).
+  //
+  // 🔴 NO BAR, and that is the design, not an omission. `model_usage` carries availability and a
+  // return time — there is no percentage in the payload (verified live 2026-09-07). Drawing a gauge
+  // here would invent a number OpenAI never sent, which is the exact failure #1209 had to correct.
+  // Rendered only when a model is actually gated: "Astra: available" on every healthy account is
+  // noise, and noise next to a limit reads as a limit.
+  // 🪤 The amber is inlined, not a var(--ct-cg-warn, …). That token is defined nowhere in the
+  // extension, so the fallback always won — the line READ as theme-aware while bypassing the
+  // html.dark block every other colour in this panel goes through, and would have survived review
+  // on its appearance. One-off use does not earn a token.
+  function buildGateRow(gate) {
+    const row = document.createElement('div');
+    row.className = 'ct-cg-limit ct-cg-limit-sub';
+    const until = gate.availableAt ? CORE.formatResetAbsolute(gate.availableAt, _lang) : '';
+    const labelRow = document.createElement('div');
+    labelRow.className = 'ct-cg-label-row';
+    labelRow.innerHTML = `
+      <span class="ct-cg-label-left">
+        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(gate.model)}</span>
+        <span class="ct-cg-pct" style="color:#f59e0b">${CORE.escapeHtml(t('gated'))}</span>
+      </span>
+      ${until ? `<span class="ct-cg-reset text-token-text-tertiary">${CORE.escapeHtml(t('gated_until'))} ${CORE.escapeHtml(until)}</span>` : ''}
+    `;
+    row.appendChild(labelRow);
+    attachTip(row, 'tip_gated');
+    return row;
+  }
+
   // The notice and ad containers are children of the PANEL, not of #ct-cg-content, so a
   // body re-render never wipes them — but a re-MOUNT does: buildPanel() mints fresh empty
   // ones. Both banners therefore have to be re-hydrated after any (re)build, and on EVERY
@@ -261,6 +345,37 @@
     const frag = document.createDocumentFragment();
     if (_data.h5 != null) frag.appendChild(buildLimitRow('5h', t('session'), _data.h5, _data.r5, _data.pred5h));
     if (_data.d7 != null) frag.appendChild(buildLimitRow('7d', t('weekly'), _data.d7, _data.r7, _data.pred7d));
+
+    // Per-feature buckets and gated models, under one shared heading so they read as a different
+    // KIND of number from the two account windows above — which is the whole point: a user at 100%
+    // on the weekly window who can still chat needs to see that the other meters are separate.
+    // 🔴 Non-model buckets are filtered OUT here, not upstream. `parseAdditionalLimits()` returns
+    // the array unfiltered (the popup shows everything), and the exclusion lived only inside
+    // pickScopedModel() — so feeding `_data.addl` straight in would list 'gpt-reserve' under a
+    // heading that says these are per-feature LIMITS. It is not one: it is the bucket we
+    // deliberately keep out of the scoped slot, whose meaning we cannot even name from data
+    // (see pickScopedModel's comment), and whose utilization is ~always 0. The dashboard already
+    // excludes it from both of its surfaces on purpose (test/feature-limit-card-guard.mjs).
+    //
+    // ⚠️ The POPUP still shows it — ui/org-selector.js renders parseAdditionalLimits() output
+    // unfiltered. That is not an oversight to fix here: the popup lists the buckets under a plain
+    // collapse header without asserting they are limits, so the label is not making a false claim
+    // there. Stated explicitly because an earlier version of this comment said "all three surfaces
+    // agree", which was simply untrue for a response whose only bucket is gpt-reserve.
+    const addl = (Array.isArray(_data.addl) ? _data.addl : [])
+      .filter((b) => !(CORE.isNonModelBucket && CORE.isNonModelBucket(b && b.name)));
+    const extras = [
+      ...addl,
+      ...(Array.isArray(_data.gates) ? _data.gates : []),
+    ];
+    if (extras.length) {
+      const head = document.createElement('div');
+      head.className = 'ct-cg-subhead text-token-text-tertiary';
+      head.textContent = t('addl_title');
+      frag.appendChild(head);
+      for (const lim of addl) frag.appendChild(buildBucketRow(lim));
+      for (const g of (_data.gates || [])) frag.appendChild(buildGateRow(g));
+    }
 
     const footer = document.createElement('div');
     footer.className = 'ct-cg-footer text-token-text-tertiary';
@@ -446,9 +561,16 @@
           if (_data !== null) { _data = null; renderContent(); }
           return;
         }
+        // 🔴 The new fields have to take part in this comparison. It exists to skip a re-render
+        // when nothing changed, so a field it does not look at can change and never reach the DOM
+        // — a bucket appearing or a model gate lifting would sit invisible until an unrelated
+        // percentage happened to move. Compared as JSON because they are small arrays of plain
+        // objects; both sides come from the same builder, so key order is stable.
+        const sameExtras = JSON.stringify([_data && _data.addl, _data && _data.gates])
+          === JSON.stringify([res.addl, res.gates]);
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
-            _data.plan === res.plan) return;
+            _data.plan === res.plan && sameExtras) return;
         _data = res;
         // Note: _lang is driven by the user's extension language setting
         // (chrome.storage.sync `lang`, navigator fallback), not res.lang — the

@@ -349,6 +349,100 @@ export function parseAdditionalLimits(usage) {
   return out;
 }
 
+// ChatGPT reports per-MODEL state separately from the percentage windows, in `usage.model_usage`
+// — keyed by model slug (observed 2026-09-07 on Plus: `{ 'gpt-6-astra': { available: true,
+// available_at: null, credits_would_enable: false } }`, Astra having launched 09-03).
+//
+// 🔴 THIS IS NOT A USAGE METER, and the temptation to draw it as one is the whole reason this
+// comment is long. The value carries no percent and no window: it answers "can you use this model
+// right now", not "how much of it have you spent". Rendering it as a gauge would invent a number
+// the provider never sent — the same class of error #1209 had to correct on the dashboard, where a
+// percentage stood without saying what it counted and two users (문의 #195·#196) read it wrong.
+//
+// So we surface AVAILABILITY only, and only when the model is actually unavailable — an available
+// model is the boring default and a row saying "Astra: available" is noise on every account.
+//   available          — false means the model is gated right now
+//   available_at       — unix seconds when it comes back, or null if unknown
+//   creditsWouldEnable — buying credits would unlock it now (an upsell state, not a limit)
+// Pure — no I/O.
+export function parseModelAvailability(usage) {
+  const mu = usage?.model_usage;
+  // 🪤 `Array.isArray` is not redundant: `typeof [] === 'object'`, so an array-shaped
+  // `model_usage` would sail through and `Object.keys` would hand back '0', '1', … — producing a
+  // gate row for a model literally named "0". The stated intent two lines down is that an unknown
+  // shape raises NO row, and without this the guard did not match it.
+  if (!mu || typeof mu !== 'object' || Array.isArray(mu)) return [];
+  const out = [];
+  for (const slug of Object.keys(mu)) {
+    const m = mu[slug];
+    if (!m || typeof m !== 'object') continue;
+    // `available` missing is NOT "unavailable" — an unknown shape must not raise a warning row.
+    if (m.available !== false) continue;
+    out.push({
+      model: String(slug).slice(0, 40),
+      availableAt: unixToResetTime(m.available_at),
+      creditsWouldEnable: m.credits_would_enable === true,
+    });
+    if (out.length >= MAX_ADDITIONAL_LIMITS) break;
+  }
+  return out;
+}
+
+// Which limit the account actually ran into, straight from the provider (`rate_limit_reached_type`,
+// null when nothing is exhausted). This is the field that answers the question our gauge cannot:
+// a weekly window at 100% does NOT mean chat is blocked, because OpenAI removed the text-chat limit
+// on 2026-08-06 — see docs/CHATGPT-USAGE-SEMANTICS.md for the policy timeline and the measured
+// population (kept there, with its queries, rather than restated here as a bare number that later
+// gets cited as settled). `limit_reached` (per-window) and this (account-wide) are the provider's own answer;
+// everything else we show is inference. Kept as an opaque short string — the vocabulary is OpenAI's
+// and rotates, so we store what they said rather than mapping it to an enum we would have to chase.
+export function parseReachedType(usage) {
+  // 🔴 THREE states, for the same reason summarizeLimitBuckets has three (and this function is
+  // where that lesson had to be learned twice). Collapsing "the provider never sent this field"
+  // into "the provider said nothing is exhausted" would record an UNREPORTED field as positive
+  // confirmation of a healthy account — contaminating the very census that exists to tell a
+  // cosmetic 100% from a real one.
+  //
+  //   undefined — never reported, or reported unreadably. We do not know. (AE: 'unknown')
+  //   null      — reported, and nothing is exhausted. This is the healthy live value. (AE: 'none')
+  //   string    — reported, and this is what is exhausted. Passed through unmapped; the vocabulary
+  //               is OpenAI's and rotates.
+  //
+  // A present-but-junk value (a number, an object, '') is UNKNOWN, not healthy: we could not read
+  // it, and "could not read" is never evidence of anything.
+  if (!usage || !('rate_limit_reached_type' in usage)) return undefined;
+  const v = usage.rate_limit_reached_type;
+  if (v === null) return null;
+  return typeof v === 'string' && v ? v.slice(0, 32) : undefined;
+}
+
+// Low-dimensional census of the RAW `additional_rate_limits[]` array, for server-side observation
+// (#1184 option 1 — Analytics Engine, no hot-path D1).
+//
+// 🔴 It must read the raw array, NOT parseAdditionalLimits() output. That function caps at 5 and
+// drops buckets whose window has no usable percent, so counting its result would answer a
+// different question than the one #1184 asks. The open ambiguity there is precisely "is Plus
+// sending an empty array, or is pickScopedModel just not choosing?" — and only the raw count
+// separates those two. Names only, no percentages: this exists to learn WHICH buckets exist on
+// which plans, and a name plus a count is enough for that.
+export function summarizeLimitBuckets(usage) {
+  const arr = usage?.additional_rate_limits;
+  // 🔴 ABSENT IS NOT EMPTY, and collapsing the two would defeat the whole point one level down.
+  // The question this census exists to answer is "does this account send an empty array, or do we
+  // just fail to pick from a non-empty one" — so `count: 0` has to mean "the provider sent an
+  // array and it had nothing in it". If a response omits the field entirely (an older shape, a
+  // partial payload, a future rename), coercing that to `[]` would file it as a confirmed empty
+  // array and inflate exactly the population we are trying to measure. Returning null keeps the
+  // two apart all the way to AE, where a missing bucket_count is recorded as -1 = "not reported".
+  if (!Array.isArray(arr)) return null;
+  return {
+    count: arr.length,
+    names: arr
+      .slice(0, MAX_ADDITIONAL_LIMITS)
+      .map((it) => String(it?.limit_name || it?.metered_feature || '?').slice(0, 40)),
+  };
+}
+
 // Select the model-scoped bucket (e.g. Codex 'GPT-5.3-Codex-Spark') from the per-feature limits
 // and shape it like Claude's weekly_scoped slot ({ utilization, resets_at, model, window_seconds })
 // so it can ride the shared `seven_day_omelette` slot. Pure — no I/O.
@@ -373,9 +467,27 @@ export function parseAdditionalLimits(usage) {
 function pickScopedModel(additionalLimits) {
   if (!Array.isArray(additionalLimits) || !additionalLimits.length) return null;
   // Non-model buckets that ride the same additional_rate_limits array (observed 2026-08-22:
-  // OpenAI's banked-reset pool 'gpt-reserve', #926). They are not model limits, so they must
-  // neither occupy the scoped slot nor outrank a real model bucket when both are present; the
-  // popup still shows them via parseAdditionalLimits.
+  // 'gpt-reserve', #926). They are not model limits, so they must neither occupy the scoped slot
+  // nor outrank a real model bucket when both are present; the popup still shows them via
+  // parseAdditionalLimits.
+  //
+  // 🔴 THE EXCLUSION IS RIGHT; AN EARLIER VERSION OF THIS COMMENT EXPLAINED IT WRONG. It called
+  // 'gpt-reserve' "OpenAI's banked-reset pool", which we never had evidence for — and the live
+  // payload argues against it: the bucket carries `metered_feature: 'base_model_inference'` and
+  // `normal_model_slug: 'gpt-5.6-luna'` (captured 2026-09-07), while banked reset credits arrive
+  // in a SEPARATE top-level field, `rate_limit_reset_credits`. It looks far more like the base-
+  // model (chat) meter than like a reset pool.
+  //
+  // We still cannot decide between the two from data, and that is not for want of looking: across
+  // 71 accounts / 662 rows (08-22~09-07) its utilization is essentially all zero — and since chat
+  // has had no cap since 2026-08-06, "reset pool nobody used" and "chat meter that cannot rise"
+  // predict the same zeros. The window that could have separated them closed before our first
+  // observation. Excluding it is correct EITHER WAY: a reset pool is not a model limit, and a chat
+  // meter pinned at zero carries no signal.
+  //
+  // ⚠️ Which is also why it is worth observing (#1184). If OpenAI ever re-caps chat, this bucket
+  // starts carrying a value and nothing in the current pipeline would notice — the client drops
+  // the array and the server stores only the winner. See docs/CHATGPT-USAGE-SEMANTICS.md.
   // Kept INSIDE the function: scripts/scoped-weekly-slots.test.mjs compiles this body in
   // isolation, so an outer constant would have to be stubbed there and could drift.
   const NON_MODEL_LIMIT_NAMES = ['gpt-reserve'];
@@ -470,6 +582,14 @@ export async function collectChatGPT(force = false, userManual = false) {
       extraUsage: null,
       // Per-feature limit buckets (e.g. Codex weekly) — display-only, popup gauges.
       additionalLimits: parseAdditionalLimits(usage),
+      // Models the provider is currently gating (empty on a healthy account — see
+      // parseModelAvailability: availability, NOT a usage percentage).
+      modelGates: parseModelAvailability(usage),
+      // Which limit the account actually ran into, per the provider. null = nothing exhausted,
+      // which is the normal state even at 100% on the weekly window (chat is unmetered since 08-06).
+      reachedType: parseReachedType(usage),
+      // Raw-array census for server-side observation only — never rendered (#1184).
+      bucketCensus: summarizeLimitBuckets(usage),
     };
 
     // Append to local usage history (for chart display)
@@ -652,6 +772,53 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // carries additionalLimits; extra workspaces have none → slot stays unset.
   const scopedModel = pickScopedModel(org.additionalLimits);
   if (scopedModel) payload.seven_day_omelette = scopedModel;
+
+  // Observation-only rider (#1184). The server writes this to Analytics Engine and stores NOTHING
+  // in D1 — the hot path may not take on another D1 statement, read or write. Sent only when there
+  // is something to say, so an ordinary heartbeat's body does not grow.
+  //
+  // 🔴 Deliberately NOT part of the dedup signature. The server's usage-only dedup keys on
+  // h5/d7/r7, and that is correct here: if a bucket appears or a model gets gated while usage sits
+  // flat, we would rather lose that observation than start forcing stores on every heartbeat.
+  // The census is a population question ("which plans see which buckets"), not a per-account
+  // timeline, so sampling it through whatever the dedup lets through is sufficient.
+  // 🔴 `bucket_count` IS SENT WHEN IT IS ZERO. An earlier cut gated the whole rider on
+  // "is there anything to say", counting 0 as nothing — which silently excluded the exact
+  // population this rider exists to measure. #1184's open question is "when a Plus account has no
+  // scoped bucket, is `additional_rate_limits[]` empty, or did pickScopedModel just not choose?"
+  // Only a count-0 row answers that, and under the old gate the ordinary healthy account
+  // ({ additional_rate_limits: [], model_usage: {...available...}, rate_limit_reached_type: null })
+  // emitted no row at all. Its silence would then be indistinguishable from "not ChatGPT" /
+  // "old client" / "dedup-skipped" / "flag off" — so the query in ae.ts would read
+  // "no Plus account has an empty array", which is the opposite of what it means.
+  //
+  // Cost of always sending it: ~20 bytes, on ChatGPT snapshots that already passed the send gate.
+  // The optional members below stay conditional — those really are "nothing to say" when absent.
+  // 🔴 THREE states, not two, and every pair of them has been conflated at some point in this file:
+  //
+  //   key absent   — we never fetched /wham/usage for this org at all. EXTRA WORKSPACES are this:
+  //                  the roster names them but usage needs a per-account token, so they arrive with
+  //                  h5/d7 null and none of these fields set. They must emit NOTHING. Attaching an
+  //                  empty rider would have AE record reached_type='none' + bucket_count=-1 for a
+  //                  workspace we never looked at — phantom "healthy" rows contaminating the census.
+  //   null         — we fetched, and the response had no `additional_rate_limits` field.
+  //   object       — we fetched, and the field was there (count may legitimately be 0).
+  //
+  // `in` rather than a truthiness test precisely because null and undefined must part ways here:
+  // the primary org always sets the key (to an object or to null), extra workspaces never set it.
+  if ('bucketCensus' in org) {
+    const census = org.bucketCensus;
+    payload.provider_obs = {
+      ...(census ? { bucket_count: census.count } : {}),
+      ...(census && census.names.length ? { bucket_names: census.names } : {}),
+      // `!== undefined` and NOT a truthiness test: null is a real, load-bearing value here
+      // ("reported, nothing exhausted") and must survive into the payload as an explicit null.
+      ...(org.reachedType !== undefined ? { reached_type: org.reachedType } : {}),
+      ...(org.modelGates && org.modelGates.length
+        ? { gated_models: org.modelGates.map((g) => g.model) }
+        : {}),
+    };
+  }
 
   // Attach the next-billing date and any scheduled plan change so the server persists
   // them on this org's snapshot row (same `subscription` shape the Claude collector

@@ -103,13 +103,29 @@
     return strip;
   }
 
-  function seg(text, color) {
-    const s = `<span class="ct-cg-strip-seg"${color ? ` style="color:${color}"` : ''}>${CORE.escapeHtml(text)}</span>`;
+  // `title` is optional; when present it is escaped into the attribute. The escaper turns a double
+  // quote into &quot;, so a locale string containing one cannot close the attribute early and
+  // truncate the tooltip — the failure #1209 had to guard against on the dashboard.
+  function seg(text, color, title) {
+    const attrs = (color ? ` style="color:${color}"` : '')
+      + (title ? ` title="${CORE.escapeHtml(title)}"` : '');
+    const s = `<span class="ct-cg-strip-seg"${attrs}>${CORE.escapeHtml(text)}</span>`;
     return s;
   }
 
   // A label + percent followed by a compact inline gauge bar (current fill +
   // optional prediction marker), mirroring the claude.ai input strip.
+  // 🔴 The label carries the same "excludes text chat" note as the sidebar panel, from the same
+  // CORE string. Both are injected into chatgpt.com together (background.js CHATGPT_INJECT) and
+  // render the SAME percentage; noting one and not the other is worse than noting neither, because
+  // the user compares the two and reads the bare one as "so THIS is the chat gauge". This strip's
+  // label is the weaker of the two — "주간 사용률" / "Weekly usage" is a bare claim with nothing
+  // qualifying it.
+  //
+  // ⚠️ A native title= does not open on touch (the constraint that made the dashboard's note a real
+  // <button> in #1209). Accepted here rather than worked around: this is a one-line composer strip
+  // with no room for an inline note, and it already uses title= for its reset cell, so the
+  // affordance is at least consistent. The sidebar panel on the same page carries the full note.
   function metric(label, util, predUtil) {
     const color = CORE.gaugeColor(util);
     const clamped = Math.min(util, 100);
@@ -127,7 +143,8 @@
       bar += `<span class="ct-cg-strip-bar-marker" style="left:${clampedPred}%;background:${predColor}"></span>`;
     }
     bar += `</span>`;
-    return seg(`${label} ${Math.round(util)}%`, color) + bar;
+    const note = CORE.cgUsageNote ? CORE.cgUsageNote(_lang) : '';
+    return seg(`${label} ${Math.round(util)}%`, color, note) + bar;
   }
 
   const GEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
