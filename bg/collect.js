@@ -24,6 +24,11 @@ import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heart
 import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 // #1122 — install-beacon imports only from storage.js, so this does not close an import cycle.
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
+// Pure response parsing lives in its own chrome-free module so the contract runner can import
+// it (#1315). Names unchanged — the call sites below are what the guards match on.
+import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows } from './parse-claude.js';
+import { claudeUsageShape } from './drift-obs.js';
+import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -123,17 +128,6 @@ export function updateOrgPollState(state, currentValues, changed) {
   return { ...state, unchangedCount: newCount, lastValues: currentValues, lastPollAt: Date.now() };
 }
 
-/** Normalize raw extra_usage API response into a consistent shape */
-function normalizeExtraUsage(raw) {
-  if (!raw) return null;
-  return {
-    is_enabled: raw.is_enabled || false,
-    monthly_limit: raw.monthly_limit ?? null,
-    used_credits: raw.used_credits ?? null,
-    utilization: raw.utilization ?? null,
-  };
-}
-
 /** Parse grove_enabled from API response text via regex */
 function parseGroveFromText(text) {
   const str = typeof text === 'string' ? text : JSON.stringify(text);
@@ -175,71 +169,13 @@ function buildHistoryPoint(snapshot, plan) {
   };
 }
 
-/**
- * Resolve the two model-scoped weekly slots from the usage response.
- *
- * Anthropic moved the per-model weekly limit out of the top-level
- * `seven_day_<model>` fields (now null) into the generic `limits[]` array:
- * entries with `kind === 'weekly_scoped'` carry `scope.model.display_name`
- * (e.g. "Fable") and a 0-100 `percent` on the same scale as the old
- * `.utilization`. We map each scoped entry into the two legacy numeric slots
- * (omelette / sonnet) so the entire server + chart pipeline keeps working
- * unchanged. The `model` sub-field is transient metadata: the server's epoch
- * observer reads it to label the slot; snapshot storage ignores it.
- *
- * Slot assignment is deterministic (sorted by model name) so a given model keeps
- * a stable slot — a single active scoped model always lands in the omelette slot.
- * Falls back to the legacy top-level fields when `limits[]` is absent/empty
- * (older API shape or a slot with no active scoped model).
- */
-function resolveScopedWeeklySlots(usageData) {
-  const scoped = Array.isArray(usageData.limits)
-    ? usageData.limits
-        .filter((l) => l && l.kind === 'weekly_scoped' && l.scope?.model?.display_name)
-        .map((l) => ({
-          model: l.scope.model.display_name,
-          utilization: l.percent ?? null,
-          resets_at: l.resets_at ?? null,
-        }))
-        // Locale-independent (code-unit) order so slot assignment is deterministic
-        // across browser locales — localeCompare could otherwise order two model names
-        // differently per user and swap their slots.
-        .sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0))
-    : [];
-
-  const slotFrom = (entry, legacy) => entry
-    ? {
-        utilization: entry.utilization,
-        resets_at: normalizeResetTime(entry.resets_at),
-        model: entry.model,
-      }
-    : {
-        utilization: legacy?.utilization ?? null,
-        resets_at: normalizeResetTime(legacy?.resets_at),
-        model: null,
-      };
-
-  return {
-    omelette: slotFrom(scoped[0], usageData.seven_day_omelette),
-    sonnet: slotFrom(scoped[1], usageData.seven_day_sonnet),
-  };
-}
-
 /** Build common usage window fields shared by primary & extra org snapshots */
 async function buildUsageFields(usageData, config) {
-  const scopedSlots = resolveScopedWeeklySlots(usageData);
   return {
-    five_hour: {
-      utilization: usageData.five_hour?.utilization ?? null,
-      resets_at: normalizeResetTime(usageData.five_hour?.resets_at),
-    },
-    seven_day: {
-      utilization: usageData.seven_day?.utilization ?? null,
-      resets_at: normalizeResetTime(usageData.seven_day?.resets_at),
-    },
-    seven_day_omelette: scopedSlots.omelette,
-    seven_day_sonnet: scopedSlots.sonnet,
-    extra_usage: normalizeExtraUsage(usageData.extra_usage),
+    // Everything derived from the PROVIDER RESPONSE comes from the pure seam
+    // (bg/parse-claude.js); everything below it is environment and settings, which is why the two
+    // are separated — a fixture can pin the first half and could never pin the second.
+    ...parseClaudeUsageWindows(usageData),
     user_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     user_language: await bgLang(),
     poll_interval: config.intervalMinutes || DEFAULT_INTERVAL_MINUTES,
@@ -317,8 +253,6 @@ function syncNotificationPrefs(config, userEmail) {
   });
 }
 
-
-
 // === Org detection based on lastActiveOrg cookie ===
 
 /**
@@ -392,14 +326,28 @@ let _collectChain = Promise.resolve();
 // nothing about whether collection works. Changing it on one side only re-opens the mail.
 const SYNC_PAUSE_HEARTBEAT_CODE = 'sync_pause_change';
 
-async function postHeartbeat(cfg, { email, errorCode, extVersion, syncPaused }) {
+// 🔴 `driftObs` is an ADDED FIELD ON A REQUEST THAT ALREADY FIRES. The heartbeat's send gate
+// (`accountCache?.email`, resolved by the caller) is UNTOUCHED and must stay that way: installs
+// that are silent today would otherwise start heartbeating on the SHARED API KEY, enlarging the
+// `hb_gate` shadow population that #758's pending HEARTBEAT_IDENTITY_ENFORCE decision rests on —
+// the exact trap the sync-pause edge report documents two functions below. Adding to the body is
+// free; changing who sends is not.
+//
+// 🔴 It is also OPTIONAL and additive with respect to the #1119 contract above. `sync_paused` is
+// still sent on every heartbeat and the server still reads it the same way; the worker parses the
+// body by named fields (index.ts POST /api/heartbeat), so an extra key is ignored by any server
+// that does not know it yet — which is what lets the client ship before the consumer does.
+async function postHeartbeat(cfg, { email, errorCode, extVersion, syncPaused, driftObs = null }) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), HEARTBEAT_TIMEOUT_MS);
   try {
     const resp = await authedFetch(cfg, `${cfg.serverUrl}/api/heartbeat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, error_code: errorCode, ext_version: extVersion, sync_paused: syncPaused }),
+      body: JSON.stringify({
+        email, error_code: errorCode, ext_version: extVersion, sync_paused: syncPaused,
+        ...(driftObs ? { drift_obs: driftObs } : {}),
+      }),
       signal: ac.signal,
     });
     return !!resp?.ok;
@@ -946,6 +894,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
 
     // 3. Build snapshot (resets_at normalized to minute precision)
     const extVersion = chrome.runtime.getManifest().version;
+    // Computed on the raw usage response, before buildUsageFields normalises it away.
+    await noteDriftOutcome('claude', 'success', null);
+    const { rider: claudeDriftRider, commit: claudeDriftCommit } =
+      await buildDriftRider('claude', claudeUsageShape(usageData),
+        { label: plan, raw: plan === 'unknown' ? null : plan });
     const snapshot = {
       user_email: userEmail,
       plan: plan,
@@ -955,6 +908,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       collected_at: new Date().toISOString(),
       subscription: subscriptionInfo,
       ...await buildUsageFields(usageData, config),
+      // Schema-drift observation (#1322). Rides this POST; never causes one. Attached before the
+      // send and committed after it, mirroring the provider collectors.
+      ...(claudeDriftRider ? { drift_obs: claudeDriftRider } : {}),
       grove_enabled: groveEnabled,
       grove_detected: groveDetected,
       claude_org_uuid: bestOrg?.uuid || null,
@@ -1256,6 +1212,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       }
       const result = await response.json();
       await noteServerSuccess(); // confirmed-healthy POST clears any backoff
+      // Confirmed 2xx — only now is the drift observation considered reported (#1322). Committing
+      // earlier would discard it whenever the POST failed, and an install whose sends fail is part
+      // of what this measures.
+      if (claudeDriftRider) await claudeDriftCommit();
       console.log(`[Claude Tuner] Snapshot sent: ${result.success ? 'ok' : 'fail'}${result.skipped ? ' (skipped)' : ''}`);
 
       // Claude accepted (email matched the token identity) — clear any prior
@@ -1861,6 +1821,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
   } catch (error) {
     const rawMsg = error.message || 'Unknown error';
     console.error('[Claude Tuner] Collection failed:', rawMsg);
+    // 🔴 THE DENOMINATOR. Only the success path recorded an attempt, so Claude's
+    // successes/attempts was permanently 1.0 and could never show the degradation the ratio exists
+    // to show. Counted here with NO event: a collection failure is not on its own evidence that the
+    // response SHAPE changed — that distinction is what keeps parse_fails meaningful.
+    await noteDriftOutcome('claude', 'error', null);
     // 🔴 EVERYTHING BELOW USES THE CODE, NEVER THE PROSE (#1176). bg/api.js throws codes, but this
     // catch also sees exceptions from the collection logic itself — a null org, an unexpected
     // response shape — and those carry a raw JS message. That message was: painted in the popup
@@ -1975,6 +1940,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // awaiting here is what keeps the MV3 worker alive long enough to flush the request.
           // See bg/heartbeat.js for why losing these specifically biases the numbers one way.
           let delivered = false;
+          // The last-resort drift carrier (#1322): this heartbeat already fires on the Claude
+          // failure path regardless of WHICH provider broke, so it reaches installs whose failing
+          // provider never produces a snapshot of its own. Built before the send, committed after
+          // — an undelivered heartbeat must not consume the observation.
+          const { rider: hbDrift, commit: hbDriftCommit } = await buildDriftEventsRider();
           if (hbEmail) {
             delivered = await postHeartbeat(cfg, {
               email: hbEmail,
@@ -1983,8 +1953,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
               // #1119 — the live pause state on EVERY heartbeat. See postHeartbeat's contract for
               // why this, and not the edge report, is what makes a stale server flag impossible.
               syncPaused: await isServerSyncPaused(),
+              driftObs: hbDrift,
             });
           }
+          if (delivered && hbDrift) await hbDriftCommit();
           if (delivered) {
             await chrome.storage.local.set({ lastHeartbeatAt: Date.now() });
             await chrome.storage.local.remove(HEARTBEAT_RETRY_KEY);
