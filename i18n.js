@@ -417,10 +417,21 @@ const TRANSLATIONS = {
     // Gauge fact block (E-1): wait-time lead + limit/reset detail rows.
     'gauge_wait_lead': '{0} 대기 예상',
     'gauge_wait_capped': '약 {0} 대기',
-    'gauge_label_limit': '한도 도달',
+    // 🔴 THESE THREE ARE WIDTH-CONSTRAINED, not just copy. They render in .gf-why, a GRID whose
+    // label column is SHARED across its rows, inside a gauge column that is 146px at the 340px
+    // popup. Measured in the popup's own font stack at 10.5px, against the widest timestamp the
+    // formatter can emit ("12/12(목) 12:11" = 83.9px, "12/12(Wed) 12:11" = 97.9px):
+    //   ko  '도달 예상' 39.4 + gap 4 + 83.9 = 127.3  of 146  → 18.7px spare
+    //   en  'Resets'    34.0 + gap 4 + 97.9 = 135.9  of 146  → 10.1px spare  ← the binding case
+    // The old ko label ('한도 도달 예상', 60.6px) needed 60.6 + 4 + 83.9 = 148.5px — over even the
+    // widened column — and it folded BOTH rows, because one long label squeezes the shared value
+    // column for every row (that is the bug this fixed).
+    // 🪤 Lengthening any of them — in EITHER locale — is a layout change. test/gauge-facts-layout-probe.mjs
+    // measures it; do not restore a longer word without re-running that probe.
+    'gauge_label_limit': '도달',
     // Same row in the FORECAST block, where the timestamp is in the future — the past-tense
     // label above would read as "already blocked" next to a time that hasn't arrived yet.
-    'gauge_label_limit_eta': '한도 도달 예상',
+    'gauge_label_limit_eta': '도달 예상',
     'gauge_label_reset': '리셋 예정',
     'gauge_reset_idle': '최근 사용 없음',
     'gauge_dur_dhm': '{0}일 {1}시간',
@@ -1052,9 +1063,13 @@ const TRANSLATIONS = {
     // Gauge fact block (E-1): wait-time lead + limit/reset detail rows.
     'gauge_wait_lead': '{0} wait expected',
     'gauge_wait_capped': '~{0} wait',
-    'gauge_label_limit': 'Limit hit',
+    // Width-constrained — see the ko note for the measurements. English is the BINDING locale
+    // here: its timestamp is 14px wider than Korean's and 'Resets' sets the shared label column,
+    // so 'Limit expected' (74.2px) overflows by 40px and cannot come back.
+    'gauge_label_limit': 'Hit',
     // Same row in the FORECAST block, where the timestamp is in the future — see the ko note.
-    'gauge_label_limit_eta': 'Limit expected',
+    // "ETA" is the shortest word that still reads as an estimate rather than as a fact.
+    'gauge_label_limit_eta': 'ETA',
     'gauge_label_reset': 'Resets',
     'gauge_reset_idle': 'No recent usage',
     'gauge_dur_dhm': '{0}d {1}h',

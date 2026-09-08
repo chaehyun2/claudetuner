@@ -84,7 +84,13 @@
        dragged out — where the column would otherwise sit flush against the left edge.
        Safe by construction: `* { margin: 0; box-sizing: border-box }` above means the body has no
        margin to disturb and 340px is the OUTER width, so nothing reflows. */
-    body { width: 340px; min-height: 600px; margin-inline: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; background: var(--bg-body); }
+    /* 🔴 The 10px is LOAD-BEARING, not taste. The popup is a fixed 340px and every gauge fact line
+       is measured against what survives it: 340 − 2×10 (here) − 2 (card border) − 2×8 (card
+       padding) − 10 (column gap) = 292, i.e. 146px per gauge. It was 138px at the previous 16px
+       body / 10px card padding, and the widest English fact row needs 135.9px — a 2.1px margin,
+       which is luck, not headroom. Widening this back costs 8px of that budget, and the probe
+       (test/gauge-facts-layout-probe.mjs) asserts the 146px directly so it goes red if you do. */
+    body { width: 340px; min-height: 600px; margin-inline: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 10px; background: var(--bg-body); }
     /* Everything below is side-panel/full-tab dressing: none of these queries CAN match inside
        the real popup, whose viewport is the 340px above.
        Centring alone leaves that 340px ribbon stranded in a wide window while the content it
@@ -152,7 +158,7 @@
     .status-text { font-size: 11px; color: var(--text-secondary); flex: 1; min-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* 사용률 게이지 카드 */
-    .gauge-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; display: flex; gap: 10px; }
+    .gauge-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 10px; display: flex; gap: 10px; }
     .gauge-row { flex: 1; min-width: 0; }
     .gauge-header { display: flex; align-items: baseline; margin-bottom: 4px; gap: 3px; flex-wrap: nowrap; }
     .gauge-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -170,9 +176,19 @@
     /* Gauge fact block (E-1). Both the normal reset line and the at-risk wait block
        render inside #gauge-{id}-reset (a .gauge-sub container). Normal = one .gf-why
        row (reset). At risk = .gf-lead (wait span) over .gf-why rows (limit + reset). */
-    .gf-why { display: grid; grid-template-columns: auto 1fr; row-gap: 2px; column-gap: 5px; align-items: baseline; margin-top: 3px; font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.4; }
+    .gf-why { display: grid; grid-template-columns: auto 1fr; row-gap: 2px; column-gap: 4px; align-items: baseline; margin-top: 3px; font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.4; }
     .gf-k { color: var(--text-muted); white-space: nowrap; }
     .gf-v { color: var(--text-secondary); font-weight: 600; }
+    /* .gf-abs carries NO style on purpose — it is a handle, not a rule. It marks which part of the
+       value is the timestamp so test/gauge-facts-layout-probe.mjs can assert on the date itself
+       rather than on its cell (the cell also holds a countdown, and that countdown reflowing to a
+       second line is fine while the date breaking is not).
+       🪤 It was `white-space: nowrap` for one revision. Do not put that back. It buys nothing:
+       the browser fills greedily, so with "Resets  Tomorrow 22:11  23h 59m" (162px of a 146px
+       column) the break already lands before the countdown — the date only breaks when the date
+       ALONE overflows. And in exactly that case nowrap turns a readable two-line date into text
+       that spills out of the column and paints over the neighbouring gauge, which is the one
+       failure mode here that a user cannot read at all. Wrapping is the graceful degradation. */
     .gf-rel { color: var(--text-muted); font-weight: 500; white-space: nowrap; }
     .gf-k.r-hit, .gf-v.r-hit { color: #ef4444; }
     /* Idle window: a value but no reset (Claude's 5h is usage-anchored → none at 0%). */

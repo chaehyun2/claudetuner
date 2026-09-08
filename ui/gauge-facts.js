@@ -29,11 +29,16 @@ function relativeIfNear(at) {
 }
 
 // One "label / value (+ optional relative)" row of the detail grid.
+//
+// The timestamp is wrapped in its own .gf-abs element so the layout probe can assert on the DATE
+// rather than on its cell: the cell may also hold a countdown, and that countdown reflowing to a
+// second line is fine while "12/24(목) 22:11" breaking in two is not. The span is a handle, not a
+// rule — it carries no styling (see the note in popup.css for why nowrap is deliberately absent).
 function factRow(label, absText, relText, hit) {
   const cls = hit ? ' r-hit' : '';
   const rel = relText ? ` <span class="gf-rel">${relText}</span>` : '';
   return `<span class="gf-k${cls}">${label}</span>` +
-         `<span class="gf-v${cls}">${absText}${rel}</span>`;
+         `<span class="gf-v${cls}"><span class="gf-abs">${absText}</span>${rel}</span>`;
 }
 
 // Normal / idle state. `hasWindow` = the gauge has a utilization value (so the
