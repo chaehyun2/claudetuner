@@ -13,7 +13,7 @@ import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGE
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
-import { loadOrgSelector, selectOrg, showMultiOrgBadges } from './ui/org-selector.js';
+import { loadOrgSelector, selectOrg, showMultiOrgBadges, renderAdditionalLimits } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
 import { loadPopupAnnouncements } from './ui/notices.js';
@@ -812,6 +812,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         const langSelOrg = (r.collectedOrgs || state.collectedOrgs || [])
           .find(o => o.uuid === state.selectedOrgId);
         if (langSelOrg) applyGaugeWindowLabels(langSelOrg.w5s, langSelOrg.w7s);
+        // Same class of string as the gauge labels above: the per-bucket `title` notes are
+        // imperative text built from CORE at render time, so a live language switch would otherwise
+        // leave the previous language's tooltip on a row whose label already changed.
+        //
+        // 🪤 NOT "nothing above re-translates them" — an earlier version of this comment said that
+        // and it is false on the primary path, where updateUI() reaches ui/render.js's own
+        // renderAdditionalLimits() call and this line makes it the SECOND identical body swap
+        // (measured). The call still has to be here: render.js only covers the primary org, so a
+        // non-primary selection or a provider-only install (no lastStatus at all) never reaches it
+        // and would keep the stale tooltip. Idempotent — the body is innerHTML-replaced and the
+        // collapse header is static markup, so the redundant pass rebinds nothing.
+        if (langSelOrg) renderAdditionalLimits(langSelOrg.additionalLimits);
         // Re-render org chips too (reflects plan name translations, etc.)
         if (state.collectedOrgs.length >= 2) showMultiOrgBadges(state.collectedOrgs);
         // Re-render overview cards (title + countdown strings are i18n).

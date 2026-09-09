@@ -116,8 +116,23 @@
       className: 'ct-cg-tip-brand', textContent: t('tip_brand'),
     }));
     const rect = target.getBoundingClientRect();
-    tip.style.left = `${rect.left}px`;
-    tip.style.top = `${rect.bottom + 6}px`;
+    // 🔴 Clamp to the viewport. The tooltip is position:fixed and used to be placed at
+    // `rect.bottom + 6` unconditionally, so a row near the bottom of the window pushed its body
+    // off-screen — measured: viewport 600px, row bottom 590px, tooltip top 596px with 8px of
+    // padding alone. That was survivable while these tips were one short line; the per-bucket
+    // notes (#1213) are three, and the LAST line is the one that matters most for Codex Spark.
+    // Flip above the row when there is not enough room below, then clamp both axes.
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    const tipRect = tip.getBoundingClientRect();
+    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    const GAP = 6;
+    const fitsBelow = rect.bottom + GAP + tipRect.height <= vh;
+    const top = fitsBelow ? rect.bottom + GAP : Math.max(GAP, rect.top - GAP - tipRect.height);
+    const left = Math.max(GAP, Math.min(rect.left, vw - tipRect.width - GAP));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${Math.min(top, Math.max(GAP, vh - tipRect.height - GAP))}px`;
     tip.classList.add('visible');
   }
   function hideTooltip() { if (_tooltipEl) _tooltipEl.classList.remove('visible'); }
@@ -321,7 +336,12 @@
     bar.className = 'ct-cg-bar';
     bar.innerHTML = `<div class="ct-cg-bar-track"><div class="ct-cg-bar-fill" style="width:${pct}%;background:${color}"></div></div>`;
     row.appendChild(bar);
-    attachTip(row, isReserve ? 'tip_reserve' : 'tip_addl');
+    // Prefer the bucket's own sourced explanation; fall back to the generic per-feature-limit
+    // line only for slugs CORE has nothing to say about. `raw` because the text is already
+    // localised by CORE — the sidebar's own I18N table is not the source for these.
+    const note = CORE.bucketNote ? CORE.bucketNote(lim.name, _lang) : null;
+    if (note) attachTip(row, note, false, true);
+    else attachTip(row, isReserve ? 'tip_reserve' : 'tip_addl');
     return row;
   }
 

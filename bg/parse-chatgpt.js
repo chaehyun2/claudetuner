@@ -255,6 +255,10 @@ const MAX_ADDITIONAL_LIMITS = 5;
 //    rate_limit:{ primary_window:{ used_percent, reset_at, limit_window_seconds } } }).
 // Each bucket is shaped like a usage window; surface the meaningful window's
 // percent + reset so the popup can render a gauge per bucket. Pure — no I/O.
+// Long enough for every name the provider has actually sent (longest in our fixtures: 50) and short
+// enough that one bucket cannot stretch the sidebar row it lands in.
+const MAX_BUCKET_NAME_CHARS = 60;
+
 export function parseAdditionalLimits(usage) {
   const arr = Array.isArray(usage?.additional_rate_limits) ? usage.additional_rate_limits : [];
   const out = [];
@@ -264,7 +268,15 @@ export function parseAdditionalLimits(usage) {
     const used = w?.used_percent;
     if (typeof used !== 'number') continue; // skip buckets without a usable window
     out.push({
-      name: item.limit_name || item.metered_feature || 'Limit',
+      // 🪤 TRIMMED, because `' '` is truthy: a whitespace-only limit_name sailed past the `||`
+      // chain and rendered as a nameless gauge on both surfaces. Bounded too — the slug reaches a
+      // sidebar row that has no length cap of its own.
+      // 🪤 The cap has to sit on the RESULT, not on one branch: it was written as
+      // `limit_name.trim() || feature.trim().slice(0, 60)`, which bounded the fallback and left the
+      // field the provider actually sends unbounded — a 500-char limit_name came through whole.
+      name: (String(item.limit_name || '').trim()
+        || String(item.metered_feature || '').trim()
+        || 'Limit').slice(0, MAX_BUCKET_NAME_CHARS),
       feature: item.metered_feature || null,
       used,
       resetsAt: unixToResetTime(w.reset_at),

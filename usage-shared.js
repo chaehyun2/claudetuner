@@ -763,7 +763,62 @@
   // escHtml() throws on (killing the whole popup section) or that renders as '[object Object]'.
   // The parent commit had no lookup at all and drew those slugs fine, so a bare `obj[name]` here
   // would be a REGRESSION, not merely a latent edge case.
-  const BUCKET_DISPLAY_NAMES = Object.assign(Object.create(null), { 'gpt-reserve': 'Luna Reserve' });
+  // 🪤 Codex Spark keeps its model version, deliberately. The slug is unreadable because it leads
+  // with the version ('GPT-5.3-Codex-Spark'); moving the feature name to the front fixes that
+  // without discarding which model the bucket meters — a user comparing this row against OpenAI's
+  // own limits page needs the version to match it up. Dropping to a bare 'Codex Spark' would also
+  // survive a version bump SILENTLY and start mislabelling 5.4 as 5.3.
+  //
+  // These slugs rotate (#926 moved this bucket's window; 'codex_bengalfox' is its metered_feature
+  // codename). An unmapped slug falls through to itself, so a rotation degrades to today's raw
+  // display rather than to a wrong name — and the scoped-model-watch cron alarm is the maintenance
+  // trigger that says a new one appeared.
+  const BUCKET_DISPLAY_NAMES = Object.assign(Object.create(null), {
+    'gpt-reserve': 'Luna Reserve',
+    'GPT-5.3-Codex-Spark': 'Codex Spark (GPT-5.3)',
+  });
+  // What each bucket actually IS, in the user's language. Single-sourced here because the popup
+  // (ui/org-selector.js) and the ChatGPT sidebar both render these rows and used to say nothing —
+  // the popup had no tooltip at all, and the sidebar gave every bucket the same generic
+  // "a limit for this feature" line, which is true of Spark and false of Reserve.
+  //
+  // 🔴 EVERY CLAIM HERE IS ATTRIBUTED, DELIBERATELY. This repo has already published two confident
+  // wrong descriptions of gpt-reserve by reasoning from payload field names. What we can defend is
+  // what the vendor says, so the copy says "OpenAI 안내상 …" / "OpenAI describes it as …" rather
+  // than asserting mechanism in our own voice.
+  //   Luna Reserve — help.openai.com "Luna Reserve in Codex and ChatGPT Work" + openai/codex#42217,
+  //     #42830 (verified 2026-09-08, see docs/CHATGPT-USAGE-SEMANTICS.md).
+  //   Codex Spark — openai.com "Introducing GPT-5.3-Codex-Spark" (own rate limit, research preview,
+  //     limits may shift with demand) + openai/codex#23150, which corroborates the separate bucket.
+  // 🪤 #23150 is a BUG REPORT that Spark usage sometimes drains regular Codex limits anyway. The
+  // copy therefore says OpenAI meters them apart AND carries the counter-example, because the
+  // decision this text actually drives is "should I switch to Spark to save my regular quota" —
+  // stating only the vendor's intent would answer that question wrongly for the users in #23150.
+  //
+  // 🔴 And nothing here may tell the user what they will be ABLE to do (see the reserve-copy guard
+  // in test/chatgpt-astra-obs-guard.mjs): we have never observed an account in this population
+  // actually blocked, so "you can keep working past your limit" remains unevidenced for us.
+  const BUCKET_NOTES = Object.assign(Object.create(null), {
+    'gpt-reserve': {
+      ko: '정상 한도와 별개로 주어지는 예비 사용량입니다.\nOpenAI 안내상 지원되는 계정·앱에서, 정상 한도를 모두 쓴 뒤 GPT-5.6 Luna로만 쓰입니다.',
+      en: 'A reserve allowance, separate from your regular limits.\nOpenAI describes it as GPT-5.6 Luna usage, on supported accounts and apps, once regular limits run out.',
+    },
+    'GPT-5.3-Codex-Spark': {
+      ko: '빠른 응답용 Codex 모델에 붙은 별도 한도입니다.\nOpenAI 안내상 일반 Codex 사용량과 따로 계산됩니다.\n다만 일반 한도도 함께 줄었다는 사용자 보고가 있습니다.',
+      en: 'A separate limit on the low-latency Codex model.\nOpenAI describes it as metered apart from regular Codex use.\nSome users report their regular limit dropping too.',
+    },
+  });
+  /** Slugs we have a note for. Exposed so a guard can check EVERY entry, not a hand-written list
+   *  that silently stops matching the map (which is exactly what happened once). */
+  function bucketNoteSlugs() { return Object.keys(BUCKET_NOTES); }
+
+  /** The per-bucket explanation, or null when we have nothing sourced to say about this slug. */
+  function bucketNote(name, lang) {
+    if (!Object.prototype.hasOwnProperty.call(BUCKET_NOTES, name)) return null;
+    const n = BUCKET_NOTES[name];
+    return n[lang] || n.en;
+  }
+
   function bucketDisplayName(name) {
     return Object.prototype.hasOwnProperty.call(BUCKET_DISPLAY_NAMES, name)
       ? BUCKET_DISPLAY_NAMES[name]
@@ -781,6 +836,8 @@
     cgUsageNote,
     isNonModelBucket,
     bucketDisplayName,
+    bucketNote,
+    bucketNoteSlugs,
     isContextValid,
     createInstanceGuard,
     PRED_MIN_DELTA,

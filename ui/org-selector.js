@@ -100,6 +100,25 @@ function bucketDisplayName(name) {
   return (core && core.bucketDisplayName) ? core.bucketDisplayName(name) : name;
 }
 
+/**
+ * The sourced explanation for a bucket, or '' when we have nothing to say about the slug.
+ *
+ * A native `title` is the right affordance HERE and not on the dashboard: this is a desktop
+ * extension popup with no touch surface, so the pointer-only tooltip the dashboard had to replace
+ * with a real <button> (#1209) reaches everyone who can see the row. Rows for unmapped slugs simply
+ * carry no title — better than a tooltip that repeats the label.
+ *
+ * 🔴 `getLang()`, NOT `CORE.detectLang()`. The popup's language is a SETTING: i18n.js resolves
+ * `chrome.storage.sync.lang` and only falls back to browser detection when it is 'auto'. Calling
+ * the detector directly would hand Korean copy to someone on a Korean browser who explicitly chose
+ * English — every other localised string in this file already goes through getLang().
+ */
+function bucketNoteFor(name) {
+  const core = globalThis.__ctUsageCore;
+  if (!core || !core.bucketNote) return '';
+  return core.bucketNote(name, getLang()) || '';
+}
+
 export function renderAdditionalLimits(additionalLimits) {
   const addlSection = document.getElementById('additional-limits-section');
   const addlBody = document.getElementById('additional-limits-body');
@@ -132,7 +151,11 @@ export function renderAdditionalLimits(additionalLimits) {
     const reset = lim.resetsAt
       ? `<div class="gauge-sub" style="margin-top:3px">↻ ${escHtml(formatResetAbsolute(lim.resetsAt))}</div>`
       : '';
-    return '<div class="gauge-row">'
+    // Escaped: the note is ours, but `title` sits inside an innerHTML string and the next entry
+    // added to the map must not be able to break out of the attribute.
+    const note = bucketNoteFor(lim.name);
+    const titleAttr = note ? ' title="' + escHtml(note) + '"' : '';
+    return '<div class="gauge-row"' + titleAttr + '>'
       + '<div class="gauge-header"><span class="gauge-label">' + label + '</span>'
       + '<span class="gauge-value" style="color:' + color + '">' + pct + '%</span></div>'
       + '<div class="gauge-bar"><div class="gauge-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
