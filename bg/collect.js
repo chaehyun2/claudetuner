@@ -26,7 +26,7 @@ import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, s
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import
 // it (#1315). Names unchanged — the call sites below are what the guards match on.
-import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows } from './parse-claude.js';
+import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows, claudeUsageWithheld } from './parse-claude.js';
 import { claudeUsageShape } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
 
@@ -1545,6 +1545,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       const successOrgs = [bestOrg?.uuid]; // primary already succeeded
       const orgUsageMap = {}; // Per-org usage storage (for popup chip display)
       orgUsageMap[bestOrg?.uuid] = {
+        // 🔴 "Claude answered and told us nothing" — computed on the RAW response, because by the
+        // time it is normalised into h5/d7 it is indistinguishable from "not collected yet". The
+        // in-page widgets need that difference: without it they show "수집 중" forever and the user
+        // concludes the extension is broken (inquiry #198).
+        noUsage: claudeUsageWithheld(usageData),
         h5: snapshot.five_hour.utilization, d7: snapshot.seven_day.utilization,
         spendUsed: snapshot.extra_usage?.used_credits ?? null,
         spendLimit: snapshot.extra_usage?.monthly_limit ?? null,
@@ -1661,6 +1666,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // Usage API success — populate orgUsageMap/successOrgs immediately (regardless of server POST result)
           successOrgs.push(extraOrg.uuid);
           orgUsageMap[extraOrg.uuid] = {
+            // This org WAS read, so it gets the same observation as the primary. Omitting it wrote
+            // an explicit `false` for an org we had the raw response for — a claim, not a default.
+            noUsage: claudeUsageWithheld(extraUsage),
             h5: extraUsage.five_hour?.utilization ?? null, d7: extraUsage.seven_day?.utilization ?? null,
             spendUsed: extraUsage.extra_usage?.used_credits ?? null, spendLimit: extraUsage.extra_usage?.monthly_limit ?? null,
             plan: extraPlan,
@@ -1793,6 +1801,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           uuid: o.uuid, name: o.name, plan: orgUsageMap[o.uuid]?.plan || await refineTeamPlan(detectPlan(o), o.uuid),
           provider: 'claude',
           isPrimary: o.uuid === primaryUuid,
+          // Carried so the in-page panels can say WHY they are empty. Absent for extra orgs, which
+          // is correct: this only means anything for an org we actually read.
+          noUsage: orgUsageMap[o.uuid]?.noUsage ?? false,
           h5: orgUsageMap[o.uuid]?.h5 ?? null,
           d7: orgUsageMap[o.uuid]?.d7 ?? null,
           spendUsed: orgUsageMap[o.uuid]?.spendUsed ?? null,

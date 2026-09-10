@@ -27,6 +27,7 @@
       settings: '설정',
       soon: '곧 리셋',
       no_data: '데이터 수집 중...',
+      no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
       brand: 'Claude Tuner',
     },
     en: {
@@ -41,6 +42,7 @@
       settings: 'Settings',
       soon: 'soon',
       no_data: 'Collecting data...',
+      no_usage: "Claude isn't providing usage for this account",
       brand: 'Claude Tuner',
     },
   };
@@ -384,6 +386,21 @@
     const strip = shadow.querySelector('.ct-strip');
     if (!strip) return;
 
+    // 🔴 "수집 중" IS A CLAIM, and it is false when the provider has answered and withheld. The two
+    // cases looked identical here (both arrive as h5 == null), so a Free-plan user was told their
+    // usage was being collected, forever (inquiry #198).
+    if (_data && _data.noUsage) {
+      let iconUrl2 = '';
+      try { iconUrl2 = chrome.runtime.getURL('icons/icon16.png'); } catch { /* ignore */ }
+      strip.innerHTML = `
+        ${iconUrl2 ? `<a href="https://claudetuner.com/dashboard/?utm_source=input" target="_blank" class="ct-logo-link"><img src="${iconUrl2}" class="ct-logo" alt="CT"></a>` : ''}
+        <div class="ct-seg">
+          <span class="ct-seg-value">${escapeHtml(t('no_usage'))}</span>
+        </div>
+      `;
+      return;
+    }
+
     if (!_data || _data.h5 == null) {
       let iconUrl = '';
       try { iconUrl = chrome.runtime.getURL('icons/icon16.png'); } catch { /* ignore */ }
@@ -503,8 +520,11 @@
         if (chrome.runtime.lastError) { onFail(); return; }
         if (!res) { onFail(); return; } // keep previous _data if available
         // Skip re-render if data hasn't changed (prevents flicker from non-Claude merges)
+        // `noUsage` decides WHICH message this strip draws, so a change in it alone must not be
+        // filtered out as "no change" — the same reason the spans are compared (#1394).
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.noUsage === res.noUsage &&
             _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;
         renderStrip();

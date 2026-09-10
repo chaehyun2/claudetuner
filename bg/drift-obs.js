@@ -107,7 +107,20 @@ export function unknownTopLevelKeyReport(obj, known, max = 5) {
   const knownSet = new Set(known);
   const unknown = Object.keys(obj).filter((k) => !knownSet.has(k));
   const names = unknown.filter(isSchemaFieldName).sort().slice(0, max);
-  return { names, withheld: unknown.length - unknown.filter(isSchemaFieldName).length };
+  // 🔴 EVERYTHING UNKNOWN THAT WE DID NOT NAME, which includes the ones the CAP dropped.
+  //
+  // This used to count only the name-filter's rejects, so a response with 14 unknown keys reported
+  // 5 names and `withheld: 0` — and `0` reads as "nothing was hidden". Measured on the live Claude
+  // usage response (2026-09-10): exactly that, on every plan. The five names that fit are the
+  // alphabetically first, and because the cut is alphabetical it is not even a random sample —
+  // `nimbus_quill` (a usage window object with the same shape as `five_hour`) and `spend` sat
+  // permanently on the wrong side of it while five all-null codenames were reported instead.
+  //
+  // The cap itself stays: bounding the payload is what stops a provider growing it without limit.
+  // What was wrong is that the loss was invisible. A count cannot say WHICH key was dropped, but
+  // "5 named, 9 withheld" tells the reader the names are a sample rather than the set — and that
+  // is the difference between a lead and a false all-clear.
+  return { names, withheld: unknown.length - names.length };
 }
 
 // ── Shape signature ──────────────────────────────────────────────────────────────────────────
@@ -225,6 +238,42 @@ export const DRIFT_KEYSETS = {
     'seven_day_omelette',
     'seven_day_sonnet',
   ],
+  // 🔴 cl2 = cl1 + the six keys the unknown-key cap was hiding. A NEW ID, not an edit to cl1:
+  // a signature is positional, so appending to cl1 would silently redefine every cl1 row already
+  // stored in a store that cannot be rewritten (test/fixtures/provider/obs-keysets.json exists to
+  // fail if anyone tries). Old rows keep meaning what they meant, and a reader MUST group by
+  // (keyset, sig) so it never straddles the seam.
+  //
+  // 🪤 That last sentence is a REQUIREMENT ON WHOEVER QUERIES THIS, not a description of something
+  // the code does. There is no drift read path yet; the writer stores keyset and sig in separate
+  // blobs and nothing joins them. An earlier draft of this comment said "the consumer groups by
+  // (keyset, sig)" as though that were enforced — it is not, and stating an unbuilt defence as a
+  // built one is how the account-blob rule went unnoticed in #1358.
+  //
+  // WHY THESE SIX. Claude stopped sending Free-plan accounts a `five_hour`/`seven_day` value on
+  // 2026-08-21 17:00 UTC — the keys arrive as explicit `null` and `limits` as `[]` (821 weekly
+  // active users, inquiry #198). Answering "is the usage available anywhere else in this response"
+  // needs the rest of the payload watched, and these are the ones carrying data on a paid account:
+  //   nimbus_quill        — {utilization, resets_at, limit_dollars, used_dollars, …}, i.e. the
+  //                         SAME shape as five_hour. Live value observed on Max 20x.
+  //   spend               — {used, limit, percent, severity, enabled, cap, …}
+  //   seven_day_opus / _cowork / _oauth_apps / _breakdown — the window family
+  // 🪤 Watching a key is NOT reading it: nothing here is parsed into a snapshot. This says only
+  // "tell us its type", which is what the question needs and all it is entitled to.
+  cl2: [
+    'five_hour',
+    'seven_day',
+    'limits',
+    'extra_usage',
+    'seven_day_omelette',
+    'seven_day_sonnet',
+    'nimbus_quill',
+    'spend',
+    'seven_day_opus',
+    'seven_day_cowork',
+    'seven_day_oauth_apps',
+    'seven_day_breakdown',
+  ],
   // Gemini jSf9Qc — positional: [planId, [[remaining, percent, windowType, [[sec, nanos]]], …]]
   gm1: ['0', '1', '1.0', '1.0.1', '1.0.3'],
 };
@@ -251,6 +300,12 @@ export const CHATGPT_USAGE_KNOWN = [
 ];
 export const CLAUDE_USAGE_KNOWN = [
   'five_hour', 'seven_day', 'limits', 'extra_usage', 'seven_day_omelette', 'seven_day_sonnet',
+  // Watched by cl2 but not parsed. `known` answers "do we recognise this field", which is exactly
+  // what watching its type makes true — and leaving them out would keep them in `unknown_keys`
+  // forever, which is the permanent-floor failure the comment above describes: when "a new key
+  // appeared" is always true, a real addition is indistinguishable from the floor.
+  'nimbus_quill', 'spend', 'seven_day_opus', 'seven_day_cowork', 'seven_day_oauth_apps',
+  'seven_day_breakdown',
 ];
 
 /**
@@ -291,9 +346,9 @@ export function geminiUsageShape(data) {
 export function claudeUsageShape(usageData) {
   const limits = usageData && usageData.limits;
   return {
-    keyset: 'cl1',
+    keyset: 'cl2',
     source: 'claude_usage',
-    sig: shapeSig(usageData, DRIFT_KEYSETS.cl1),
+    sig: shapeSig(usageData, DRIFT_KEYSETS.cl2),
     unknownKeys: unknownTopLevelKeyReport(usageData, CLAUDE_USAGE_KNOWN).names,
     unknownWithheld: unknownTopLevelKeyReport(usageData, CLAUDE_USAGE_KNOWN).withheld,
     rawBuckets: Array.isArray(limits) ? limits.length : -1,

@@ -398,8 +398,13 @@
     }
 
     const frag = document.createDocumentFragment();
-    if (_data.h5 != null) frag.appendChild(buildLimitRow('5h', t('session'), _data.h5, _data.r5, _data.pred5h));
-    if (_data.d7 != null) frag.appendChild(buildLimitRow('7d', t('weekly'), _data.d7, _data.r7, _data.pred7d));
+    // 🔴 Span, not slot — see usage-shared.js windowLabel. ChatGPT Free/Go report a 30-day window
+    // that lands in the 7d slot, so a static t('weekly') prints "주간" beside a 29-day countdown.
+    // 🪤 THIS SURFACE WAS MISSED IN THE FIRST CUT of #1394, which fixed the composer strip and the
+    // CLAUDE sidebar and left the ChatGPT sidebar — the same "one more surface" that let #954 sit
+    // half-applied for two weeks. The guard now reads this file for exactly that reason.
+    if (_data.h5 != null) frag.appendChild(buildLimitRow('5h', CORE.windowLabel(_data.w5s, _lang, t('session')), _data.h5, _data.r5, _data.pred5h));
+    if (_data.d7 != null) frag.appendChild(buildLimitRow('7d', CORE.windowLabel(_data.w7s, _lang, t('weekly')), _data.d7, _data.r7, _data.pred7d));
 
     // Per-feature buckets and gated models, under one shared heading so they read as a different
     // KIND of number from the two account windows above — which is the whole point: a user at 100%
@@ -689,8 +694,10 @@
         // objects; both sides come from the same builder, so key order is stable.
         const sameExtras = JSON.stringify([_data && _data.addl, _data && _data.gates])
           === JSON.stringify([res.addl, res.gates]);
+        // The spans decide the labels now, so a span-only change must not be skipped as "no change".
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s &&
             _data.plan === res.plan && sameExtras) return;
         _data = res;
         // Note: _lang is driven by the user's extension language setting

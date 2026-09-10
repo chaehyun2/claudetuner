@@ -77,8 +77,37 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   const addl = isChatGPT && Array.isArray(orgData?.additionalLimits) ? orgData.additionalLimits : null;
   const gates = isChatGPT && Array.isArray(orgData?.modelGates) ? orgData.modelGates : null;
 
+  // 🔴 The reported window SPANS. They were already stored on the org (`w5s`/`w7s`, written by the
+  // collectors) and simply never returned here, so every in-page widget labelled by SLOT instead —
+  // "주간 사용률" on ChatGPT Free's 30-day window (inquiry #198). The popup got this right in #954
+  // via ui/util.js; the content scripts could not, because the data stopped at this function.
+  const w5s = orgData?.w5s ?? null;
+  const w7s = orgData?.w7s ?? null;
+
+  // 🔴 The provider answered and withheld the windows (inquiry #198). Distinct from "no data yet",
+  // which is what every widget used to say in this situation — and saying "수집 중" about something
+  // that will never arrive is how a provider policy change reads as our bug.
+  //
+  // 🔴 THE STORED FLAG IS NECESSARY, NOT SUFFICIENT. It records a fact about ONE response; the
+  // values below are assembled from several sources (this org, a possibly fresher snapshot, an
+  // adaptive-poll cache) by writers that do not all set it. Trusting it alone put the notice over
+  // working gauges in three separate ways, all reproduced by Codex:
+  //   · extra usage present — the notice returned before the spend branch and hid a live gauge
+  //   · recovery — org-merge spreads the previous org, so a stale `true` outlived the withholding
+  //     itself (`{noUsage: true, h5: 25}`)
+  //   · the snapshot/org seam — gauges taken from the fresher snapshot, the flag from the older
+  //     org (`{h5: 25, d7: 35, noUsage: true}`)
+  // Requiring the SAME payload to be empty makes all three impossible by construction: whatever the
+  // flag says, a notice can only appear when there is genuinely nothing on this panel to show.
+  //
+  // 🪤 The conjunction is deliberately one-directional. A missing flag means no notice (the old
+  // blank/"수집 중" behaviour), which is a lost improvement; a wrong notice would be a false
+  // statement about the user's account. Only one of those two is acceptable to get wrong.
+  const nothingToShow = h5 == null && d7 == null && !euEnabled && euUsed == null && euLimit == null;
+  const noUsage = !!orgData?.noUsage && nothingToShow;
+
   return {
-    plan, h5, d7, r5, r7, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
+    plan, h5, d7, r5, r7, w5s, w7s, noUsage, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
     addl: addl && addl.length ? addl : null,
     gates: gates && gates.length ? gates : null,
     // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now

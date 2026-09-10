@@ -159,9 +159,14 @@
       strip.innerHTML = `<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(t('no_data'))}</span>`;
       return;
     }
+    // 🔴 Labelled by the span the PROVIDER reported, not by the slot. ChatGPT Free and Go report a
+    // 30-day window that lands in the 7d slot, so a static t('weekly') printed "주간 사용률" right
+    // next to a 29-day countdown — one line contradicting itself (inquiry #198, confirmed against a
+    // live Free account: limit_window_seconds = 2592000). CORE falls back to the static label when
+    // there is no span, so Plus/Team/Pro and Claude render exactly as before.
     const win = use7d
-      ? { label: t('weekly'), util: _data.d7, reset: _data.r7, pred: _data.pred7d }
-      : { label: t('session'), util: _data.h5, reset: _data.r5, pred: _data.pred5h };
+      ? { label: CORE.windowLabel(_data.w7s, _lang, t('weekly')), util: _data.d7, reset: _data.r7, pred: _data.pred7d }
+      : { label: CORE.windowLabel(_data.w5s, _lang, t('session')), util: _data.h5, reset: _data.r5, pred: _data.pred5h };
     const logoUrl = chrome.runtime.getURL('icons/icon16.png');
     const dot = '<span class="ct-cg-strip-dot">·</span>';
     let main = `<img src="${logoUrl}" class="ct-cg-strip-logo" alt="CT">`;
@@ -262,8 +267,13 @@
           if (_data !== null) { _data = null; renderStrip(); }
           return;
         }
+        // 🔴 THE SPANS ARE PART OF THE COMPARISON, because they decide the label now. Leaving them
+        // out would let a span-only change (a plan move that turns a 7-day window into a 30-day one
+        // at the same percentage) be filtered as "no change", and the widget would keep showing the
+        // old — now false — label until some other field happened to differ.
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s &&
             _data.plan === res.plan) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang

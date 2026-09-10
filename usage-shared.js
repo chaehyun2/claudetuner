@@ -93,6 +93,47 @@
            `<span class="ct-reset-abs">${formatResetAbsolute(resetAt, lang, { compact: true })}</span>`;
   }
 
+  // ── Window span labels ───────────────────────────────────────────────────────────────────────
+  //
+  // 🔴 A WINDOW IS LABELLED BY THE SPAN THE PROVIDER REPORTED, NEVER BY THE SLOT IT SITS IN.
+  // ChatGPT Free and Go report a THIRTY-DAY window, which the collector files in the 7d slot
+  // because there is nowhere else for it to go — so "주간 사용률" beside a 29-day countdown is a
+  // false label, and the two sat on the same line (inquiry #198, verified against a live Free
+  // account 2026-09-10: limit_window_seconds = 2592000).
+  //
+  // 🪤 THIS IS A SECOND COPY OF ui/util.js's RULE, and it is deliberate: ui/ is popup ESM and a
+  // content script cannot import it — a runtime boundary, not a convenience. What must not drift
+  // is the MAPPING (under a day → hours, else days, rounded), so test/window-span-label-guard.mjs
+  // executes both and requires identical output across a table of spans. Signatures differ on
+  // purpose: ui/ resolves its own i18n key, content scripts pass their already-localized fallback.
+  const WINDOW_HOUR_S = 3600;
+  const WINDOW_DAY_S = 86400;
+  /** True when `seconds` is a usable span. Rejects 0 and negatives, not merely non-numbers. */
+  function isSpanSeconds(seconds) {
+    return typeof seconds === 'number' && isFinite(seconds) && seconds > 0;
+  }
+  /** The reported window as a bare unit — '5시간' / '30일' / '5-Hour' / '30-Day' — or null. */
+  function windowUnitLabel(seconds, lang) {
+    if (!isSpanSeconds(seconds)) return null;
+    const ko = lang === 'ko';
+    if (seconds < WINDOW_DAY_S) {
+      const n = Math.round(seconds / WINDOW_HOUR_S);
+      return ko ? `${n}시간` : `${n}-Hour`;
+    }
+    const n = Math.round(seconds / WINDOW_DAY_S);
+    return ko ? `${n}일` : `${n}-Day`;
+  }
+  /**
+   * THE way an in-page widget labels a usage gauge. `fallbackText` is the caller's own static
+   * slot label, already localized — used when the provider reported no span, which keeps Claude
+   * and every pre-span stored org rendering exactly as before.
+   */
+  function windowLabel(seconds, lang, fallbackText) {
+    const unit = windowUnitLabel(seconds, lang);
+    if (unit == null) return fallbackText;
+    return lang === 'ko' ? `${unit} 사용률` : `${unit} Usage`;
+  }
+
   function escapeHtml(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
@@ -833,6 +874,8 @@
     buildResetCellInner,
     escapeHtml,
     detectLang,
+    windowUnitLabel,
+    windowLabel,
     cgUsageNote,
     isNonModelBucket,
     bucketDisplayName,

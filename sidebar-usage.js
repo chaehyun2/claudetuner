@@ -43,6 +43,7 @@
       extra: '추가 사용량',
       peak: 'PEAK',
       no_data: '데이터 수집 중...',
+      no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
       soon: '곧 리셋',
       pred_tip: '리셋 시 예상 사용률',
       dashboard: '대시보드 열기',
@@ -62,6 +63,7 @@
       extra: 'Extra Usage',
       peak: 'PEAK',
       no_data: 'Collecting data...',
+      no_usage: "Claude isn't providing usage for this account",
       soon: 'Resetting soon',
       pred_tip: 'Estimated usage at reset',
       dashboard: 'Open dashboard',
@@ -457,16 +459,29 @@
       return;
     }
 
+    // 🔴 SAY WHY IT IS EMPTY. Both gauges are conditional, so when the provider withholds every
+    // window this function appended NOTHING — not even the `no_data` line above, which only fires
+    // when `_data` itself is missing. A panel that renders blank is read as broken, and that is
+    // exactly what inquiry #198 was: Anthropic stopped serving Free-plan windows on 2026-08-21
+    // 17:00 UTC and the widget said nothing at all about it.
+    if (_data.noUsage) {
+      content.innerHTML = `<div class="ct-sb-message text-text-500">${escapeHtml(t('no_usage'))}</div>`;
+      return;
+    }
+
     const frag = document.createDocumentFragment();
 
     // 5h gauge
     if (_data.h5 != null) {
-      frag.appendChild(buildLimitRow('5h', t('session'), _data.h5, _data.r5, _data.pred5h));
+      // Span-aware, same rule as every other surface. Claude reports no span, so this resolves to
+      // t('session') today — wired anyway so the rule is uniform and a future Claude span is not a
+      // second change in a third place.
+      frag.appendChild(buildLimitRow('5h', CORE.windowLabel(_data.w5s, _lang, t('session')), _data.h5, _data.r5, _data.pred5h));
     }
 
     // 7d gauge
     if (_data.d7 != null) {
-      frag.appendChild(buildLimitRow('7d', t('weekly'), _data.d7, _data.r7, _data.pred7d));
+      frag.appendChild(buildLimitRow('7d', CORE.windowLabel(_data.w7s, _lang, t('weekly')), _data.d7, _data.r7, _data.pred7d));
     }
 
     // Extra usage
@@ -618,8 +633,13 @@
         if (seq !== _reqSeq || !isCurrent()) return; // stale response or superseded instance — discard
         if (chrome.runtime.lastError || !res) return;
         // Skip re-render if data hasn't changed (prevents flicker from non-Claude merges)
+        // Spans included for the same reason as the label above: this panel reads them now, and a
+        // skip decided without them would freeze a stale label. Latent for Claude (no writer sets
+        // a span yet) — included so the rule does not depend on that staying true.
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s &&
+            _data.noUsage === res.noUsage &&
             _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;
         renderContent();
