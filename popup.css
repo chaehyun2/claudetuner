@@ -43,7 +43,8 @@
        line, directly above the NEXT provider's sentence, so it read as belonging to the wrong one.
        Flex gives the button its own line under its own text, and the row gap makes the grouping
        unambiguous. Scoped to this banner: the single-row banners (#perm-banner, #capdrop-banner)
-       have no such ambiguity and keep their compact inline button.
+       have no such ambiguity and keep their compact inline button — #capdrop-banner now carries
+       two (Choose orgs + Dismiss), but both belong to its one sentence, so they stay inline.
        🪤 The ID selector outranks `.hidden`, so a future attempt to hide ONE row by adding
        `.hidden` to it would not work — hide by not appending it (Codex caveat). */
     #prov-err-banner > div { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
@@ -52,10 +53,14 @@
     /* The dismissal (#1130) sits beside "Open ChatGPT" and must not compete with it: fixing the
        problem is the outcome we want, waving it away is the escape hatch. Same size and hit area,
        quieter fill — so it is discoverable without reading as the recommended action. */
-    #prov-err-banner button.prov-err-dismiss { background: transparent; color: inherit; border: 1px solid currentColor; opacity: .75; font-weight: 500; }
-    #prov-err-banner button.prov-err-dismiss:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
-    [data-theme="dark"] #prov-err-banner button.prov-err-dismiss { background: transparent; }
-    [data-theme="dark"] #prov-err-banner button.prov-err-dismiss:hover { background: rgba(253, 230, 138, .16); }
+    /* 🔴 The selector is the CLASS, not `#prov-err-banner .prov-err-dismiss`. #capdrop-banner
+       reuses this button for the same reason (#1408) and an ID-scoped rule would have left it
+       styled as the PRIMARY action — i.e. "wave it away" would have outranked "fix it", the exact
+       inversion the rule below is written to avoid. */
+    .perm-banner button.prov-err-dismiss { background: transparent; color: inherit; border: 1px solid currentColor; opacity: .75; font-weight: 500; }
+    .perm-banner button.prov-err-dismiss:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
+    [data-theme="dark"] .perm-banner button.prov-err-dismiss { background: transparent; }
+    [data-theme="dark"] .perm-banner button.prov-err-dismiss:hover { background: rgba(253, 230, 138, .16); }
     [data-theme="dark"] .btn-primary:disabled { background: #3730a3; color: #818cf8; }
     [data-theme="dark"] #privacy-row { background: #1a1500; }
     [data-theme="dark"] #privacy-row .label { color: #fde68a; }

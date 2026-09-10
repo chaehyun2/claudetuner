@@ -57,6 +57,29 @@ function freshFields(snapshot, prev = {}, now, noUsage = false) {
 }
 
 /**
+ * Should an org that adaptive polling SKIPPED this tick stay in the stored list?
+ *
+ * 🔴 THE OLD TEST WAS "does the cache hold a number", and it contradicted the comment above its own
+ * call site ("don't remove from collectedOrgs"). That was harmless while an empty cache meant "we
+ * failed to read" — but since Claude stopped serving Free accounts their windows on 2026-08-21, an
+ * empty reading is the NORMAL state for every Free org, so those orgs vanished from the popup's
+ * list on any skipped poll (#1398 ②).
+ *
+ * 🔑 `lastPollAt > 0` asks the question the comment meant: have we read this org at all? A freshly
+ * created state has 0 (see emptyOrgPollState in bg/collect.js), so an org we have never polled is
+ * still not resurrected from nothing — which is what the number test was really guarding.
+ *
+ * Lives here, next to upsertClaudeOrg, because both answer "what belongs in collectedOrgs" and both
+ * need to be executed by a test rather than pattern-matched in a 2,000-line collector.
+ */
+export function shouldKeepSkippedOrg(pollState) {
+  if (!pollState || typeof pollState !== 'object') return false;
+  if (typeof pollState.lastPollAt === 'number' && pollState.lastPollAt > 0) return true;
+  const v = pollState.lastValues;
+  return !!v && (v.h5 != null || v.d7 != null || v.extraUsed != null);
+}
+
+/**
  * Returns a NEW list with `bestOrg` refreshed, appending it when absent.
  *
  * 🔴 Never becomes primary on a list that already has entries. The full collection path resolves

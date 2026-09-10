@@ -1,6 +1,9 @@
 // Builds the usage payload the in-page sidebar renders, and pushes it.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
 import { diurnalProject7dAdaptive } from '../ui/diurnal.js';
+// 🔴 The SAME predicate the popup renders by (ui/util.js). Importing across ui/ ↔ bg/ is already
+// the pattern here (diurnal above); restating the rule is what let the two surfaces disagree.
+import { extraUsageShown } from '../ui/util.js';
 import { hasProviderPermission } from './providers.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 
@@ -44,11 +47,36 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   const useSnapshot = snapshotOrgMatch && status?.timestamp &&
     (!orgData.updatedAt || status.timestamp >= orgData.updatedAt);
 
-  const h5 = useSnapshot ? snapshot.five_hour.utilization : (orgData?.h5 ?? snapshot?.five_hour?.utilization ?? null);
-  const d7 = useSnapshot ? (snapshot.seven_day?.utilization ?? orgData?.d7 ?? null) : (orgData?.d7 ?? snapshot?.seven_day?.utilization ?? null);
-  const r5 = useSnapshot ? (snapshot.five_hour?.resets_at ?? orgData?.resetsAt5h ?? null) : (orgData?.resetsAt5h ?? snapshot?.five_hour?.resets_at ?? null);
-  const r7 = useSnapshot ? (snapshot.seven_day?.resets_at ?? orgData?.resetsAt7d ?? null) : (orgData?.resetsAt7d ?? snapshot?.seven_day?.resets_at ?? null);
-  const plan = orgData?.plan || snapshot?.plan || null;
+  // 🔴 THE SNAPSHOT MAY ONLY FILL IN FOR THE ORG IT DESCRIBES. `useSnapshot` above checks the UUID,
+  // but the FALLBACK arms below used to read `snapshot?.…` unconditionally — so asking for org B
+  // while the snapshot belonged to org A returned A's percentages under B's name. Reproduced by
+  // Codex on the 1.29.71 batch review (A = 25/35 shown for an empty B), and it is the worst shape
+  // in this file: not a stale number or a missing one, but SOMEBODY ELSE'S number wearing this
+  // org's label. The popup got B right, so our own two screens disagreed.
+  //
+  // 🪤 `snap` is NOT simply `snapshotOrgMatch`. That one also requires a non-null 5h utilization
+  // (it decides which SOURCE IS FRESHER), and reusing it here would drop the legacy single-org
+  // case, where there is no collectedOrgs entry at all and the snapshot is the only data we have.
+  // The question here is narrower: does this snapshot describe the org being rendered?
+  //
+  // 🪤 `!orgData` is NOT enough on its own. When a specific org WAS requested but the list is empty
+  // (a fresh profile, a cleared storage, a provider whose orgs have not been written yet), orgData
+  // is null and the snapshot — which may describe a completely different org — would be admitted
+  // under the requested id. Codex found this exact combination missing from the first cut. So a
+  // requested id must still match; only an UNSPECIFIED request falls back freely, which is the
+  // legacy single-org path.
+  const snapIsThisOrg = !!snapshot && (orgData
+    ? snapshot.claude_org_uuid === orgData.uuid
+    : (!reqOrgId || snapshot.claude_org_uuid === reqOrgId));
+  const snap = snapIsThisOrg ? snapshot : null;
+
+  const h5 = useSnapshot ? snapshot.five_hour.utilization : (orgData?.h5 ?? snap?.five_hour?.utilization ?? null);
+  const d7 = useSnapshot ? (snapshot.seven_day?.utilization ?? orgData?.d7 ?? null) : (orgData?.d7 ?? snap?.seven_day?.utilization ?? null);
+  const r5 = useSnapshot ? (snapshot.five_hour?.resets_at ?? orgData?.resetsAt5h ?? null) : (orgData?.resetsAt5h ?? snap?.five_hour?.resets_at ?? null);
+  const r7 = useSnapshot ? (snapshot.seven_day?.resets_at ?? orgData?.resetsAt7d ?? null) : (orgData?.resetsAt7d ?? snap?.seven_day?.resets_at ?? null);
+  // Same rule for the plan label: naming this org with another org's tier is the same mistake in
+  // words rather than numbers.
+  const plan = orgData?.plan || snap?.plan || null;
 
   // Extra usage
   const eu = orgData?.extraUsage;
@@ -103,7 +131,13 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   // 🪤 The conjunction is deliberately one-directional. A missing flag means no notice (the old
   // blank/"수집 중" behaviour), which is a lost improvement; a wrong notice would be a false
   // statement about the user's account. Only one of those two is acceptable to get wrong.
-  const nothingToShow = h5 == null && d7 == null && !euEnabled && euUsed == null && euLimit == null;
+  // 🪤 ASK WHAT THE SCREEN ASKS. This used to test `!euEnabled && euUsed == null && euLimit == null`,
+  // which is LOOSER than the rule the panels actually draw by (`is_enabled && used_credits > 0`).
+  // So `{is_enabled: false, used_credits: 0, monthly_limit: 0}` counted as "something to show",
+  // suppressed the notice — and then no gauge was drawn either. The widget ended up with neither a
+  // number nor an explanation, while the popup, using the render's own rule, said why (Codex,
+  // #1405 ②). An "is anything on screen" test that disagrees with what is on screen is the bug.
+  const nothingToShow = h5 == null && d7 == null && !extraUsageShown(eu);
   const noUsage = !!orgData?.noUsage && nothingToShow;
 
   return {

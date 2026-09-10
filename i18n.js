@@ -263,8 +263,16 @@ const TRANSLATIONS = {
     'perm_banner_text': '{0} 수집을 위해 사이트 접근 권한이 필요합니다.',
     'perm_banner_btn': '권한 허용',
     // 3-org cap drop: the server accepts the POST but stores nothing for a non-selected org.
+    // {0} is a list of ORGS ("Claude · account@dable.io's Organization"), not providers — naming
+    // the provider told users their whole Claude was down while one of its orgs was collecting
+    // fine (#1408, 문의 #198).
     'capdrop_banner_text': '{0} 수집이 안 되고 있습니다. 활성 조직 3개 한도가 찼습니다.',
+    'capdrop_banner_more': '외 {0}개',
+    // Used when an org could not be named AND naming its provider instead would be false.
+    'capdrop_banner_text_count': '조직 {0}개가 수집되지 않고 있습니다. 활성 조직 3개 한도가 찼습니다.',
     'capdrop_banner_btn': '조직 고르기',
+    'capdrop_banner_dismiss': '그만 보기',
+    'capdrop_banner_dismiss_title': '이 안내를 숨깁니다. 수집되지 않는 조직이 바뀌면 다시 표시됩니다.',
     'collect_interval': '수집 주기 (분)',
     'plan_optimization': '관리자 플랜 변경 요청',
     'opt_mode': '처리 방식',
@@ -918,7 +926,11 @@ const TRANSLATIONS = {
     'perm_banner_btn': 'Grant',
     // 3-org cap drop: the server accepts the POST but stores nothing for a non-selected org.
     'capdrop_banner_text': '{0} is not being collected — your 3 active-org limit is full.',
+    'capdrop_banner_more': 'and {0} more',
+    'capdrop_banner_text_count': '{0} organizations are not being collected — your 3 active-org limit is full.',
     'capdrop_banner_btn': 'Choose orgs',
+    'capdrop_banner_dismiss': 'Dismiss',
+    'capdrop_banner_dismiss_title': 'Hides this notice. It returns if a different org starts being dropped.',
     'collect_interval': 'Interval (min)',
     'plan_optimization': 'Admin Plan Change Requests',
     'opt_mode': 'Handling Mode',

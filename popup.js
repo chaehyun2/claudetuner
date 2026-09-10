@@ -9,6 +9,7 @@ import { serverSyncWithheldReason, getLastStatus, isServerSyncPaused } from './b
 import { liveProviderErrors, providerErrorAction, providerErrorSnoozed } from './bg/provider-state.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
+import { buildCapDropView } from './bg/capdrop-view.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
@@ -52,31 +53,107 @@ let _syncEmailLive = false;
 // ⚠️ Key literal is duplicated from bg/cadence-config.js (CAP_DROP_KEY): the popup is a
 // classic script and cannot import that ESM module. Rename in BOTH or neither.
 const CAP_DROP_KEY = '_ct_cap_drop';
+// The drop SET the user last waved away (#1408). Popup-only — written and read here and nowhere
+// else — so unlike CAP_DROP_KEY it crosses no runtime boundary and needs no drift guard.
+const CAP_DROP_ACK_KEY = '_ct_cap_drop_ack';
+// 🔴 ONLY THE NEWEST READ MAY PAINT — the same rule the provider-error banner above follows, and
+// for a sharper reason here: this check is now re-run by a storage listener, so several reads are
+// routinely in flight. Codex reproduced both directions with delayed storage replies: a newer
+// {A,B} render undone by an older acknowledged {A} read, and a dismissal undone by an older read
+// that predated it. Bumping on entry means every earlier read finds itself stale and returns
+// before touching the DOM.
+let _capDropSeq = 0;
+// The acknowledgement, remembered in memory as well as in storage. Storage is the durable copy;
+// this one is what makes the dismissal honest when the write FAILS — without it the very next
+// listener-driven check re-read storage, found no ack, and reopened the banner the user had just
+// closed. "It lasts until the popup closes" has to be true of the failure path too, or it is not
+// a promise, it is a description of the happy path. (Codex round 2, #1408.)
+let _capDropAckMemory = '';
 
 async function checkCapDrops() {
   const banner = document.getElementById('capdrop-banner');
   if (!banner) return;
+  const seq = ++_capDropSeq;
   let orgs = [];
+  let collectedOrgs = [];
+  let ackSig = '';
   try {
-    const stored = await chrome.storage.local.get(CAP_DROP_KEY);
+    const stored = await chrome.storage.local.get({
+      [CAP_DROP_KEY]: null, [CAP_DROP_ACK_KEY]: null, collectedOrgs: [],
+    });
     const cur = stored && stored[CAP_DROP_KEY];
     if (cur && Array.isArray(cur.orgs)) orgs = cur.orgs.filter(Boolean);
+    // 🔑 The org NAMES live here. A dropped org is present in this list because the collect loop
+    // records it "regardless of server POST result" (bg/collect.js) — the drop happens on the
+    // server, after the client already knew the org.
+    if (Array.isArray(stored?.collectedOrgs)) collectedOrgs = stored.collectedOrgs;
+    const ack = stored && stored[CAP_DROP_ACK_KEY];
+    if (ack && typeof ack.sig === 'string') ackSig = ack.sig;
   } catch { /* storage hiccup → treat as "nothing dropped" and stay quiet */ }
-  if (orgs.length === 0) { banner.classList.add('hidden'); return; }
+  if (seq !== _capDropSeq) return;      // a newer check started while this one was reading
+  // The in-memory copy wins only when storage has none: storage is the durable answer, memory is
+  // the fallback for a write that did not land.
+  if (!ackSig) ackSig = _capDropAckMemory;
 
-  // Name the PROVIDERS, not the org uuids: a uuid means nothing to a user, and the provider
-  // is the part they recognise ("my Gemini isn't being collected").
-  const names = [...new Set(orgs.map(o => PROVIDER_LABELS[o.provider] || o.provider))].join(', ');
+  // What to SAY is decided by a pure function so it can be executed by a test rather than
+  // pattern-matched — see bg/capdrop-view.js for the invariant it protects.
+  const view = buildCapDropView(orgs, collectedOrgs, ackSig, PROVIDER_LABELS);
+  if (!view) { banner.classList.add('hidden'); return; }
+
   banner.innerHTML = '';
-  banner.appendChild(document.createTextNode(
-    t('capdrop_banner_text', names) || names + ' is not being collected — active-org limit reached.',
-  ));
+  // 🪤 No `|| 'fallback'` on these t() calls. It reads like a safety net and is not one: t()
+  // returns the KEY itself when a translation is missing (i18n.js), which is truthy, so the
+  // right-hand side is unreachable. The surrounding file has the same idiom in older code; these
+  // are simply not adding more of it. (Codex round 2, #1408.)
+  let text;
+  if (view.mode === 'count') {
+    text = t('capdrop_banner_text_count', view.count);
+  } else {
+    const more = view.extra > 0 ? ' ' + t('capdrop_banner_more', view.extra) : '';
+    text = t('capdrop_banner_text', view.names.join(', ') + more);
+  }
+  banner.appendChild(document.createTextNode(text));
+
   const btn = document.createElement('button');
-  btn.textContent = t('capdrop_banner_btn') || 'Choose';
+  btn.textContent = t('capdrop_banner_btn');
   btn.addEventListener('click', () => {
     chrome.tabs.create({ url: 'https://claudetuner.com/dashboard/settings/#active-orgs-card' });
   });
   banner.appendChild(btn);
+
+  // 🔴 THE ESCAPE HATCH, AND WHY IT HAS TO EXIST. Self-clearing (applyCapDrop) needs a non-drop
+  // 200 for the same stream — but the client keeps posting orgs it knows will be dropped (#855)
+  // and the server keeps dropping them (#1180), so a full cap re-records the entry every cycle.
+  // Without this the banner is permanent, and "Choose orgs" is not a way out: with the cap full,
+  // choosing a different org only moves the drop.
+  const dismiss = document.createElement('button');
+  dismiss.className = 'prov-err-dismiss';
+  dismiss.textContent = t('capdrop_banner_dismiss');
+  dismiss.title = t('capdrop_banner_dismiss_title');
+  dismiss.addEventListener('click', async () => {
+    // 🔴 HIDE FIRST, PERSIST SECOND — the order is the fix, not an optimisation.
+    // Awaiting the write before hiding meant the hide landed on whatever the banner had become
+    // by then: Codex reproduced render{A} → click → rerender{A,B} → write resolves → the {A,B}
+    // banner vanishes, having acknowledged only {A}. Hiding synchronously binds the hide to the
+    // render that was actually clicked, and no DOM is touched after the await — so a later
+    // render simply rebuilds and re-shows the banner on its own terms.
+    // Recorded in memory BEFORE the await, and bumping the sequence retires any read already in
+    // flight — otherwise a check that started before the click finishes after it and reopens the
+    // banner, which is what the user just told us not to do.
+    _capDropAckMemory = view.sig;
+    _capDropSeq++;
+    banner.classList.add('hidden');
+    try {
+      await chrome.storage.local.set({ [CAP_DROP_ACK_KEY]: { sig: view.sig } });
+    } catch {
+      // Storage hiccup: the acknowledgement did not persist, so this dismissal lasts exactly as
+      // long as the popup does — `_capDropAckMemory` holds it, and it is gone on the next open.
+      // Deliberately NOT re-shown here; overriding the click the user just made is worse than a
+      // dismissal that does not outlive the session.
+    }
+  });
+  banner.appendChild(dismiss);
+
   banner.classList.remove('hidden');
 }
 
@@ -859,6 +936,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (changes.onboardOrgName) {
       state.onboardOrgName = changes.onboardOrgName.newValue || null;
       updateUI(state.lastUpdateUIStatus);
+    }
+
+    // Cap-drop banner: repaint when either input changes (#1408, Codex FOLLOW-UP).
+    // 🔴 It used to be computed at startup and on a language switch only, which was survivable
+    // while it said the same thing every time — but it now depends on `collectedOrgs` (for the
+    // org NAMES) and is dismissible per drop-SET. In a side panel left open, that meant a
+    // dismissal of {A} silently swallowed {A,B} arriving afterwards, and a banner that fell back
+    // to a bare provider label because names had not loaded yet could never correct itself.
+    // 🪤 `collectedOrgs` is handled below too, for the org chips — deliberately a separate `if`
+    // rather than a shared branch: these two consumers want different things from the same key,
+    // and folding them would couple the banner's fate to the chip-rendering conditions.
+    if (changes[CAP_DROP_KEY] || changes[CAP_DROP_ACK_KEY] || changes.collectedOrgs) {
+      checkCapDrops();
     }
 
     // Immediately refresh org chips when collectedOrgs changes

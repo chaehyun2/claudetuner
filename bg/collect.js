@@ -17,7 +17,7 @@ import {
   detectPlan, refineTeamPlan, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
-import { upsertClaudeOrg } from './org-merge.js';
+import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
@@ -1580,7 +1580,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         if (!force && !isOrgDueForPoll(pollState, now, baseIntervalMs)) {
           skippedOrgs.push({ uuid: extraOrg.uuid, name: extraOrg.name, tier: pollState.tier });
           // Use cached values for popup display (don't remove from collectedOrgs)
-          if (pollState.lastValues.h5 != null || pollState.lastValues.d7 != null || pollState.lastValues.extraUsed != null) {
+          //
+          // 🔴 THE CONDITION USED TO CONTRADICT THAT COMMENT. It required a cached NUMBER, so an org
+          // whose last reading was empty was left out of `successOrgs` and therefore dropped from
+          // the stored list on this write. That was harmless while "empty" meant "we failed to
+          // read" — but since 2026-08-21 it is the NORMAL state for every Free Claude account, so
+          // those orgs vanished from the popup's list on any skipped poll (#1398 ②).
+          //
+          // 🔑 `lastPollAt > 0` is the honest test of the comment's intent: it means we have read
+          // this org at least once (it is 0 only on a freshly created state, see line ~99), which
+          // is a different question from whether that read produced a number.
+          if (shouldKeepSkippedOrg(pollState)) {
             successOrgs.push(extraOrg.uuid);
             orgUsageMap[extraOrg.uuid] = {
               h5: pollState.lastValues.h5, d7: pollState.lastValues.d7,
