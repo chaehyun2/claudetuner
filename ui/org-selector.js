@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels } from './util.js';
+import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
@@ -295,6 +295,15 @@ export function selectOrg(orgId, container) {
         if (g5Fill) g5Fill.style.width = '0';
         renderGaugePrediction('5h', hist, 'h5', null, resetsAt5h, orgData.w5s); // self-hides on null
       }
+      // Same rule as the primary path in render.js: one sentence about the account, and only when
+      // the org's own observation says the provider answered with nothing.
+      const withheld = usageWithheldForDisplay(orgData, util5h, util7d, isClaudeOrg ? orgData.extraUsage : null);
+      if (withheld) {
+        const g5r = document.getElementById('gauge-5h-reset');
+        if (g5r) g5r.textContent = t('usage_withheld');
+        const g7r0 = document.getElementById('gauge-7d-reset');
+        if (g7r0) g7r0.textContent = '';
+      }
       if (util7d !== null && util7d !== undefined) {
         document.getElementById('gauge-7d-value').textContent = `${Math.round(util7d)}%`;
         document.getElementById('gauge-7d-fill').style.width = `${Math.min(util7d, 100)}%`;
@@ -323,7 +332,7 @@ export function selectOrg(orgId, container) {
     const extraSection = document.getElementById('extra-usage-section');
     if (extraSection) {
       const eu = isClaudeOrg ? orgData.extraUsage : null;
-      if (eu && eu.is_enabled && (eu.used_credits || 0) > 0) {
+      if (extraUsageShown(eu)) {
         // Respect the user's hidden preference (set via the popup's × button).
         chrome.storage.local.get({ hiddenExtraUsage: false }, (cfg) => {
           if (cfg.hiddenExtraUsage) { extraSection.style.display = 'none'; return; }

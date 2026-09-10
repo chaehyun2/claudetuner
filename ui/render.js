@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels } from './util.js';
+import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
@@ -464,9 +464,24 @@ export function _updateUICore(status) {
       // Call prediction unconditionally (it self-hides on null util) so a stale 7d
       // prediction badge from a prior render is cleared, not just the value/reset.
       renderGaugePrediction('7d', _filteredHistory(), 'd7', util7d, s.seven_day?.resets_at, s.seven_day?.window_seconds);
-      if (util7d === null) {
-        // Plan without 7d data (Free, Team, etc.): replace the cleared reset line
-        // with the plan-specific no-7d message (_setGaugeValue already blanked the %).
+      // 🔴 BOTH WINDOWS GONE — say so, once, instead of two silent N/As.
+      //
+      // Claude stopped serving Free-plan accounts any usage window on 2026-08-21 17:00 UTC. Before
+      // that they had a 5h window and no 7d one, which is exactly what `free_no_7d` describes — so
+      // that string is now HALF TRUE, and a user reading "7일 사용률 제공 안 됨" beside a 5h gauge
+      // that also says N/A is told the wrong thing about which limit they lost (inquiry #198).
+      //
+      // 🪤 The flag comes from the ORG, not the plan. Gating on `plan.includes('free')` would be a
+      // guess about why, would miss any other plan it happens to, and would keep asserting it after
+      // Anthropic changes it back. `usageWithheldForDisplay` also requires the displayed windows to
+      // be empty, so a stale flag cannot put this over a working gauge.
+      const withheldOrg = (state.collectedOrgs || []).find((o) => o.uuid === s.claude_org_uuid);
+      if (usageWithheldForDisplay(withheldOrg, util5h, util7d, s.extra_usage)) {
+        document.getElementById('gauge-5h-reset').textContent = t('usage_withheld');
+        // Once, not twice: the sentence is about the account, not about one window.
+        document.getElementById('gauge-7d-reset').textContent = '';
+      } else if (util7d === null) {
+        // Plan with a 5h window but no 7d one (Team, and Free before the cutover above).
         const plan = (s.plan || '').toLowerCase();
         document.getElementById('gauge-7d-reset').textContent = plan.includes('free') ? t('free_no_7d') : t('team_no_7d');
       }
@@ -504,7 +519,7 @@ export function _updateUICore(status) {
         extraToggle.style.transform = open ? '' : 'rotate(90deg)';
       });
     }
-    if (s.extra_usage && s.extra_usage.is_enabled && (s.extra_usage.used_credits || 0) > 0) {
+    if (extraUsageShown(s.extra_usage)) {
       // hiddenExtraUsage: user-dismissed via the × button (restorable in Options).
       chrome.storage.local.get({ hiddenExtraUsage: false, ct_prev_extra_used: 0 }, (cfg) => {
         if (cfg.hiddenExtraUsage) { extraSection.style.display = 'none'; return; }

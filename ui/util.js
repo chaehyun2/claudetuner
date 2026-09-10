@@ -140,6 +140,37 @@ export function setRenewalDisplay(renewalDate) {
   return true;
 }
 
+/**
+ * TRUE when the provider answered and gave this org nothing to show.
+ *
+ * 🔴 SAME CONJUNCTION AS bg/sidebar-usage.js, and for the same reason: the stored `noUsage` flag
+ * describes ONE response, while the values on screen are assembled from a snapshot and an org list
+ * that different writers update at different times. Requiring the displayed windows to be empty
+ * too means a stale or wrong flag can never put this notice over a working gauge — the failure
+ * Codex reproduced three ways on the in-page widgets (#198).
+ *
+ * 🪤 The flag alone is NOT enough and the empty windows alone are NOT enough. Without the flag,
+ * "both null" also describes a cold start, a failed fetch, and an extra ChatGPT workspace — saying
+ * "the provider withheld it" about any of those is a false statement, not a missing one.
+ */
+/**
+ * TRUE when the extra-usage section is actually drawn. Exported so the notice below and the two
+ * render sites ask the SAME question — an "is anything on screen" test that disagrees with what is
+ * on screen is the bug it exists to prevent.
+ */
+export function extraUsageShown(eu) {
+  return !!(eu && eu.is_enabled && (eu.used_credits || 0) > 0);
+}
+
+export function usageWithheldForDisplay(org, util5h, util7d, extraUsage) {
+  // 🔴 EXTRA USAGE COUNTS AS SOMETHING TO SHOW. Without this the popup printed "Claude isn't
+  // providing usage for this account" directly above a working spend gauge — the account has null
+  // windows AND live credits, which is a real combination, not a stale-flag artefact (Codex).
+  // The sidebar builder already had this half; the popup did not.
+  if (extraUsageShown(extraUsage)) return false;
+  return !!(org && org.noUsage) && util5h == null && util7d == null;
+}
+
 export function _fmIcon(level) {
   const map = {
     exceeded:     { cls: 'fm-exceeded', label: 'fm_lv_exceeded', icon: '✕' },

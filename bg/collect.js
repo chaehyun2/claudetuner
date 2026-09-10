@@ -1035,7 +1035,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       const { collectedOrgs: prevOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
       // UPSERT, not map — see bg/org-merge.js for why a withheld install loses its Claude org
       // otherwise. The logic lives there so it can be executed by a test instead of regex-matched.
-      const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot);
+      // 🔴 The RAW response, same source as the synced path below. This branch returns before that
+      // computation, so without passing it here a gated/paused/Boost install never learns that the
+      // provider served nothing — and its popup falls back to the stale plan-specific string.
+      const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot, Date.now(), claudeUsageWithheld(usageData));
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
       await refreshRecNotice();
