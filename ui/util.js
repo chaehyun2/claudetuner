@@ -162,6 +162,31 @@ export function extraUsageShown(eu) {
   return !!(eu && eu.is_enabled && (eu.used_credits || 0) > 0);
 }
 
+/**
+ * The sentence to show when usage was withheld — named by plan when we have one.
+ *
+ * 🔴 THE PLAN NAMES THE ACCOUNT; IT DOES NOT DECIDE ANYTHING. The branch is still
+ * `usageWithheldForDisplay`, which reads the observation and the displayed values and never looks
+ * at the plan — so if Anthropic restores Free and withholds from some other tier tomorrow, the
+ * same sentence appears with THAT tier's name and nothing has to change.
+ *
+ * 🪤 Why name it at all, when the first cut deliberately did not: "이 계정의" says nothing, and a
+ * user reads it as "something is wrong with MY account" — the cousin of the failure this whole
+ * change exists to stop, where a provider policy reads as our defect. The popup already prints the
+ * same label two rows below ("현재 플랜"), so this is a word we are ALREADY standing behind.
+ *
+ * A missing or unknown plan falls back to the neutral sentence rather than inventing a name.
+ */
+export function usageWithheldText(org) {
+  // 🔴 `noUsagePlan`, not `org.plan`. The org's plan field is not refreshed by a collection, so on
+  // a boost/gated/paused install it can be a tier the account left months ago — and this sentence
+  // would then name it. `noUsagePlan` is written at the same moment as the observation itself.
+  const plan = org && org.noUsagePlan;
+  const p = typeof plan === 'string' ? plan.trim() : '';
+  if (!p || p.toLowerCase() === 'unknown') return t('usage_withheld');
+  return t('usage_withheld_plan', p);
+}
+
 export function usageWithheldForDisplay(org, util5h, util7d, extraUsage) {
   // 🔴 EXTRA USAGE COUNTS AS SOMETHING TO SHOW. Without this the popup printed "Claude isn't
   // providing usage for this account" directly above a working spend gauge — the account has null

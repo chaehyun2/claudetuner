@@ -91,7 +91,7 @@ export function upsertClaudeOrg(prevOrgs, bestOrg, snapshot, now = Date.now(), n
   const list = Array.isArray(prevOrgs) ? prevOrgs : [];
   if (!bestOrg || !bestOrg.uuid) return list;
   if (list.some((o) => o.uuid === bestOrg.uuid)) {
-    return list.map((o) => (o.uuid === bestOrg.uuid ? { ...o, ...freshFields(snapshot, o, now, !!noUsage), noUsage: !!noUsage } : o));
+    return list.map((o) => (o.uuid === bestOrg.uuid ? { ...o, ...freshFields(snapshot, o, now, !!noUsage), noUsage: !!noUsage, noUsagePlan: noUsage ? (snapshot.plan ?? null) : null } : o));
   }
   return [...list, {
     uuid: bestOrg.uuid,
@@ -104,5 +104,11 @@ export function upsertClaudeOrg(prevOrgs, bestOrg, snapshot, now = Date.now(), n
     // THIS response. Carrying a previous `true` forward is how a notice outlives the withholding
     // it describes, which is the failure the in-page widgets shipped and had to be fixed (#1397).
     noUsage: !!noUsage,
+    // 🔴 THE NAME TRAVELS WITH THE FACT. `plan` on the org is deliberately NOT refreshed by a
+    // collection (test/gated-org-upsert-guard.mjs pins that), so a boost/gated/paused install can
+    // hold `plan: 'Pro'` while this response says the provider served nothing — and the popup would
+    // then print "Claude isn't providing usage on the Pro plan" about a Free account. Reproduced by
+    // Codex. Storing the plan AS OBSERVED makes the sentence's two halves come from one reading.
+    noUsagePlan: noUsage ? (snapshot.plan ?? null) : null,
   }];
 }

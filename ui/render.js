@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown } from './util.js';
+import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
@@ -477,7 +477,7 @@ export function _updateUICore(status) {
       // be empty, so a stale flag cannot put this over a working gauge.
       const withheldOrg = (state.collectedOrgs || []).find((o) => o.uuid === s.claude_org_uuid);
       if (usageWithheldForDisplay(withheldOrg, util5h, util7d, s.extra_usage)) {
-        document.getElementById('gauge-5h-reset').textContent = t('usage_withheld');
+        document.getElementById('gauge-5h-reset').textContent = usageWithheldText(withheldOrg);
         // Once, not twice: the sentence is about the account, not about one window.
         document.getElementById('gauge-7d-reset').textContent = '';
       } else if (util7d === null) {

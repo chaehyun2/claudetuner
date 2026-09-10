@@ -1807,6 +1807,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // Carried so the in-page panels can say WHY they are empty. Absent for extra orgs, which
           // is correct: this only means anything for an org we actually read.
           noUsage: orgUsageMap[o.uuid]?.noUsage ?? false,
+          // The plan AS OBSERVED with that emptiness — see bg/org-merge.js for why the org's own
+          // `plan` field is not a safe source for this sentence.
+          noUsagePlan: orgUsageMap[o.uuid]?.noUsage ? (orgUsageMap[o.uuid]?.plan ?? null) : null,
           h5: orgUsageMap[o.uuid]?.h5 ?? null,
           d7: orgUsageMap[o.uuid]?.d7 ?? null,
           spendUsed: orgUsageMap[o.uuid]?.spendUsed ?? null,

@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown } from './util.js';
+import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
@@ -300,7 +300,7 @@ export function selectOrg(orgId, container) {
       const withheld = usageWithheldForDisplay(orgData, util5h, util7d, isClaudeOrg ? orgData.extraUsage : null);
       if (withheld) {
         const g5r = document.getElementById('gauge-5h-reset');
-        if (g5r) g5r.textContent = t('usage_withheld');
+        if (g5r) g5r.textContent = usageWithheldText(orgData);
         const g7r0 = document.getElementById('gauge-7d-reset');
         if (g7r0) g7r0.textContent = '';
       }
