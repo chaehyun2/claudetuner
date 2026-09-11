@@ -554,6 +554,13 @@ const TRANSLATIONS = {
     'err_chatgpt_no_cookies': 'ChatGPT 쿠키를 읽지 못했습니다. chatgpt.com 탭을 열어두면 해결됩니다.',
     'err_chatgpt_rate_limit': 'ChatGPT 요청 제한에 걸렸습니다. 잠시 후 자동으로 재시도됩니다.',
     'err_chatgpt_session_expired': 'ChatGPT 세션이 만료되었습니다. chatgpt.com에 다시 로그인해 주세요.',
+    // 🔴 이 두 코드는 「탭이 이미 열려 있었다」가 전제다(bg/api-chatgpt.js). 그러니 문구가 탭을
+    // 열라고 시키면 안 된다 — err_gemini_no_at_token에서 고친 것과 같은 #967 형태다.
+    // 2026-09-11 문의(wonkyung@backpac.kr): 로그인된 chatgpt.com 탭을 띄워둔 화면에서
+    // 「chatgpt.com 탭을 열고 다시 시도해 주세요」를 계속 읽고 있었다.
+    'err_chatgpt_http': 'ChatGPT가 사용량 요청을 거절했습니다 ({0}). 잠시 후 자동으로 다시 시도합니다.',
+    'err_chatgpt_fallback_exhausted': 'chatgpt.com 탭은 열려 있는데 사용량을 읽지 못했습니다. 탭을 새로고침하거나 다시 로그인해 주세요.',
+    // 🔑 남은 자리: 탭이 하나도 안 열려 있었던 경우. 그래서 이 문장은 여기서는 참이다.
     'err_chatgpt_collect_failed': 'ChatGPT 사용량을 가져오지 못했습니다. chatgpt.com 탭을 열고 다시 시도해 주세요.',
     'err_gemini_not_logged_in': 'Gemini에 로그인되어 있지 않습니다. gemini.google.com에 로그인해 주세요.',
     'err_gemini_auth_failed': 'Gemini 인증에 실패했습니다 ({0}). gemini.google.com에서 다시 로그인해 주세요.',
@@ -566,6 +573,12 @@ const TRANSLATIONS = {
     'err_gemini_page_fetch': 'Gemini 페이지를 불러오지 못했습니다. gemini.google.com 탭을 열고 다시 시도해 주세요.',
     'err_gemini_rate_limit': 'Gemini 요청 제한에 걸렸습니다. 잠시 후 자동으로 재시도됩니다.',
     'err_gemini_session_expired': 'Gemini 세션이 만료되었습니다. gemini.google.com에 다시 로그인해 주세요.',
+    // 🔴 ChatGPT 쌍둥이(#1417)와 같은 이유로 분리. 이 두 코드는 「탭이 이미 열려 있었다」가
+    // 전제라(bg/api-gemini.js) 문구가 탭을 열라고 시키면 안 된다 — 바로 위 no_at_token 주석의
+    // #967과 같은 형태다. 직전 8일 `err_gemini_collect_failed`는 2,789 install-day였다.
+    'err_gemini_http': 'Gemini가 사용량 요청을 거절했습니다 ({0}). 잠시 후 자동으로 다시 시도합니다.',
+    'err_gemini_fallback_exhausted': 'gemini.google.com 탭은 열려 있는데 사용량을 읽지 못했습니다. 탭을 새로고침하거나 다시 로그인해 주세요.',
+    // 🔑 남은 자리: 탭이 하나도 안 열려 있었거나, 응답은 왔는데 RPC 봉투를 못 읽은 경우.
     'err_gemini_collect_failed': 'Gemini 사용량을 가져오지 못했습니다. gemini.google.com 탭을 열고 다시 시도해 주세요.',
     'err_no_orgs': '조직 정보를 가져올 수 없습니다. Claude.ai에 로그인해주세요.',
     'err_api_only': 'API 전용 조직은 모니터링을 지원하지 않습니다. Claude.ai Pro/Max/Team 플랜이 필요합니다.',
@@ -1187,6 +1200,8 @@ const TRANSLATIONS = {
     'err_chatgpt_no_cookies': "Couldn't read ChatGPT cookies. Keeping a chatgpt.com tab open fixes this.",
     'err_chatgpt_rate_limit': 'ChatGPT rate limited. Will retry automatically.',
     'err_chatgpt_session_expired': 'Your ChatGPT session expired. Please sign in again at chatgpt.com.',
+    'err_chatgpt_http': 'ChatGPT refused the usage request ({0}). We will retry automatically.',
+    'err_chatgpt_fallback_exhausted': 'A chatgpt.com tab is open but its usage could not be read. Refresh the tab or sign in again.',
     'err_chatgpt_collect_failed': "Couldn't fetch ChatGPT usage. Open a chatgpt.com tab and try again.",
     'err_gemini_not_logged_in': "You're not signed in to Gemini. Please sign in at gemini.google.com.",
     'err_gemini_auth_failed': 'Gemini authentication failed ({0}). Please sign in again at gemini.google.com.',
@@ -1195,6 +1210,8 @@ const TRANSLATIONS = {
     'err_gemini_page_fetch': "Couldn't load the Gemini page. Open a gemini.google.com tab and try again.",
     'err_gemini_rate_limit': 'Gemini rate limited. Will retry automatically.',
     'err_gemini_session_expired': 'Your Gemini session expired. Please sign in again at gemini.google.com.',
+    'err_gemini_http': 'Gemini refused the usage request ({0}). We will retry automatically.',
+    'err_gemini_fallback_exhausted': 'A gemini.google.com tab is open but its usage could not be read. Refresh the tab or sign in again.',
     'err_gemini_collect_failed': "Couldn't fetch Gemini usage. Open a gemini.google.com tab and try again.",
     'err_no_orgs': 'Cannot fetch organizations. Please sign in to Claude.ai.',
     'err_api_only': 'API-only organization is not supported. Pro/Max/Team plan required.',

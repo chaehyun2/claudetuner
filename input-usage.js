@@ -8,6 +8,24 @@
 
   const HOST_ID = 'ct-input-usage-host';
 
+  // 🔴 THIS FILE HAD NO CORE BINDING AT ALL until the spend-gauge predicate moved into the shared
+  // core. Unlike its sibling sidebar-usage.js, the input strip never needed one — so adding a bare
+  // `CORE.x(...)` call threw `ReferenceError: CORE is not defined` on EVERY ordinary render, not
+  // just the extra-usage path, and blanked the strip. Both textual guards stayed green on it
+  // (Codex, #1410). test/panel-render-execution-guard.mjs now runs this renderer for real.
+  const CORE = globalThis.__ctUsageCore;
+
+  // 🔴 GUARDED, LIKE EVERY CORE LOOKUP IN sidebar-usage.js. A content script can end up running
+  // against a stale or absent core — an update that replaced this file while an older
+  // usage-shared.js sits in the isolated world. An unguarded call would throw INSIDE the render,
+  // which is far worse than the missing-notice bug the predicate was extracted to fix.
+  //
+  // 🪤 The fallback is `false`, not a hand-written copy of the rule. Restating it would put a fourth
+  // copy back into circulation — exactly what produced #1405 ② and #1410 ②. A stale core therefore
+  // drops the spend bar (one degraded feature among the several it already loses) rather than
+  // risking a copy that drifts.
+  const extraGaugeDrawn = (d) => !!(CORE && CORE.extraGaugeDrawn && CORE.extraGaugeDrawn(d));
+
   // ── State ──
   let _enabled = null;    // null until storage read
   let _data = null;
@@ -452,7 +470,7 @@
       html += `<span class="ct-dot">\u00b7</span><div class="ct-seg"><span class="ct-seg-label">${escapeHtml(t('pred_label'))}</span><span class="ct-seg-value" style="color:${gaugeColor(pred5h)}">${pd}</span></div>`;
     }
 
-    if (_data.euEnabled && _data.el && (_data.eu || 0) > 0) {
+    if (extraGaugeDrawn(_data)) {
       const uc = _data.eu || 0, lc = _data.el || 0;
       const ep = lc > 0 ? Math.min((uc / lc) * 100, 100) : 0;
       const ec = ep >= 80 ? '#ef4444' : '#f59e0b';

@@ -194,9 +194,34 @@ export async function collectGemini(force = false, userManual = false) {
     return { success: true, orgs: [org] };
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection failed:', e.message);
-    await noteProviderError('gemini', e);
+    const st = await noteProviderError('gemini', e);
+    // 🔴 AN EVENT, NOT ONLY A COUNTER — and the reason is the HTTP STATUS.
+    //
+    // `noteDriftOutcome(p, 'error', null)` increments a counter, and counters ride ONLY that
+    // provider's shape rider, which needs a snapshot to have gone out. A provider that NEVER
+    // succeeds therefore emitted nothing on this axis at all: verified on a real account
+    // (2026-09-11), zero chatgpt rows over a week of continuous failure while claude and gemini
+    // rows flowed from the same install.
+    //
+    // GA does count the reason, so this is not the only channel — but `noteProviderError` sends
+    // `baseReason(code)`, which DROPS the status on purpose, so GA can never say whether a failure
+    // was a 404 or a 500. This event is the only carrier that keeps `:NNN`.
+    //
+    // 🪤 WRITTEN BEFORE THE SPLIT LANDED, AND IT WENT STALE INSIDE ITS OWN PR. This used to say
+    // Gemini's catch-all was "NOT split yet" with `auth_failed` as its only status-bearing code —
+    // and the very PR that added this comment then split it (#1418). Gemini now carries
+    // `err_gemini_http:NNN` and `err_gemini_page_fetch:NNN` too, so what rides here is the specific
+    // code far more often than the bare catch-all. (Caught by the pre-deploy batch review for
+    // v1.29.74, which is what that review is for: a claim that was true when written and false by
+    // the time the batch shipped.)
+    //
+    // 🪤 The PRECHECK path above is deliberately still counter-only. It is 5,185 install-days in
+    // the 8 days to 2026-09-10 — the largest single reason — and it carries no status and nothing
+    // we do not already know. Widening it would buy volume, not signal.
     // No shape: the throw may have come from the fetch, before there was a response to read.
-    await noteDriftOutcome('gemini', 'error', null);
+    await noteDriftOutcome('gemini', 'error', {
+      stage: 'collect', code: (st && st.lastError && st.lastError.code) || 'err_gemini_collect_failed',
+    });
     return { success: false, orgs: [] };
   }
 }

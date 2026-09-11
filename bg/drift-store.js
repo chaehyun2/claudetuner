@@ -105,11 +105,29 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
   const sig = shape ? shape.sig : null;
   let decision = shouldFlushDrift(rec.state[provider], sig, now);
   // A pending drift event does not wait out the quiet hour. The cadence exists to stop UNCHANGED
-  // shapes from riding every cycle; an event is by definition something that changed, and holding
-  // it for up to an hour behind an unrelated provider's quiet window would blunt the same signal
-  // the sig_change trigger exists to deliver promptly.
+  // shapes from riding every cycle; a PARSE event is by definition something that changed, and
+  // holding it for up to an hour behind an unrelated provider's quiet window would blunt the same
+  // signal the sig_change trigger exists to deliver promptly.
+  //
+  // 🔴 `stage === 'parse'` IS THE WHOLE CONDITION, AND THE NARROWING IS LOAD-BEARING. Collect-stage
+  // errors recur IDENTICALLY every cycle (a signed-out or refusing provider fails the same way at
+  // 10-minute intervals), and `commit` clears the buffer on each drain — so an unfiltered
+  // `hasPending` would re-arm on the very next attempt and turn the hourly cadence into a
+  // per-cycle flush for exactly the installs that are broken. That is a volume multiplier on the
+  // largest failing population, not a signal: `err_chatgpt_collect_failed` alone was 4,566
+  // install-days in the 8 days to 2026-09-10. A recurring error is not news; it still travels, on
+  // the next natural flush and on the heartbeat rider, which are the cadences it belongs to.
+  //
+  // 🪤 THE COST IS NOT ZERO, AND IT IS NOT ONLY LATENCY. Codex reproduced a loss (2026-09-11):
+  // shape committed at t=0, collect event at t=1m, an unchanged-shape carrier at t=10m that this
+  // predicate now skips, and no further carrier before the 48h event TTL — the observation expires
+  // and the next rider reports `events_dropped:1` with nothing in it. So this trades a rare loss on
+  // installs whose carriers stop for a bounded write rate on every install whose provider is
+  // broken. That is the right trade at today's numbers and it is a TRADE, not a free narrowing;
+  // revisit it with a per-identity "already early-flushed" latch if the dropped counts say so.
+  // (#1417)
   const hasPending = (Array.isArray(rec.events) ? rec.events : []).some(
-    (e) => now - e.first < DRIFT_EVENT_TTL_MS,
+    (e) => e.stage === 'parse' && now - e.first < DRIFT_EVENT_TTL_MS,
   );
   if (!decision.flush && hasPending) decision = { flush: true, reason: 'events' };
   if (!decision.flush) return { rider: null, commit: async () => {} };

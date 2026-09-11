@@ -1,9 +1,6 @@
 // Builds the usage payload the in-page sidebar renders, and pushes it.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
 import { diurnalProject7dAdaptive } from '../ui/diurnal.js';
-// 🔴 The SAME predicate the popup renders by (ui/util.js). Importing across ui/ ↔ bg/ is already
-// the pattern here (diurnal above); restating the rule is what let the two surfaces disagree.
-import { extraUsageShown } from '../ui/util.js';
 import { hasProviderPermission } from './providers.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 
@@ -131,13 +128,28 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   // 🪤 The conjunction is deliberately one-directional. A missing flag means no notice (the old
   // blank/"수집 중" behaviour), which is a lost improvement; a wrong notice would be a false
   // statement about the user's account. Only one of those two is acceptable to get wrong.
-  // 🪤 ASK WHAT THE SCREEN ASKS. This used to test `!euEnabled && euUsed == null && euLimit == null`,
-  // which is LOOSER than the rule the panels actually draw by (`is_enabled && used_credits > 0`).
-  // So `{is_enabled: false, used_credits: 0, monthly_limit: 0}` counted as "something to show",
-  // suppressed the notice — and then no gauge was drawn either. The widget ended up with neither a
-  // number nor an explanation, while the popup, using the render's own rule, said why (Codex,
-  // #1405 ②). An "is anything on screen" test that disagrees with what is on screen is the bug.
-  const nothingToShow = h5 == null && d7 == null && !extraUsageShown(eu);
+  // 🪤 ASK WHAT THE SCREEN ASKS, AND ASK IT THE WAY THE SCREEN ASKS IT. This test has now been
+  // wrong twice in the same direction — each time LOOSER than the panels' own draw condition, so
+  // the builder thought a gauge was up, suppressed the notice, and the widget showed neither a
+  // number nor a reason:
+  //   · `!euEnabled && euUsed == null && euLimit == null` — counted a disabled all-zero org as
+  //     "something to show" (Codex, #1405 ②)
+  //   · `is_enabled && used_credits > 0` — the popup's rule, which correctly matches the POPUP's
+  //     render but omits the limit the panels require (#1410 ②)
+  // So it no longer restates the rule: `extraGaugeDrawn` is the panels' own condition, kept in
+  // usage-shared.js next to the code that draws the bar. This is a MECHANICAL SYNC COPY — the SW
+  // is a module in another world and cannot read that global — held identical by
+  // test/extra-gauge-drawn-guard.mjs, which runs both over the same truth table.
+  //
+  // 🔴 Do not "unify" this with the popup's own predicate in ui/util.js. Each notice must match
+  // the renderer
+  // it sits next to; one shared predicate would have to be wrong for one of the two surfaces, and
+  // that is exactly how this started.
+  function extraGaugeDrawn(d) {
+    return !!(d && d.euEnabled && d.el && (d.eu || 0) > 0);
+  }
+  const extraDrawnHere = extraGaugeDrawn({ euEnabled, el: euLimit, eu: euUsed });
+  const nothingToShow = h5 == null && d7 == null && !extraDrawnHere;
   const noUsage = !!orgData?.noUsage && nothingToShow;
 
   return {

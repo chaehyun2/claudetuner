@@ -113,6 +113,24 @@
     return typeof seconds === 'number' && isFinite(seconds) && seconds > 0;
   }
   /** The reported window as a bare unit — '5시간' / '30일' / '5-Hour' / '30-Day' — or null. */
+  // 🔴 THE SPEND GAUGE'S OWN RENDER CONDITION — canonical for the whole extension.
+  // Both in-page panels (sidebar-usage.js, input-usage.js) draw the extra-usage bar only when this
+  // is true, and the background payload builder (bg/sidebar-usage.js) asks the SAME question to
+  // decide whether the panel has anything on it at all. It used to be written out at each of those
+  // three sites, and the builder's copy left out the limit — so "enabled + spend + no limit" made
+  // the builder believe a gauge was on screen, which suppressed the "no usage" notice while the
+  // panels drew nothing (#1410 ②).
+  //
+  // 🪤 The limit is not decoration: the bar is a PERCENTAGE OF IT (used/limit), so without a limit
+  // there is no bar to draw. Any "is the spend gauge showing" test that ignores `el` is wrong.
+  //
+  // The service worker is a module in another world and cannot reach this global, so its copy is a
+  // mechanical sync copy — test/extra-gauge-drawn-guard.mjs runs both against the same truth table
+  // and fails on any disagreement.
+  function extraGaugeDrawn(d) {
+    return !!(d && d.euEnabled && d.el && (d.eu || 0) > 0);
+  }
+
   function windowUnitLabel(seconds, lang) {
     if (!isSpanSeconds(seconds)) return null;
     const ko = lang === 'ko';
@@ -875,6 +893,7 @@
     escapeHtml,
     detectLang,
     windowUnitLabel,
+    extraGaugeDrawn,
     windowLabel,
     cgUsageNote,
     isNonModelBucket,

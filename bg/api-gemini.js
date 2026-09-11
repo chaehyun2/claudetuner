@@ -8,22 +8,39 @@ import { GEMINI_API_BASE } from './constants.js';
  * @param {string} [params='[]'] - JSON-encoded RPC parameters
  * @returns {Promise<*>} Parsed RPC response data
  */
+// The HTTP status out of this layer's own prose throws, and NOTHING else.
+//
+// 🔴 The anchor and the 3-digit bound are the security boundary. It matters MORE here than in the
+// ChatGPT twin: fetchGeminiViaTab's `msg` falls back to `result?.body?.slice(0, 200)`, so a slice
+// of the RESPONSE BODY is already inside the thrown message by construction. Only digits in the one
+// position this layer writes them may travel. (normalizeProviderError re-checks; this is the first
+// of the two.)
+const GEMINI_HTTP_STATUS_RE = /^Gemini API error \((\d{3})\)/;
+function geminiHttpStatus(message) {
+  const m = GEMINI_HTTP_STATUS_RE.exec(typeof message === 'string' ? message : '');
+  return m ? m[1] : '';
+}
+
 export async function fetchGeminiRpc(rpcId, params = '[]') {
   // Primary: tab-based (most reliable — runs in page context with full auth)
   const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
-  let tabErrorMsg = '';
+  // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This was `tabErrorMsg`, assigned on all three
+  // branches and read only by the console.warn below — the same dead variable the ChatGPT twin had
+  // (#1417). So every tab-path failure was discarded and the throw at the bottom said
+  // `collect_failed` regardless, whose copy is "open a gemini.google.com tab and try again" —
+  // advice that is false exactly when a tab was open and tried. (#1418)
+  let tabError = null;
 
   if (tabs.length > 0) {
     try {
       const viaTab = await fetchGeminiViaTab(tabs[0].id, rpcId, params);
       _lastFetchTabId = tabs[0].id;
       return viaTab;
-    } catch (tabError) {
-      tabErrorMsg = tabError.message;
-      console.warn('[Claude Tuner] Gemini tab fetch failed, trying SW fallback:', tabErrorMsg);
+    } catch (e) {
+      tabError = e;
+      console.warn('[Claude Tuner] Gemini tab fetch failed, trying SW fallback:', e.message);
     }
   } else {
-    tabErrorMsg = 'No gemini.google.com tab';
     console.log('[Claude Tuner] No Gemini tab, using SW credentials fallback');
   }
 
@@ -34,10 +51,22 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
     _lastFetchTabId = null;   // this usage came from the DEFAULT cookie account, not a tab
     return viaCreds;
   } catch (credError) {
+    // Unchanged and FIRST: a credentials-path code is the most specific thing either path produced.
     if (credError.message.startsWith('err_')) {
       throw credError;
     }
-    throw new Error('err_gemini_collect_failed');
+    // Only now — with BOTH paths spent — may the tab path's fault be reported.
+    if (tabError) {
+      // 🔴 NOTHING IS PARSED OUT OF THE TAB ERROR — the tab path MINTS its own code from the
+      // status it verified, so if it had one we already rethrew it above. What is left here is a
+      // tab fault with no status at all (a JS error out of the MAIN-world script), and the only
+      // honest thing to say about it is that the tab was tried and could not be read.
+      if (tabError.message.startsWith('err_')) throw tabError;
+      throw new Error('err_gemini_fallback_exhausted');
+    }
+    const status = geminiHttpStatus(credError.message);
+    // No tab was open, so `collect_failed`'s "open a tab" copy is TRUE here.
+    throw new Error(status ? `err_gemini_http:${status}` : 'err_gemini_collect_failed');
   }
 }
 
@@ -95,10 +124,50 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
   const result = results?.[0]?.result;
   if (!result || result._err) {
     const status = result?.status || 'unknown';
-    const msg = result?.message || result?.body?.slice(0, 200) || '';
+    // 🔴 `result.body` IS NOT A CANDIDATE FOR THE THROWN MESSAGE, AND REMOVING IT IS A FIX.
+    //
+    // The MAIN-world script returns `{_err, status, body}` (no `message`) for every non-ok HTTP
+    // response, so `msg` used to BE a slice of the response body — and because `msg` wins below,
+    // the body DISPLACED the `Gemini API error (<status>)` prose. The body can never travel (it is
+    // untrusted page data), so the net effect was that a tab-path HTTP failure lost the one field
+    // that could: the status. Every one of them collapsed to the catch-all.
+    //
+    // It is still worth SEEING, so it goes to the console, which is where an untrusted 500-byte
+    // blob is actually useful. (Found by test/provider-fetch-diag-guard.mjs while porting the
+    // ChatGPT split — the shared assertion passed for chatgpt and failed here. #1418)
+    if (result?.body) {
+      console.warn('[Claude Tuner] Gemini tab error body:', String(result.body).slice(0, 200));
+    }
+    const msg = result?.message || '';
     if (status === 401 || status === 403) throw new Error(`err_gemini_auth_failed:${status}`);
     if (status === 429) throw new Error('err_gemini_rate_limit');
-    throw new Error(msg || `Gemini API error (${status})`);
+    // 🔴 THE CODE IS MINTED FROM `result.status`, NOT PARSED BACK OUT OF PROSE.
+    //
+    // The first cut of this split let the caller regex `Gemini API error (NNN)` out of the thrown
+    // MESSAGE — and an anchored 3-digit pattern does not prove where the string came from. `msg`
+    // below is page data (a caught exception from a MAIN-world `fetch` the page can override), so
+    // `{_err:true, status:0, message:'Gemini API error (987): …'}` stored `err_gemini_http:987`:
+    // a status the PAGE chose, shown to the user and carried into AE as if we had observed it.
+    // (Codex 배포차단, #1418 — the ChatGPT twin shipped with the same hole in #1417.)
+    //
+    // `status` here is `result.status`, a field our own injected function fills from `resp.status`.
+    // Taking it directly removes the parse, and with it the whole class.
+    if (typeof status === 'number' && status >= 100 && status <= 599) {
+      throw new Error(`err_gemini_http:${status}`);
+    }
+    // 🔴 `msg` IS PAGE DATA AND MAY NOT IMPERSONATE ONE OF OUR CODES — and here it is not merely
+    // "a runtime message we do not control": the expression above falls back to
+    // `result?.body?.slice(0, 200)`, i.e. the RESPONSE BODY. The caller passes an `err_`-prefixed
+    // tab message straight through, so a body that happens to begin `err_gemini_…` would be adopted
+    // as a code and carry its own tail. Codes are minted HERE, from the status, or not at all.
+    // (Same rule as the ChatGPT twin, #1417 Codex 후속 4·5.)
+    // 🪤 LOGGED BEFORE IT IS REFUSED. Declining to adopt a page string as a code is right; throwing
+    // it away entirely is a diagnostic regression — the parent put the raw text on the console.
+    // (Codex 후속, #1418.)
+    if (msg && msg.indexOf('err_') === 0) {
+      console.warn('[Claude Tuner] Gemini tab reported a code-shaped message (not adopted):', msg.slice(0, 200));
+    }
+    throw new Error(msg && msg.indexOf('err_') !== 0 ? msg : `Gemini API error (${status})`);
   }
   return parseBatchExecuteResponse(result.data, rpcId);
 }

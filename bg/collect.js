@@ -1804,7 +1804,21 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       const nonClaudeOrgs = prevOrgsAll.filter(o => o.provider && o.provider !== 'claude');
       // Preserve user's pinned primary org if it still exists
       const prevPrimaryUuid = prevOrgsAll.find(o => o.isPrimary)?.uuid;
-      const collectedOrgsRaw = targetOrgs.filter(o => successOrgs.includes(o.uuid));
+      // 🔴 FILTERED BY WHAT WE READ, NOT BY WHAT WE POLL. `targetOrgs` drops Free orgs on a
+      // multi-org account (see monitorableOrgs above) — a deliberate policy about which orgs are
+      // worth POLLING. But the primary is fetched before that filter exists, so intersecting the
+      // results with it threw away an org we had already collected: `successOrgs` contained it and
+      // `targetOrgs` did not, and the user's pinned org simply vanished from the popup.
+      //
+      // 🪤 THIS IS NOT A HYPOTHETICAL. `bestOrg` is chosen manual > lastActiveOrg cookie > plan
+      // score, so the org the user is CURRENTLY BROWSING on claude.ai becomes primary — and a
+      // personal Free org beside a work Team org hits exactly this (#1410 ①).
+      //
+      // Scanning `orgList` cannot widen the result: `successOrgs` only ever holds the primary and
+      // secondaries that came from `targetOrgs`, so API orgs and unpolled orgs still cannot appear.
+      // What changes is only that an org we DID read is no longer discarded for not being a polling
+      // target.
+      const collectedOrgsRaw = orgList.filter(o => successOrgs.includes(o.uuid));
       const allNewUuids = [...collectedOrgsRaw.map(o => o.uuid), ...nonClaudeOrgs.map(o => o.uuid)];
       const primaryUuid = (prevPrimaryUuid && allNewUuids.includes(prevPrimaryUuid))
         ? prevPrimaryUuid : bestOrg?.uuid;

@@ -305,8 +305,30 @@ export async function collectChatGPT(force = false, userManual = false) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
     // The reason dies here otherwise: the caller only sees `success:false`, and background.js
     // catches that again with `.catch(() => {})`. Store it before it is lost (#852).
-    await noteProviderError('chatgpt', e);
-    await noteDriftOutcome('chatgpt', 'error', null);
+    const st = await noteProviderError('chatgpt', e);
+    // 🔴 AN EVENT, NOT ONLY A COUNTER — and the reason is the HTTP STATUS.
+    //
+    // `noteDriftOutcome(p, 'error', null)` increments a counter, and counters ride ONLY that
+    // provider's shape rider, which needs a snapshot to have gone out. A provider that NEVER
+    // succeeds therefore emitted nothing on this axis at all: verified on a real account
+    // (2026-09-11), zero chatgpt rows over a week of continuous failure while claude and gemini
+    // rows flowed from the same install.
+    //
+    // GA does count the reason, so this is not the only channel — but `noteProviderError` sends
+    // `baseReason(code)`, which DROPS the status on purpose. So GA can say `err_chatgpt_http`
+    // happened and can never say whether it was a 404 or a 500. This event is the only carrier
+    // that keeps `:NNN`. A healthy provider's shape rider drains EVERY provider's events, so a
+    // working Claude or Gemini carries a permanently failing ChatGPT's — the failing provider need
+    // never succeed. 🪤 `buildDriftEventsRider` is NOT an unconditional heartbeat for that job: its
+    // caller is the Claude FAILURE path (bg/collect.js), throttled and gated on an account email.
+    //
+    // 🪤 The PRECHECK path above is deliberately still counter-only. It is 5,185 install-days in
+    // the 8 days to 2026-09-10 — the largest single reason — and it carries no status and nothing
+    // we do not already know. Widening it would buy volume, not signal.
+    // No shape: the throw may have come from the fetch, before there was a response to read.
+    await noteDriftOutcome('chatgpt', 'error', {
+      stage: 'collect', code: (st && st.lastError && st.lastError.code) || 'err_chatgpt_collect_failed',
+    });
     return { success: false, orgs: [] };
   }
 }

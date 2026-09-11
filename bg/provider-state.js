@@ -80,7 +80,13 @@ export const PROVIDER_ERROR_CODES = {
     'err_chatgpt_no_cookies',
     'err_chatgpt_rate_limit',
     'err_chatgpt_session_expired',
-    'err_chatgpt_collect_failed',  // the catch-all; unknown errors normalise to this
+    // Promoted out of the catch-all (inquiry 2026-09-11), the same move #1162/#1176 made for
+    // Claude. `collect_failed` was not merely vague — its copy prescribed "open a chatgpt.com tab",
+    // and the two commonest ways to reach it BOTH require a tab to have been open and tried. These
+    // two name that, so the sentence the user is shown can be true.
+    'err_chatgpt_http',            // provider answered a status we do not map; carries it
+    'err_chatgpt_fallback_exhausted', // tab AND cookie both failed, neither with a code
+    'err_chatgpt_collect_failed',  // the residual: no tab was open and nothing named itself
   ],
   gemini: [
     'err_gemini_not_logged_in',
@@ -90,7 +96,12 @@ export const PROVIDER_ERROR_CODES = {
     'err_gemini_page_fetch',
     'err_gemini_rate_limit',
     'err_gemini_session_expired',
-    'err_gemini_collect_failed',
+    // The ChatGPT split (#1417) applied to its twin (#1418). Same two suffixes on purpose: the web
+    // copy and PROVIDER_ERROR_ACTIONABLE are keyed by SUFFIX, so reusing them means the dashboard
+    // already knows how to word these and no third place has to learn a Gemini-specific vocabulary.
+    'err_gemini_http',             // provider answered a status we do not map; carries it
+    'err_gemini_fallback_exhausted', // tab AND SW-credentials both failed, neither with a code
+    'err_gemini_collect_failed',   // the residual: no tab was open, or the RPC envelope was unreadable
   ],
 };
 
@@ -108,9 +119,32 @@ export const PROVIDER_ERROR_CODES = {
 // 🔴 `err_send_*` is absent for a different reason: those failures are OURS (our server rejected
 // the snapshot, or the network to us is down). They carry no provider segment at all, so the
 // parse below rejects them before this list is consulted.
+/**
+ * The reasons whose HTTP status is part of the diagnosis, and the only ones allowed to keep it.
+ *
+ * 🔴 This is a LENGTH contract as well as a meaning one: worker/src/services/ae.ts caps a drift
+ * code at 32 characters, and the longest member here with a status is `err_chatgpt_auth_failed:403`
+ * at 27. Adding a longer code to this list without checking that bound stores `invalid` in AE
+ * instead of the observation. The guard derives the check from THIS list, so the bound is tested
+ * rather than remembered.
+ *
+ * 🪤 `page_fetch` was MISSING from the first cut of this list and that was a regression: bg/
+ * api-gemini.js throws `err_gemini_page_fetch:${status}` deliberately, so narrowing the rule to
+ * ['auth_failed','http'] silently dropped a status the producer had gone to the trouble of
+ * carrying. Nothing displayed it (the copy has no {0} and both readers strip the suffix), which is
+ * exactly why it could be lost without anything going red. Found while starting #1418.
+ */
+export const PROVIDER_STATUS_BEARING = ['auth_failed', 'http', 'page_fetch'];
+
 export const PROVIDER_ERROR_ACTIONABLE = [
   'not_logged_in', 'session_expired', 'auth_failed',   // sign in again
   'cloudflare', 'no_cookies', 'no_at_token', 'page_fetch', 'collect_failed',   // open a tab there
+  // The tab was open and unreadable, so the trip is to SIGN IN AGAIN, not to open one. Same list
+  // because the destination is the same; the copy is what differs.
+  'fallback_exhausted',
+  // 🔴 `http` is deliberately absent, for `rate_limit`'s reason: the provider answered, it just
+  // answered a status we do not map. Nothing at chatgpt.com is waiting to be clicked, and a button
+  // labelled "Open ChatGPT" would send someone to do the one thing that cannot help (#967).
 ];
 
 /**
@@ -156,6 +190,15 @@ export function normalizeProviderError(provider, err) {
   const key = colon > 0 ? raw.slice(0, colon) : raw;
   if (allowed.indexOf(key) < 0) return fallback;
   if (colon <= 0) return key;
+  // 🔴 A STATUS SURVIVES ONLY ON A CODE THAT MEANS SOMETHING BY IT. `auth_failed` does (401 and 403
+  // are different fixes) and `http` is nothing but its status; on anything else a number is noise
+  // the code did not ask for. Keeping it everywhere had a second cost: `err_chatgpt_
+  // fallback_exhausted:500` is 34 characters and AE's DRIFT_CODE_RE caps drift codes at 32, so the
+  // whole observation stored as `invalid` — a value that reads as a client bug rather than as the
+  // real failure. Every code that CAN carry a status is at most 27 characters with one.
+  // (Codex 후속 4, 2026-09-11.)
+  const suffix = key.replace(/^err_(?:chatgpt|gemini)_/, '');
+  if (PROVIDER_STATUS_BEARING.indexOf(suffix) < 0) return key;
   const detail = raw.slice(colon + 1).trim();
   return /^\d{1,3}$/.test(detail) ? `${key}:${detail}` : key;
 }

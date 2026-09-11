@@ -18,6 +18,34 @@
   // fetch/rotation and doubled impression counts). CORE is a soft dependency
   // everywhere else in this file (the usage panel still works without it, just
   // without notices/ads), so keep it soft here too rather than blanking the panel.
+
+  // 🔴 GUARDED, LIKE EVERY OTHER CORE LOOKUP IN THIS FILE. A content script can end up running
+  // against a STALE core — an update that replaced this file but left an older usage-shared.js in
+  // the isolated world (see fetchNotices() and buildResetCellInner below for the same shape). An
+  // unguarded `CORE.extraGaugeDrawn(...)` would throw INSIDE the render and blank the whole panel,
+  // which is far worse than the missing-notice bug this predicate was extracted to fix.
+  //
+  // 🪤 The fallback is `false`, not a hand-written copy of the rule. Restating it here would put a
+  // fourth copy back into circulation — the exact thing that produced #1405 ② and #1410 ②. A stale
+  // core therefore drops the spend bar (one degraded feature among several it already loses) rather
+  // than risking a copy that drifts. Codex flagged the unguarded call as a deploy blocker.
+  const extraGaugeDrawn = (d) => !!(CORE && CORE.extraGaugeDrawn && CORE.extraGaugeDrawn(d));
+
+  // 🔴 SAME GUARD, AND THIS ONE WAS LIVE. `CORE.windowLabel` was added on 2026-09-10 (#1394) and
+  // called UNGUARDED twice in render() — the main gauge path, the first thing the panel draws. A
+  // content script running against a core that predates #1394 threw `CORE.windowLabel is not a
+  // function` inside render and produced a BLANK PANEL, which is exactly the outcome the comment
+  // above says is "far worse than the missing-notice bug". It shipped in v1.29.71 and reproduces
+  // in test/panel-render-execution-guard.mjs section [5].
+  //
+  // 🪤 The fallback is the caller's own `fallbackText` — the SAME value already passed as
+  // windowLabel's third argument — so there is no second copy of the span rule here. A stale core
+  // shows `Session` / `Weekly` instead of a span-derived label, which is what windowLabel itself
+  // returns when the provider reports no span.
+  const windowLabel = (seconds, fallbackText) => ((CORE && CORE.windowLabel)
+    ? CORE.windowLabel(seconds, _lang, fallbackText)
+    : fallbackText);
+
   const _guard = CORE && CORE.createInstanceGuard
     ? CORE.createInstanceGuard('__ctSbSidebarGen', releaseInstance)
     : null;
@@ -398,7 +426,11 @@
     // Reset time tooltip (dynamic — recalculated on hover; verbose form with timezone)
     const resetSpan = row.querySelector('.ct-sb-reset');
     if (resetAt && resetSpan) {
-      attachTip(resetSpan, () => CORE.formatResetAbsolute(resetAt, _lang), true, true);
+      // Guarded like every other lookup here: a stale core loses the verbose reset tooltip, it
+      // does not throw on hover. `''` (not a hand-written date format) for the reason the
+      // extraGaugeDrawn fallback is `false` — a restated rule is a copy that drifts.
+      attachTip(resetSpan, () => (CORE && CORE.formatResetAbsolute)
+        ? CORE.formatResetAbsolute(resetAt, _lang) : '', true, true);
     }
 
     return row;
@@ -476,16 +508,16 @@
       // Span-aware, same rule as every other surface. Claude reports no span, so this resolves to
       // t('session') today — wired anyway so the rule is uniform and a future Claude span is not a
       // second change in a third place.
-      frag.appendChild(buildLimitRow('5h', CORE.windowLabel(_data.w5s, _lang, t('session')), _data.h5, _data.r5, _data.pred5h));
+      frag.appendChild(buildLimitRow('5h', windowLabel(_data.w5s, t('session')), _data.h5, _data.r5, _data.pred5h));
     }
 
     // 7d gauge
     if (_data.d7 != null) {
-      frag.appendChild(buildLimitRow('7d', CORE.windowLabel(_data.w7s, _lang, t('weekly')), _data.d7, _data.r7, _data.pred7d));
+      frag.appendChild(buildLimitRow('7d', windowLabel(_data.w7s, t('weekly')), _data.d7, _data.r7, _data.pred7d));
     }
 
     // Extra usage
-    if (_data.euEnabled && _data.el && (_data.eu || 0) > 0) {
+    if (extraGaugeDrawn(_data)) {
       frag.appendChild(buildExtraUsageRow(_data.eu, _data.el));
     }
 
@@ -569,7 +601,10 @@
       const resetAt = el.dataset.reset;
       if (!resetAt) return;
       const countEl = el.querySelector('.ct-reset-count');
-      if (countEl) countEl.textContent = CORE.formatCountdown(resetAt, _lang);
+      // Leave the last-rendered text in place rather than blanking it: the cell already shows a
+      // countdown from the render, and a stale core losing the per-second refresh is strictly
+      // better than a throw on a 1s interval.
+      if (countEl && CORE && CORE.formatCountdown) countEl.textContent = CORE.formatCountdown(resetAt, _lang);
     });
   }
 
@@ -761,7 +796,22 @@
     // recovers if the first pick was empty (e.g. _ct_country not cached yet). The period
     // is SERVER-TUNABLE (CORE.startAdRotation → getAdRefreshMs) — changing it needs no
     // CWS release. Decoupled from the 30-min notice refresh.
-    CORE.startAdRotation(ctSetInterval, fetchAds);
+    // 🔴 GUARDED LIKE THE REST, AND IT IS NOT IN mount() — this is the tail of init(), which the
+    // IIFE calls at script load.
+    //
+    // 🪤 WHAT AN UNGUARDED THROW HERE ACTUALLY COSTS, measured rather than assumed. An earlier
+    // version of this comment said it "kills the whole content script — no panel, no countdown, no
+    // reaction to settings changes, for the life of the page". That is WRONG, and Codex reproduced
+    // the counterexample: every listener registered BEFORE this line survives the throw. The
+    // storage listener, the MutationObserver, the rAF tick and all three intervals are already
+    // attached, and they keep working — settings changes are still handled and the panel still
+    // renders. What is lost is the ad rotation, and the tail of init() after it (there is none).
+    //
+    // It is still guarded, for the reason every other lookup in this file is: `fetchAds` already
+    // returns early without a core (see selectAds above), so the rotation this schedules would have
+    // had nothing to do — the benefit of leaving it bare was zero, and a throw out of init() is a
+    // bad place to spend even a small cost. The claim is narrow on purpose; the guard is not.
+    if (CORE && CORE.startAdRotation) CORE.startAdRotation(ctSetInterval, fetchAds);
   }
 
   function onStorageChanged(changes, area) {
