@@ -326,8 +326,24 @@ export async function collectChatGPT(force = false, userManual = false) {
     // the 8 days to 2026-09-10 — the largest single reason — and it carries no status and nothing
     // we do not already know. Widening it would buy volume, not signal.
     // No shape: the throw may have come from the fetch, before there was a response to read.
+    // 🔑 A FINER CODE FOR THE OBSERVATION ONLY — the stored, user-facing code is untouched above.
+    //
+    // The API layer converts everything it throws into an `err_chatgpt_*` code, so a message that
+    // does NOT start with `err_` cannot have come from there: it is an exception out of OUR
+    // collection logic (a parse, a field that was not the shape we assumed). Claude names that
+    // `err_claude_unclassified` (bg/collect.js:1884) and it is the same question here — "is this
+    // the provider or is this us" halves the search space.
+    //
+    // 🪤 It stays OUT of PROVIDER_ERROR_CODES on purpose. A user cannot act on "unclassified", and
+    // the sentence they should read is the same one `collect_failed` already gives them. The split
+    // is for the readout, so it lives only where the readout looks.
+    const rawMsg = (e && e.message) || '';
+    const storedCode = (st && st.lastError && st.lastError.code) || 'err_chatgpt_collect_failed';
     await noteDriftOutcome('chatgpt', 'error', {
-      stage: 'collect', code: (st && st.lastError && st.lastError.code) || 'err_chatgpt_collect_failed',
+      stage: 'collect',
+      code: (storedCode === 'err_chatgpt_collect_failed' && rawMsg.indexOf('err_') !== 0)
+        ? 'err_chatgpt_unclassified'
+        : storedCode,
     });
     return { success: false, orgs: [] };
   }

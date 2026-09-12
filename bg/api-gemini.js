@@ -23,7 +23,17 @@ function geminiHttpStatus(message) {
 
 export async function fetchGeminiRpc(rpcId, params = '[]') {
   // Primary: tab-based (most reliable — runs in page context with full auth)
-  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+  // 🪤 A REJECTION HERE IS NOT "our collection logic threw". `chrome.tabs.query` can reject, and it
+  // sits OUTSIDE every code-minting path — the raw message escaped to the collector, whose new
+  // `unclassified` rule reads "no err_ prefix" as "our own logic". That would be wrong: this is the
+  // browser-access layer. (Codex 후속.) Treating it as "no tab" is also the more robust reading —
+  // the fallback path does not need the tab list to run.
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+  } catch (e) {
+    console.debug(`[Claude Tuner] gemini tabs.query rejected: ${e && e.message}`);
+  }
   // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This was `tabErrorMsg`, assigned on all three
   // branches and read only by the console.warn below — the same dead variable the ChatGPT twin had
   // (#1417). So every tab-path failure was discarded and the throw at the bottom said
@@ -51,20 +61,34 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
     _lastFetchTabId = null;   // this usage came from the DEFAULT cookie account, not a tab
     return viaCreds;
   } catch (credError) {
-    // Unchanged and FIRST: a credentials-path code is the most specific thing either path produced.
+    // 🔴 `network` IS THE WEAKEST CODE, AND ORDER HAD TO LEARN THAT. It says one thing — this path
+    // never got an answer. If the OTHER path DID get one, that observation is strictly better, and
+    // returning "could not connect" instead would throw away a verified HTTP status. Adding the
+    // network split without this made exactly that regression; the guard caught it.
+    // 🪤 "NAMES A DIAGNOSIS" IS NARROWER THAN "STARTS WITH err_", AND THE FIRST CUT GOT IT WRONG.
+    // The tab path can throw the CATCH-ALL itself — Gemini's `parseBatchExecuteResponse` does it for
+    // a 200 whose RPC envelope is unreadable — and letting that outrank `network` trades an
+    // actionable observation for the bucket we are trying to empty. Codex reproduced it (배포차단).
+    // Only a code that says what the provider actually ANSWERED beats "we never reached them".
+    const tabMsg = tabError ? tabError.message : '';
+    const tabNamesDiagnosis = tabMsg.indexOf('err_') === 0 && tabMsg !== 'err_gemini_collect_failed';
+    if (credError.message === 'err_gemini_network' && tabNamesDiagnosis) {
+      throw tabError;
+    }
+    // Otherwise a fallback-path code is the most specific thing either path produced.
     if (credError.message.startsWith('err_')) {
       throw credError;
     }
     // Only now — with BOTH paths spent — may the tab path's fault be reported.
-    if (tabError) {
-      // 🔴 NOTHING IS PARSED OUT OF THE TAB ERROR — the tab path MINTS its own code from the
-      // status it verified, so if it had one we already rethrew it above. What is left here is a
-      // tab fault with no status at all (a JS error out of the MAIN-world script), and the only
-      // honest thing to say about it is that the tab was tried and could not be read.
-      if (tabError.message.startsWith('err_')) throw tabError;
-      throw new Error('err_gemini_fallback_exhausted');
-    }
+    // 🔑 A STATUS THE FALLBACK ACTUALLY OBSERVED BEATS "neither path named itself". This was
+    // reachable only when there was no tab, so a statusless tab fault plus a fallback HTTP 500
+    // reported `fallback_exhausted` and threw the 500 away (Codex 후속). The tab's own code still
+    // wins first — it talked to the provider through the more reliable path.
     const status = geminiHttpStatus(credError.message);
+    if (tabError) {
+      if (tabMsg.indexOf('err_') === 0) throw tabError;
+      throw new Error(status ? `err_gemini_http:${status}` : 'err_gemini_fallback_exhausted');
+    }
     // No tab was open, so `collect_failed`'s "open a tab" copy is TRUE here.
     throw new Error(status ? `err_gemini_http:${status}` : 'err_gemini_collect_failed');
   }
@@ -178,10 +202,18 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
 // No need for chrome.cookies API or *.google.com host_permissions.
 async function fetchGeminiWithCredentials(rpcId, params) {
   // Step 1: Fetch page HTML to extract AT token (SNlM0e)
-  const pageResp = await fetch(`${GEMINI_API_BASE}/app`, {
-    credentials: 'include',
-    cache: 'no-store',
-  });
+  // 🔴 Same split as the ChatGPT twin: a REJECTED fetch never got an answer and is not the same
+  // thing as "collection failed". See the note in bg/api-chatgpt.js.
+  let pageResp;
+  try {
+    pageResp = await fetch(`${GEMINI_API_BASE}/app`, {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+  } catch (e) {
+    console.debug(`[Claude Tuner] Gemini page fetch rejected: ${e && e.message}`);
+    throw new Error('err_gemini_network');
+  }
 
   if (pageResp.redirected && (pageResp.url.includes('accounts.google') || pageResp.url.includes('signin'))) {
     throw new Error('err_gemini_not_logged_in');
@@ -207,16 +239,22 @@ async function fetchGeminiWithCredentials(rpcId, params) {
   const body = `f.req=${encodeURIComponent(innerReq)}&at=${encodeURIComponent(atToken)}&`;
   const url = `${GEMINI_API_BASE}/_/BardChatUi/data/batchexecute?rpcids=${rpcId}&source-path=%2Fusage&rt=c`;
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      'X-Same-Domain': '1',
-    },
-    body,
-    cache: 'no-store',
-  });
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-Same-Domain': '1',
+      },
+      body,
+      cache: 'no-store',
+    });
+  } catch (e) {
+    console.debug(`[Claude Tuner] Gemini rpc fetch rejected: ${e && e.message}`);
+    throw new Error('err_gemini_network');
+  }
 
   if (!resp.ok) {
     if (resp.status === 403) throw new Error('err_gemini_cloudflare');

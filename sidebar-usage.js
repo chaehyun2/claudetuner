@@ -72,6 +72,10 @@
       peak: 'PEAK',
       no_data: '데이터 수집 중...',
       no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
+      // 🪤 `no_usage`와 다른 말이다. 저건 「Claude가 안 준다」는 주장이고, 이건 「우리가 못 그렸다」다.
+      // stale 코어에서 지출 막대를 접으면 Claude는 데이터를 준 것이므로 no_usage는 거짓이 된다
+      // (문의 #198이 바로 그 형태였다). 새로고침은 콘텐트 스크립트를 다시 주입해 stale 코어를 고친다.
+      cant_show: '사용량을 표시하지 못했습니다. 페이지를 새로고침해 주세요',
       soon: '곧 리셋',
       pred_tip: '리셋 시 예상 사용률',
       dashboard: '대시보드 열기',
@@ -92,6 +96,7 @@
       peak: 'PEAK',
       no_data: 'Collecting data...',
       no_usage: "Claude isn't providing usage for this account",
+      cant_show: "Couldn't display usage. Try refreshing the page",
       soon: 'Resetting soon',
       pred_tip: 'Estimated usage at reset',
       dashboard: 'Open dashboard',
@@ -502,6 +507,15 @@
     }
 
     const frag = document.createDocumentFragment();
+    // 🔴 COUNTED, BECAUSE "THE PANEL SAID NOTHING" IS ITS OWN FAILURE. Every row below is
+    // conditional, and the payload's `noUsage` flag — which is what the branch above keys on — is
+    // computed by the SERVICE WORKER (bg/sidebar-usage.js), which has no CORE and therefore always
+    // believes the spend bar is drawable. When a stale core makes `extraGaugeDrawn` return false
+    // and the windows are withheld, the builder says "there is something to show", this function
+    // shows none of it, and nothing explains the gap: the user gets a plan name and two buttons.
+    // Shipped that way in v1.29.74 (#1415). The builder cannot know what the renderer lost, so the
+    // renderer keeps its own count.
+    let usageRows = 0;
 
     // 5h gauge
     if (_data.h5 != null) {
@@ -509,16 +523,50 @@
       // t('session') today — wired anyway so the rule is uniform and a future Claude span is not a
       // second change in a third place.
       frag.appendChild(buildLimitRow('5h', windowLabel(_data.w5s, t('session')), _data.h5, _data.r5, _data.pred5h));
+      usageRows++;
     }
 
     // 7d gauge
     if (_data.d7 != null) {
       frag.appendChild(buildLimitRow('7d', windowLabel(_data.w7s, t('weekly')), _data.d7, _data.r7, _data.pred7d));
+      usageRows++;
     }
 
     // Extra usage
     if (extraGaugeDrawn(_data)) {
       frag.appendChild(buildExtraUsageRow(_data.eu, _data.el));
+      usageRows++;
+    }
+
+    // 🔴 THE INVARIANT, AND IT IS NARROW ON PURPOSE: when OUR OWN capability is what went missing,
+    // say so. Not "the usage area is empty" — "we could not draw what we were given".
+    //
+    // 🪤 THE FIRST CUT FIRED ON `!usageRows` ALONE AND THAT WAS THE #967 DEFECT AGAIN. Reaching
+    // zero rows with a COMPLETE core is ordinary: no windows and no spend, spend disabled, a zero
+    // limit. Worse, `bg/collect.js`'s skipped-poll cache path restores empty windows WITHOUT
+    // `noUsage` (it defaults to false), so a genuinely withheld account lands here — and telling
+    // that user to refresh the page recommends the one thing that cannot undo provider withholding.
+    // Codex reproduced it through the real builder. A message that is right for one branch and
+    // wrong for three is not an improvement.
+    //
+    // 🔑 `CORE && CORE.extraGaugeDrawn` IS A CAPABILITY CHECK, NOT A COPY OF THE RULE. It asks
+    // "could the core answer at all", which is exactly the difference between "the answer was no"
+    // and "there was no answer" — and it restates nothing, so it cannot drift the way a
+    // hand-written predicate would.
+    //
+    // 🪤 NOT `t('no_usage')` either, in any branch. That sentence claims a CAUSE — "Claude isn't
+    // providing usage for this account" — and here Claude did provide it. That false-claim shape is
+    // what inquiry #198 was.
+    //
+    // The complete-core zero-row case is deliberately left exactly as it was (silent). It is the
+    // pre-existing gap in #1415 ①: the payload carries one panel's answer, so the renderer cannot
+    // tell "withheld" from "not collected yet" and any sentence picked here would be a guess.
+    const coreAnsweredSpend = !!(CORE && CORE.extraGaugeDrawn);
+    if (!usageRows && !coreAnsweredSpend) {
+      const gap = document.createElement('div');
+      gap.className = 'ct-sb-message text-text-500';
+      gap.textContent = t('cant_show');
+      frag.appendChild(gap);
     }
 
     // Footer: plan + peak + action buttons

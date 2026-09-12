@@ -558,6 +558,10 @@ const TRANSLATIONS = {
     // 열라고 시키면 안 된다 — err_gemini_no_at_token에서 고친 것과 같은 #967 형태다.
     // 2026-09-11 문의(wonkyung@backpac.kr): 로그인된 chatgpt.com 탭을 띄워둔 화면에서
     // 「chatgpt.com 탭을 열고 다시 시도해 주세요」를 계속 읽고 있었다.
+    // 🪤 「거절」이 아니라 「닿지 못함」이다. 요청이 응답을 아예 못 받은 경우 — 오프라인·DNS·
+    // 보안 프로그램·프록시·다른 확장의 차단. 종전엔 전부 catch-all로 들어가 「탭을 열라」는
+    // 안내를 받았는데, 탭은 이것과 아무 상관이 없다.
+    'err_chatgpt_network': 'ChatGPT에 연결하지 못했습니다. 네트워크나 보안 프로그램(VPN·방화벽·다른 확장)을 확인해 주세요.',
     'err_chatgpt_http': 'ChatGPT가 사용량 요청을 거절했습니다 ({0}). 잠시 후 자동으로 다시 시도합니다.',
     'err_chatgpt_fallback_exhausted': 'chatgpt.com 탭은 열려 있는데 사용량을 읽지 못했습니다. 탭을 새로고침하거나 다시 로그인해 주세요.',
     // 🔑 남은 자리: 탭이 하나도 안 열려 있었던 경우. 그래서 이 문장은 여기서는 참이다.
@@ -576,6 +580,7 @@ const TRANSLATIONS = {
     // 🔴 ChatGPT 쌍둥이(#1417)와 같은 이유로 분리. 이 두 코드는 「탭이 이미 열려 있었다」가
     // 전제라(bg/api-gemini.js) 문구가 탭을 열라고 시키면 안 된다 — 바로 위 no_at_token 주석의
     // #967과 같은 형태다. 직전 8일 `err_gemini_collect_failed`는 2,789 install-day였다.
+    'err_gemini_network': 'Gemini에 연결하지 못했습니다. 네트워크나 보안 프로그램(VPN·방화벽·다른 확장)을 확인해 주세요.',
     'err_gemini_http': 'Gemini가 사용량 요청을 거절했습니다 ({0}). 잠시 후 자동으로 다시 시도합니다.',
     'err_gemini_fallback_exhausted': 'gemini.google.com 탭은 열려 있는데 사용량을 읽지 못했습니다. 탭을 새로고침하거나 다시 로그인해 주세요.',
     // 🔑 남은 자리: 탭이 하나도 안 열려 있었거나, 응답은 왔는데 RPC 봉투를 못 읽은 경우.
@@ -1200,6 +1205,7 @@ const TRANSLATIONS = {
     'err_chatgpt_no_cookies': "Couldn't read ChatGPT cookies. Keeping a chatgpt.com tab open fixes this.",
     'err_chatgpt_rate_limit': 'ChatGPT rate limited. Will retry automatically.',
     'err_chatgpt_session_expired': 'Your ChatGPT session expired. Please sign in again at chatgpt.com.',
+    'err_chatgpt_network': "Couldn't reach ChatGPT. Check your network or security software (VPN, firewall, another extension).",
     'err_chatgpt_http': 'ChatGPT refused the usage request ({0}). We will retry automatically.',
     'err_chatgpt_fallback_exhausted': 'A chatgpt.com tab is open but its usage could not be read. Refresh the tab or sign in again.',
     'err_chatgpt_collect_failed': "Couldn't fetch ChatGPT usage. Open a chatgpt.com tab and try again.",
@@ -1210,6 +1216,7 @@ const TRANSLATIONS = {
     'err_gemini_page_fetch': "Couldn't load the Gemini page. Open a gemini.google.com tab and try again.",
     'err_gemini_rate_limit': 'Gemini rate limited. Will retry automatically.',
     'err_gemini_session_expired': 'Your Gemini session expired. Please sign in again at gemini.google.com.',
+    'err_gemini_network': "Couldn't reach Gemini. Check your network or security software (VPN, firewall, another extension).",
     'err_gemini_http': 'Gemini refused the usage request ({0}). We will retry automatically.',
     'err_gemini_fallback_exhausted': 'A gemini.google.com tab is open but its usage could not be read. Refresh the tab or sign in again.',
     'err_gemini_collect_failed': "Couldn't fetch Gemini usage. Open a gemini.google.com tab and try again.",

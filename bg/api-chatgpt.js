@@ -18,7 +18,17 @@ export async function fetchChatGPTApi(path, options = {}) {
   const fullUrl = `${CHATGPT_API_BASE}${path}`;
 
   // Primary: tab-based (most reliable — runs in page context with full auth)
-  const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+  // 🪤 A REJECTION HERE IS NOT "our collection logic threw". `chrome.tabs.query` can reject, and it
+  // sits OUTSIDE every code-minting path — the raw message escaped to the collector, whose new
+  // `unclassified` rule reads "no err_ prefix" as "our own logic". That would be wrong: this is the
+  // browser-access layer. (Codex 후속.) Treating it as "no tab" is also the more robust reading —
+  // the fallback path does not need the tab list to run.
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+  } catch (e) {
+    console.debug(`[Claude Tuner] chatgpt tabs.query rejected: ${e && e.message}`);
+  }
   // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This used to be `tabErrorMsg`, assigned on
   // all three branches and read only by the console.warn below — so every tab-path failure was
   // discarded and the throw at the bottom said `collect_failed` no matter what had happened. That
@@ -42,21 +52,35 @@ export async function fetchChatGPTApi(path, options = {}) {
   try {
     return await fetchChatGPTWithCookies(fullUrl);
   } catch (cookieError) {
-    // Unchanged and FIRST: a cookie-path code is the most specific thing either path produced.
+    // 🔴 `network` IS THE WEAKEST CODE, AND ORDER HAD TO LEARN THAT. It says one thing — this path
+    // never got an answer. If the OTHER path DID get one, that observation is strictly better, and
+    // returning "could not connect" instead would throw away a verified HTTP status. Adding the
+    // network split without this made exactly that regression; the guard caught it.
+    // 🪤 "NAMES A DIAGNOSIS" IS NARROWER THAN "STARTS WITH err_", AND THE FIRST CUT GOT IT WRONG.
+    // The tab path can throw the CATCH-ALL itself — Gemini's `parseBatchExecuteResponse` does it for
+    // a 200 whose RPC envelope is unreadable — and letting that outrank `network` trades an
+    // actionable observation for the bucket we are trying to empty. Codex reproduced it (배포차단).
+    // Only a code that says what the provider actually ANSWERED beats "we never reached them".
+    const tabMsg = tabError ? tabError.message : '';
+    const tabNamesDiagnosis = tabMsg.indexOf('err_') === 0 && tabMsg !== 'err_chatgpt_collect_failed';
+    if (cookieError.message === 'err_chatgpt_network' && tabNamesDiagnosis) {
+      throw tabError;
+    }
+    // Otherwise a fallback-path code is the most specific thing either path produced.
     if (cookieError.message.startsWith('err_')) {
       throw cookieError;
     }
     // Only now — with BOTH paths spent — may the tab path's fault be reported. Consulting it any
     // earlier would change which error wins on a request the cookie path went on to answer.
-    if (tabError) {
-      // 🔴 NOTHING IS PARSED OUT OF THE TAB ERROR — the tab path MINTS its own code from the
-      // status it verified, so if it had one we already rethrew it above. What is left here is a
-      // tab fault with no status at all (a JS error out of the MAIN-world script), and the only
-      // honest thing to say about it is that the tab was tried and could not be read.
-      if (tabError.message.startsWith('err_')) throw tabError;
-      throw new Error('err_chatgpt_fallback_exhausted');
-    }
+    // 🔑 A STATUS THE FALLBACK ACTUALLY OBSERVED BEATS "neither path named itself". This was
+    // reachable only when there was no tab, so a statusless tab fault plus a fallback HTTP 500
+    // reported `fallback_exhausted` and threw the 500 away (Codex 후속). The tab's own code still
+    // wins first — it talked to the provider through the more reliable path.
     const status = chatgptHttpStatus(cookieError.message);
+    if (tabError) {
+      if (tabMsg.indexOf('err_') === 0) throw tabError;
+      throw new Error(status ? `err_chatgpt_http:${status}` : 'err_chatgpt_fallback_exhausted');
+    }
     // No tab was open, so `collect_failed`'s "open a chatgpt.com tab" copy is TRUE here. That
     // narrowing is the point: the sentence stays, and the population it is said to shrinks to the
     // one it fits.
@@ -162,10 +186,29 @@ async function fetchChatGPTWithCookies(url) {
   };
 
   // Step 1: Get Bearer token via session endpoint
-  const sessionResp = await fetch(`${CHATGPT_API_BASE}/api/auth/session`, {
-    headers: { ...commonHeaders, 'Accept': 'application/json' },
-    cache: 'no-store',
-  });
+  //
+  // 🔴 A REJECTED FETCH IS ITS OWN FAILURE, NOT "collection failed". `fetch` rejects when the
+  // request got no answer — offline, DNS, TLS, a proxy or security product refusing the connection,
+  // another extension cancelling it.
+  // 🪤 NOT ONLY CONNECTIVITY, which is why the copy is worded as troubleshooting rather than as a
+  // diagnosis: `fetch` also rejects on invalid request options — a malformed Authorization header
+  // built from a bad `accessToken` is refused before anything is sent (Codex 후속). "Check your
+  // network or security software" is a reasonable first thing to try; it is not a claim about cause.
+  // That message does not start with `err_`, so it
+  // fell through every mapping below and became the catch-all. Measured 2026-09-12: 365 accounts on
+  // v1.29.74 had `err_chatgpt_collect_failed` as their ONLY signal, none of them with a single
+  // successful ChatGPT snapshot — this is the largest candidate for that mass. Claude already
+  // splits it (`err_claude_network`, bg/api.js:184); ChatGPT did not. (#1415-adjacent, #1417 계열)
+  let sessionResp;
+  try {
+    sessionResp = await fetch(`${CHATGPT_API_BASE}/api/auth/session`, {
+      headers: { ...commonHeaders, 'Accept': 'application/json' },
+      cache: 'no-store',
+    });
+  } catch (e) {
+    console.debug(`[Claude Tuner] ChatGPT cookie session fetch rejected: ${e && e.message}`);
+    throw new Error('err_chatgpt_network');
+  }
   if (!sessionResp.ok) {
     if (sessionResp.status === 403) throw new Error('err_chatgpt_cloudflare');
     throw new Error('err_chatgpt_session_expired');
@@ -176,14 +219,20 @@ async function fetchChatGPTWithCookies(url) {
   }
 
   // Step 2: Call actual API with Bearer token
-  const resp = await fetch(url, {
-    headers: {
-      ...commonHeaders,
-      'Authorization': 'Bearer ' + session.accessToken,
-      'Accept': 'application/json',
-    },
-    cache: 'no-store',
-  });
+  let resp;
+  try {
+    resp = await fetch(url, {
+      headers: {
+        ...commonHeaders,
+        'Authorization': 'Bearer ' + session.accessToken,
+        'Accept': 'application/json',
+      },
+      cache: 'no-store',
+    });
+  } catch (e) {
+    console.debug(`[Claude Tuner] ChatGPT cookie api fetch rejected: ${e && e.message}`);
+    throw new Error('err_chatgpt_network');
+  }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');

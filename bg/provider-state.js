@@ -84,6 +84,7 @@ export const PROVIDER_ERROR_CODES = {
     // Claude. `collect_failed` was not merely vague — its copy prescribed "open a chatgpt.com tab",
     // and the two commonest ways to reach it BOTH require a tab to have been open and tried. These
     // two name that, so the sentence the user is shown can be true.
+    'err_chatgpt_network',          // the fetch itself never got an answer
     'err_chatgpt_http',            // provider answered a status we do not map; carries it
     'err_chatgpt_fallback_exhausted', // tab AND cookie both failed, neither with a code
     'err_chatgpt_collect_failed',  // the residual: no tab was open and nothing named itself
@@ -99,6 +100,7 @@ export const PROVIDER_ERROR_CODES = {
     // The ChatGPT split (#1417) applied to its twin (#1418). Same two suffixes on purpose: the web
     // copy and PROVIDER_ERROR_ACTIONABLE are keyed by SUFFIX, so reusing them means the dashboard
     // already knows how to word these and no third place has to learn a Gemini-specific vocabulary.
+    'err_gemini_network',          // the fetch itself never got an answer
     'err_gemini_http',             // provider answered a status we do not map; carries it
     'err_gemini_fallback_exhausted', // tab AND SW-credentials both failed, neither with a code
     'err_gemini_collect_failed',   // the residual: no tab was open, or the RPC envelope was unreadable
@@ -139,6 +141,9 @@ export const PROVIDER_STATUS_BEARING = ['auth_failed', 'http', 'page_fetch'];
 export const PROVIDER_ERROR_ACTIONABLE = [
   'not_logged_in', 'session_expired', 'auth_failed',   // sign in again
   'cloudflare', 'no_cookies', 'no_at_token', 'page_fetch', 'collect_failed',   // open a tab there
+  // 🔴 `network` is deliberately absent, for `rate_limit`'s reason: the request never reached the
+  // provider, so there is nothing at that site to click. The fix is on the user's machine or
+  // network, and a button labelled "Open ChatGPT" would point away from it.
   // The tab was open and unreadable, so the trip is to SIGN IN AGAIN, not to open one. Same list
   // because the destination is the same; the copy is what differs.
   'fallback_exhausted',
