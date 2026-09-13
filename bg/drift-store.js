@@ -22,6 +22,7 @@
 import {
   mergeDriftEvent, drainDriftBuffer, noteDriftAttempt,
   shouldFlushDrift, flushWindowSeconds, nextDriftState, DRIFT_EVENT_TTL_MS, purgeExpired,
+  noteDriftTotal, driftTotalsDue,
   normalizeDriftPlan,
 } from './drift-obs.js';
 
@@ -56,12 +57,121 @@ async function read() {
   return {
     events: Array.isArray(stored?.events) ? stored.events : [],
     counters: stored?.counters && typeof stored.counters === 'object' ? stored.counters : {},
+    // Cumulative lifetime counters, never drained — see noteDriftTotal. Deliberately a SEPARATE
+    // map from `counters`: mixing a drained rate and a lifetime total in one record is how the
+    // first attempt at this ended up clearing one while meaning the other.
+    totals: stored?.totals && typeof stored.totals === 'object' ? stored.totals : {},
     state: stored?.state && typeof stored.state === 'object' ? stored.state : {},
   };
 }
 
 async function write(rec) {
   await chrome.storage.local.set({ [KEY]: rec });
+}
+
+/**
+ * Serialize every read-modify-write of this record.
+ *
+ * 🔴 EVERY WRITE HERE REPLACES THE WHOLE RECORD, so two overlapping read→modify→write cycles lose
+ * whatever the loser read stale — and review reproduced it without artificial delays: an attempt
+ * recorded while a rider's commit was in flight was written, then overwritten back to its old value
+ * by the commit's stale copy. A provider's FIRST attempt could be erased outright, and two
+ * concurrent `noteDriftOutcome` calls could lose one provider's entry entirely.
+ *
+ * 🪤 THIS IS NOT NEW, AND THAT IS THE POINT — it predates the cumulative totals and applies just as
+ * much to `counters` and `events`. Scheduled collection is sequential, but Gemini's tab-triggered
+ * collection has its own guard (bg/providers.js) and can overlap another provider's cycle, and the
+ * heartbeat commit is a third writer. Making the totals immune to CLEARING did not make the record
+ * immune to REPLACEMENT; the first redesign confused the two.
+ *
+ * A promise chain is enough — one service worker, so this module is the only writer. Mirrors
+ * `patch()` in bg/provider-state.js, which exists for exactly this failure on a different key.
+ * 🔴 The chain must survive a rejection, or one failed transaction deadlocks every later one.
+ */
+let _txChain = Promise.resolve();
+/**
+ * 🔴 THE CHAIN IS BOUNDED, THE OPERATION IS NOT.
+ *
+ * A rejection releases the chain; a promise that NEVER SETTLES does not. `chrome.storage` can hang
+ * — and with every collector now queueing here, one hung write would block every later observation
+ * for the whole service-worker lifetime, including the snapshot riders' commits. That trades an
+ * occasional lost increment for total silence, which is the wrong direction for a module whose
+ * entire job is not going silent.
+ *
+ * So the SUCCESSOR waits at most this long. The caller still awaits its own transaction — only the
+ * queue moves on. 🪤 The cost is honest: if a stalled transaction later completes it can write over
+ * the one that went ahead, which is the very race this chain exists to prevent. That race is
+ * bounded to the pathological case; blocking forever is not bounded to anything.
+ */
+const TX_CHAIN_MAX_WAIT_MS = 10_000;
+function tx(fn) {
+  const run = async () => {
+    const rec = await read();
+    return fn(rec);
+  };
+  const next = _txChain.then(run, run);
+  _txChain = Promise.race([
+    next.then(() => {}, () => {}),
+    new Promise((resolve) => setTimeout(resolve, TX_CHAIN_MAX_WAIT_MS)),
+  ]);
+  return next;
+}
+
+/**
+ * The cumulative totals due to ride along, excluding `carrier` (pass null to exclude nothing).
+ *
+ * 🔴 ONE IMPLEMENTATION FOR BOTH RIDERS. The snapshot rider and the heartbeat rider both carry
+ * these, and the heartbeat is the one that reaches the population with no successful snapshot at
+ * all — so a second spelling here would be a rule that gets fixed once and stays broken in the
+ * carrier that matters. `stampTotalsSent` is its mandatory partner: what is reported must be what
+ * is stamped, or the throttle drifts from the report.
+ */
+/** Age of the last attempt, never trusting a stamp from the future — see the call site. */
+function totalsAge(t, now) {
+  const last = typeof t.lastAt === 'number' && t.lastAt <= now ? t.lastAt : t.since;
+  return Math.max(0, Math.round((now - last) / 1000));
+}
+
+function dueTotals(rec, carrier, now) {
+  const out = [];
+  for (const [p, t] of Object.entries(rec.totals || {})) {
+    if (p === carrier || !driftTotalsDue(t, now)) continue;
+    out.push({
+      provider: p,
+      attempts: t.attempts,
+      successes: t.successes,
+      parse_fails: t.parse_fails,
+      // Seconds since the FIRST observed attempt — the span these cumulative counts cover.
+      // 🔴 Not the envelope's `flush_window_seconds`, which belongs to a different provider and a
+      // different quantity. A reader must divide by this, or not divide at all.
+      since_seconds: Math.max(0, Math.round((now - t.since) / 1000)),
+      // 🔑 How long ago the LAST attempt was. Without it a cumulative count cannot distinguish
+      // "still failing every cycle" from "ran once months ago and stopped" — both report the same
+      // totals forever, and after saturation they are literally identical. Review raised this as
+      // the limit of a max()-only reading; this is the field that answers it.
+      // 🪤 `Math.max(0, …)` alone made a FUTURE `lastAt` read as age zero — an old observation
+      // looking brand new, which is the opposite of what a recency field is for. A future stamp
+      // means the clock moved, not that the collector just ran: fall back to `since`, which is the
+      // oldest thing we know, so the answer degrades toward "stale" rather than toward "fresh".
+      last_seconds: totalsAge(t, now),
+      ...(t.capped ? { capped: true } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Mark the reported totals as sent — the ONLY mutation a commit makes to them.
+ *
+ * 🔴 Re-reads each record from the record being written (`fresh`), never from a copy captured at
+ * build time: an attempt recorded between build and commit must survive. Spreading a stale copy is
+ * exactly the loss review reproduced, and the serialized `tx` is what makes `fresh` current.
+ */
+function stampTotalsSent(fresh, reported, now) {
+  for (const r of reported) {
+    const prev = fresh.totals[r.provider];
+    if (prev) fresh.totals[r.provider] = { ...prev, sentAt: now };
+  }
 }
 
 /**
@@ -79,10 +189,16 @@ export async function noteDriftOutcome(provider, outcome, event, now = Date.now(
   return safe(() => noteDriftOutcomeImpl(provider, outcome, event, now), undefined);
 }
 async function noteDriftOutcomeImpl(provider, outcome, event, now) {
-  const rec = await read();
-  rec.counters[provider] = noteDriftAttempt(rec.counters[provider], outcome);
-  if (event) rec.events = mergeDriftEvent(rec.events, { provider, ...event }, now);
-  await write(rec);
+  return tx(async (rec) => {
+    rec.counters[provider] = noteDriftAttempt(rec.counters[provider], outcome);
+  // 🔴 The cumulative twin, updated on the SAME call so the two can never disagree about whether an
+  // attempt happened. This is the only place an attempt is observed, which is why the `since`
+  // anchor belongs here — it must exist before the first flush, and for the population this feature
+  // is about there is never a first flush.
+    rec.totals[provider] = noteDriftTotal(rec.totals[provider], outcome, now);
+    if (event) rec.events = mergeDriftEvent(rec.events, { provider, ...event }, now);
+    await write(rec);
+  });
 }
 
 /**
@@ -147,6 +263,35 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
   // questions and conflating them is what caused the hole.
   const counters = rec.counters[provider] || { attempts: 0, successes: 0, parse_fails: 0, capped: false };
 
+  // 🔴 THE SAME HOLE AS THE EVENTS ABOVE, ONE FIELD OVER — and this one stayed open (#1430).
+  //
+  // The paragraph above widened EVENTS to every provider because "the only carrier for a Gemini
+  // event was a Gemini SNAPSHOT, and a Gemini that fails never produces one". The counters below
+  // are per-carrier for a stated reason: they are RATES, cleared each flush so the next report
+  // divides fresh counts by a fresh window. A provider that never succeeds never flushes, so its
+  // rate was never reported — and "the collector ran and bailed" and "it never ran" were the same
+  // silence. Measured 2026-09-13 on live AE: of 2,226 accounts sending ANY snapshot on ext
+  // 1.29.75, **1,322 (59%) produced no ChatGPT signal at all**.
+  //
+  // 🔴 WHAT RIDES HERE IS A DIFFERENT QUANTITY, NOT A WIDENED RATE, and that distinction is what
+  // makes it safe. The first attempt carried the DRAINED counters with a per-entry window, and
+  // review reproduced two failures in it that are inherent to draining something this rider does
+  // not own: a LOSS (the carrier's commit zeroed increments recorded after the rider was built)
+  // and a DUPLICATION (two carriers reporting the same window). Both stop being expressible here:
+  //
+  //   nothing is cleared   → no increment can be destroyed by another provider's commit
+  //   value is cumulative  → two carriers carry the SAME snapshot, so the reader takes the MAX per
+  //                          (install, provider). A duplicate is a copy, not a double count.
+  //   `since` is anchored  → at the first attempt ever observed, not at the first flush. The
+  //                          earlier design read the flush anchor, which does not exist until a
+  //                          flush happens — so the never-succeeding provider, the whole point of
+  //                          the feature, reported a zero-length window.
+  //
+  // 🔑 Throttled (DRIFT_TOTALS_MIN_INTERVAL_MS), which is safe for the same reason: a skipped
+  // report loses nothing, because the next one carries everything. The drained design had no such
+  // freedom and measured 48–144 extra AE rows per install per day; this is ≤4 per provider per day.
+  const otherTotals = dueTotals(rec, provider, now);
+
   const rider = {
     obs_provider: provider,
     // 🔴 The axis the signature MUST be cut by. Free and Go legitimately report a 30-day window
@@ -175,14 +320,29 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
       ...(shape.unknownWithheld ? { unknown_keys_withheld: shape.unknownWithheld } : {}),
     } : {}),
     ...(drained.events.length ? { drift_events: drained.events } : {}),
+    ...(otherTotals.length ? { other_totals: otherTotals } : {}),
   };
 
-  const commit = async () => safe(async () => {
-    const fresh = await read();
+  // 🔴 The commit runs INSIDE the same serialized chain as every other writer, re-reading under the
+  // lock rather than spreading a copy captured at build time. Without that, an attempt recorded
+  // between build and commit is written and then reverted by this write (reproduced in review).
+  const commit = async () => safe(() => tx(async (fresh) => {
     fresh.state[provider] = nextDriftState(sig, now);
     // Counters restart with the window they are divided by, or the next report's rate is computed
     // over the wrong span.
     fresh.counters[provider] = { attempts: 0, successes: 0, parse_fails: 0, capped: false };
+    // 🔴 THE CARRIED TOTALS ARE NOT CLEARED — ONLY STAMPED AS SENT.
+    //
+    // This is the line the whole redesign turns on. Clearing another provider's counters from this
+    // provider's commit is what produced the loss and the duplication review found: the rider does
+    // not own them, and between build and commit they keep moving. A cumulative value needs no
+    // clearing, so there is nothing to race over. `sentAt` only throttles the NEXT report, and
+    // getting it wrong costs one redundant copy of a value that is idempotent by construction —
+    // never a lost increment.
+    //
+    // 🪤 `since` and the counts are untouched here on purpose. Advancing either would turn this
+    // back into a drained counter wearing a cumulative name.
+    stampTotalsSent(fresh, otherTotals, now);
     // Clear exactly what shipped — keyed on the full identity INCLUDING the provider, so an event
     // that arrived after the rider was built is not swept out unreported. Expired entries are
     // purged in the same pass: leaving them costs a buffer slot and, worse, gave a recurring
@@ -192,7 +352,7 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
       (e) => !reported.has(`${e.provider}|${e.stage}|${e.code}|${e.sig}`),
     );
     await write(fresh);
-  }, undefined);
+  }), undefined);
   return { rider, commit };
 }
 
@@ -204,10 +364,24 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
  * heartbeat fires on the Claude failure path regardless of which provider broke, so draining ALL
  * providers' events here reaches installs a per-provider rider cannot.
  *
- * Events name their own provider, so widening the carrier does not blur attribution. Counters are
- * deliberately NOT included: they are per-provider rates that belong with that provider's flush
- * window, and mixing them into a carrier with a different cadence would make the window field —
- * the thing that makes them divisible at all — mean nothing.
+ * Events name their own provider, so widening the carrier does not blur attribution. The windowed
+ * COUNTERS are still excluded, and the reason is unchanged: they are per-provider rates belonging to
+ * that provider's flush window, and mixing them into a carrier with a different cadence would make
+ * the window field — the thing that makes them divisible at all — mean nothing.
+ *
+ * 🔴 CUMULATIVE TOTALS *ARE* CARRIED HERE, AND THIS IS THE CARRIER THAT MATTERS MOST (#1430).
+ * An install whose provider only ever fails produces no snapshot, so the snapshot rider never runs
+ * for it — which is precisely the population the totals exist to make visible. Leaving them off
+ * this carrier reproduced the original hole one layer up: review found an install that sends
+ * failure heartbeats but no successful snapshots stays invisible indefinitely.
+ *
+ * Totals are immune to the objection that excludes counters: they are not a rate over the carrier's
+ * window, they are a lifetime count with their own `since` anchor, so which request carries them
+ * changes nothing about how they are read. Nothing is drained, so a heartbeat and a snapshot rider
+ * carrying the same totals is a duplicate SNAPSHOT, not a split of one measurement.
+ *
+ * 🔑 This adds no new send: the heartbeat already goes out on the Claude failure path. Its
+ * `accountCache?.email` gate is NOT widened (that is forbidden, #758) — the residual below stands.
  *
  * 🔴 It does not close the hole entirely, and the residual is documented rather than papered over:
  * the heartbeat is itself gated on `accountCache?.email`, so an install with no Claude account AND
@@ -219,20 +393,28 @@ export async function buildDriftEventsRider(now = Date.now()) {
 async function buildDriftEventsRiderImpl(now) {
   const rec = await read();
   const drained = drainDriftBuffer(rec.events, now);
-  if (!drained.events.length && !drained.dropped) return { rider: null, commit: async () => {} };
+  // 🔴 EVERY provider here — there is no carrier to exclude. `obs_provider` is 'all'.
+  const totals = dueTotals(rec, null, now);
+  // 🔴 Totals alone are enough to send. Gating on events would leave out exactly the install this
+  // carrier was extended for: one whose only signal is a counter-only precheck failure, which
+  // produces no event at all.
+  if (!drained.events.length && !drained.dropped && !totals.length) {
+    return { rider: null, commit: async () => {} };
+  }
   const rider = {
     obs_provider: 'all',
     flush_reason: 'heartbeat',
     ...(drained.dropped ? { events_dropped: drained.dropped } : {}),
     ...(drained.events.length ? { drift_events: drained.events } : {}),
+    ...(totals.length ? { other_totals: totals } : {}),
   };
-  const commit = async () => safe(async () => {
-    const fresh = await read();
+  const commit = async () => safe(() => tx(async (fresh) => {
     const reported = new Set(drained.events.map((e) => `${e.provider}|${e.stage}|${e.code}|${e.sig}`));
     fresh.events = purgeExpired(fresh.events, now).filter(
       (e) => !reported.has(`${e.provider}|${e.stage}|${e.code}|${e.sig}`),
     );
+    stampTotalsSent(fresh, totals, now);
     await write(fresh);
-  }, undefined);
+  }), undefined);
   return { rider, commit };
 }

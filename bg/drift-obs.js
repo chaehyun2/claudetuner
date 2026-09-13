@@ -617,6 +617,87 @@ export function noteDriftAttempt(counters, outcome) {
   return next;
 }
 
+/**
+ * CUMULATIVE lifetime counters for a provider — never reset, never drained.
+ *
+ * 🔴 A SEPARATE QUANTITY FROM `noteDriftAttempt`, AND THE DIFFERENCE IS THE WHOLE POINT (#1430).
+ * Those counters are a RATE: they are cleared on every flush so the next report divides fresh
+ * counts by a fresh window. That works only for a provider that FLUSHES — i.e. one that succeeds.
+ * A provider that never succeeds has no rider of its own, so its rate was never reported at all,
+ * and "the collector ran and bailed" was indistinguishable from "it never ran".
+ *
+ * These are the answer to that, and they are cumulative ON PURPOSE:
+ *
+ *   no clearing  → nothing can be LOST by another provider's commit, and nothing can be
+ *                  DOUBLE-COUNTED by two carriers reporting the same window. Two riders carrying
+ *                  this value carry the SAME cumulative snapshot, and the reader takes the MAX per
+ *                  (install, provider) rather than a sum. Both failure modes stop being possible
+ *                  rather than being defended against — the first design tried to defend, and
+ *                  review reproduced a loss AND a duplication in it.
+ *   `since`      → anchored the first time the provider is observed AT ALL, not at first flush.
+ *                  The earlier attempt read the flush anchor, which is `undefined` until a flush
+ *                  happens — so the never-succeeding provider, the entire target population,
+ *                  reported a zero-length window. The anchor has to exist before the thing it
+ *                  measures, which means it belongs here.
+ *
+ * Saturates at DRIFT_COUNTER_MAX like its windowed twin; `capped` then marks the counts as lower
+ * bounds. At a 10-minute cadence that is ~69 days, and the question these answer ("did this
+ * collector run at all") survives saturation intact.
+ */
+export function noteDriftTotal(total, outcome, now) {
+  const t = {
+    attempts: 0, successes: 0, parse_fails: 0, capped: false, since: now, lastAt: now, sentAt: 0,
+    ...(total && typeof total === 'object' ? total : {}),
+  };
+  const bump = (n) => Math.min(n + 1, DRIFT_COUNTER_MAX);
+  const next = {
+    attempts: bump(t.attempts),
+    successes: outcome === 'success' ? bump(t.successes) : t.successes,
+    parse_fails: outcome === 'parse_fail' ? bump(t.parse_fails) : t.parse_fails,
+    capped: t.capped,
+    // 🔴 NEVER MOVED once set. It is the denominator's origin; sliding it forward would silently
+    // shorten every rate computed from these counts.
+    since: typeof t.since === 'number' ? t.since : now,
+    // 🔴 MOVES on every attempt, unlike `since`. A cumulative count alone cannot tell "still failing
+    // every cycle" from "ran once and stopped" — after saturation they are literally the same
+    // numbers forever. This is the field that separates them.
+    lastAt: now,
+    sentAt: typeof t.sentAt === 'number' ? t.sentAt : 0,
+  };
+  if (next.attempts >= DRIFT_COUNTER_MAX) next.capped = true;
+  return next;
+}
+
+/**
+ * How often a provider's cumulative totals are worth re-sending.
+ *
+ * 🔴 THIS IS A VOLUME CONTROL AND IT IS SAFE ONLY BECAUSE THE VALUE IS CUMULATIVE. Skipping a
+ * report loses nothing — the next one carries everything that happened, including what the skipped
+ * one would have said. The first design had no such freedom: its counts were drained, so every
+ * unsent report was data destroyed, which is why it rode every flush and measured 48–144 extra AE
+ * rows per install per day. Six hours puts it at ≤4 rows per provider per day.
+ *
+ * 🪤 A cumulative value does not need fine time resolution. "Has this collector ever run" is
+ * answered by ANY sample; the cadence only bounds how stale the newest answer can be.
+ */
+export const DRIFT_TOTALS_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Is this provider's cumulative snapshot due to ride along again? */
+export function driftTotalsDue(total, now) {
+  if (!total || typeof total !== 'object' || !total.attempts) return false;
+  const sentAt = typeof total.sentAt === 'number' ? total.sentAt : 0;
+  // Never sent → due now. Spelled out rather than left to `now - 0 >= interval`, which is true only
+  // because epoch timestamps are large; it would read as "not due" under any small-`now` fixture.
+  if (!sentAt) return true;
+  // 🔴 A STAMP IN THE FUTURE IS NOT TRUSTWORTHY — treat it as due (#1430). A backward clock
+  // correction (DST tooling, NTP step, a restored profile) leaves `sentAt` ahead of `now`, and
+  // trusting it silences this provider until real time catches up PLUS the interval: review
+  // reproduced a one-day correction producing 30 HOURS of silence, and a larger step scales with it.
+  // Reporting one redundant copy of a cumulative value is free; going blind is not.
+  if (sentAt > now) return true;
+  return now - sentAt >= DRIFT_TOTALS_MIN_INTERVAL_MS;
+}
+
 /** Quiet period between flushes for a provider whose signature has not moved. */
 export const DRIFT_FLUSH_INTERVAL_MS = 60 * 60 * 1000;
 
