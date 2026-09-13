@@ -118,11 +118,35 @@ export async function reconcileProviderRecs(provider, orgs) {
 
 // Did this rec judge the plan the org currently holds? The rec carries the plan it was computed
 // against (`current_plan`, preserved through the server's formatForExtension shim on both
-// branches). An UNKNOWN basis is not evidence of change, so it is kept — invalidating on missing
-// information would silently delete good recs, which is the bug this whole area started with.
+// branches).
+//
+// 🔴 THE TWO "NO PLAN" CASES ARE NOT THE SAME, and telling them apart is the whole of this
+// function (#1434). The caller already separates them and this must not re-merge them:
+//
+//   org not in `livePlanByOrg`      → not collected this cycle. Handled by (2) above, never here.
+//   org IS in the map, plan falsy   → COLLECTED, and the collector positively reports it cannot
+//                                     read this workspace's tier.
+//
+// A missing BASIS is still kept: a rec that predates the `current_plan` field says nothing about
+// change, and invalidating on that would silently delete good recs — the bug this area started
+// with. But a missing LIVE plan on an org we DID collect is the opposite: we cannot confirm the
+// user still holds the plan this advice was computed against, and this module's own invariant
+// (see the header, and docs/SPEC-chatgpt-plan-rec.md) is that a missing current signal means
+// insufficient_data, NEVER "keep showing the old answer".
+//
+// 🪤 This line did not change behaviour until 1.29.76, and that is exactly why it is dangerous:
+// `chatgptWorkspacePlan()` used to fabricate 'Free' rather than report null, so `!livePlan` was
+// effectively dead for ChatGPT. Making the producer honest gave this untouched branch a new
+// meaning. Found by the pre-release batch review, reproduced end to end: a workspace that had
+// cached a "downgrade from Pro 20x" kept rendering it — pricing link and all — after becoming an
+// extra roster entry whose plan we can no longer read.
+//
+// 🔑 NOT the same question as a null `recommendation` in a POST response (see the ingest handler
+// below): that is an ordinary cache miss and must NOT invalidate anything.
 function _recMatchesPlan(rec, livePlan) {
   const basis = rec && rec.current_plan;
-  if (!basis || !livePlan) return true;
+  if (!basis) return true;
+  if (!livePlan) return false;
   return String(basis).trim().toLowerCase() === String(livePlan).trim().toLowerCase();
 }
 // === EXT REC INVALIDATION: END ===

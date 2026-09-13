@@ -52,12 +52,57 @@ const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
 
 // Derive a workspace's display plan without a per-workspace /wham/usage call:
 // prefer the entitlement's subscription_plan, then the account plan_type, then
-// fall back to the generic tier-code mapping.
+// fall back to the generic tier-code mapping. Returns null when NOTHING was observed.
+//
+// 🔴 NO SIGNAL → NO CLAIM, and the null is the whole point (#1431).
+//
+// This used to end at `chatgptPlanName(accountPlanType)`, whose own default turns an ABSENT code
+// into 'free' — sensible for display, a fabrication here. An extra workspace is enumerated from
+// the accounts/check roster, and a roster entry can carry neither an entitlement nor a plan_type;
+// that workspace was then RECORDED as Free. Measured 2026-09-13 on 14 days of AE: of 2,121 ChatGPT
+// orgs, 52 reported Free AND a paid tier from different browsers, and 32 of those (49%) were
+// sitting in D1 `latest_snapshot` as Free. The row is per-org and last-write-wins, so alternating
+// two browsers was a coin flip over a paying customer's plan.
+//
+// 🔑 NOT A DISPLAY BUG. `plan` is an INPUT to the recommendation engine (getRecFromCacheOnly) and
+// to `isPaidPlanName` — a paying customer could be scored and classified as free.
+//
+// 🪤 The same defect was already found on the OBSERVATION axis (#1322) and solved there by passing
+// the RAW signal beside the label, because the label alone cannot say "unreadable"
+// (test/fixtures/provider/obs-plan.json). That workaround covers drift rows only; the STORED value
+// still came from the label, so it stayed wrong. Fixing the label is compatible, not redundant:
+// normalizeDriftPlan() judges on `raw` FIRST, so a null label still reports 'unknown' exactly as
+// it does today.
+//
+// 🔑 The ACTIVE account is deliberately untouched, and the evidence for that is NARROWER than it
+// first looks. The normalized drift plan axis (AE blob16) holds ZERO 'unknown' rows for chatgpt out
+// of 68,514, which shows no ABSENT plan_type among the observations that were emitted. It does NOT
+// cover the 'invalid' bucket (1,343 rows / 42 accounts): normalizeDriftPlan files a NON-STRING raw
+// signal — `0`, `false` — as invalid, and chatgptPlanName maps exactly those to 'Free' too. Nor
+// does it cover responses suppressed before a rider is built. So collect-chatgpt.js:147 may carry
+// the same defect for a small population; it is left alone because fixing it means handling
+// `users.current_plan` (the primary path is not is_extra_org), which is a larger change than this
+// one. Tracked separately — do not read this paragraph as "the active path is clean".
+//
+// 🔴 The non-string throw contract is UNCHANGED: a numeric plan_type still reaches .toLowerCase()
+// on the line above and throws, which parseChatGPTScheduledChange relies on validating against.
 export function chatgptWorkspacePlan(entitlement, accountPlanType) {
   const sub = entitlement?.subscription_plan;
   if (sub && CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub]) return CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub];
   const pt = (accountPlanType || '').toLowerCase();
   if (CHATGPT_ACCOUNT_PLAN_TYPE_NAMES[pt]) return CHATGPT_ACCOUNT_PLAN_TYPE_NAMES[pt];
+  // Trimmed, so a whitespace-only code counts as absent rather than producing a blank label.
+  //
+  // An ACCOUNT plan_type that is present but unrecognised still flows through (capitalized), so a
+  // new tier keeps appearing in the data without a code change.
+  //
+  // 🪤 THAT DOES NOT EXTEND TO `subscription_plan`, and the asymmetry is worth knowing: it is
+  // recognised ONLY through its lookup table, so an unknown subscription-only tier with no account
+  // plan_type reaches here and returns null — the signal exists but we cannot read it. That is
+  // still better than the 'Free' it used to produce, but it is not "nothing was reported": with
+  // the server's COALESCE, such an org keeps its LAST KNOWN tier indefinitely instead of adopting
+  // the new one. Add new subscription codes to CHATGPT_SUBSCRIPTION_PLAN_NAMES promptly.
+  if (!pt.trim()) return null;
   return chatgptPlanName(accountPlanType);
 }
 

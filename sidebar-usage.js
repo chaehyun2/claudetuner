@@ -42,6 +42,31 @@
   // windowLabel's third argument — so there is no second copy of the span rule here. A stale core
   // shows `Session` / `Weekly` instead of a span-derived label, which is what windowLabel itself
   // returns when the provider reports no span.
+  // 🔴 THE AD PATH IS CHECKED AS A SET, AND THAT IS NOT THE SAME CHOICE AS THE LOOKUPS ABOVE.
+  //
+  // Everything else in this file guards ONE method and degrades ONE feature: a stale core loses the
+  // span label, or the countdown refresh, or the spend bar, and keeps the rest. The ad path is not
+  // like that — one render uses five methods together and its degradation is all-or-nothing ("no
+  // ads this round"), so asking about them one at a time buys nothing and costs a real defect:
+  // `renderInlineAd` guarded on `buildAdBannerHtml` (exported 2026-07-12) and then called
+  // `trackAdViewability` / `trackAdClick` (exported 2026-07-13). A core from that one-day window
+  // passes the check and throws. Codex loaded the actual 07-12 core and reproduced it: the banner
+  // is WRITTEN, then the loop throws, and a later renderContent() throws again through
+  // syncBanners(). (#1422, split out of #1415 ④.)
+  //
+  // 🔑 `trackAdClick` IS WHY THIS MUST BE A SET CHECK AT RENDER TIME. It runs inside a click
+  // handler — minutes later, on a banner that is already on screen. Checking it when the listener
+  // is attached is the only moment we can still decline to draw. Missing it, the user clicks an ad
+  // and the handler throws BEFORE `window.open`: nothing happens, twice, with no way to tell why.
+  //
+  // 🪤 The other ~20 lookups are deliberately NOT folded into this helper. Each has its own
+  // fallback, and one shared gate would replace per-feature degradation with all-or-nothing —
+  // strictly worse for exactly the stale core this file exists to survive.
+  const AD_CORE_METHODS = ['selectAds', 'buildAdBannerHtml', 'noteAdServed', 'trackAdViewability', 'trackAdClick'];
+  const adCoreReady = () => !!CORE
+    && AD_CORE_METHODS.every((n) => typeof CORE[n] === 'function')
+    && !!(CORE.PLACEMENTS && CORE.PLACEMENTS.CLAUDE_SIDEBAR);
+
   const windowLabel = (seconds, fallbackText) => ((CORE && CORE.windowLabel)
     ? CORE.windowLabel(seconds, _lang, fallbackText)
     : fallbackText);
@@ -248,7 +273,7 @@
   // ── In-house ad banner (design §2.2/§3.2/§4) ──
   async function fetchAds() {
     if (!isCurrent()) return; // superseded instance — don't fetch or rotate
-    if (!CORE || !CORE.selectAds) return; // stale core without the ad module — skip
+    if (!adCoreReady()) return; // stale core without the whole ad module — skip the round
     try {
       const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CLAUDE_SIDEBAR, lang: _lang });
       if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
@@ -259,7 +284,9 @@
 
   function renderInlineAd() {
     const container = document.getElementById('ct-sb-ad');
-    if (!container || !CORE || !CORE.buildAdBannerHtml) return;
+    // 🔑 The SET, not `buildAdBannerHtml` alone — see AD_CORE_METHODS. Drawing a banner we cannot
+    // fully operate is worse than drawing none: the click handler would throw before window.open.
+    if (!container || !adCoreReady()) return;
     if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
     container.style.display = '';
     container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
