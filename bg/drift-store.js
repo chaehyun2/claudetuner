@@ -88,34 +88,49 @@ async function write(rec) {
  * `patch()` in bg/provider-state.js, which exists for exactly this failure on a different key.
  * 🔴 The chain must survive a rejection, or one failed transaction deadlocks every later one.
  */
-let _txChain = Promise.resolve();
 /**
- * 🔴 THE CHAIN IS BOUNDED, THE OPERATION IS NOT.
+ * 🔴 THE QUEUE IS NOT RELEASED WHILE A WRITE MAY STILL LAND — and a watchdog that did was a
+ * DATA-LOSS BUG, reproduced and reverted (#1430).
  *
- * A rejection releases the chain; a promise that NEVER SETTLES does not. `chrome.storage` can hang
- * — and with every collector now queueing here, one hung write would block every later observation
- * for the whole service-worker lifetime, including the snapshot riders' commits. That trades an
- * occasional lost increment for total silence, which is the wrong direction for a module whose
- * entire job is not going silent.
+ * The concern is real: a `chrome.storage` write that never settles holds this chain for the
+ * service-worker lifetime, and every collector now queues here. I shipped a 10s watchdog that let
+ * the SUCCESSOR proceed, reasoning that a bounded race beats unbounded silence. That reasoning was
+ * wrong, and the difference is what the two failures destroy:
  *
- * So the SUCCESSOR waits at most this long. The caller still awaits its own transaction — only the
- * queue moves on. 🪤 The cost is honest: if a stalled transaction later completes it can write over
- * the one that went ahead, which is the very race this chain exists to prevent. That race is
- * bounded to the pathological case; blocking forever is not bounded to anything.
+ *   blocking      — loses observations that were never written. Bad, and self-limited: the worker
+ *                   restarts and the counters that DID persist are all still there.
+ *   the watchdog  — the held write still completes, and every write here replaces the WHOLE record
+ *                   from a copy read before the successor ran. Reproduced: Gemini's write is held,
+ *                   Claude's transaction proceeds after the timer and persists
+ *                   `totals.claude.attempts = 1`, then Gemini's original write lands and the record
+ *                   contains Gemini ONLY. An ALREADY-PERSISTED counter is erased.
+ *
+ * Destroying durable state to avoid a stall is the wrong trade for a module whose entire output is
+ * cumulative counts. A promise cannot be cancelled, so once a stale whole-record write is in flight
+ * there is nothing to do but wait for it — which is exactly what serialization is.
+ *
+ * 🪤 The watchdog also armed its timer at ENQUEUE rather than at execution, so a burst enqueued
+ * together would lose serialization together. Both defects are gone with it.
+ *
+ * ⇒ The stall risk is a documented FOLLOW-UP, not something to trade durable data for. Closing it
+ * properly needs writes that cannot clobber — per-provider storage keys, or a compare-and-set —
+ * not a way to let two whole-record writers run at once.
+ *
+ * A promise chain is enough — one service worker, so this module is the only writer. Mirrors
+ * `patch()` in bg/provider-state.js, which exists for exactly this failure on a different key.
+ * 🔴 The chain must survive a rejection, or one failed transaction deadlocks every later one.
  */
-const TX_CHAIN_MAX_WAIT_MS = 10_000;
+let _txChain = Promise.resolve();
 function tx(fn) {
   const run = async () => {
     const rec = await read();
     return fn(rec);
   };
   const next = _txChain.then(run, run);
-  _txChain = Promise.race([
-    next.then(() => {}, () => {}),
-    new Promise((resolve) => setTimeout(resolve, TX_CHAIN_MAX_WAIT_MS)),
-  ]);
+  _txChain = next.then(() => {}, () => {});
   return next;
 }
+
 
 /**
  * The cumulative totals due to ride along, excluding `carrier` (pass null to exclude nothing).
