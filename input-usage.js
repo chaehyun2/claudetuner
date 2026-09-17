@@ -47,6 +47,9 @@
       no_data: '데이터 수집 중...',
       no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
       brand: 'Claude Tuner',
+      cmp_ask_others: 'AI 크로스체크',
+      cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요',
+      cmp_empty_tip: '먼저 질문을 입력하세요',
     },
     en: {
       usage_5h: '5h usage',
@@ -62,6 +65,9 @@
       no_data: 'Collecting data...',
       no_usage: "Claude isn't providing usage for this account",
       brand: 'Claude Tuner',
+      cmp_ask_others: 'AI Cross-Check',
+      cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers',
+      cmp_empty_tip: 'Type a question first',
     },
   };
 
@@ -246,6 +252,15 @@
   color: #ef4444; font-weight: 700; font-size: 10px;
   letter-spacing: 0.03em; cursor: default;
 }
+
+.ct-cmp-btn {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 7px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+  color: var(--muted); font: inherit; font-size: 10px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; transition: opacity 0.15s, color 0.15s;
+}
+.ct-cmp-btn:hover:not(:disabled) { color: var(--text); }
+.ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   `;
 
   // ── Composer detection ──
@@ -366,6 +381,7 @@
     _torndown = true;
     _intervals.forEach(clearInterval);
     _observers.forEach(o => { try { o.disconnect(); } catch { /* noop */ } });
+    try { document.removeEventListener('input', onAnyInput, true); } catch { /* noop */ }
     return true;
   }
   function ctSetInterval(fn, ms) {
@@ -397,8 +413,103 @@
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-mode'] });
   _observers.push(themeObserver);
 
+  // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
+  // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17) sits in the strip's right-hand group. Gate = the CDN dark-launch flag
+  // (asked ONCE per page load through the service worker: `COMPARE_FLAG` → {on}) AND the
+  // `compareEnabled` option (chrome.storage.sync, default on). Click reads the composer's plain text
+  // and asks the SW to open compare.html — the SW owns the tab, and any optional-host permission
+  // prompt happens on that page under a user gesture (AC16: no `permissions.request` here).
+  //
+  // 🔴 No usage-shared core dependency in this block (#1421): plain DOM + chrome.runtime only, so the button
+  // survives a stale/absent usage-shared.js exactly like the rest of this strip.
+  const CMP_PROVIDER = 'claude';
+  const CMP_BTN_CLASS = 'ct-cmp-btn';
+  // Generation token for the document-level input listener: this strip has no instance guard of
+  // its own (teardownIfDead only fires once the runtime is gone), so a re-injection into a LIVE
+  // page would stack a second listener. The older one sees the bumped token and unhooks itself
+  // (Codex #12).
+  const _cmpGen = (globalThis.__ctCmpInputGen = (globalThis.__ctCmpInputGen || 0) + 1);
+  let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
+  let _cmpFlagPending = false;
+  let _cmpEnabled = true;     // compareEnabled option
+  let _cmpSyncScheduled = false;
+
+  const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
+
+  function ensureCompareFlag() {
+    if (_cmpFlag !== null || _cmpFlagPending || !_cmpEnabled) return;
+    _cmpFlagPending = true;
+    try {
+      chrome.runtime.sendMessage({ type: 'COMPARE_FLAG' }, (res) => {
+        _cmpFlagPending = false;
+        // A runtime error (no handler in an older SW) or a non-`on` answer both mean "no button".
+        // `cta`, not `on`: the page may be live (flags.json.compare) while the button stays hidden
+        // (flags.json.compare_cta — 2026-09-18 launch order: site entry first).
+        _cmpFlag = !chrome.runtime.lastError && !!(res && res.cta === true);
+        // Re-render on BOTH answers: a previous instance may have left its button in the shared
+        // strip, and only a render with the fresh answer removes it (Codex #13).
+        renderStrip();
+      });
+    } catch { _cmpFlagPending = false; _cmpFlag = false; }
+  }
+
+  /** Plain text of the claude.ai composer (ProseMirror contenteditable); '' when empty/absent. */
+  function readComposerText() {
+    const editor = document.querySelector('div.ProseMirror[contenteditable="true"], div[contenteditable="true"][role="textbox"]');
+    if (!editor) return '';
+    return String(editor.innerText || editor.textContent || '').trim();
+  }
+
+  function syncCompareButtonState(btnEl) {
+    const shadow = $shadow();
+    const btn = btnEl || (shadow && shadow.querySelector('.' + CMP_BTN_CLASS));
+    if (!btn) return;
+    const empty = !readComposerText();
+    btn.disabled = empty;
+    btn.title = empty ? t('cmp_empty_tip') : t('cmp_ask_others_tip');
+  }
+
+  // The composer fires `input` on every keystroke; coalesce the enabled/disabled sync per frame.
+  function onAnyInput() {
+    if (_cmpGen !== globalThis.__ctCmpInputGen) { document.removeEventListener('input', onAnyInput, true); return; }
+    if (teardownIfDead() || _cmpSyncScheduled) return;
+    _cmpSyncScheduled = true;
+    requestAnimationFrame(() => { _cmpSyncScheduled = false; syncCompareButtonState(); });
+  }
+
+  function mountCompareButton(strip) {
+    // A superseded instance keeps rendering from its own timers while the runtime is alive; it must
+    // neither add nor remove the button — the newest instance owns it (Codex 2R #26).
+    if (_cmpGen !== globalThis.__ctCmpInputGen) return;
+    const existing = strip.querySelector('.' + CMP_BTN_CLASS);
+    if (!cmpAllowed()) { if (existing) existing.remove(); return; }
+    if (existing) { syncCompareButtonState(existing); return; }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = CMP_BTN_CLASS;
+    btn.textContent = t('cmp_ask_others');
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const q = readComposerText();
+      if (!q) { syncCompareButtonState(btn); return; }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: CMP_PROVIDER, q }); } catch { /* context dead */ }
+    });
+    (strip.querySelector('.ct-right') || strip).appendChild(btn);
+    syncCompareButtonState(btn);
+  }
+
   // ── Render ──
+  // Every branch of renderStripInner replaces the strip's markup, so the compare button is
+  // (re)attached here, after it, rather than inside each branch.
   function renderStrip() {
+    renderStripInner();
+    const shadow = $shadow();
+    const strip = shadow && shadow.querySelector('.ct-strip');
+    if (strip) mountCompareButton(strip);
+  }
+
+  function renderStripInner() {
     const shadow = $shadow();
     if (!shadow) return;
     const strip = shadow.querySelector('.ct-strip');
@@ -580,11 +691,13 @@
   ctSetInterval(ensureMounted, 800);
 
   try {
-    chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true, compareEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
       _enabled = cfg.inputUsageEnabled !== false;
-      if (_enabled) { ensureMounted(); requestUsageData(); }
+      _cmpEnabled = cfg.compareEnabled !== false;
+      if (_enabled) { ensureMounted(); requestUsageData(); ensureCompareFlag(); }
     });
+    document.addEventListener('input', onAnyInput, true);
   } catch {
     // Storage read failed (extension context dead) — stay disabled
   }
@@ -595,7 +708,12 @@
       if (changes.inputUsageEnabled) {
         _enabled = changes.inputUsageEnabled.newValue !== false;
         if (!_enabled) { const el = document.getElementById(HOST_ID); if (el) el.remove(); }
-        else { ensureMounted(); requestUsageData(); }
+        else { ensureMounted(); requestUsageData(); ensureCompareFlag(); }
+      }
+      if (changes.compareEnabled) {
+        _cmpEnabled = changes.compareEnabled.newValue !== false;
+        ensureCompareFlag();
+        renderStrip();
       }
       if (changes.lang) {
         _lang = changes.lang.newValue === 'auto' ? detectLang() : changes.lang.newValue;

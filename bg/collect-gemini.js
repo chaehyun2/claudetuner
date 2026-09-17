@@ -1,4 +1,5 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
+import { platformField } from './platform.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import it
 // (#1315). collectGemini() keeps every await: parse-gemini.js decides from parsed values and only
 // REPORTS which stored state must then be consulted.
@@ -290,6 +291,10 @@ async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendO
     provider_email: geminiEmail || null,
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
+    // #1445 step B. 🔴 A CLAIM from the request BODY — the server stores it under `claimed_`
+    // and never lets it overwrite what it derived from the request's own headers.
+    // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
+    ...(await platformField()),
     // Force = "store, don't dedup": the server's usage-only dedup keys on h5/d7/r7, so a plan
     // change with flat usage would otherwise be dropped. Set only on force/plan-change sends.
     ...(force ? { force: true } : {}),

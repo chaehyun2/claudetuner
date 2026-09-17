@@ -132,3 +132,13 @@
 .ct-gm-strip-muted { color: var(--ct-gm-text-muted); }
 .ct-gm-strip-reset { color: var(--ct-gm-text-muted); }
 .ct-gm-strip-dot { color: var(--ct-gm-text-muted); opacity: 0.5; }
+
+/* 「다른 AI에게도 물어보기」 (compare, #1452) — a pill next to the gear. */
+.ct-cmp-btn {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; margin-left: 4px;
+  border: 1px solid var(--ct-gm-border); border-radius: 999px; background: none;
+  color: var(--ct-gm-text-muted); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.ct-cmp-btn:hover:not(:disabled) { background: var(--ct-gm-surface); color: var(--ct-gm-text); }
+.ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }

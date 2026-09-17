@@ -1,7 +1,7 @@
 // Recommendation card, plan fitness matrix, review nudge, and dashboard nudge for the popup.
 // Leaf domain (does not call org-selector/prediction). Imports shared state + selectors, pure
 // helpers, and the auth fetch wrapper; i18n `t` and CT_CONFIG are globals from classic scripts.
-import { state, _isNonClaudePrimarySelected } from './state.js';
+import { state, _isNonClaudePrimarySelected, primaryPlanFor } from './state.js';
 import { applyCollapseState } from './collapsible.js';
 import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util.js';
 import { _authedFetch } from './auth.js';
@@ -320,7 +320,14 @@ export function _renderRecommendation(rec, provider, basisPlan) {
   // "current plan ok". Callers that render a specific org pass that org's plan explicitly;
   // the Claude/primary path passes nothing and keeps the original behaviour.
   const _recFromPlan = _canonPlan(rec.from_plan || rec.fromPlan);
-  const _curPlan = _canonPlan(basisPlan != null ? basisPlan : state.currentPlan);
+  // 🔴 The fallback is Claude-only (primaryPlanFor, ui/state.js). `basisPlan` is null exactly when
+  // a provider org reports no plan, and reading state.currentPlan there compared a ChatGPT rec
+  // against the CLAUDE plan: a cached "Free → Go" card plus Claude Max 5x resolved to a mismatch
+  // and rendered "current plan ok" — a false all-clear over a real upgrade (#1433 ④). With an
+  // unknown basis `_curPlan` is null, `_planStale` requires BOTH sides known, so the rec renders
+  // as computed. That is the documented intent one comment above: suppress only on a CONFIDENT
+  // mismatch.
+  const _curPlan = _canonPlan(basisPlan != null ? basisPlan : primaryPlanFor(recProvider));
   const _planStale = _recFromPlan != null && _curPlan != null && _recFromPlan !== _curPlan;
   if (_planStale) {
     recEl.textContent = t('current_plan_ok');

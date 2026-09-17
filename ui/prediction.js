@@ -431,23 +431,35 @@ const _runnerStates = [
   { min: 80, max: 90, emoji: '🏇💨💨' },
   { min: 90, max: 101, emoji: '🏍️💨💨💨' },
 ];
-const _pausedEmojis = {
-  high: ['🏃', '😤', '💪', '🔥'],
-  mid: ['🚶', '🙂', '☕', '🎵'],
-  low: ['😴', '💤', '🧘', '😌', '🍵'],
-};
-
 function _getRunnerState(speed) {
   return _runnerStates.find(s => speed >= s.min && speed < s.max) || _runnerStates[0];
 }
+
+// Widest character cell the runner can occupy, reserved so the emoji never overruns the track.
+const RUNNER_CHAR_WIDTH_PX = 24;
+// How often the still frame re-reads the usage state. Long enough that a change reads as new
+// information rather than movement, short enough that the side panel (which stays open
+// indefinitely) does not show a stale emoji.
+const RUNNER_STILL_REFRESH_MS = 5000;
 
 export function initRunner() {
   const track = document.getElementById('runner-track');
   const char = document.getElementById('runner-char');
   const pauseBtn = document.getElementById('runner-pause');
   if (!track || !char || !pauseBtn) return;
+  // Stacking two animation loops and two sets of listeners on one popup would double the
+  // movement and leave the pause button toggling only one of them.
+  if (track.dataset.runnerInit === '1') return;
+  track.dataset.runnerInit = '1';
 
-  let pos = 0, dir = 1, paused = false, pausedTimer = 0, speed = 0;
+  let pos = 0, dir = 1, rafId = 0, stillTimer = 0;
+  // Mirrors storage.local `runnerPaused`; null means the user never chose, so the OS setting
+  // decides. See motion-pref.js.
+  let pref = null;
+  // 🔴 The opening read of `runnerPaused` is asynchronous, and a decision can land while it is
+  // still in flight (the options page writing the key as the popup opens). Without this the
+  // stale read would win and restart the animation on someone who just turned it off.
+  let prefDecided = false;
 
   // Speed calculation: 5h change rate based on usageHistory
   function calcSpeed() {
@@ -463,38 +475,26 @@ export function initRunner() {
     return Math.min(rate * 5 + util5h * 0.3, 100);
   }
 
-  // Load paused state
-  chrome.storage.local.get({ runnerPaused: false }, (r) => {
-    paused = r.runnerPaused;
-    pauseBtn.textContent = paused ? '▶' : '⏸';
-  });
-
-  pauseBtn.addEventListener('click', () => {
-    paused = !paused;
-    pausedTimer = 0;
-    pauseBtn.textContent = paused ? '▶' : '⏸';
-    chrome.storage.local.set({ runnerPaused: paused });
-  });
+  // Still frame: refresh WHAT the runner says without moving it. Deliberately touches nothing
+  // but textContent — 🔴 rewriting left/top/transform here would teleport the character back to
+  // the start of the track at the exact moment the user asked everything to stop, which is a
+  // burst of movement in response to "stop moving". On a popup that never animated these styles
+  // are unset, so the character simply starts parked where CSS puts it.
+  function renderStill() {
+    char.textContent = _getRunnerState(calcSpeed()).emoji;
+  }
 
   function animate() {
-    speed = calcSpeed();
-    const state = _getRunnerState(speed);
-    const trackWidth = track.offsetWidth - 24;
-    if (trackWidth <= 0) { requestAnimationFrame(animate); return; }
+    rafId = requestAnimationFrame(animate);
+    const speed = calcSpeed();
+    const runState = _getRunnerState(speed);
+    const trackWidth = track.offsetWidth - RUNNER_CHAR_WIDTH_PX;
+    if (trackWidth <= 0) return;
 
-    if (paused) {
-      char.textContent = state.emoji;
-      char.style.left = '0px';
-      char.style.top = '0px';
-      char.style.transform = 'scaleX(1)';
-      requestAnimationFrame(animate);
-      return;
-    }
-
-    if (state.rest) {
+    if (runState.rest) {
       // Resting state: fixed at center + breathing animation
-      char.textContent = state.emoji;
-      char.style.left = (trackWidth / 2 - 8) + 'px';
+      char.textContent = runState.emoji;
+      char.style.left = (trackWidth / 2 - RUNNER_CHAR_WIDTH_PX / 3) + 'px';
       char.style.top = '0px';
       const breathe = 1 + Math.sin(Date.now() / 600) * 0.04;
       char.style.transform = `scale(${breathe})`;
@@ -505,7 +505,7 @@ export function initRunner() {
       if (pos >= trackWidth) { pos = trackWidth; dir = -1; }
       else if (pos <= 0) { pos = 0; dir = 1; }
 
-      char.textContent = state.emoji;
+      char.textContent = runState.emoji;
       char.style.left = pos + 'px';
       char.style.transform = dir === 1 ? 'scaleX(-1)' : 'scaleX(1)';
 
@@ -516,12 +516,72 @@ export function initRunner() {
         char.style.top = '0px';
       }
     }
-
-    requestAnimationFrame(animate);
   }
 
-  // Show + start
+  function stopLoops() {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    if (stillTimer) { clearInterval(stillTimer); stillTimer = 0; }
+    // `pos`/`dir` survive on purpose: the character freezes in place and, if motion is turned
+    // back on, carries on from there instead of jumping.
+  }
+
+  // Single place that decides between moving and still, so the button label, the frame loop
+  // and the stored preference can never drift apart.
+  function applyMotionPref() {
+    stopLoops();
+    const motionOff = ctRunnerMotionOff(pref);
+    pauseBtn.textContent = motionOff ? '▶' : '⏸';
+    // The old title just repeated the glyph, which told a user nothing about what the button
+    // does — the whole control was effectively undiscoverable.
+    const label = t(motionOff ? 'runner_resume' : 'runner_pause');
+    pauseBtn.title = label;
+    pauseBtn.setAttribute('aria-label', label);
+    pauseBtn.style.display = '';
+
+    if (motionOff) {
+      renderStill();
+      stillTimer = setInterval(renderStill, RUNNER_STILL_REFRESH_MS);
+    } else {
+      rafId = requestAnimationFrame(animate);
+    }
+  }
+
+  pauseBtn.addEventListener('click', () => {
+    // Whatever the OS says, clicking records an explicit choice from here on.
+    // 🪤 This latch is defence in depth, and the guard cannot pin it: the button is not revealed
+    // until applyMotionPref has labelled it, so today a click cannot beat the opening read. Keep
+    // it — anything that reveals the button earlier would reopen the race it closes.
+    prefDecided = true;
+    pref = !ctRunnerMotionOff(pref);
+    chrome.storage.local.set({ runnerPaused: pref });
+    applyMotionPref();
+  });
+
+  // The options page writes the same key. The side panel outlives a visit to options, so
+  // without this the two surfaces would sit there disagreeing.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.runnerPaused) return;
+    const next = changes.runnerPaused.newValue ?? null;
+    prefDecided = true;
+    if (next === pref) return; // our own write echoing back
+    pref = next;
+    applyMotionPref();
+  });
+
+  // With no explicit choice on record the OS setting decides, so follow it when it flips.
+  if (typeof matchMedia === 'function') {
+    matchMedia(CT_REDUCE_MOTION_QUERY).addEventListener('change', () => {
+      if (pref == null) applyMotionPref();
+    });
+  }
+
+  // Show + start. The button stays hidden until applyMotionPref has labelled it, so it can
+  // never be clicked while it is blank.
   track.style.display = '';
-  pauseBtn.style.display = '';
-  animate();
+  chrome.storage.local.get({ runnerPaused: null }, (r) => {
+    if (prefDecided) return; // something more recent already decided; this read is stale
+    prefDecided = true;
+    pref = r.runnerPaused ?? null;
+    applyMotionPref();
+  });
 }

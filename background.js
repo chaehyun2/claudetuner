@@ -36,6 +36,13 @@ import { hasProviderPermission, registerChatGPTScripts, unregisterChatGPTScripts
 import { getResetNotifContext, resolveResetWindow, scheduleExpireAlarms } from './bg/reset-alarms.js';
 import { buildSidebarUsageData, pushSidebarUsage } from './bg/sidebar-usage.js';
 import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm } from './bg/ad-counters.js';
+import { isChatGPTLoggedIn } from './bg/api-chatgpt.js';
+import { isGeminiLoggedIn } from './bg/api-gemini.js';
+import { createCompareController, COMPARE_PORT_NAME } from './bg/compare.js';
+import { createClient as createAiWebClient, listModels as listAiWebModels, drainPendingHides } from './vendor-ai/index.js';
+// ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
+// module has no top-level DOM access — safe to load in the service worker (compare plan labels).
+import { planDisplayName } from './ui/util.js';
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -1356,8 +1363,31 @@ let _lastPopupCollect = 0;
 // Restore from storage on SW restart
 chrome.storage.local.get({ _lastPopupCollect: 0 }, (r) => { _lastPopupCollect = r._lastPopupCollect; });
 
+// === Multi-AI compare (#1452) — SW controller; see bg/compare.js for the wire contract ===
+// Every chrome API it needs is injected here so test/compare-send-order-guard.mjs can run the
+// same module under Node with stubs. `tabs.create` inside it opens only our own compare.html.
+const compareController = createCompareController({
+  createClient: createAiWebClient, listModels: listAiWebModels, drainPendingHides,
+  authedFetch, getConfig, getExtToken, hasProviderPermission,
+  loginChecks: { claude: hasClaudeSession, gemini: isGeminiLoggedIn, chatgpt: isChatGPTLoggedIn },
+  tabs: chrome.tabs, scripting: chrome.scripting, cookies: chrome.cookies, runtime: chrome.runtime,
+  storage: chrome.storage.local,
+  // Per-provider model choice (COMPARE_MODELS_KEY) — sync, like the other user options.
+  storageSync: chrome.storage.sync,
+  // Plan label per provider (ux3 item 3): what the collectors wrote, labelled the popup's way.
+  readCollectedOrgs: () => chrome.storage.local.get({ collectedOrgs: [] }).then((r) => r.collectedOrgs),
+  planLabel: planDisplayName,
+  // Usage analytics (ux3 item 8): the page's COMPARE_EVENTs and the SW's own `consume`, as cmp_*.
+  sendGAEvent,
+});
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === COMPARE_PORT_NAME) compareController.onConnect(port);
+});
+
 // === Message Handler (manual collection request from popup) ===
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // COMPARE_FLAG / COMPARE_STATUS / OPEN_COMPARE — answered asynchronously by the controller.
+  if (compareController.handleMessage(message, _sender, sendResponse)) return true;
   // Ad measurement (design §5.3/§5.4): content scripts detect viewability/click and
   // send here; the SW is the single owner that increments + flushes. Fire-and-forget.
   if (message.type === 'ad_metric') { incrementAdCounter(message); return false; }

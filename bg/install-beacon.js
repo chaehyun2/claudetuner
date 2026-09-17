@@ -18,6 +18,7 @@
 // nobody could see. Hence the first statement of maybeSendInstallBeacon().
 
 import { getConfig, getOrCreateInstallId, serverSyncWithheldReason } from './storage.js';
+import { getPlatformEnv } from './platform.js';
 
 const BEACON_PATH = '/api/install-beacon';
 
@@ -139,6 +140,8 @@ async function sendInstallBeaconForReason(withheldReason, onAboutToSend) {
       lastStatus: null, collectedOrgs: [], installFirstSeenAt: null,
     });
     const src = pickBeaconSource(lastStatus, collectedOrgs) || {};
+    // Never throws (bg/platform.js contract) — a beacon must not be able to break on telemetry.
+    const platform = await getPlatformEnv();
 
     const payload = compact({
       install_id: installId,
@@ -155,6 +158,14 @@ async function sendInstallBeaconForReason(withheldReason, onAboutToSend) {
       // The version running RIGHT NOW, not the one stamped on the stored snapshot — a beacon
       // reports the client that sent it, and a stale snapshot would misattribute the fleet split.
       ext_version: chrome.runtime.getManifest().version,
+      // #1445 step B. The gated population never POSTs a snapshot, so without this line their
+      // environment is invisible — and "which browsers sit behind the login gate" is exactly the
+      // kind of question this beacon exists to answer. Flat, not nested, because the route reads a
+      // flat body; `claimed_` because nothing this file sends has been verified by anybody, which
+      // is the contract stated in the header. compact() below drops whichever halves are absent.
+      claimed_os: platform && platform.os,
+      claimed_os_major: platform && platform.osMajor,
+      claimed_browser: platform && platform.browser,
       last_seen_at: isoFromMs(src.lastSeenMs),
       // Sent ONLY when the install actually recorded one, which is only true for installs created
       // on 1.29.57 or later (background.js, onInstalled 'install'). 🔴 There is deliberately no

@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'AI 크로스체크', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요', cmp_empty_tip: '먼저 질문을 입력하세요' },
+    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'AI Cross-Check', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers', cmp_empty_tip: 'Type a question first' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -74,9 +74,87 @@
   // ── Anchor ──
   // Preferred: a full-width row directly below the composer box (sibling of the
   // composer form). Fallback: just above the bottom disclaimer line.
+  //
+  // 🔴 THE FORM'S PARENT DOES NOT LAY ANYTHING OUT. It is `display: contents`, so inserting after
+  // the form actually drops the strip into the GRANDPARENT — the composer container, whose height
+  // is pinned by `--composer-container-height`. That box cannot grow for us. In Chat mode it holds
+  // only the form, so our overflow lands on empty page and looks fine; that has always been luck,
+  // not design.
+  function displayOf(node) {
+    const cs = getComputedStyle(node);
+    return cs ? cs.display : '';   // getComputedStyle returns null for a node in a dead document
+  }
+
+  function composerBox(form) {
+    let el = form.parentElement;
+    while (el && displayOf(el) === 'contents') el = el.parentElement;
+    // 🔴 NEVER HAND BACK THE DOCUMENT SHELL. The walk stops at the first ancestor that lays out,
+    // and on a page where every wrapper is `display: contents` that is BODY — inserting "after
+    // BODY" drops the strip at the very bottom of the document, which is worse than the overlap
+    // this whole change exists to fix. No composer, no outside anchor (Codex, #1491 finding 3).
+    if (!el || el === document.body || el === document.documentElement) return null;
+    return el;
+  }
+
+  // 🔴 Is something OTHER than the composer already occupying the space below it? In Work mode
+  // ChatGPT puts its own row there (프로젝트 / 파일 / 플러그인 / 데스크톱 앱 다운로드) as a
+  // sibling of the form inside that same height-pinned box — so our strip and that row are squeezed
+  // into one slot and overlap. Measured on 2026-09-17: strip at y=438 h=23, row at y=441 h=64,
+  // **20px of overlap**, and the row's own wrapper is opaque with `overflow-clip`, so it paints over
+  // us. That is the reported breakage: the gauge and the compare button peek out from behind a
+  // white card.
+  //
+  // 🪤 This asks about STRUCTURE, not about "Work mode". We do not own ChatGPT's mode names and a
+  // second row could arrive under any other label; the thing that actually breaks us is "the
+  // composer box already lays out content below the form", which is directly observable.
+  function boxHasContentBelowForm(box, form) {
+    if (!box) return false;
+    const formBottom = form.getBoundingClientRect().bottom;
+    const flat = [];
+    (function walk(node) {
+      for (const child of node.children) {
+        // Our own strip stays in the list — the displacement maths below needs its position and
+        // height — but it is never itself a candidate.
+
+        if (getComputedStyle(child).display === 'contents') walk(child);
+        else flat.push(child);
+      }
+    })(box);
+    // 🔴 DISCOUNT OUR OWN DISPLACEMENT, or the answer depends on the thing it decides. While the
+    // strip is mounted INSIDE this box it sits between the form and everything below it, pushing
+    // those elements down by exactly its own height. Measuring them as-is makes a row that is
+    // genuinely above the threshold look below it once we leave — so the tick would unmount, the
+    // next mount() would remeasure without the strip, choose the old anchor again, and churn the
+    // node every second forever (Codex, #1491 finding 4).
+    const self = flat.find((el) => el.id === STRIP_ID);
+    const selfIndex = self ? flat.indexOf(self) : -1;
+    const selfHeight = self ? self.getBoundingClientRect().height : 0;
+
+    return flat.some((el, i) => {
+      if (el === form || form.contains(el)) return false;
+      if (el === self) return false;
+      const cs = getComputedStyle(el);
+      // Out-of-flow siblings cannot squeeze us — the `top-full z-[-1]` panel next to the form is
+      // absolutely positioned and measures 0 high in both modes.
+      if (!cs || cs.position === 'absolute' || cs.position === 'fixed') return false;
+      const r = el.getBoundingClientRect();
+      const shift = (selfIndex >= 0 && i > selfIndex) ? selfHeight : 0;
+      // >4px filters the `sr-only` 1px announcers that sit beside the form in both modes.
+      return r.height > 4 && (r.bottom - shift) > formBottom + 1;
+    });
+  }
+
   function findAnchor() {
     const form = document.querySelector('form[data-type="unified-composer"]');
-    if (form && form.parentNode) return { type: 'belowbox', el: form };
+    if (form && form.parentNode) {
+      const box = composerBox(form);
+      // Put the strip BELOW the whole composer container when that container is already full.
+      // Verified in page on 2026-09-17: overlap 20px → 0px, and the strip sits below the box.
+      if (box && box.parentNode && boxHasContentBelowForm(box, form)) {
+        return { type: 'belowcontainer', el: box };
+      }
+      return { type: 'belowbox', el: form };
+    }
     const disclaimer = findDisclaimer();
     if (disclaimer && disclaimer.parentNode) return { type: 'disclaimer', el: disclaimer };
     return null;
@@ -151,7 +229,93 @@
   // Chat-bubble icon (matches the popup's Feedback button).
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
+  // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
+  // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17)
+  // next to the gear. Gate = the CDN dark-launch flag (asked ONCE per page
+  // load through the service worker: `COMPARE_FLAG` → {on}) AND the `compareEnabled` option
+  // (chrome.storage.sync, default on). Click reads the composer's plain text and asks the SW to open
+  // compare.html — the SW owns the tab, and any optional-host permission prompt happens on that page
+  // under a user gesture (AC16: no `permissions.request` here).
+  //
+  // 🔴 No usage-shared core call in this block (#1421): plain DOM + chrome.runtime only.
+  const CMP_BTN_CLASS = 'ct-cmp-btn';
+  let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
+  let _cmpFlagPending = false;
+  let _cmpEnabled = true;     // compareEnabled option
+  let _cmpSyncScheduled = false;
+
+  const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
+
+  function ensureCompareFlag() {
+    if (_cmpFlag !== null || _cmpFlagPending || !_cmpEnabled) return;
+    _cmpFlagPending = true;
+    try {
+      chrome.runtime.sendMessage({ type: 'COMPARE_FLAG' }, (res) => {
+        _cmpFlagPending = false;
+        // A runtime error (no handler in an older SW) or a non-`on` answer both mean "no button".
+        // `cta`, not `on`: the page may be live (flags.json.compare) while the button stays hidden
+        // (flags.json.compare_cta — 2026-09-18 launch order: site entry first).
+        _cmpFlag = !chrome.runtime.lastError && !!(res && res.cta === true);
+        // Re-render on BOTH answers: a previous instance may have left its button in the shared
+        // strip, and only a render with the fresh answer removes it (Codex #13).
+        if (isCurrent()) renderStrip();
+      });
+    } catch { _cmpFlagPending = false; _cmpFlag = false; }
+  }
+
+  /** Plain text of the composer; '' when empty/absent. */
+  function readComposerText() {
+    const editor = document.querySelector('#prompt-textarea, form[data-type="unified-composer"] div.ProseMirror[contenteditable="true"], form[data-type="unified-composer"] textarea');
+    if (!editor) return '';
+    if (editor.tagName === 'TEXTAREA') return String(editor.value || '').trim();
+    return String(editor.innerText || editor.textContent || '').trim();
+  }
+
+  // `btnEl` is passed at mount time: buildStrip() renders BEFORE the strip is inserted into the
+  // document, so a document-wide query would find nothing and leave the button enabled on an
+  // empty composer (caught by test/compare-button-guard.mjs).
+  function syncCompareButtonState(btnEl) {
+    const btn = btnEl || document.querySelector(`#${STRIP_ID} .${CMP_BTN_CLASS}`);
+    if (!btn) return;
+    const empty = !readComposerText();
+    btn.disabled = empty;
+    btn.title = empty ? t('cmp_empty_tip') : t('cmp_ask_others_tip');
+  }
+
+  // The composer fires `input` on every keystroke; coalesce the enabled/disabled sync per frame.
+  function onAnyInput() {
+    if (!isCurrent()) { document.removeEventListener('input', onAnyInput, true); return; }
+    if (_cmpSyncScheduled) return;
+    _cmpSyncScheduled = true;
+    requestAnimationFrame(() => { _cmpSyncScheduled = false; syncCompareButtonState(); });
+  }
+
+  function mountCompareButton(strip) {
+    const existing = strip.querySelector('.' + CMP_BTN_CLASS);
+    if (!cmpAllowed()) { if (existing) existing.remove(); return; }
+    if (existing) { syncCompareButtonState(existing); return; }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = CMP_BTN_CLASS;
+    btn.textContent = t('cmp_ask_others');
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const q = readComposerText();
+      if (!q) { syncCompareButtonState(btn); return; }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q }); } catch { /* context dead */ }
+    });
+    (strip.querySelector('.ct-cg-strip-inner') || strip).appendChild(btn);
+    syncCompareButtonState(btn);
+  }
+  // Both branches below replace the strip's markup, so the compare button is (re)attached here,
+  // after the markup, rather than inside each branch.
   function renderStripInto(strip) {
+    renderStripMarkup(strip);
+    mountCompareButton(strip);
+  }
+
+  function renderStripMarkup(strip) {
     // Prefer the 5h window; fall back to the 7d window for plans that expose
     // only a weekly limit (e.g. ChatGPT Pro 5x 'prolite', where h5 is null).
     const use7d = _data && _data.h5 == null && _data.d7 != null;
@@ -217,26 +381,56 @@
     const anchor = findAnchor();
     if (!anchor) { _mounted = false; return; }
     const strip = buildStrip();
-    if (anchor.type === 'belowbox') {
+    if (anchor.type === 'belowbox' || anchor.type === 'belowcontainer') {
       strip.classList.add('ct-cg-strip-belowbox'); // full-width row under the box
       anchor.el.parentNode.insertBefore(strip, anchor.el.nextSibling);
     } else {
       anchor.el.parentNode.insertBefore(strip, anchor.el);
     }
+    // Remembered so the tick can notice the page changed shape underneath us — see ensureMounted().
+    // The TYPE alone is not enough: a composer subtree can be replaced by another of the same
+    // shape, and then the type matches while the element does not.
+    strip.dataset.ctAnchor = anchor.type;
+    _anchorEl = anchor.el;
     _mounted = true;
   }
+
+  let _anchorEl = null;
 
   function unmount() {
     const el = document.getElementById(STRIP_ID);
     if (el) el.remove();
+    _anchorEl = null;
     _mounted = false;
   }
 
   function ensureMounted() {
     if (!_enabled) { unmount(); return; }
     if (!isCurrent()) return;
-    if (!document.getElementById(STRIP_ID)) _mounted = false;
-    if (!_mounted) mount();
+    const el = document.getElementById(STRIP_ID);
+    if (!el) { _mounted = false; mount(); return; }
+
+    // 🔴 MOUNTED IS NOT THE SAME AS MOUNTED IN THE RIGHT PLACE. Chat ↔ Work is a client-side
+    // toggle: the composer box gains or loses its row with no navigation and without ever removing
+    // our strip. Every pre-existing remount trigger keys on the node being GONE, so a strip mounted
+    // in Chat mode stayed exactly where it was — wrong — for the whole Work session.
+    const want = findAnchor();
+
+    // 🔴 NO ANCHOR MEANS NO STRIP. Placing the strip outside the composer box severed the lifetime
+    // it used to inherit: when the strip lived INSIDE that subtree, removing the composer removed
+    // the strip too, and the existing "is the node gone" recovery took over. Outside, an orphan
+    // strip — with a live compare button — can outlive the composer on a composerless view for as
+    // long as the tab stays open (Codex, #1491 finding 1).
+    if (!want) { unmount(); return; }
+
+    const placedRight = want.type === 'disclaimer'
+      ? el.nextElementSibling === want.el
+      : el.previousElementSibling === want.el;
+
+    if (want.type !== el.dataset.ctAnchor || want.el !== _anchorEl || !placedRight) {
+      unmount();
+      mount();
+    }
   }
 
   // Fully stop this instance (superseded by a newer injection, or ChatGPT
@@ -250,6 +444,7 @@
     if (_observer) { _observer.disconnect(); _observer = null; }
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* context dead */ }
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { /* context dead */ }
+    try { document.removeEventListener('input', onAnyInput, true); } catch { /* context dead */ }
   }
 
   // ── Data ──
@@ -295,9 +490,14 @@
       return;
     }
     if (area !== 'sync') return;
+    if (changes.compareEnabled) {
+      _cmpEnabled = changes.compareEnabled.newValue !== false;
+      ensureCompareFlag();
+      renderStrip();
+    }
     if (changes.chatgptInputUsageEnabled) {
       _enabled = changes.chatgptInputUsageEnabled.newValue !== false;
-      if (!_enabled) unmount(); else requestUsageData();
+      if (!_enabled) unmount(); else { requestUsageData(); ensureCompareFlag(); }
     }
     if (changes.lang) {
       _lang = changes.lang.newValue === 'auto' ? CORE.detectLang() : changes.lang.newValue;
@@ -332,11 +532,13 @@
 
   // ── Init ──
   function init() {
-    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true, compareEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
       _enabled = cfg.chatgptInputUsageEnabled !== false;
-      if (_enabled) requestUsageData();
+      _cmpEnabled = cfg.compareEnabled !== false;
+      if (_enabled) { requestUsageData(); ensureCompareFlag(); }
     });
+    document.addEventListener('input', onAnyInput, true);
     loadAccount(); // prefill name/email into the inquiry link
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);

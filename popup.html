@@ -141,7 +141,9 @@
     <div class="runner-track" id="runner-track" style="display:none">
       <div class="runner-char" id="runner-char">🏃</div>
     </div>
-    <button class="runner-pause" id="runner-pause" style="display:none" title="⏸">⏸</button>
+    <!-- Label, title and aria-label are set by initRunner, which knows whether the runner is
+         currently moving. Starts empty so it can never show a stale glyph. -->
+    <button class="runner-pause" id="runner-pause" style="display:none"></button>
   </div>
 
   <!-- Overview ("모아 보기") master screen — one card per collected org/provider.
@@ -641,6 +643,9 @@
   <script src="config.js"></script>
   <script src="analytics.js"></script>
   <script src="i18n.js"></script>
+  <!-- motion-pref.js resolves the runner's motion preference. Classic (not a module) so the
+       options page, which has no module loader, reads the same implementation. -->
+  <script src="motion-pref.js"></script>
   <!-- usage-shared.js is the classic content-script core; loading it here lets the popup ES
        modules reuse the SAME ad-serving logic (globalThis.__ctUsageCore) as the sidebars,
        instead of duplicating it (single-source-of-truth rule). -->

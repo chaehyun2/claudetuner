@@ -5,7 +5,7 @@ import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRen
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
-import { state, _filteredHistory } from './state.js';
+import { state, _filteredHistory, primaryPlanFor } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
@@ -497,7 +497,11 @@ export function selectOrg(orgId, container) {
     const isChatGPT = (orgData.provider || 'claude') === 'chatgpt';
     const isGemini = (orgData.provider || 'claude') === 'gemini';
     const isExternalProvider = isChatGPT || isGemini;
-    const orgPlan = orgData.plan || state.currentPlan;
+    // 🔴 Only a Claude org may fall back to state.currentPlan — see primaryPlanFor() in ui/state.js.
+    // This used to read `|| state.currentPlan`, which handed a ChatGPT org Claude's plan NAME; the
+    // provider field just below then sent it into ChatGPT's ladder, where 'Pro' means 20x and the
+    // org's real 80% drew as 4% (#1433 ②).
+    const orgPlan = orgData.plan || primaryPlanFor(providerKey);
     const orgSnapshot = {
       plan: orgPlan,
       // drawCharts() reads snapshot.provider to pick the quota-multiplier scale and the guide-line

@@ -51,8 +51,8 @@
   let _email = '';
 
   const I18N = {
-    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '현재는 5시간·7일 사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기' },
-    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'Currently no 5h/7d usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback' },
+    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '현재는 5시간·7일 사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'AI 크로스체크', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요', cmp_empty_tip: '먼저 질문을 입력하세요' },
+    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'Currently no 5h/7d usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'AI Cross-Check', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers', cmp_empty_tip: 'Type a question first' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -184,7 +184,14 @@
   // Chat-bubble icon for 문의하기 (matches the popup's Feedback button / other strips).
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
+  // Both branches below replace the strip's markup, so the compare button is (re)attached here,
+  // after the markup, rather than inside each branch.
   function renderStripInto(strip) {
+    renderStripMarkup(strip);
+    mountCompareButton(strip);
+  }
+
+  function renderStripMarkup(strip) {
     // Collecting guard: no data yet. Transient state, so no gear/contact —
     // just the muted placeholder. Checked AFTER noLimits below because no-limit
     // plans report a 0% window (h5 is 0, not null) and must not fall in here.
@@ -234,6 +241,86 @@
     });
   }
 
+
+  // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
+  // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17)
+  // next to the gear. Gate = the CDN dark-launch flag (asked ONCE per page
+  // load through the service worker: `COMPARE_FLAG` → {on}) AND the `compareEnabled` option
+  // (chrome.storage.sync, default on). Click reads the composer's plain text and asks the SW to open
+  // compare.html — the SW owns the tab, and any optional-host permission prompt happens on that page
+  // under a user gesture (AC16: no `permissions.request` here).
+  //
+  // 🔴 No usage-shared core call in this block (#1421): plain DOM + chrome.runtime only.
+  const CMP_BTN_CLASS = 'ct-cmp-btn';
+  let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
+  let _cmpFlagPending = false;
+  let _cmpEnabled = true;     // compareEnabled option
+  let _cmpSyncScheduled = false;
+
+  const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
+
+  function ensureCompareFlag() {
+    if (_cmpFlag !== null || _cmpFlagPending || !_cmpEnabled) return;
+    _cmpFlagPending = true;
+    try {
+      chrome.runtime.sendMessage({ type: 'COMPARE_FLAG' }, (res) => {
+        _cmpFlagPending = false;
+        // A runtime error (no handler in an older SW) or a non-`on` answer both mean "no button".
+        // `cta`, not `on`: the page may be live (flags.json.compare) while the button stays hidden
+        // (flags.json.compare_cta — 2026-09-18 launch order: site entry first).
+        _cmpFlag = !chrome.runtime.lastError && !!(res && res.cta === true);
+        // Re-render on BOTH answers: a previous instance may have left its button in the shared
+        // strip, and only a render with the fresh answer removes it (Codex #13).
+        if (isCurrent()) renderStrip();
+      });
+    } catch { _cmpFlagPending = false; _cmpFlag = false; }
+  }
+
+  /** Plain text of the composer; '' when empty/absent. */
+  function readComposerText() {
+    const editor = findEditor();
+    if (!editor) return '';
+    if (editor.tagName === 'TEXTAREA') return String(editor.value || '').trim();
+    return String(editor.innerText || editor.textContent || '').trim();
+  }
+
+  // `btnEl` is passed at mount time: buildStrip() renders BEFORE the strip is inserted into the
+  // document, so a document-wide query would find nothing and leave the button enabled on an
+  // empty composer (caught by test/compare-button-guard.mjs).
+  function syncCompareButtonState(btnEl) {
+    const btn = btnEl || document.querySelector(`#${STRIP_ID} .${CMP_BTN_CLASS}`);
+    if (!btn) return;
+    const empty = !readComposerText();
+    btn.disabled = empty;
+    btn.title = empty ? t('cmp_empty_tip') : t('cmp_ask_others_tip');
+  }
+
+  // The composer fires `input` on every keystroke; coalesce the enabled/disabled sync per frame.
+  function onAnyInput() {
+    if (!isCurrent()) { document.removeEventListener('input', onAnyInput, true); return; }
+    if (_cmpSyncScheduled) return;
+    _cmpSyncScheduled = true;
+    requestAnimationFrame(() => { _cmpSyncScheduled = false; syncCompareButtonState(); });
+  }
+
+  function mountCompareButton(strip) {
+    const existing = strip.querySelector('.' + CMP_BTN_CLASS);
+    if (!cmpAllowed()) { if (existing) existing.remove(); return; }
+    if (existing) { syncCompareButtonState(existing); return; }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = CMP_BTN_CLASS;
+    btn.textContent = t('cmp_ask_others');
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const q = readComposerText();
+      if (!q) { syncCompareButtonState(btn); return; }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q }); } catch { /* context dead */ }
+    });
+    (strip.querySelector('.ct-gm-strip-inner') || strip).appendChild(btn);
+    syncCompareButtonState(btn);
+  }
   function renderStrip() {
     const strip = document.getElementById(STRIP_ID);
     if (strip) renderStripInto(strip);
@@ -293,6 +380,7 @@
     if (_themeObserver) { _themeObserver.disconnect(); _themeObserver = null; }
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* context dead */ }
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { /* context dead */ }
+    try { document.removeEventListener('input', onAnyInput, true); } catch { /* context dead */ }
   }
 
   // ── Data ──
@@ -351,9 +439,14 @@
       return;
     }
     if (area !== 'sync') return;
+    if (changes.compareEnabled) {
+      _cmpEnabled = changes.compareEnabled.newValue !== false;
+      ensureCompareFlag();
+      renderStrip();
+    }
     if (changes.geminiInputUsageEnabled) {
       _enabled = changes.geminiInputUsageEnabled.newValue !== false;
-      if (!_enabled) { clearEmptyRetry(); unmount(); } else requestUsageData();
+      if (!_enabled) { clearEmptyRetry(); unmount(); } else { requestUsageData(); ensureCompareFlag(); }
     }
     if (changes.lang) {
       _lang = changes.lang.newValue === 'auto' ? CORE.detectLang() : changes.lang.newValue;
@@ -408,11 +501,13 @@
 
   // ── Init ──
   function init() {
-    chrome.storage.sync.get({ lang: 'auto', geminiInputUsageEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', geminiInputUsageEnabled: true, compareEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
       _enabled = cfg.geminiInputUsageEnabled !== false;
-      if (_enabled) requestUsageData();
+      _cmpEnabled = cfg.compareEnabled !== false;
+      if (_enabled) { requestUsageData(); ensureCompareFlag(); }
     });
+    document.addEventListener('input', onAnyInput, true);
     loadAccount(); // prefill 문의하기 form with the user's name/email
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);

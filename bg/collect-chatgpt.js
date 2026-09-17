@@ -1,4 +1,5 @@
 import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
+import { platformField } from './platform.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import it
 // (#1315). Names are unchanged on purpose: the call sites below are what several guards match on.
 import {
@@ -401,6 +402,10 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     provider_email: chatgptEmail || null,
     is_extra_org: isExtraOrg,
     install_id: await getOrCreateInstallId(),
+    // #1445 step B. 🔴 A CLAIM from the request BODY — the server stores it under `claimed_`
+    // and never lets it overwrite what it derived from the request's own headers.
+    // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
+    ...(await platformField()),
     // Force = "store, don't dedup": the server's usage-only dedup (sig cache / D1) keys on
     // h5/d7/r7, so a plan/pending change with flat usage would otherwise be dropped. Set only on
     // plan/pending-change or user-manual sends (shouldForceProviderPost) — flat heartbeats stay dedupable.

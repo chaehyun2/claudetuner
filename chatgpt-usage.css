@@ -357,3 +357,13 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 .ct-cg-strip-muted { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-reset { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-dot { color: var(--ct-cg-text-muted); opacity: 0.5; }
+
+/* 「다른 AI에게도 물어보기」 (compare, #1452) — a pill next to the gear. */
+.ct-cmp-btn {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; margin-left: 4px;
+  border: 1px solid var(--ct-cg-border); border-radius: 999px; background: none;
+  color: var(--ct-cg-text-muted); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.ct-cmp-btn:hover:not(:disabled) { background: var(--ct-cg-surface); color: var(--ct-cg-text); }
+.ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }

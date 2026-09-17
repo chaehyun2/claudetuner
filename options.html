@@ -247,6 +247,18 @@
     </div>
   </div>
 
+  <!-- AI Cross-Check (#1452; formerly Multi-AI compare, renamed 2026-09-17). Dark-launched: hidden until flags.json.compare === true (options.js FLAG_ROWS). -->
+  <div class="card" id="compare-enabled-row" style="display:none">
+    <div class="card-title" data-i18n="compare_title"></div>
+    <div class="form-group">
+      <label class="check-label">
+        <input type="checkbox" id="compare-enabled" checked>
+        <span data-i18n="compare_enabled_desc"></span>
+      </label>
+      <div class="form-hint" data-i18n="compare_enabled_hint"></div>
+    </div>
+  </div>
+
   <!-- 팝업 표시 -->
   <div class="card" id="popup-display">
     <div class="card-title" data-i18n="popup_display_title"></div>
@@ -256,6 +268,13 @@
         <span data-i18n="show_extra_usage_desc"></span>
       </label>
       <div class="form-hint" data-i18n="show_extra_usage_hint"></div>
+    </div>
+    <div class="form-group">
+      <label class="check-label">
+        <input type="checkbox" id="show-runner" checked>
+        <span data-i18n="show_runner_desc"></span>
+      </label>
+      <div class="form-hint" data-i18n="show_runner_hint"></div>
     </div>
   </div>
 
@@ -475,6 +494,8 @@
   <script src="config.js"></script>
   <script src="analytics.js"></script>
   <script src="i18n.js"></script>
+  <!-- Same motion-preference resolution the popup uses; see motion-pref.js. -->
+  <script src="motion-pref.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

@@ -9,12 +9,18 @@ let _lastInteractedCard = null;
 // fail-safe CORS fetch (same URL, same shape) in addition to reading the
 // cache claude-folders.js writes, and stays live via storage.onChanged.
 const FOLDERS_FLAGS_URL = 'https://cdn.claudetuner.com/flags.json';
-// Each dark-launch-gated folders row: CDN flag field → row element id + the
-// storage.local cache key the matching content script (claude-folders.js /
-// chatgpt-folders.js) writes. Provider-agnostic so adding a provider is one row.
+// Each dark-launch-gated row: CDN flag field → row element id + the storage.local
+// cache key the matching content script (claude-folders.js / chatgpt-folders.js)
+// writes. Feature-agnostic so adding a gated feature is one row — the compare
+// card (#1452) rides the same mechanism; its cache key is written only by this
+// page (the content scripts ask the SW for the flag instead).
 const FOLDER_FLAG_ROWS = [
   { flag: 'folders', rowId: 'folders-enabled-row', cacheKey: 'foldersAvailable' },
   { flag: 'foldersChatgpt', rowId: 'chatgpt-folders-enabled-row', cacheKey: 'foldersChatgptAvailable' },
+  // The compare row follows the in-page BUTTON gate (`compare` AND `compare_cta`, like the three
+  // composer scripts via COMPARE_FLAG.cta — 2026-09-18 launch order: page first, button later):
+  // a toggle for a button that cannot show would be a dead control (pre-deploy Codex #2).
+  { flag: 'compare', alsoFlag: 'compare_cta', rowId: 'compare-enabled-row', cacheKey: 'compareAvailable' },
 ];
 function _setRowVisible(rowId, available) {
   const row = document.getElementById(rowId);
@@ -29,11 +35,12 @@ async function _refreshFoldersAvailability() {
     const res = await fetch(FOLDERS_FLAGS_URL);
     if (res.ok) json = await res.json();
   } catch { json = null; } // network/parse error → fail-safe below (hidden, keep cache)
-  for (const { flag, rowId, cacheKey } of FOLDER_FLAG_ROWS) {
+  for (const { flag, alsoFlag, rowId, cacheKey } of FOLDER_FLAG_ROWS) {
     if (json && typeof json[flag] === 'boolean') {
       // Definitive 200 result with a real boolean — safe to self-heal storage,
       // even when the definitive value is `false` (corrects a stale cached `true`).
-      const available = json[flag] === true;
+      // A second field (`alsoFlag`) must ALSO be exactly true; missing = false (fail-safe).
+      const available = json[flag] === true && (!alsoFlag || json[alsoFlag] === true);
       _setRowVisible(rowId, available);
       try { chrome.storage.local.set({ [cacheKey]: available }); } catch { /* noop */ }
     } else {
@@ -210,6 +217,7 @@ function doSave() {
   const foldersEnabledChatgpt = document.getElementById('chatgpt-folders-enabled').checked;
   const geminiSidebarUsageEnabled = document.getElementById('gemini-sidebar-usage-enabled').checked;
   const geminiInputUsageEnabled = document.getElementById('gemini-input-usage-enabled').checked;
+  const compareEnabled = document.getElementById('compare-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
@@ -220,7 +228,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -248,7 +256,7 @@ function doSave() {
       if (userEmail) {
         const extSettings = {
           usageDisplayMode, thresholdWarn, thresholdDanger,
-          sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, optimizationMode,
+          sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, optimizationMode,
           collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup,
@@ -315,9 +323,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // Runner animation (popup) — shares one storage key with the popup's pause button so the two
+  // controls can't disagree. The key is absent until someone chooses, and while it is absent the
+  // OS "reduce motion" setting decides; ticking or unticking here records an explicit choice.
+  const showRunnerCb = document.getElementById('show-runner');
+  if (showRunnerCb) {
+    const { runnerPaused } = await chrome.storage.local.get({ runnerPaused: null });
+    showRunnerCb.checked = !ctRunnerMotionOff(runnerPaused);
+    showRunnerCb.addEventListener('change', () => {
+      chrome.storage.local.set({ runnerPaused: !showRunnerCb.checked });
+      showToast(`${t('popup_display_title')} ${t('auto_saved')}`);
+    });
+  }
+
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -363,6 +384,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('chatgpt-input-usage-enabled').checked = config.chatgptInputUsageEnabled !== false;
       document.getElementById('gemini-sidebar-usage-enabled').checked = config.geminiSidebarUsageEnabled !== false;
       document.getElementById('gemini-input-usage-enabled').checked = config.geminiInputUsageEnabled !== false;
+      document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
       document.getElementById('notify-usage-warn').checked = config.notifyUsageWarn !== false;
@@ -414,6 +436,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('chatgpt-folders-enabled').addEventListener('change', autoSave);
   document.getElementById('gemini-sidebar-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('gemini-input-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('compare-enabled').addEventListener('change', autoSave);
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {

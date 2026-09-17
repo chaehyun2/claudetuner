@@ -117,7 +117,23 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
   // send). It self-heals on the first send (commit persists `plan`), which happens within one
   // heartbeat floor (≤1h) via usage change or the floor, after which detection is fully active.
   // This window is no worse than the pre-feature behaviour (plan changes weren't detected at all).
-  const planChanged = prevValues.plan != null && currentValues.plan != null && prevValues.plan !== currentValues.plan;
+  // knownDiff: both sides RECORDED (not merely truthy) and different. `undefined` means "this gate
+  // state predates the field" — the bootstrap case — and is the only value that must never count.
+  const knownDiff = (a, b) => a !== undefined && b !== undefined && a !== b;
+  // 🔴 `prevValues.plan !== undefined`, NOT `!= null`. The old `!= null` on the PREV side conflated
+  // two different facts: "this gate state predates the plan field" (undefined — a real bootstrap,
+  // must stay a no-op) and "we looked and the provider did not tell us" (null). Since #1431/#1434
+  // made an unknown plan honest, null is a RECORDED observation, so `null -> 'Plus'` is a genuine
+  // recovery that must POST promptly — under the old guard it fell through to the heartbeat floor
+  // as force=false, where another browser's recent unknown snapshot could get it dropped as
+  // "unchanged" while this client had already committed 'Plus' locally. Staggered heartbeats then
+  // kept deferring the correction (#1433 ①).
+  //
+  // The CURRENT side keeps `!= null`: a known -> unknown transition must NOT force. It carries no
+  // new tier (the server's COALESCE preserves the last known plan anyway), and unknown is common —
+  // ~27% of collecting installs report no ChatGPT plan — so forcing on it would turn an ordinary
+  // observation gap into a POST storm.
+  const planChanged = knownDiff(prevValues.plan, currentValues.plan) && currentValues.plan != null;
   // A scheduled plan change — its target (pendingPlan) OR effective date (pendingChangeDate), its
   // appearance, or its cancellation — carries NO usage delta, so without this it would only ride
   // the heartbeat AND be dropped by the server's usage-only dedup (keys on h5/d7/r7, not pending).
@@ -129,7 +145,6 @@ export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { forc
   //     of riding a droppable non-force heartbeat (which, once the client commits on the 200, would
   //     leave the change never stored). `cur != null` is false for BOTH null and undefined, so "no
   //     pending" and "unknown" (roster fetch failed → undefined) never fabricate a store/cancellation.
-  const knownDiff = (a, b) => a !== undefined && b !== undefined && a !== b;
   const pendingAppearedAtBootstrap = prevValues.pendingPlan === undefined && currentValues.pendingPlan != null;
   const pendingChanged = knownDiff(prevValues.pendingPlan, currentValues.pendingPlan)
     || knownDiff(prevValues.pendingChangeDate, currentValues.pendingChangeDate)

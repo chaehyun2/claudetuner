@@ -221,6 +221,24 @@ export function drawCharts(history, plan, snapshot) {
   // guide lines and the plan-change rebase below need one multiplier each, not one shared.
   const currentMult5h = planToMultiplier(plan, provider, '5h');
   const currentMult7d = planToMultiplier(plan, provider, '7d');
+  // === UNKNOWN NORMALIZATION BASIS: BEGIN (pinned by test/plan-borrow-guard.mjs) ===
+  // 🔴 planToMultiplier() returns 1 for "unknown" AND for genuine 1x tiers, so the multiplier alone
+  // cannot say whether we HAVE a scale. Everything below divides by the current multiplier, and a
+  // fabricated 1x is not a neutral default — it is an assertion that this account has Plus's quota,
+  // which silently rescales any history point that DOES carry a plan. Measured: current plan
+  // unknown + history 'Pro' (20x) plots 80% at 1600%; history 'Go' (0.4x) plots it at 32% (#1433).
+  //
+  // A provider read can lose the plan while retained history keeps known labels (bg/providers.js
+  // stores org.plan as `p` per point), so mixed history is a REACHABLE input, not a corner case.
+  //
+  // 🔑 This became reachable only when #1431/#1434 made an unknown plan honest — org-selector used
+  // to borrow the Claude plan, which always produced SOME label. Fixing that borrow is what exposed
+  // this, so the two changes ship together.
+  //
+  // With no basis we do the only defensible thing: report what each point reported, and draw no
+  // named quota guides at all. A guide line is a claim about THIS account's ceiling.
+  const basisUnknown = plan == null || String(plan).trim() === '';
+  // === UNKNOWN NORMALIZATION BASIS: END ===
 
   // Time-ordered but UNSCALED — this is what the gauges and the banner forecast from
   // (render.js passes _filteredHistory() straight through). The forecast MUST read the same
@@ -231,7 +249,7 @@ export function drawCharts(history, plan, snapshot) {
 
   // Normalize past data to current plan scale, for DRAWING only
   // (e.g. Pro 80% -> Max 5x switch -> converted to 16%)
-  const sorted = sortedRaw.map((pt) => {
+  const sorted = basisUnknown ? sortedRaw : sortedRaw.map((pt) => {
     const entryMult5h = planToMultiplier(pt.p || plan, provider, '5h');
     const entryMult7d = planToMultiplier(pt.p || plan, provider, '7d');
     if (entryMult5h === currentMult5h && entryMult7d === currentMult7d) return pt;
@@ -258,8 +276,12 @@ export function drawCharts(history, plan, snapshot) {
   // 🔴 One array per window (#955). These used to be built once and handed to BOTH charts, so a
   // Max 20x user's WEEKLY chart drew the "Max 5x" boundary at 5/20 = 25% when it belongs at
   // 5/10 = 50% — i.e. the popup told them they needed 20x while a 5x would have held them.
-  const limitLines5h = buildPlanLimitLines(currentMult5h, provider, '5h');
-  const limitLines7d = buildPlanLimitLines(currentMult7d, provider, '7d');
+  // Empty when the basis is unknown: buildPlanLimitLines() at currentMult 1 would mark the
+  // provider's 1x tier ('Plus' for ChatGPT, 'AI Pro' for Gemini) as isCurrentPlan and draw it at
+  // 100% — naming a plan we do not know the user has. chartMaxY/visibleLimits both degrade to
+  // "follow the data" on an empty array.
+  const limitLines5h = basisUnknown ? [] : buildPlanLimitLines(currentMult5h, provider, '5h');
+  const limitLines7d = basisUnknown ? [] : buildPlanLimitLines(currentMult7d, provider, '7d');
 
   // Hide placeholder and show both panes (for correct canvas size calculation)
   const pane5h = document.getElementById('chart-pane-5h');

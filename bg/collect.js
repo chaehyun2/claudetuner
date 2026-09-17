@@ -1,4 +1,5 @@
 import { sendGAEvent } from './analytics.js';
+import { platformField } from './platform.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_TIMEOUT_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
@@ -918,6 +919,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       is_primary_org: !!config.selectedOrgId && config.selectedOrgId === bestOrg?.uuid,
       last_active_org_uuid: cookieOrgId || null,
       install_id: await getOrCreateInstallId(),
+      // #1445 step B. 🔴 A CLAIM from the request BODY — the server stores it under `claimed_`
+      // and never lets it overwrite what it derived from the request's own headers.
+      // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
+      ...(await platformField()),
     };
 
     // Include ref_source (removed after first send)
@@ -1674,6 +1679,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             // after a rate-limited window would be mislabeled and re-deduped.
             is_heartbeat: !extraChanged,
             install_id: await getOrCreateInstallId(),
+            // #1445 step B. 🔴 A CLAIM from the request BODY — the server stores it under `claimed_`
+            // and never lets it overwrite what it derived from the request's own headers.
+            // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
+            ...(await platformField()),
           };
 
           // Usage API success — populate orgUsageMap/successOrgs immediately (regardless of server POST result)

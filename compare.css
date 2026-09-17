@@ -1,0 +1,344 @@
+/* compare.html — multi-AI compare page (#1452).
+   Theme tokens mirror popup.css :root / [data-theme="dark"] (popup.css pins body to 340px, so it cannot
+   be linked here); the extra tokens below (success / brand / shadow / radius) are page-local.
+   🔴 Every colour a piece of TEXT uses must be a token defined in BOTH theme blocks —
+   test/compare-contrast-guard.mjs reads these two blocks and checks the pairs at WCAG AA. */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-body: #f6f6f8; --bg-card: #ffffff; --bg-hover: #f3f4f6; --bg-subtle: #f4f4f6; --border: #e5e7eb; --border-strong: #d1d5db;
+  --text-primary: #1e1b4b; --text-secondary: #5b6472; --text-muted: #9ca3af;
+  --accent: #4f46e5; --accent-hover: #4338ca; --accent-light: #eef2ff;
+  --btn-primary-bg: #4f46e5; --btn-primary-hover: #4338ca; --btn-primary-fg: #ffffff;
+  --success: #15803d; --success-bg: #ecfdf3;
+  --danger: #b91c1c; --danger-bg: #fef2f2;
+  --warn: #92400e; --warn-bg: #fef3c7;
+  --code-bg: #f3f4f6;
+  /* 「시크릿 대화」 surface (item 6): the prompt card + composers sit on this slate while incognito is on. */
+  --bg-incognito: #e8ebf3; --border-incognito: #c7cddc;
+  --brand-claude: #d97757; --brand-gemini: #4285f4; --brand-chatgpt: #10a37f;
+  --shadow-card: 0 1px 2px rgba(17, 24, 39, .04), 0 1px 3px rgba(17, 24, 39, .06);
+  --shadow-pop: 0 1px 2px rgba(17, 24, 39, .08);
+  --radius-card: 14px; --radius-ctl: 10px; --radius-pill: 999px;
+}
+[data-theme="dark"] {
+  --bg-body: #0f1419; --bg-card: #1a1f2e; --bg-hover: #252d3d; --bg-subtle: #222937; --border: #2d3748; --border-strong: #3b4557;
+  --text-primary: #F0F0F0; --text-secondary: #A0AEC0; --text-muted: #718096;
+  --accent: #818CF8; --accent-hover: #6366F1; --accent-light: #1e1b4b;
+  --btn-primary-bg: #4f46e5; --btn-primary-hover: #4338ca; --btn-primary-fg: #ffffff;
+  --success: #4ade80; --success-bg: #052e16;
+  --danger: #fca5a5; --danger-bg: #2a0a0a;
+  --warn: #fde68a; --warn-bg: #422006;
+  --code-bg: #0f1419;
+  --bg-incognito: #232a3b; --border-incognito: #3f4a63;
+  --brand-claude: #e0876a; --brand-gemini: #7ba7f7; --brand-chatgpt: #34c199;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, .35), 0 1px 3px rgba(0, 0, 0, .3);
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, .4);
+}
+
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  font-size: 14px; line-height: 1.55; color: var(--text-primary); background: var(--bg-body);
+  -webkit-font-smoothing: antialiased; overflow-wrap: anywhere;
+}
+/* Korean wraps at word boundaries (keep-all) — long unbroken runs still fall back to anywhere. */
+html[lang="ko"] body { word-break: keep-all; }
+/* App shell: the root is exactly one viewport tall and the columns take whatever the header, the
+   question card and the docked composer leave (.cmp-columns flex: 1) — no `calc(100vh - N)` that
+   assumes a header height. Wider than that the content overflows the root and the page scrolls
+   (the bottom composer stays docked, .cmp-dock). No max-width: three columns fill a 2200px window. */
+#compare-root { display: flex; flex-direction: column; height: 100vh; padding: 16px clamp(24px, 3vw, 64px) 0; gap: 12px; }
+a { color: var(--accent); }
+button { font: inherit; cursor: pointer; color: inherit; }
+button:disabled { cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── top bar ── */
+/* Two groups on one 36px line: identity (title · source chip · mode chip) and actions (quota ·
+   전체 복사 · 중지 · 새 대화). Chips are 26px, action buttons 30px (.cmp-btn-sm), gaps 10px. */
+.cmp-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 36px; }
+.cmp-title { font-size: 20px; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; margin-right: 2px; }
+.cmp-src-chip { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px; border-radius: var(--radius-pill); background: var(--bg-card); border: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+/* session history mode chip (「기록 남김」 / 🕶 「시크릿 대화」), shown once the session started */
+.cmp-mode-chip[hidden] { display: none; }
+.cmp-mode-chip.is-incognito { background: var(--bg-incognito); border-color: var(--border-incognito); color: var(--text-primary); }
+.cmp-incognito-glyph { font-size: 13px; line-height: 1; }
+.cmp-incognito-glyph[hidden] { display: none; }
+.cmp-topbar-side { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.cmp-quota { margin-right: 4px; }
+.cmp-quota { font-size: 12.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp-quota.is-exhausted { color: var(--warn); font-weight: 600; }
+.cmp-quota:empty { display: none; }
+
+/* ── provider mark (dot) ── */
+.cmp-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+.cmp-dot[data-mark="claude"] { background: var(--brand-claude); }
+.cmp-dot[data-mark="gemini"] { background: var(--brand-gemini); }
+.cmp-dot[data-mark="chatgpt"] { background: var(--brand-chatgpt); }
+
+/* ── buttons ── */
+.cmp-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 16px; border: 1px solid var(--border-strong); background: var(--bg-card); color: var(--text-primary); border-radius: var(--radius-ctl); font-size: 13.5px; font-weight: 600; text-decoration: none; white-space: nowrap; transition: background-color .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
+.cmp-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.cmp-btn:disabled { opacity: .5; }
+/* Filled button: its own tokens — the dark theme's --accent is a TEXT colour (white on it is 2.98:1). */
+.cmp-btn-primary { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); color: var(--btn-primary-fg); }
+.cmp-btn-primary:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
+.cmp-btn-sm { height: 30px; padding: 0 12px; font-size: 12.5px; }
+/* Stop: quiet while idle, a real (red-outlined) action while a send is in flight. */
+.cmp-btn-stop::before { content: ''; width: 9px; height: 9px; border-radius: 2px; background: currentColor; }
+.cmp-btn-stop:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.cmp-btn-stop:not(:disabled):hover { background: var(--danger-bg); }
+.cmp-btn-stop:disabled { opacity: .45; }
+/* New chat: a plus glyph drawn from two bars — no image (the stylesheet stays url()-free). */
+.cmp-btn-new::before { content: ''; width: 9px; height: 9px; background: linear-gradient(currentColor, currentColor) center / 9px 1.5px no-repeat, linear-gradient(currentColor, currentColor) center / 1.5px 9px no-repeat; }
+.cmp-btn-new:disabled { opacity: .45; }
+
+/* ── column action row (batch 2): retry this column · open the provider tab ── */
+.cmp-col-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.cmp-col-actions[hidden] { display: none; }
+
+/* ── copy buttons (every turn, the frozen question, each column head) ── */
+/* Item 5 (2026-09-17): ALWAYS visible — the hover-only ghost was never found. Quiet (secondary
+   text, no fill) until hovered. Icon-only for a user turn / the frozen question (aria + title say
+   what it copies); `.cmp-copy-labelled` carries a text label — 「답변 복사」 under an answer,
+   「대화 복사」 in a column head — and reads 「복사됨」 for 1.5 s after a copy. */
+.cmp-copy { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 6px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--text-secondary); font-size: 11.5px; font-weight: 600; line-height: 1; white-space: nowrap; transition: background-color .15s ease, color .15s ease, border-color .15s ease; flex-shrink: 0; }
+.cmp-copy:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-copy.is-copied { color: var(--success); }
+.cmp-copy[hidden] { display: none; }
+.cmp-copy-label:empty { display: none; }
+.cmp-copy-labelled { height: 28px; padding: 0 9px 0 7px; border-color: var(--border); background: var(--bg-card); font-size: 12px; }
+.cmp-copy-labelled:hover { border-color: var(--border-strong); }
+/* Column-head instance: matches the head's 30px control height. */
+.cmp-copy-col { height: 30px; }
+/* The execCommand fallback's scratch textarea: in the document (it must be selectable), never seen. */
+.cmp-clip { position: fixed; top: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
+
+/* ── cards ── */
+.cmp-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+
+/* ── prompt card ── */
+.cmp-prompt { padding: 16px 18px 14px; flex-shrink: 0; }
+/* Committed (the session started): a record plus the thread composer — tighter, so the columns keep the height. */
+.cmp-prompt.is-committed { padding: 10px 14px 10px; }
+.cmp-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; min-height: 26px; }
+.cmp-prompt.is-committed .cmp-prompt-head { margin-bottom: 2px; }
+.cmp-eyebrow { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-secondary); }
+.cmp-prompt-text { font-size: 15px; line-height: 1.6; white-space: pre-wrap; max-height: 180px; overflow: auto; }
+.cmp-prompt-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cmp-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.cmp-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.cmp-check input:disabled { cursor: not-allowed; }
+.cmp-check:has(input:disabled) { opacity: .6; cursor: not-allowed; }
+.cmp-check-incognito .cmp-incognito-glyph { margin-right: -2px; }
+.cmp-spacer { flex: 1; }
+/* ── incognito surface (item 6) ── */
+/* `html[data-incognito="1"]` (compare.js syncSaveHistory): the question card and both follow-up
+   composers move onto the slate surface with a dashed border — the page says "this one is not
+   kept" before a word is read. Text on it stays --text-primary / --text-secondary (contrast guard). */
+html[data-incognito="1"] .cmp-prompt, html[data-incognito="1"] .cmp-composer-compact { background: var(--bg-incognito); border-color: var(--border-incognito); border-style: dashed; }
+html[data-incognito="1"] .cmp-textarea { background: var(--bg-card); }
+html[data-incognito="1"] .cmp-textarea[readonly] { background: var(--bg-subtle); }
+html[data-incognito="1"] .cmp-prompt-actions, html[data-incognito="1"] .cmp-composer-thread { border-top-color: var(--border-incognito); }
+html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font-weight: 600; }
+
+/* ── notices ── */
+.cmp-notices:empty { display: none; }
+.cmp-notice { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 16px; border-radius: var(--radius-card); border: 1px solid var(--border); border-left-width: 4px; background: var(--bg-card); box-shadow: var(--shadow-card); font-size: 13.5px; line-height: 1.5; animation: cmp-fade-in .2s ease-out both; }
+.cmp-notice-text { flex: 1 1 320px; min-width: 0; }
+.cmp-notice-title { font-weight: 600; }
+.cmp-notice-desc { color: var(--text-secondary); font-size: 13px; margin-top: 2px; }
+.cmp-notice.is-error { border-left-color: var(--danger); }
+.cmp-notice.is-error .cmp-notice-title { color: var(--danger); }
+.cmp-notice.is-warn { border-left-color: var(--warn); }
+.cmp-notice.is-warn .cmp-notice-title { color: var(--warn); }
+/* info: a plain hint (no AI signed in yet) — accent bar, ordinary text */
+.cmp-notice.is-info { border-left-color: var(--accent); }
+.cmp-notice .cmp-btn { flex-shrink: 0; }
+
+/* ── coming soon ── */
+.cmp-coming-soon { margin: 18vh auto 0; text-align: center; max-width: 440px; padding: 36px 28px; }
+.cmp-coming-soon h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; letter-spacing: -.01em; }
+.cmp-coming-soon p { color: var(--text-secondary); }
+
+/* ── columns ── */
+/* The columns take the height the shell leaves (flex: 1) and never less than the floor; rows are
+   `minmax(0, 1fr)` so a long answer can never grow a row past the box — the column body scrolls
+   instead. When the window is too narrow for three columns the grid wraps to two rows that share
+   the same box (each shorter, each scrolling); below 720px the shell gives way (see ── narrow ──). */
+.cmp-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 14px; align-items: stretch; flex: 1 1 auto; min-height: 320px; }
+.cmp-columns:empty { display: none; }
+/* Every column shares one height (grid stretch) and scrolls inside — chunks never move the page. */
+.cmp-col { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; animation: cmp-fade-in .25s ease-out both; }
+/* 「↓ 새 내용」 (streaming scroll, dowoo-style): outside the scrolling body, pinned to the column's bottom edge,
+   shown only while the reader is away from the end of a column that holds content (compare.js syncJumpButton). */
+.cmp-jump { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 2; height: 28px; padding: 0 12px; border-radius: var(--radius-pill); box-shadow: var(--shadow-card); font-size: 12px; }
+.cmp-jump[hidden] { display: none; }
+.cmp-col[hidden] { display: none; }
+/* Head (item 12): two groups on a 30px control line — identity (dot · name → site · model pill ·
+   plan) and tools (status badge · 대화 복사). At a 340px column the tools group wraps under the
+   identity group rather than truncating a badge, a plan or a model name. */
+.cmp-col-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 9px 12px 9px 14px; min-height: 48px; border-bottom: 1px solid var(--border); background: var(--bg-card); flex-shrink: 0; }
+.cmp-col-id { display: inline-flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.cmp-col-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+/* Item 1: the name is a link to the site (new tab). Plain text weight, no underline; the ↗ arrow
+   shows on hover / focus so the row reads as a heading until it is pointed at. */
+.cmp-col-name { display: inline-flex; align-items: center; gap: 2px; height: 30px; font-weight: 650; font-size: 14px; letter-spacing: -.005em; color: var(--text-primary); text-decoration: none; border-radius: 6px; white-space: nowrap; }
+.cmp-col-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.cmp-col-name .cmp-ext-arrow { margin-left: 1px; font-size: 12px; opacity: 0; transition: opacity .15s ease; }
+.cmp-col-name:hover .cmp-ext-arrow, .cmp-col-name:focus-visible .cmp-ext-arrow { opacity: .9; }
+@media (hover: none) { .cmp-col-name .cmp-ext-arrow { opacity: .7; } }
+/* model select — a compact pill; the wrapper draws the chevron so no image is needed */
+.cmp-model { position: relative; display: inline-flex; align-items: center; min-width: 0; }
+.cmp-model[hidden] { display: none; }
+.cmp-model::after { content: ''; position: absolute; right: 10px; top: 50%; width: 6px; height: 6px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.cmp-model-select { appearance: none; -webkit-appearance: none; height: 30px; max-width: 180px; padding: 0 24px 0 10px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--bg-subtle); color: var(--text-secondary); font: inherit; font-size: 12px; font-weight: 500; line-height: 28px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: border-color .15s ease, color .15s ease, background-color .15s ease; }
+.cmp-model-select:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text-primary); }
+.cmp-model-select:disabled { cursor: not-allowed; opacity: .55; }
+/* Item 3: the account plan (Free · Pro 5x · Max 20x …), a quiet label after the pill — no box. */
+.cmp-col-plan { font-size: 12px; font-weight: 500; color: var(--text-secondary); white-space: nowrap; line-height: 30px; }
+.cmp-col-plan[hidden] { display: none; }
+/* Catalog hint under the pill (#1452 refresh): a full-width muted line in the wrapping header. */
+.cmp-model-hint { flex-basis: 100%; margin-top: -4px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.cmp-model-hint[hidden] { display: none; }
+/* status badge: a pill with a leading dot; empty = hidden. Its text is the status, or the served model once known. */
+.cmp-col-badge { display: inline-flex; align-items: center; gap: 6px; height: 26px; max-width: 260px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--bg-subtle); color: var(--text-secondary); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color .2s ease, background-color .2s ease; }
+.cmp-col-badge:empty { display: none; }
+.cmp-col-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.cmp-col-badge.is-streaming { color: var(--accent); background: var(--accent-light); }
+.cmp-col-badge.is-streaming::before { animation: cmp-pulse 1.2s ease-in-out infinite; }
+.cmp-col-badge.is-done { color: var(--success); background: var(--success-bg); }
+.cmp-col-badge.is-error { color: var(--danger); background: var(--danger-bg); }
+.cmp-col-badge.is-muted { color: var(--text-secondary); background: var(--bg-subtle); }
+.cmp-col-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px 18px; line-height: 1.6; }
+
+/* column gate / empty states */
+.cmp-col-state { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; height: 100%; min-height: 220px; padding: 24px 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
+.cmp-col-state .cmp-dot { width: 12px; height: 12px; margin-bottom: 6px; }
+.cmp-col-state-title { font-size: 14.5px; font-weight: 600; color: var(--text-primary); }
+.cmp-col-state-desc { max-width: 300px; }
+.cmp-col-state .cmp-btn { margin-top: 12px; }
+/* login guidance: the quiet 「다시 확인」 under the primary link, the new-tab arrow, the 「확인 중…」 line */
+.cmp-col-state .cmp-gate-check { margin-top: 8px; }
+.cmp-ext-arrow { margin-left: 4px; opacity: .8; }
+.cmp-col-state-status { min-height: 1.4em; font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.cmp-col-state-status:empty { display: none; }
+.cmp-col-state-hint { font-size: 12px; color: var(--warn); margin-top: 8px; max-width: 300px; }
+.cmp-col-state-hint:empty { display: none; }
+.cmp-col-joined { color: var(--success); font-weight: 600; }
+
+/* turns — each block = the turn's text node + its copy button (compare.js pushUserTurn / pushAssistantTurn) */
+.cmp-turn { animation: cmp-fade-in .2s ease-out both; }
+.cmp-turn-block + .cmp-turn-block, .cmp-turn-block + .cmp-turn, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn { margin-top: 12px; }
+.cmp-turn-block-user { display: flex; align-items: flex-end; gap: 6px; }
+.cmp-turn-block-user .cmp-turn-user { min-width: 0; }
+/* Assistant turn: the text, then 「답변 복사」 UNDER it (item 5) — a labelled button the eye finds
+   where the answer ends, which is where the column's scroll leaves the reader. Column direction:
+   the button can never overlap the text and a long answer still ends in its button. */
+.cmp-turn-block-assistant { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.cmp-turn-block-assistant .cmp-turn-assistant { width: 100%; min-width: 0; }
+.cmp-turn-block-assistant > .cmp-copy { margin-left: -2px; }
+.cmp-turn-user { display: inline-block; max-width: 100%; font-size: 13px; color: var(--text-secondary); background: var(--bg-subtle); border-radius: 12px 12px 12px 4px; padding: 7px 12px; white-space: pre-wrap; }
+.cmp-turn-assistant { min-height: 1.6em; }
+.cmp-turn-assistant.is-skipped { color: var(--text-secondary); font-size: 13px; font-style: italic; }
+.cmp-turn-assistant .cmp-col-error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+/* typing caret at the end of the growing answer */
+.cmp-turn-assistant.is-streaming::after { content: ''; display: inline-block; width: 2px; height: 1em; margin-left: 2px; vertical-align: -.15em; background: var(--accent); border-radius: 1px; animation: cmp-blink 1s steps(2) infinite; }
+
+/* markdown (md-lite output) */
+.cmp-turn-assistant p { margin: 0 0 10px; }
+.cmp-turn-assistant > p:last-child, .cmp-turn-assistant > ul:last-child, .cmp-turn-assistant > ol:last-child { margin-bottom: 0; }
+.cmp-turn-assistant h1, .cmp-turn-assistant h2, .cmp-turn-assistant h3, .cmp-turn-assistant h4, .cmp-turn-assistant h5, .cmp-turn-assistant h6 { margin: 16px 0 6px; line-height: 1.3; font-weight: 650; letter-spacing: -.005em; }
+.cmp-turn-assistant > :first-child { margin-top: 0; }
+.cmp-turn-assistant h1 { font-size: 17px; } .cmp-turn-assistant h2 { font-size: 16px; } .cmp-turn-assistant h3 { font-size: 15px; } .cmp-turn-assistant h4, .cmp-turn-assistant h5, .cmp-turn-assistant h6 { font-size: 14px; }
+.cmp-turn-assistant ul, .cmp-turn-assistant ol { margin: 0 0 10px 22px; }
+.cmp-turn-assistant li { margin: 3px 0; }
+.cmp-turn-assistant li > ul, .cmp-turn-assistant li > ol { margin: 3px 0 0 16px; }
+.cmp-turn-assistant pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; margin: 0 0 10px; font-size: 12.5px; line-height: 1.5; }
+.cmp-turn-assistant code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; background: var(--code-bg); border-radius: 4px; padding: 1px 5px; }
+.cmp-turn-assistant pre code { background: none; padding: 0; font-size: inherit; }
+.cmp-turn-assistant blockquote { border-left: 3px solid var(--border-strong); padding: 2px 0 2px 12px; color: var(--text-secondary); margin: 0 0 10px; }
+.cmp-turn-assistant hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+.cmp-turn-assistant del { color: var(--text-secondary); }
+.cmp-turn-assistant a { text-decoration: underline; text-underline-offset: 2px; }
+/* tables: the wrapper scrolls sideways so a wide table stays inside its column. */
+.cmp-turn-assistant .md-table-wrap { overflow-x: auto; margin: 0 0 10px; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+.cmp-turn-assistant table { border-collapse: collapse; font-size: 13px; line-height: 1.45; min-width: 100%; }
+.cmp-turn-assistant th, .cmp-turn-assistant td { border-bottom: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+.cmp-turn-assistant th + th, .cmp-turn-assistant td + td { border-left: 1px solid var(--border); }
+.cmp-turn-assistant tr:last-child td { border-bottom: 0; }
+.cmp-turn-assistant th { background: var(--bg-subtle); font-weight: 600; white-space: nowrap; position: sticky; top: 0; }
+.cmp-turn-assistant th[data-align="center"], .cmp-turn-assistant td[data-align="center"] { text-align: center; }
+.cmp-turn-assistant th[data-align="right"], .cmp-turn-assistant td[data-align="right"] { text-align: right; }
+
+/* ── follow-up composer (two instances of one model: thread + bottom) ── */
+.cmp-composer { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
+/* Thread instance: lives inside the prompt card under the frozen question — a divider, not a card. */
+.cmp-composer-thread { margin-top: 8px; padding: 8px 0 0; gap: 8px; border-top: 1px solid var(--border); }
+/* Compact (bottom) instance: the textarea row only; the routing lives at the top, the caption names the shared target. */
+.cmp-composer-compact { padding: 8px 10px; }
+.cmp-composer-target { align-self: center; max-width: 220px; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmp-composer-target:empty { display: none; }
+/* Bottom instance: docked to the viewport bottom. The dock paints the page background under the
+   card so scrolled content never shows through the gap around it (finding C). */
+.cmp-dock { position: sticky; bottom: 0; z-index: 2; background: var(--bg-body); padding-bottom: 8px; flex-shrink: 0; }
+.cmp-composer-row { display: flex; gap: 10px; align-items: flex-end; }
+/* ── composer textareas (question card + follow-up) ── */
+.cmp-textarea { flex: 1 1 auto; min-width: 0; min-height: 44px; max-height: 200px; resize: none; overflow-y: auto; font: inherit; line-height: 1.5; color: var(--text-primary); background: var(--bg-body); border: 1px solid var(--border); border-radius: var(--radius-ctl); padding: 10px 12px; transition: border-color .15s ease, box-shadow .15s ease; }
+.cmp-textarea::placeholder { color: var(--text-secondary); opacity: 1; }
+.cmp-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
+.cmp-textarea:disabled { opacity: .6; cursor: not-allowed; }
+/* Locked while the text is on the wire (readOnly keeps focus + caret; the send button says 보내는 중…). */
+.cmp-textarea[readonly] { color: var(--text-secondary); background: var(--bg-subtle); }
+/* The question composer (before the first send): prompt-sized type. After the shared rule, whose `font: inherit` would otherwise win (Codex 2R #4). */
+.cmp-textarea.cmp-prompt-input { font-size: 15px; line-height: 1.6; }
+.cmp-composer-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cmp-composer-label { font-size: 12.5px; color: var(--text-secondary); }
+.cmp-composer-hint { margin-left: auto; font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
+/* routing control (item 2): native CHECKBOXES (keyboard + a11y for free) drawn as 30px segments,
+   each with its own check square so a multi-select reads as one; 「전체」 is the select-all chip. */
+.cmp-seg { display: inline-flex; flex-wrap: wrap; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
+.cmp-seg-item { position: relative; display: inline-flex; }
+.cmp-seg-item input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.cmp-seg-item input:disabled { cursor: not-allowed; }
+/* Only the segment itself (the input's sibling) is styled — its inner text span / dot inherit (Codex 1R #3). */
+.cmp-seg-item > .cmp-seg-label { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 8px; border-radius: 7px; font-size: 12.5px; color: var(--text-secondary); transition: background-color .15s ease, color .15s ease, box-shadow .15s ease; user-select: none; }
+/* The check square: an empty box; checked = filled with an inset ring (no glyph font, no image). */
+.cmp-seg-item > .cmp-seg-label::before { content: ''; width: 12px; height: 12px; border: 1.5px solid var(--border-strong); border-radius: 3px; background: var(--bg-card); flex-shrink: 0; transition: background-color .15s ease, border-color .15s ease; }
+.cmp-seg-item > input:checked + .cmp-seg-label { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: var(--shadow-pop); }
+.cmp-seg-item > input:checked + .cmp-seg-label::before { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); box-shadow: inset 0 0 0 2px var(--bg-card); }
+.cmp-seg-item-all > .cmp-seg-label { margin-right: 4px; padding-right: 12px; border-right: 1px solid var(--border); border-radius: 7px 0 0 7px; }
+.cmp-seg-item > input:focus-visible + .cmp-seg-label { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cmp-seg-item > input:disabled + .cmp-seg-label { opacity: .5; }
+
+/* ── footer ── */
+/* One 11.5px line (two spans) — a footnote that costs the columns ~24px, not two paragraphs. */
+.cmp-footer { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; padding: 0 4px 8px; flex-shrink: 0; }
+.cmp-footer-sep { margin: 0 6px; }
+
+/* ── motion ── */
+@keyframes cmp-fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes cmp-blink { to { opacity: 0; } }
+@keyframes cmp-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ── narrow ── */
+@media (max-width: 720px) {
+  /* The shell gives way to a scrolling page: the root grows with its content, the columns stack
+     and each is capped at 72vh (its body still scrolls inside); the bottom composer stays docked. */
+  #compare-root { height: auto; min-height: 100vh; padding: 12px 12px 0; gap: 12px; }
+  .cmp-title { font-size: 18px; }
+  .cmp-topbar-side { width: 100%; margin-left: 0; justify-content: space-between; }
+  /* One column, and one that can shrink: minmax(340px, 1fr) would overflow a viewport under ~364px (Codex 1R #4). */
+  .cmp-columns { flex: none; min-height: 0; grid-auto-rows: auto; grid-template-columns: minmax(0, 1fr); }
+  .cmp-col { height: auto; max-height: 72vh; min-height: 280px; }
+  .cmp-col-badge { max-width: 100%; }
+  .cmp-composer-hint { display: none; }
+  .cmp-composer-target { max-width: 120px; }
+  .cmp-col-name .cmp-ext-arrow { opacity: .7; }
+}
+
+/* `hidden` must beat every display rule above (.cmp-composer is display:flex — Codex #16). */
+[hidden] { display: none !important; }
