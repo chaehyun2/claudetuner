@@ -122,8 +122,12 @@ export const COMPARE_PAGE = 'compare.html';
 export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
 
 // Per-provider answer budget (AC19). A provider that has not finished by then gets ERROR{timeout};
-// the others keep streaming.
-export const PROVIDER_SEND_TIMEOUT_MS = 120 * 1000;
+// the others keep streaming. 🔴 2026-09-18 live: 120 s cut off every column of a three-part travel
+// question on thinking models (Opus 5 · Gemini 3.6 Thinking · ChatGPT 5.6 Sol Thinking) — one
+// column mid-answer, the others still thinking (thinking deltas are not forwarded as events, so an
+// idle timeout would fire in the same silence). The budget is now 10 minutes; Stop remains the way
+// to end a round early, and the page tells the user the budget it hit (ERROR.budgetMs).
+export const PROVIDER_SEND_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Bound on each provider's `listModels()` inside COMPARE_STATUS. The package caps its own ChatGPT
 // round trip at the same value; this one is the SW's, so the status probe never waits on a client's
@@ -922,8 +926,11 @@ export function createCompareController({
 
     // One ERROR to the page + one line in the SW console. `e` is the client's error (or null for
     // a code this module produced itself): its `reason`/`message` ride along as reason/detail.
-    const postError = (provider, code, message, e) => {
-      const extras = errorExtras(e);
+    // `more`: fields this module adds beside the client's (a timeout's `budgetMs`) — never written
+    // onto the caught error itself (a frozen/sealed error would throw here and swallow ALL_DONE —
+    // Codex 1.31.2 #1).
+    const postError = (provider, code, message, e, more = null) => {
+      const extras = { ...errorExtras(e), ...(more && typeof more === 'object' ? more : {}) };
       logInfo(provider, 'ERROR', { code, reason: extras.reason ?? null, message: extras.detail ?? message });
       post({ type: PORT_MSG.ERROR, provider, code, ...extras, message });
     };
@@ -1041,7 +1048,9 @@ export function createCompareController({
       } catch (e) {
         const code = timedOut ? SW_CODES.TIMEOUT
           : (typeof e?.code === 'string' ? e.code : (e?.name === 'AbortError' ? SW_CODES.ABORTED : SW_CODES.UNKNOWN));
-        postError(provider, code, String(e?.message || e), e);
+        // A timeout names the budget it hit (the page's copy shows it, so a changed budget never
+        // leaves a stale number in a string).
+        postError(provider, code, String(e?.message || e), e, timedOut ? { budgetMs: sendTimeoutMs } : null);
       } finally {
         clearTimeout(timer);
         sendSignal.removeEventListener('abort', onSendAbort);

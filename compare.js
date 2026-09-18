@@ -130,6 +130,10 @@ const CODE_NO_TARGETS = 'no_targets';
 const CODE_BUSY = 'busy';
 const CODE_NETWORK_ERROR = 'network_error';
 const CODE_ABORTED = 'aborted';
+// Per-provider answer budget exhausted (bg/compare.js PROVIDER_SEND_TIMEOUT_MS); ERROR carries `budgetMs`.
+const CODE_TIMEOUT = 'timeout';
+const DEFAULT_SEND_BUDGET_MS = 10 * 60 * 1000;
+const MS_PER_MINUTE = 60 * 1000;
 // Page-local pseudo code: the port that carried the session is gone (never sent by the SW).
 const CODE_SESSION_ENDED = 'session_ended';
 // 🔴 MV3 service-worker lifetime (Chrome 110+): the extension SW is killed after ~30 s with no
@@ -1566,9 +1570,11 @@ export function mountComparePage(deps) {
     setBadge(col, null, '');
   }
 
-  function errorText(provider, code, reason) {
+  function errorText(provider, code, reason, budgetMs) {
     const label = PROVIDER_META[provider].label;
     if (code === CODE_RATE_LIMITED) return t(PROVIDER_RATE_LIMIT_KEY, label);
+    // The timeout names the budget the SW actually applied (ERROR.budgetMs), in whole minutes.
+    if (code === CODE_TIMEOUT) return t('err_timeout', Math.max(1, Math.round((Number.isFinite(budgetMs) && budgetMs > 0 ? budgetMs : DEFAULT_SEND_BUDGET_MS) / MS_PER_MINUTE)));
     // Reason-specific copy first (err_no_tab_load_timeout → "click the tab to wake it"), then the
     // code's, then unknown. Only keys that exist are used, so an unlisted reason is not a hole.
     const specific = reason ? `err_${code}_${reason}` : '';
@@ -1719,7 +1725,7 @@ export function mountComparePage(deps) {
         turn.node.classList.add('is-error');
         // Keep whatever streamed before the failure, then the reason underneath it (and the raw
         // cause in its title).
-        turn.errorText = errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '');
+        turn.errorText = errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs);
         turn.errorTitle = col.errorTitle;
         paintAssistant(col);
         settleTurn(turn);
