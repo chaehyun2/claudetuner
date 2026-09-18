@@ -169,6 +169,17 @@ const STAGE_STREAM_DONE = 'stream_done';
 const TTFT_STAGES = new Set([STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE]);
 // DIAG stage the client reports when it starts a tool (web search) — the badge says 「웹 검색 중…」.
 const STAGE_TOOL_USE = 'tool_use';
+// Activity panel (package v0.5.0, 2026-09-18): the provider's process — thinking text, tool calls,
+// results, status lines — shown INSIDE the assistant turn above the answer, as a <details> that is
+// open while the answer has not started and folds to a one-line summary once text streams (the
+// user can reopen it). Kinds the page draws; anything else is ignored.
+const ACTIVITY_THINKING = 'thinking';
+const ACTIVITY_TOOL_USE = 'tool_use';
+const ACTIVITY_TOOL_RESULT = 'tool_result';
+const ACTIVITY_STATUS = 'status';
+const ACTIVITY_TOOL_WEB_SEARCH = 'web_search';
+// The list scrolls past this many pixels so a long thinking block never pushes the answer away.
+const ACTIVITY_LIST_MAX_PX = 160;
 const BADGE_SEARCHING = 'col_searching';
 // A duration above this is not a measurement (a clock jump, an absurd timestamp) — no number.
 const TTFT_MAX_MS = 60 * 60 * 1000;
@@ -1462,6 +1473,10 @@ export function mountComparePage(deps) {
     const node = el('div', 'cmp-turn cmp-turn-assistant is-streaming');
     const turn = { role: 'assistant', text: '', node, root: null, copyBtn: null };
     const root = el('div', 'cmp-turn-block cmp-turn-block-assistant');
+    // The process panel sits above the answer, hidden until the first activity event arrives.
+    const activity = makeActivityPanel();
+    root.appendChild(activity.box);
+    turn.activity = activity;
     root.appendChild(node);
     // 「답변 복사」 under the answer (item 5): hidden while it streams, shown once the turn settled
     // (DONE / ERROR / ALL_DONE) and only if there is text to copy — an errored turn that never got
@@ -1591,6 +1606,106 @@ export function mountComparePage(deps) {
     return text.length > ERROR_TITLE_MAX ? `${text.slice(0, ERROR_TITLE_MAX)}…` : text;
   }
 
+  // ── activity panel (the provider's process) ──
+  /**
+   * A <details> above the answer: summary line (title + counters) and a scrolling list of
+   * entries keyed by the event id — a thinking block grows in place, a tool call turns from
+   * 「검색 중…」 into its query, a result line names its count and top titles.
+   */
+  function makeActivityPanel() {
+    const box = el('details', 'cmp-act');
+    box.hidden = true;
+    box.open = true;
+    const summary = el('summary', 'cmp-act-summary');
+    const title = el('span', 'cmp-act-title', t('act_title'));
+    const meta = el('span', 'cmp-act-meta');
+    summary.appendChild(title);
+    summary.appendChild(meta);
+    box.appendChild(summary);
+    const list = el('div', 'cmp-act-list');
+    box.appendChild(list);
+    return { box, summary, meta, list, entries: new Map(), searches: 0, thinkingChars: 0, thinkingStart: null, thinkingEnd: null, folded: false, scrollPending: false };
+  }
+  /** Label for a tool call: the known web search by name, else the tool's own name. */
+  const toolLabel = (name) => (name === ACTIVITY_TOOL_WEB_SEARCH ? t('act_web_search') : String(name || ''));
+  function paintActivityMeta(a) {
+    const parts = [];
+    if (a.searches) parts.push(t('act_searches', a.searches));
+    // Thinking time = first thinking event → the fold / settle (not the turn's age — Codex act 1R #5).
+    if (a.thinkingChars && a.thinkingStart != null) {
+      const secs = Math.floor(((a.thinkingEnd != null ? a.thinkingEnd : clock.now()) - a.thinkingStart) / MS_PER_SECOND);
+      if (secs > 0) parts.push(t('act_thought_for', secs));
+    }
+    a.meta.textContent = parts.join(' · ');
+  }
+  function applyActivity(a, msg) {
+    const kind = msg.kind;
+    const id = `${kind}:${String(msg.id ?? '0')}`;
+    const text = typeof msg.text === 'string' ? msg.text : '';
+    let item = a.entries.get(id);
+    if (!item) {
+      item = el('div', `cmp-act-item is-${kind}`);
+      const icon = el('span', 'cmp-act-icon');
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = kind === ACTIVITY_THINKING ? '💭' : (kind === ACTIVITY_TOOL_USE ? '🔍' : (kind === ACTIVITY_TOOL_RESULT ? '📄' : '·'));
+      item.appendChild(icon);
+      const body = el('span', 'cmp-act-text');
+      item.appendChild(body);
+      item.body = body;
+      item.kind = kind;
+      a.entries.set(id, item);
+      a.list.appendChild(item);
+      if (kind === ACTIVITY_TOOL_USE) a.searches++;
+    }
+    if (kind === ACTIVITY_THINKING) {
+      // Deltas append (the SW forwards the client's throttled slices); a final with text is the tail.
+      // One text node per block (textContent grows), not one node per 150 ms slice.
+      if (text) { item.body.textContent += text; a.thinkingChars += text.length; if (a.thinkingStart == null) a.thinkingStart = clock.now(); }
+      if (msg.final === true) item.classList.add('is-final');
+    } else if (kind === ACTIVITY_TOOL_USE) {
+      const label = toolLabel(msg.name);
+      item.label = label;
+      item.body.textContent = msg.final === true && text ? `${label} · ${text}` : (msg.final === true ? label : `${label} · ${t('act_searching')}`);
+      if (msg.final === true) item.classList.add('is-final');
+    } else if (kind === ACTIVITY_TOOL_RESULT) {
+      const n = typeof msg.count === 'number' ? msg.count : null;
+      item.body.textContent = [n != null ? t('act_results', n) : toolLabel(msg.name), text].filter(Boolean).join(' · ');
+      item.classList.add('is-final');
+    } else {
+      item.body.textContent = text;
+      item.classList.add('is-final');
+    }
+    // A panel whose first event lands after the answer already started appears FOLDED (the fold
+    // was recorded while it was hidden — Codex act 1R #1).
+    if (a.box.hidden) { a.box.hidden = false; a.box.open = !a.folded; }
+    paintActivityMeta(a);
+    // The list follows its newest line — one layout read per frame, not per event (Codex act 1R #2).
+    if (a.box.open && !a.scrollPending) { a.scrollPending = true; raf(() => { a.scrollPending = false; a.list.scrollTop = a.list.scrollHeight; }); }
+  }
+  /** First answer text (or DONE): the panel folds to its summary line — once; a user who reopened it keeps it open. */
+  function foldActivity(turn, done = false) {
+    const a = turn && turn.activity;
+    if (!a) return;
+    if (a.thinkingStart != null && a.thinkingEnd == null) a.thinkingEnd = clock.now();
+    // Recorded even while hidden: a panel that shows up later opens folded (see applyActivity).
+    if (!a.folded) { a.folded = true; if (!a.box.hidden) a.box.open = false; }
+    if (!a.box.hidden) paintActivityMeta(a);
+    if (done) settleActivity(turn);
+  }
+  /** The turn is over (DONE / ERROR / ALL_DONE): every entry still 「검색 중…」 settles so nothing pulses forever. */
+  function settleActivity(turn) {
+    const a = turn && turn.activity;
+    if (!a || a.box.hidden) return;
+    if (a.thinkingStart != null && a.thinkingEnd == null) a.thinkingEnd = clock.now();
+    for (const item of a.entries.values()) {
+      // A tool call that never reported its input reads as its bare label, not 「검색 중…」 (Codex act 1R #3).
+      if (item.kind === ACTIVITY_TOOL_USE && !item.classList.contains('is-final') && item.label) item.body.textContent = item.label;
+      item.classList.add('is-final');
+    }
+    a.box.classList.add('is-done');
+    paintActivityMeta(a);
+  }
+
   // ── port / streaming ──
   function onPortMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
@@ -1677,7 +1792,7 @@ export function mountComparePage(deps) {
         turn.text += String(msg.delta || '');
         setBadge(col, 'col_streaming', 'is-streaming');
         scheduleRender(col);
-        if (!hadText && turn.text) syncCopyAll(); // the first text on the page enables 「전체 복사」
+        if (!hadText && turn.text) { syncCopyAll(); foldActivity(turn); } // the first text on the page enables 「전체 복사」; the process folds under the answer
         return;
       }
       case 'MODEL': {
@@ -1698,6 +1813,7 @@ export function mountComparePage(deps) {
         if (typeof msg.text === 'string' && msg.text) turn.text = msg.text;
         col.status = 'done';
         turn.node.classList.remove('is-streaming');
+        foldActivity(turn, true);
         paintAssistant(col);
         settleTurn(turn);
         renderColumnActions(col);
@@ -1727,6 +1843,7 @@ export function mountComparePage(deps) {
         // cause in its title).
         turn.errorText = errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs);
         turn.errorTitle = col.errorTitle;
+        settleActivity(turn); // an open 「검색 중…」 must not pulse under an error line
         paintAssistant(col);
         settleTurn(turn);
         setBadge(col, col.errorCode === CODE_ABORTED ? 'col_aborted' : 'col_error', col.errorCode === CODE_ABORTED ? 'is-muted' : 'is-error');
@@ -1737,6 +1854,14 @@ export function mountComparePage(deps) {
         // `readiness`: the SW's prepare() step failed (its message reads `not ready: <code>`), as
         // opposed to a failure while the answer was being produced (contract: ERROR.message).
         track('column_error', { provider: col.provider, code: col.errorCode, reason: typeof msg.reason === 'string' ? msg.reason : '', readiness: /^not ready/.test(String(msg.message || '')) });
+        return;
+      }
+      case 'ACTIVITY': {
+        const col = state.columns.get(msg.provider);
+        if (!col || col.status !== 'streaming') return;
+        const turn = col.turns[col.turns.length - 1];
+        if (!turn || turn.role !== 'assistant' || !turn.activity) return;
+        applyActivity(turn.activity, msg);
         return;
       }
       case 'DIAG': {
@@ -1769,7 +1894,7 @@ export function mountComparePage(deps) {
       }
       case 'ALL_DONE': {
         for (const col of state.columns.values()) {
-          if (col.status === 'streaming') { col.status = 'done'; setBadge(col, 'col_done', 'is-done'); paintAssistant(col); settleTurn(col.turns[col.turns.length - 1]); renderColumnActions(col); }
+          if (col.status === 'streaming') { col.status = 'done'; setBadge(col, 'col_done', 'is-done'); foldActivity(col.turns[col.turns.length - 1], true); paintAssistant(col); settleTurn(col.turns[col.turns.length - 1]); renderColumnActions(col); }
         }
         // Every column of this round failed (not by the user's Stop) → say so once, above the columns.
         const live = state.roundTargets.map((p) => state.columns.get(p)).filter((c) => c && !c.node.hidden);

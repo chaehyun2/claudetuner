@@ -25,7 +25,7 @@
 //                         saveHistory}   OPEN_COMPARE{src, q} → {ok}   COMPARE_EVENT{name, params} → {ok}
 //   Port 'ctcmp-compare'  page→SW  SEND{text, targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?} · ABORT
-//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?} · ERROR · ALL_DONE · DIAG · MODELS
+//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY
 //   Tabs: SEND and FOLLOWUP both prepare every target with `mayOpenTab: true` — a provider tab the
 //   session opened and the user closed is re-opened on the next send. Tabs we open are pinned and
 //   KEPT across sessions (CLIENT_OPTIONS): the next session finds them with tabs.query.
@@ -234,8 +234,17 @@ function catalogPending(provider, source) {
 export const PORT_MSG = Object.freeze({
   SEND: 'SEND', FOLLOWUP: 'FOLLOWUP', ABORT: 'ABORT',
   CONSUME_OK: 'CONSUME_OK', CONSUME_FAIL: 'CONSUME_FAIL',
-  MODEL: 'MODEL', CHUNK: 'CHUNK', DONE: 'DONE', ERROR: 'ERROR', ALL_DONE: 'ALL_DONE', DIAG: 'DIAG', MODELS: 'MODELS',
+  MODEL: 'MODEL', CHUNK: 'CHUNK', DONE: 'DONE', ERROR: 'ERROR', ALL_DONE: 'ALL_DONE', DIAG: 'DIAG', MODELS: 'MODELS', ACTIVITY: 'ACTIVITY',
 });
+// Activity (package v0.5.0, 2026-09-18): the provider's PROCESS while it works — thinking text,
+// tool calls (web search + query), tool results, status sentences — forwarded to the page as
+// ACTIVITY{provider, kind, id, text, name?, count?, final} so the column can show what claude.ai
+// itself shows (「웹 검색됨」, the thinking summary) instead of a bare 「응답 대기 중」 for minutes.
+// Bounded here: kinds allowlisted, ids/names/text length-capped, count a finite integer.
+export const ACTIVITY_KINDS = Object.freeze(['thinking', 'tool_use', 'tool_result', 'status']);
+// = the package sink's per-block thinking cap (activity.js): a single delta can be that long.
+export const ACTIVITY_TEXT_MAX = 8000;
+export const ACTIVITY_FIELD_MAX = 120;
 
 // Prefix of every SW-console line this module writes (readiness stages, errors).
 export const LOG_TAG = '[compare]';
@@ -333,6 +342,19 @@ function errorExtras(e) {
   if (typeof e?.reason === 'string' && e.reason) out.reason = e.reason;
   const detail = typeof e?.message === 'string' ? e.message : (e == null ? '' : String(e));
   if (detail) out.detail = detail;
+  return out;
+}
+
+// An `activity` event (package v0.5.0) in the shape the page renders, or null when its kind is
+// unknown / its fields are garbage. Text is cut, never parsed — the page renders it as text.
+function activityForPage(ev) {
+  if (!ev || typeof ev !== 'object' || !ACTIVITY_KINDS.includes(ev.kind)) return null;
+  const cut = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const id = typeof ev.id === 'number' && Number.isFinite(ev.id) ? String(ev.id) : cut(ev.id, ACTIVITY_FIELD_MAX);
+  const out = { kind: ev.kind, id: id || '0', text: cut(ev.text, ACTIVITY_TEXT_MAX), final: ev.final === true };
+  const name = cut(ev.name, ACTIVITY_FIELD_MAX);
+  if (name) out.name = name;
+  if (typeof ev.count === 'number' && Number.isFinite(ev.count) && ev.count >= 0) out.count = Math.floor(ev.count);
   return out;
 }
 
@@ -1030,6 +1052,7 @@ export function createCompareController({
             // provider reports it). The page swaps its "waiting" badge for the name.
             onEvent: (ev) => {
               if (ev?.type === 'diag') { onDiag(provider)(ev); onStage(ev); return; }
+              if (ev?.type === 'activity') { const a = activityForPage(ev); if (a) post({ type: PORT_MSG.ACTIVITY, provider, ...a }); return; }
               if (ev?.type !== 'model') return;
               const m = modelForPage(ev.model);
               if (m) post({ type: PORT_MSG.MODEL, provider, model: m });

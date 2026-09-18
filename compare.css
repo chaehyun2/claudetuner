@@ -257,6 +257,23 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-assistant { min-height: 1.6em; }
 .cmp-turn-assistant.is-skipped { color: var(--text-secondary); font-size: 13px; font-style: italic; }
 .cmp-turn-assistant .cmp-col-error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+/* ── activity panel: the provider's process above the answer (details/summary) ── */
+.cmp-act { align-self: stretch; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); font-size: 12px; color: var(--text-secondary); }
+.cmp-act[hidden] { display: none; }
+.cmp-act-summary { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; list-style: none; }
+.cmp-act-summary::-webkit-details-marker { display: none; }
+.cmp-act-summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s ease; flex-shrink: 0; }
+.cmp-act[open] > .cmp-act-summary::before { transform: rotate(45deg); }
+.cmp-act-title { font-weight: 600; color: var(--text-primary); }
+.cmp-act-meta { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp-act-meta:empty { display: none; }
+.cmp-act-list { max-height: 160px; overflow: auto; padding: 0 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+.cmp-act-item { display: flex; gap: 6px; align-items: flex-start; line-height: 1.45; }
+.cmp-act-icon { flex-shrink: 0; width: 16px; text-align: center; }
+.cmp-act-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmp-act-item.is-thinking .cmp-act-text { font-style: italic; }
+.cmp-act-item.is-tool_use:not(.is-final) .cmp-act-text::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; animation: cmp-pulse 1.2s ease-in-out infinite; }
+.cmp-act-item.is-tool_use .cmp-act-text, .cmp-act-item.is-tool_result .cmp-act-text { color: var(--text-primary); }
 /* typing caret at the end of the growing answer */
 .cmp-turn-assistant.is-streaming::after { content: ''; display: inline-block; width: 2px; height: 1em; margin-left: 2px; vertical-align: -.15em; background: var(--accent); border-radius: 1px; animation: cmp-blink 1s steps(2) infinite; }
 
