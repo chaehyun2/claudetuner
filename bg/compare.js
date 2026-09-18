@@ -674,7 +674,7 @@ export function createCompareController({
   // other storage reads — a status probe must not wait on storage.local).
   async function planLabels() {
     const out = {};
-    for (const p of COMPARE_PROVIDERS) out[p] = null;
+    for (const p of COMPARE_PROVIDERS) out[p] = null; // { plan, usage } per provider, or null when nothing was collected
     let orgs = null;
     try {
       orgs = await withTimeout(Promise.resolve().then(() => readCollectedOrgs()), selectedModelsReadTimeoutMs, null);
@@ -684,12 +684,30 @@ export function createCompareController({
     for (const p of COMPARE_PROVIDERS) {
       const mine = orgs.filter((o) => o && typeof o === 'object' && providerOf(o) === p);
       const entry = (p === 'claude' ? mine.find((o) => o.isPrimary === true) : null) || mine[0] || null;
-      if (!entry || typeof entry.plan !== 'string' || !entry.plan.trim()) continue;
+      if (!entry) continue;
       let label = null;
-      try { label = planLabel(entry.plan, p); } catch { label = null; }
-      out[p] = typeof label === 'string' && label.trim() ? label.trim() : null;
+      if (typeof entry.plan === 'string' && entry.plan.trim()) {
+        try { label = planLabel(entry.plan, p); } catch { label = null; }
+      }
+      out[p] = {
+        plan: typeof label === 'string' && label.trim() ? label.trim() : null,
+        usage: usageFacts(entry),
+      };
     }
     return out;
+  }
+  // The same entry's usage windows, display-ready for the column head's mini gauges (2026-09-18,
+  // user request): utilisation 0–100 per window (null = not collected / not a number), the reset
+  // instants as ISO strings, the reported window lengths (`w5s`/`w7s`, seconds) and the collector's
+  // "this plan has no limits" mark (Gemini Workspace/Business). Numbers are clamped, strings bounded.
+  function usageFacts(entry) {
+    const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null);
+    const iso = (v) => (typeof v === 'string' && v.length <= 40 ? v : null);
+    // Window lengths in seconds (ChatGPT Free/Go report a 30-day `w7s` = 2592000): the page labels
+    // the gauge from them like the popup's windowLabel(); a missing/garbage span keeps the nominal label.
+    const span = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 366 * 86400 ? Math.round(v) : null);
+    const u = { h5: pct(entry.h5), d7: pct(entry.d7), resetsAt5h: iso(entry.resetsAt5h), resetsAt7d: iso(entry.resetsAt7d), w5s: span(entry.w5s), w7s: span(entry.w7s), noLimits: entry.noLimits === true };
+    return u.h5 == null && u.d7 == null && !u.noLimits ? null : u;
   }
 
   // The static catalog: what the page gets when a provider's own answer is late or failed. Never
@@ -751,11 +769,11 @@ export function createCompareController({
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
-    const [plans] = await Promise.all([
+    const [facts] = await Promise.all([
       planLabels(),
       ...COMPARE_PROVIDERS.map(async (p) => { providers[p] = await providerStatus(p); }),
     ]);
-    for (const p of COMPARE_PROVIDERS) providers[p].plan = plans[p];
+    for (const p of COMPARE_PROVIDERS) { providers[p].plan = facts[p] ? facts[p].plan : null; providers[p].usage = facts[p] ? facts[p].usage : null; }
     // Pickers only for providers the page can actually send to (permitted AND signed in) — and only
     // when the page will show anything at all (dark = nothing else, AC24). In parallel: three caps
     // of LIST_MODELS_TIMEOUT_MS must cost one, not three.

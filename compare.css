@@ -169,7 +169,10 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 14px; align-items: stretch; flex: 1 1 auto; min-height: 320px; }
 .cmp-columns:empty { display: none; }
 /* Every column shares one height (grid stretch) and scrolls inside — chunks never move the page. */
-.cmp-col { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; animation: cmp-fade-in .25s ease-out both; }
+/* min-height: a wrapped two-row head (~87px) + the usage strip (~38px) must leave the body its
+   padding and a few lines even when the grid wraps to two rows on a short window — the page then
+   scrolls (Codex 1.31.1 #3). */
+.cmp-col { position: relative; display: flex; flex-direction: column; min-height: 240px; overflow: hidden; animation: cmp-fade-in .25s ease-out both; }
 /* 「↓ 새 내용」 (streaming scroll, dowoo-style): outside the scrolling body, pinned to the column's bottom edge,
    shown only while the reader is away from the end of a column that holds content (compare.js syncJumpButton). */
 .cmp-jump { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 2; height: 28px; padding: 0 12px; border-radius: var(--radius-pill); box-shadow: var(--shadow-card); font-size: 12px; }
@@ -196,7 +199,19 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-model-select:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text-primary); }
 .cmp-model-select:disabled { cursor: not-allowed; opacity: .55; }
 /* Item 3: the account plan (Free · Pro 5x · Max 20x …), a quiet label after the pill — no box. */
-.cmp-col-plan { font-size: 12px; font-weight: 500; color: var(--text-secondary); white-space: nowrap; line-height: 30px; }
+/* Plan pill: a small rounded tag; paid tiers get the accent tint, Free stays quiet (data-tier). */
+.cmp-col-plan { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: 600; white-space: nowrap; line-height: 22px; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border); }
+.cmp-col-plan[data-tier="paid"] { color: var(--accent); background: var(--accent-light); border-color: transparent; }
+/* ── usage strip under the head: two mini gauges (5h · 7d), popup gauge colours ── */
+.cmp-col-usage { display: flex; gap: 14px; align-items: center; padding: 6px 14px 8px; border-bottom: 1px solid var(--border); background: var(--bg-card); flex-shrink: 0; }
+.cmp-col-usage[hidden] { display: none; }
+.cmp-gauge { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.cmp-gauge-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; line-height: 14px; }
+.cmp-gauge-label { color: var(--text-secondary); font-weight: 500; }
+.cmp-gauge-value { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.cmp-gauge-bar { display: block; height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
+.cmp-gauge-fill { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
+.cmp-gauge-note { font-size: 11px; color: var(--text-secondary); }
 .cmp-col-plan[hidden] { display: none; }
 /* Catalog hint under the pill (#1452 refresh): a full-width muted line in the wrapping header. */
 .cmp-model-hint { flex-basis: 100%; margin-top: -4px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }

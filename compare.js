@@ -44,6 +44,9 @@
 
 import { renderMarkdown } from './ui/md-lite.js';
 import { COMPARE_I18N, makeT, resolveLang } from './ui/compare-i18n.js';
+// The popup's gauge palette (ui/util.js is dependency-free): the mini gauges here read like the
+// overview cards — same thresholds, same colours (user request 2026-09-18).
+import { gaugeColor } from './ui/util.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 export const COMPARE_PROVIDERS = ['claude', 'gemini', 'chatgpt'];
@@ -92,6 +95,9 @@ const COMPOSER_MAX_HEIGHT = 200;
 // pill sits at the bottom of that column and jumps to the end. Distances in px.
 const FOLLOW_AT_BOTTOM_PX = 50;   // this close to the end counts as "at the bottom"
 const FOLLOW_ANCHOR_TOP_PX = 16;  // where the overflowing answer's start is anchored (below the body top)
+// Usage gauge window labels (windowText): a span under a day reads in hours, else in days.
+const SECONDS_PER_HOUR = 3600;
+const SECONDS_PER_DAY = 86400;
 // Auto-reconnect (login guidance): a status re-read on focus / visibility / bfcache restore while
 // some column is gated, at most one per this many ms and never while a session runs.
 const AUTO_REFRESH_MIN_MS = 3000;
@@ -928,6 +934,13 @@ export function mountComparePage(deps) {
     modelHint.hidden = true;
     head.appendChild(modelHint);
     node.appendChild(head);
+    // Usage mini gauges (2026-09-18, user request): the account's 5h / 7d utilisation for this
+    // provider, from status.providers[p].usage — the same numbers the popup's overview cards
+    // draw, in a one-line strip under the head. Hidden when nothing was collected; a no-limits
+    // plan (Gemini Workspace/Business) says so instead of drawing bars.
+    const usageRow = el('div', 'cmp-col-usage');
+    usageRow.hidden = true;
+    node.appendChild(usageRow);
     const body = el('div', 'cmp-col-body');
     node.appendChild(body);
     // 「↓ 새 내용」 (streaming scroll): outside the scroller, pinned to the column's bottom edge.
@@ -964,7 +977,7 @@ export function mountComparePage(deps) {
     // `continuation`: the provider conversation ids DONE carried (package v0.4.0) for a KEPT
     // session — what a SEND{resume} on a fresh port hands back after a lost port (D3). Null for an
     // incognito session (never stored even if sent) and until the first DONE.
-    col = { provider, node, badge, body, modelWrap, modelSelect, plan, modelHint, copyColBtn, actions, retryBtn, openTab, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false };
+    col = { provider, node, badge, body, modelWrap, modelSelect, plan, modelHint, copyColBtn, actions, retryBtn, openTab, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false };
     state.columns.set(provider, col);
     columnsBox.appendChild(node);
     return col;
@@ -1256,8 +1269,67 @@ export function mountComparePage(deps) {
     const label = pstate && typeof pstate.plan === 'string' ? pstate.plan.trim() : '';
     col.plan.hidden = !label;
     col.plan.textContent = label;
+    // The pill's tier tint: paid tiers (Pro / Max / Plus / Ultra / Team / Enterprise / Business …)
+    // read as "paid", Free as quiet — a glance says which account is behind each column.
+    col.plan.setAttribute('data-tier', /^free$/i.test(label) ? 'free' : (label ? 'paid' : ''));
     if (label) col.plan.title = t('col_plan_title', PROVIDER_META[col.provider].label);
     else col.plan.removeAttribute('title');
+    renderUsage(col, pstate && pstate.usage && typeof pstate.usage === 'object' ? pstate.usage : null);
+  }
+  /** Whole hours/minutes until `iso`, as 「6h 29m」 / 「29m」 / 「6d 13h」; '' when unparseable or past. */
+  function countdown(iso) {
+    const ms = new Date(iso).getTime() - clock.now();
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const m = Math.floor(ms / 60000);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    if (d >= 1) return `${d}d ${h % 24}h`;
+    if (h >= 1) return `${h}h ${m % 60}m`;
+    return `${m}m`;
+  }
+  /**
+   * The gauge's window label from the reported span, like the popup's windowLabel(): ChatGPT
+   * Free/Go report a 30-day second window (w7s = 2592000), which must not read 「7일」. Under a
+   * day → hours, else days; no/garbage span → the slot's nominal label.
+   */
+  function windowText(spanSeconds, fallbackKey) {
+    if (!(typeof spanSeconds === 'number' && Number.isFinite(spanSeconds) && spanSeconds > 0)) return t(fallbackKey);
+    return spanSeconds < SECONDS_PER_DAY ? t('usage_window_hours', Math.round(spanSeconds / SECONDS_PER_HOUR)) : t('usage_window_days', Math.round(spanSeconds / SECONDS_PER_DAY));
+  }
+  /** One mini gauge: label · percent · a bar whose fill takes the popup's gauge colour (the number stays in text colour — AA on both themes). */
+  function miniGauge(labelKey, pct, resetIso, spanSeconds) {
+    const item = el('span', 'cmp-gauge');
+    const head = el('span', 'cmp-gauge-head');
+    const label = windowText(spanSeconds, labelKey);
+    head.appendChild(el('span', 'cmp-gauge-label', label));
+    const rounded = Math.round(pct);
+    const value = el('span', 'cmp-gauge-value', `${rounded}%`);
+    head.appendChild(value);
+    item.appendChild(head);
+    const bar = el('span', 'cmp-gauge-bar');
+    const fill = el('span', 'cmp-gauge-fill');
+    fill.style.width = `${Math.min(rounded, 100)}%`;
+    fill.style.background = gaugeColor(rounded);
+    bar.appendChild(fill);
+    item.appendChild(bar);
+    const left = resetIso ? countdown(resetIso) : '';
+    item.title = left ? t('usage_resets_in', label, rounded, left) : t('usage_title', label, rounded);
+    item.setAttribute('role', 'img');
+    item.setAttribute('aria-label', item.title);
+    return item;
+  }
+  /** The strip under the head: 5h + 7d gauges, or the no-limits note; hidden when nothing is known. */
+  function renderUsage(col, usage) {
+    clear(col.usageRow);
+    if (!usage) { col.usageRow.hidden = true; return; }
+    if (usage.noLimits && usage.h5 == null && usage.d7 == null) {
+      col.usageRow.appendChild(el('span', 'cmp-gauge-note', t('usage_no_limits')));
+      col.usageRow.hidden = false;
+      return;
+    }
+    if (typeof usage.h5 === 'number') col.usageRow.appendChild(miniGauge('usage_5h', usage.h5, usage.resetsAt5h, usage.w5s));
+    if (typeof usage.d7 === 'number') col.usageRow.appendChild(miniGauge('usage_7d', usage.d7, usage.resetsAt7d, usage.w7s));
+    col.usageRow.hidden = !col.usageRow.firstChild;
   }
   function syncGateStatus(col) {
     if (col.gate && col.gate.status) col.gate.status.textContent = state.checking ? t('gate_checking') : '';
