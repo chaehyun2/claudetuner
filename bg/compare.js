@@ -156,7 +156,7 @@ export const RESUME_MAX_VALUE_CHARS = 200;
 export const COMPARE_EVENT_NAMES = Object.freeze([
   'open', 'send', 'column_done', 'column_error', 'round_done', 'consume_fail', 'copy', 'stop', 'new_chat',
   'model_change', 'target_change', 'provider_link_click', 'gate_shown', 'permission_result', 'session_lost',
-  'incognito_toggle', 'quota_exhausted', 'jump_to_latest', 'consume',
+  'incognito_toggle', 'quota_exhausted', 'jump_to_latest', 'history_open', 'history_load', 'history_delete', 'history_clear', 'consume',
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
 // Params: a FLAT object of at most this many string/number/boolean values, keys `[a-z_]{1,40}`,
@@ -242,6 +242,8 @@ export const PORT_MSG = Object.freeze({
 // itself shows (「웹 검색됨」, the thinking summary) instead of a bare 「응답 대기 중」 for minutes.
 // Bounded here: kinds allowlisted, ids/names/text length-capped, count a finite integer.
 export const ACTIVITY_KINDS = Object.freeze(['thinking', 'tool_use', 'tool_result', 'status']);
+// Prefix of kept Claude conversation titles (package v0.5.2 `titlePrefix`).
+export const CLAUDE_TITLE_PREFIX = '[C.T.] ';
 // = the package sink's per-block thinking cap (activity.js): a single delta can be that long.
 export const ACTIVITY_TEXT_MAX = 8000;
 export const ACTIVITY_FIELD_MAX = 120;
@@ -492,7 +494,10 @@ export function createCompareController({
     ...(pinDisabled ? { tabCreateProps: Object.freeze({ pinned: false }) } : {}),
     relayFile: PROVIDER_SITES[provider].relayFile,
     saveHistory: saveHistory === true,
-    ...(provider === 'claude' ? { webSearch: true } : {}),
+    // `titlePrefix` (package v0.5.2): a KEPT Claude conversation is titled by claude.ai's own title
+    // endpoint after its first answer and renamed `[C.T.] <title>` — the sidebar no longer reads
+    // 「Claude Tuner」 for every compare (user request 2026-09-18). No effect on temporary ones.
+    ...(provider === 'claude' ? { webSearch: true, titlePrefix: CLAUDE_TITLE_PREFIX } : {}),
     ...(continuation ? { continuation } : {}),
   });
 

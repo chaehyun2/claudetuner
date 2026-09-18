@@ -180,6 +180,22 @@ const ACTIVITY_STATUS = 'status';
 const ACTIVITY_TOOL_WEB_SEARCH = 'web_search';
 // The list scrolls past this many pixels so a long thinking block never pushes the answer away.
 const ACTIVITY_LIST_MAX_PX = 160;
+// Local history (2026-09-18, user request): the last HISTORY_MAX kept sessions — question, every
+// column's turns and its continuation — in chrome.storage.local under HISTORY_KEY, so a session can
+// be reopened later and, when its continuations survive, continued (the resume path). Incognito
+// sessions are never stored (that is what incognito means here). Answers are clipped at
+// HISTORY_TEXT_MAX chars per turn so one long session cannot crowd the quota.
+// One storage key PER ENTRY (`compareHistory:<id>`), never one list: two compare pages writing at
+// once would otherwise lose each other's entries through read-modify-write of a shared array
+// (Codex hist 1R #4). Eviction and listing read every key with the prefix.
+const HISTORY_KEY_PREFIX = 'compareHistory:';
+const HISTORY_MAX = 20;
+const HISTORY_TEXT_MAX = 60000;
+// An entry's JSON is kept under this many UTF-8 BYTES (the quota counts bytes — a Korean answer is
+// ~3 bytes per char) by clipping its answers further (Codex hist 1R #6: 20 × 3 × 60k Korean chars
+// serialised past the 10 MiB storage.local quota).
+const HISTORY_ENTRY_MAX_BYTES = 200000;
+const HISTORY_QUESTION_PREVIEW = 80;
 const BADGE_SEARCHING = 'col_searching';
 // A duration above this is not a measurement (a clock jump, an absurd timestamp) — no number.
 const TTFT_MAX_MS = 60 * 60 * 1000;
@@ -374,6 +390,7 @@ export function mountComparePage(deps) {
     modelChoice: {},      // provider → model id | null (the header <select>), sent as SEND/FOLLOWUP `models`
     roundTargets: [],     // providers the in-flight / last round was sent to (col.round is the rollback snapshot and dies at CONSUME_OK)
     rounds: 0,            // rounds accepted (CONSUME_OK) in this session — analytics `send.round`
+    sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
     roundStartedAt: null, // clock.now() at the last beginSend — analytics `round_done.ms`
     checking: false,      // a COMPARE_STATUS read is in flight (gates show 「확인 중…」)
     notice: null,         // { kind, owner } of the notice on screen (see NOTICE_OWNER_*), null when none
@@ -443,6 +460,14 @@ export function mountComparePage(deps) {
   topbarSide.appendChild(quotaLine);
   // Copy all (batch 2): one markdown document of the whole comparison — see compareMarkdown().
   // Enabled once at least one column holds an answer.
+  // Recent sessions (local history): a button with the count, opening the panel built below.
+  const historyBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-history');
+  historyBtn.id = 'cmp-history';
+  historyBtn.type = 'button';
+  historyBtn.hidden = true; // shown once storage answered with at least one entry
+  historyBtn.setAttribute('aria-haspopup', 'dialog');
+  historyBtn.setAttribute('aria-expanded', 'false');
+  topbarSide.appendChild(historyBtn);
   const copyAllBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-copy-all', t('copy_all'));
   copyAllBtn.id = 'cmp-copy-all';
   copyAllBtn.type = 'button';
@@ -1712,7 +1737,7 @@ export function mountComparePage(deps) {
     switch (msg.type) {
       case 'CONSUME_OK': {
         const first = !state.sessionStarted;
-        if (first) commitPrompt(state.question);
+        if (first) { commitPrompt(state.question); state.sessionId = newSessionId(); }
         state.sessionStarted = true;
         state.rounds++;
         // A SEND{resume} was accepted (D3): the new port carries the session again — the lost
@@ -2170,6 +2195,7 @@ export function mountComparePage(deps) {
     stopBtn.disabled = true;
     syncWaitTimer();
     updateControls();
+    persistSession(); // every settled round updates the local history entry (kept sessions only)
   }
 
   function currentTargets() {
@@ -2338,7 +2364,10 @@ export function mountComparePage(deps) {
     state.roundTargets = [];
     state.rounds = 0;
     state.roundStartedAt = null;
+    state.sessionId = null;
     state.followupTargets = new Set();
+    closeHistoryPanel();
+    syncHistoryButton(null); // hidden again when nothing is stored (Codex hist 1R #9)
     statusEpoch++; // a status answer asked before the reset describes the old session
     for (const col of state.columns.values()) resetColumn(col);
     releasePrompt();
@@ -2351,6 +2380,284 @@ export function mountComparePage(deps) {
     qInput.focus();
     refreshStatus();
   }
+
+  // ── local history (recent sessions) ──
+  // Storage: chrome.storage.local (an extension page has it directly); injectable for the flow guard,
+  // absent in mini-dom → the feature stays hidden. Every write is serialised so a settle and a
+  // delete cannot interleave into a lost update.
+  const historyStorage = deps.historyStorage || (chrome && chrome.storage && chrome.storage.local) || null;
+  let historyChain = Promise.resolve();
+  let lastHistoryCount = 0; // from the last SUCCESSFUL read — what the button shows
+  const lastErr = () => { try { return chrome && chrome.runtime ? chrome.runtime.lastError : null; } catch { return null; } };
+  /** Every stored entry (any key with the prefix), newest first; `ok:false` when the read failed. */
+  function storageReadAll() {
+    return new Promise((resolve) => {
+      const done = (all, failed) => {
+        if (failed || !all || typeof all !== 'object') { resolve({ ok: false, list: [] }); return; }
+        const list = Object.keys(all).filter((k) => k.startsWith(HISTORY_KEY_PREFIX)).map((k) => all[k]).filter((e) => e && typeof e === 'object' && typeof e.id === 'string');
+        list.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+        resolve({ ok: true, list });
+      };
+      try {
+        const r = historyStorage.get(null, (v) => done(v, !!lastErr()));
+        if (r && typeof r.then === 'function') r.then((v) => done(v, false), () => done(null, true));
+      } catch { done(null, true); }
+    });
+  }
+  /** Write entries / remove keys; resolves true only when storage reported success. */
+  function storageWrite(setObj, removeKeys) {
+    const call = (fn, arg) => new Promise((resolve) => {
+      try {
+        const r = fn(arg, () => resolve(!lastErr()));
+        if (r && typeof r.then === 'function') r.then(() => resolve(true), () => resolve(false));
+      } catch { resolve(false); }
+    });
+    return (async () => {
+      let ok = true;
+      if (removeKeys && removeKeys.length) ok = (await call((a, cb) => historyStorage.remove(a, cb), removeKeys)) && ok;
+      if (setObj && Object.keys(setObj).length) ok = (await call((a, cb) => historyStorage.set(a, cb), setObj)) && ok;
+      return ok;
+    })();
+  }
+  /**
+   * One history operation under the chain: `mutate(list)` → `{ set?: {key: entry}, remove?: [key] }`
+   * or null (read only). A failed READ runs no mutation (Codex hist 1R #5: never rebuild history
+   * from an empty read); the resolved list is re-read after a write so callers paint the truth.
+   */
+  function historyUpdate(mutate) {
+    if (!historyStorage) return Promise.resolve({ ok: false, list: [] });
+    const step = historyChain.then(async () => {
+      const read = await storageReadAll();
+      if (!read.ok) return read;
+      const change = mutate ? mutate(read.list) : null;
+      if (!change) { lastHistoryCount = read.list.length; return read; }
+      const ok = await storageWrite(change.set, change.remove);
+      const after = await storageReadAll();
+      if (after.ok) lastHistoryCount = after.list.length;
+      return ok && after.ok ? after : { ok: false, list: after.list };
+    }).catch(() => ({ ok: false, list: [] }));
+    historyChain = step.then(() => undefined, () => undefined);
+    return step;
+  }
+  const historyKey = (id) => `${HISTORY_KEY_PREFIX}${id}`;
+  const newSessionId = () => {
+    try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* no crypto */ }
+    return `s-${clock.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  };
+  const clipText = (v) => String(v || '').slice(0, HISTORY_TEXT_MAX);
+  /** This session as a storable entry (null when there is nothing to store: no session, incognito, no participating column). */
+  function snapshotSession() {
+    if (!state.sessionStarted || !state.sessionId || state.sessionSaveHistory !== true) return null;
+    const columns = {};
+    for (const col of state.columns.values()) {
+      if (!col.participated) continue; // an excluded (hidden) column that took part earlier is still part of the record (Codex hist 1R #2)
+      columns[col.provider] = {
+        turns: col.turns.map((turn) => ({ role: turn.role, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}) })),
+        model: col.servedModel ? { id: col.servedModel.id, label: col.servedModel.label } : null,
+        continuation: col.continuation || null,
+      };
+    }
+    if (!Object.keys(columns).length) return null;
+    return fitEntry({ id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), src, columns, rounds: state.rounds });
+  }
+  /** Keep an entry's JSON under HISTORY_ENTRY_MAX_CHARS by halving its answers' clip until it fits. */
+  const jsonBytes = (v) => { const str = JSON.stringify(v); try { return new TextEncoder().encode(str).length; } catch { return str.length * 3; } };
+  function fitEntry(entry) {
+    let cap = HISTORY_TEXT_MAX;
+    for (let i = 0; i < 12 && jsonBytes(entry) > HISTORY_ENTRY_MAX_BYTES; i++) {
+      cap = Math.max(200, Math.floor(cap / 2));
+      for (const c of Object.values(entry.columns)) for (const turn of c.turns) if (turn.role === 'assistant' && turn.text.length > cap) turn.text = `${turn.text.slice(0, cap)}…`;
+    }
+    return entry;
+  }
+  function persistSession() {
+    const snap = snapshotSession();
+    if (!snap || !historyStorage) return;
+    historyUpdate((list) => {
+      const prev = list.find((e) => e.id === snap.id);
+      const entry = { ...snap, createdAt: prev && typeof prev.createdAt === 'number' ? prev.createdAt : snap.updatedAt };
+      // Newest first, HISTORY_MAX kept: the oldest beyond the cap are removed in the same write.
+      const rest = list.filter((e) => e.id !== snap.id);
+      const evict = rest.slice(HISTORY_MAX - 1).map((e) => historyKey(e.id));
+      return { set: { [historyKey(entry.id)]: entry }, remove: evict };
+    }).then((r) => syncHistoryButton(r.ok ? r.list : null));
+  }
+  // The panel: a small dialog under the topbar listing the entries newest first — question preview,
+  // when, which providers — each with its own 「삭제」, and 「모두 삭제」 at the bottom.
+  const historyPanel = el('div', 'cmp-history');
+  historyPanel.id = 'cmp-history-panel';
+  historyPanel.hidden = true;
+  historyPanel.setAttribute('role', 'dialog');
+  historyPanel.setAttribute('aria-label', t('history_title'));
+  const historyHead = el('div', 'cmp-history-head');
+  historyHead.appendChild(el('span', 'cmp-history-title', t('history_title')));
+  const historyClearBtn = el('button', 'cmp-btn cmp-btn-sm cmp-history-clear', t('history_clear'));
+  historyClearBtn.type = 'button';
+  historyHead.appendChild(historyClearBtn);
+  historyPanel.appendChild(historyHead);
+  const historyList = el('div', 'cmp-history-list');
+  historyPanel.appendChild(historyList);
+  const historyNote = el('p', 'cmp-history-note', t('history_incognito_note'));
+  historyPanel.appendChild(historyNote);
+  root.appendChild(historyPanel);
+  function syncHistoryButton(list) {
+    const n = Array.isArray(list) ? list.length : lastHistoryCount;
+    historyBtn.hidden = n === 0 && !state.sessionStarted;
+    historyBtn.textContent = n ? t('history_btn_n', n) : t('history_btn');
+    historyBtn.title = t('history_title');
+  }
+  /** 「2시간 전」-style relative time for the list (minutes / hours / days; older = the date). */
+  function relativeTime(ts) {
+    const diff = Math.max(0, clock.now() - ts);
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return t('time_just_now');
+    if (m < 60) return t('time_minutes_ago', m);
+    const h = Math.floor(m / 60);
+    if (h < 24) return t('time_hours_ago', h);
+    const d = Math.floor(h / 24);
+    if (d < 7) return t('time_days_ago', d);
+    const date = new Date(ts);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+  }
+  function renderHistoryList(list) {
+    clear(historyList);
+    if (!list.length) { historyList.appendChild(el('p', 'cmp-history-empty', t('history_empty'))); historyClearBtn.disabled = true; return; }
+    historyClearBtn.disabled = false;
+    for (const entry of list) {
+      const row = el('div', 'cmp-history-item');
+      row.setAttribute('data-id', entry.id);
+      if (entry.id === state.sessionId) row.classList.add('is-current');
+      const open = el('button', 'cmp-history-open');
+      open.type = 'button';
+      const q = String(entry.question || '').split('\n')[0];
+      open.appendChild(el('span', 'cmp-history-q', q.length > HISTORY_QUESTION_PREVIEW ? `${q.slice(0, HISTORY_QUESTION_PREVIEW)}…` : q));
+      const meta = el('span', 'cmp-history-meta');
+      for (const p of COMPARE_PROVIDERS) if (entry.columns && entry.columns[p]) meta.appendChild(dot(p));
+      const resumable = !!(entry.columns && Object.values(entry.columns).some((c) => c && c.continuation));
+      meta.appendChild(el('span', null, [relativeTime(entry.updatedAt), resumable ? t('history_resumable') : t('history_readonly')].filter(Boolean).join(' · ')));
+      open.appendChild(meta);
+      open.setAttribute('aria-label', t('history_open_aria', q));
+      open.addEventListener('click', () => { loadSession(entry); });
+      row.appendChild(open);
+      const del = el('button', 'cmp-history-del');
+      del.type = 'button';
+      del.textContent = '×';
+      del.title = t('history_delete');
+      del.setAttribute('aria-label', t('history_delete_aria', q));
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteSession(entry.id); });
+      row.appendChild(del);
+      historyList.appendChild(row);
+    }
+  }
+  function openHistoryPanel() {
+    if (!historyStorage) return;
+    historyPanel.hidden = false;
+    historyBtn.setAttribute('aria-expanded', 'true');
+    track('history_open');
+    historyUpdate(null).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); });
+  }
+  function closeHistoryPanel() {
+    historyPanel.hidden = true;
+    historyBtn.setAttribute('aria-expanded', 'false');
+  }
+  function deleteSession(id) {
+    // The live session's id rotates NOW, before the delete is queued: a settle that lands while the
+    // delete is in flight then writes under the new id instead of resurrecting the deleted one
+    // (Codex hist 1R #3).
+    if (id === state.sessionId && state.sessionStarted) state.sessionId = newSessionId();
+    historyUpdate(() => ({ remove: [historyKey(id)] })).then((r) => {
+      renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null);
+      track('history_delete', { remaining: r.list.length });
+    });
+  }
+  function clearHistory() {
+    if (state.sessionStarted) state.sessionId = newSessionId();
+    historyUpdate((list) => ({ remove: list.map((e) => historyKey(e.id)) })).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); track('history_clear'); });
+  }
+  /**
+   * Open a stored session in place of whatever is on screen: the question card freezes to its
+   * question, every stored column shows its turns, and — when a continuation was stored — the
+   * follow-up composers are live through the resume path (a fresh port, SEND{resume}); without
+   * one the session is read-only and the notice says so.
+   */
+  let pendingLoad = null; // an entry chosen before the status built the columns (Codex hist 1R #7)
+  function loadSession(entry) {
+    if (state.disabled || !entry || typeof entry !== 'object') return;
+    if (!state.columns.size) { pendingLoad = entry; closeHistoryPanel(); return; } // applied by readStatus once the columns exist
+    // Leave whatever is on screen — accepted or not: a first SEND still waiting for its CONSUME_OK
+    // keeps a port whose late answer must never land in the loaded session (Codex hist 1R #1).
+    if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* gone */ } }
+    closePort();
+    // The exclusion checkbox is a first-send choice; a stored session shows every column it holds.
+    state.excludeSrc = false; excludeInput.checked = false;
+    for (const col of state.columns.values()) col.node.hidden = false;
+    state.sending = false; state.resuming = false; state.resumed = false; state.idleEnded = false;
+    state.pendingFollowup = ''; state.roundTargets = []; state.roundStartedAt = null;
+    statusEpoch++;
+    for (const col of state.columns.values()) resetColumn(col);
+    clearCopyFeedback();
+    for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
+    clearNotice();
+    state.question = String(entry.question || '');
+    state.sessionId = entry.id;
+    state.sessionStarted = true;
+    state.sessionEnded = true;      // no port carries it: a follow-up resumes (canResume) or is refused
+    state.sessionSaveHistory = true; // only kept sessions are stored
+    state.rounds = typeof entry.rounds === 'number' ? entry.rounds : 1;
+    commitPrompt(state.question);
+    const targets = [];
+    for (const p of COMPARE_PROVIDERS) {
+      const stored = entry.columns && entry.columns[p];
+      const col = state.columns.get(p);
+      if (!stored || !col) continue;
+      col.participated = true;
+      col.gate = null;
+      clear(col.body);
+      for (const turn of Array.isArray(stored.turns) ? stored.turns : []) {
+        if (turn.role === 'user') pushUserTurn(col, String(turn.text || ''));
+        else if (turn.role === 'skipped') pushSkippedTurn(col);
+        else restoreAssistantTurn(col, turn);
+      }
+      if (stored.model && typeof stored.model === 'object') col.servedModel = { id: stored.model.id == null ? null : String(stored.model.id), label: stored.model.label == null ? '' : String(stored.model.label), source: 'reported' };
+      col.continuation = stored.continuation && typeof stored.continuation === 'object' ? stored.continuation : null;
+      const last = col.turns[col.turns.length - 1];
+      col.status = last && last.role === 'assistant' && last.errorText ? 'error' : 'done';
+      col.errorCode = col.status === 'error' ? 'restored' : null;
+      setBadge(col, col.status === 'error' ? 'col_error' : 'col_done', col.status === 'error' ? 'is-error' : 'is-done');
+      renderColumnActions(col);
+      targets.push(p);
+    }
+    state.followupTargets = new Set(targets);
+    stopBtn.disabled = true;
+    syncWaitTimer();
+    closeHistoryPanel();
+    updateControls();
+    showNotice(canResume() ? 'info' : 'warn', [t(canResume() ? 'history_loaded_resumable' : 'history_loaded_readonly')]);
+    track('history_load', { resumable: canResume(), columns: targets.length });
+    if (canResume()) focusQuietly(followupTop.input);
+  }
+  /** A stored assistant turn: painted settled (no stream), with its error line when it had one. */
+  function restoreAssistantTurn(col, stored) {
+    const turn = pushAssistantTurn(col);
+    turn.text = String(stored.text || '');
+    if (stored.errorText) { turn.errorText = String(stored.errorText); turn.node.classList.add('is-error'); }
+    turn.node.classList.remove('is-streaming');
+    col.status = 'done';
+    paintAssistant(col);
+    settleTurn(turn);
+    if (turn.activity) turn.activity.box.hidden = true;
+  }
+  historyBtn.addEventListener('click', () => { if (historyPanel.hidden) openHistoryPanel(); else closeHistoryPanel(); });
+  historyClearBtn.addEventListener('click', clearHistory);
+  if (typeof doc.addEventListener === 'function') {
+    doc.addEventListener('keydown', (e) => { if (e && e.key === 'Escape' && !historyPanel.hidden) closeHistoryPanel(); });
+    doc.addEventListener('click', (e) => {
+      if (historyPanel.hidden || !e || !e.target) return;
+      const inside = (node) => { for (let n = node; n; n = n.parentNode) if (n === historyPanel || n === historyBtn) return true; return false; };
+      if (!inside(e.target)) closeHistoryPanel();
+    });
+  }
+  if (historyStorage) historyUpdate(null).then((r) => syncHistoryButton(r.ok ? r.list : null));
 
   // ── status ──
   // A COMPARE_STATUS answer is a snapshot of the moment it was ASKED. Anything that made the page's
@@ -2417,6 +2724,7 @@ export function mountComparePage(deps) {
     renderColumns();
     syncZeroTargetsNotice();
     updateControls();
+    if (pendingLoad && state.columns.size) { const entry = pendingLoad; pendingLoad = null; loadSession(entry); }
   }
 
   // ── auto-reconnect (login guidance) ──
@@ -2544,7 +2852,7 @@ export function mountComparePage(deps) {
   refreshStatus();
 
   // Exposed for the flow guard only.
-  return { state, refreshStatus, sendableTargets: currentTargets };
+  return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession };
 }
 
 // ── bootstrap (real page only) ──
