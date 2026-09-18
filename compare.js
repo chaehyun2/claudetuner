@@ -464,7 +464,7 @@ export function mountComparePage(deps) {
   const historyBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-history');
   historyBtn.id = 'cmp-history';
   historyBtn.type = 'button';
-  historyBtn.hidden = true; // shown once storage answered with at least one entry
+  historyBtn.hidden = true; // shown once storage answered at all (empty list included — the user must be able to find the panel; 2026-09-18 live feedback)
   historyBtn.setAttribute('aria-haspopup', 'dialog');
   historyBtn.setAttribute('aria-expanded', 'false');
   topbarSide.appendChild(historyBtn);
@@ -2367,7 +2367,7 @@ export function mountComparePage(deps) {
     state.sessionId = null;
     state.followupTargets = new Set();
     closeHistoryPanel();
-    syncHistoryButton(null); // hidden again when nothing is stored (Codex hist 1R #9)
+    syncHistoryButton(null); // count re-read from the last good list (Codex hist 1R #9)
     statusEpoch++; // a status answer asked before the reset describes the old session
     for (const col of state.columns.values()) resetColumn(col);
     releasePrompt();
@@ -2502,7 +2502,9 @@ export function mountComparePage(deps) {
   root.appendChild(historyPanel);
   function syncHistoryButton(list) {
     const n = Array.isArray(list) ? list.length : lastHistoryCount;
-    historyBtn.hidden = n === 0 && !state.sessionStarted;
+    // Always visible once storage is reachable: an empty panel says 「저장된 대화가 없어요」 — a
+    // button that only appears after the first saved conversation was invisible to a fresh install.
+    historyBtn.hidden = !historyStorage;
     historyBtn.textContent = n ? t('history_btn_n', n) : t('history_btn');
     historyBtn.title = t('history_title');
   }
