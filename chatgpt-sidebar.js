@@ -553,8 +553,20 @@
   }
 
   // ── In-house ad banner (design §2.2/§3.2/§4) ──
+  // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium skips the fetch and
+  // clears the slot. Feature-detected — a stale core (dynamic injection, see docs/EXTENSION.md) has no
+  // adFreeEntitled and must not throw — and FAIL-OPEN: any error or a non-Premium answer → ads as before.
+  const adFree = () => {
+    try {
+      if (!CORE || typeof CORE.adFreeEntitled !== 'function') return Promise.resolve(false);
+      return Promise.resolve(CORE.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
+    } catch { return Promise.resolve(false); }
+  };
   async function fetchAds() {
     if (!isCurrent() || !CORE.selectAds) return;
+    const gated = await adFree();
+    if (!isCurrent()) return; // superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch
+    if (gated) { _ads = []; renderInlineAd(); return; } // Premium: no fetch, slot cleared
     try {
       const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CHATGPT_SIDEBAR, lang: _lang });
       if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
@@ -720,6 +732,10 @@
     // second chatgpt.com tab keeps the old state indefinitely: the section is rebuilt on every poll
     // from a module variable that nothing updates.
     if (area === 'local') {
+      // Premium (1.32.0, AC3): the SW rewrote the entitlement cache (its own fetch or the compare
+      // status write-through) → re-run the gated fetchAds now, not at the next rotation tick: a
+      // Premium answer clears the slot, a free one brings the ads back.
+      if (changes.ct_entitlement && _enabled) fetchAds(); // a disabled panel has no slot to refresh (Codex U3 2R #7)
       if (changes.ct_cg_extras_collapsed) {
         _extrasCollapsed = changes.ct_cg_extras_collapsed.newValue === true;
         _extrasStateSettled = true;

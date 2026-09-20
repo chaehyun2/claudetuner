@@ -179,8 +179,13 @@ export async function loadPopupAnnouncements(attempt = 0) {
     // In-house ads (design §3.2) — fetched/filtered by the shared core, rendered
     // alongside promos. Independent of announcements; a failure here never blocks notices.
     if (CORE && CORE.selectAds) {
+      // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium gets no popup
+      // ads — the fetch is skipped and the list emptied (renderPopupNotices draws nothing from []).
+      // Feature-detected (an older core has no adFreeEntitled) and FAIL-OPEN: any error → ads as before.
+      let adFree = false;
+      try { adFree = typeof CORE.adFreeEntitled === 'function' && (await CORE.adFreeEntitled(chrome.runtime)) === true; } catch { adFree = false; }
       try {
-        state.popupAds = await CORE.selectAds({ placement: CORE.PLACEMENTS.POPUP, lang: userLang });
+        state.popupAds = adFree ? [] : await CORE.selectAds({ placement: CORE.PLACEMENTS.POPUP, lang: userLang });
       } catch { state.popupAds = []; }
     }
     renderPopupNotices();

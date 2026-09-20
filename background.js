@@ -39,6 +39,7 @@ import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm
 import { isChatGPTLoggedIn } from './bg/api-chatgpt.js';
 import { isGeminiLoggedIn } from './bg/api-gemini.js';
 import { createCompareController, COMPARE_PORT_NAME } from './bg/compare.js';
+import { createEntitlementCache } from './bg/entitlement-cache.js';
 import { createClient as createAiWebClient, listModels as listAiWebModels, drainPendingHides } from './vendor-ai/index.js';
 // ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
@@ -1363,14 +1364,68 @@ let _lastPopupCollect = 0;
 // Restore from storage on SW restart
 chrome.storage.local.get({ _lastPopupCollect: 0 }, (r) => { _lastPopupCollect = r._lastPopupCollect; });
 
+// === Billing entitlement cache (`ct_entitlement`) — bg/entitlement-cache.js ===
+// One shape, two writers, a 1h NEGATIVE entry for failed fetches and one in-flight fetch per
+// account (1.32.0). The module owns the rules; this file supplies the account, the storage and the
+// network step, so test/entitlement-cache-guard.mjs executes the same code with stubs.
+/** The account the cache is scoped to: the last snapshot's email, else the independent account's. */
+async function resolveEntitlementEmail() {
+  const status = await getLastStatus().catch(() => null);
+  let email = status?.snapshot?.user_email;
+  if (!email) {
+    try {
+      const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
+      email = independentAccount?.email || null;
+    } catch { email = null; }
+  }
+  return email || null;
+}
+const entitlementCache = createEntitlementCache({
+  storage: chrome.storage.local,
+  // `/api/users/entitlement` is behind authMiddleware, which DOES accept our ext_token, and reports
+  // the flat billingSummary. Deliberately NOT `/api/me` (googleAuthMiddleware: session/Google only —
+  // the extension holds no session token, so it 401'd forever and the folders gate was permanently
+  // free) and NOT `/api/folders` (404 on FOLDER_SYNC_ENABLED=0 says nothing about Pro; its 403 is
+  // 'Pro required' OR 'Email mismatch'). A non-2xx is `{ok:false}` (the module caches the failure);
+  // transport / body errors throw (same).
+  fetchEntitlement: async (email) => {
+    const config = await getConfig().catch(() => null);
+    if (!config?.serverUrl) return { ok: false };
+    const resp = await authedFetch(config, `${config.serverUrl}/api/users/entitlement`, {
+      headers: { 'X-User-Email': email },
+    });
+    if (!resp.ok) return { ok: false };
+    const data = await resp.json();
+    // Flat billingSummary — NOT nested under `billing` like /api/me's payload was.
+    return { ok: true, plan: data?.plan === 'pro' ? 'pro' : 'free' };
+  },
+});
+/**
+ * Write-through from the compare status (plan compare-quota-premium §2 / AC3): the server's `pro`
+ * on a SUCCESSFUL `GET /api/compare/status` is the same isPro(users row) the entitlement endpoint
+ * reports — the ad gate flips on the next render instead of in 24h. Called only from readQuota's
+ * ok:true branch: a failed / 401 / 404 status never writes, so a transient error cannot demote a
+ * real Premium to free. Never throws (the status must not depend on storage health).
+ */
+async function syncEntitlementFromCompare(pro) {
+  try {
+    await entitlementCache.syncFromStatus(await resolveEntitlementEmail(), pro);
+  } catch { /* storage unavailable: the 24h path still applies */ }
+}
+
 // === Multi-AI compare (#1452) — SW controller; see bg/compare.js for the wire contract ===
 // Every chrome API it needs is injected here so test/compare-send-order-guard.mjs can run the
 // same module under Node with stubs. `tabs.create` inside it opens only our own compare.html.
 const compareController = createCompareController({
   createClient: createAiWebClient, listModels: listAiWebModels, drainPendingHides,
   authedFetch, getConfig, getExtToken, hasProviderPermission,
+  // Entitlement write-through from /api/compare/status `pro` (1.32.0, see syncEntitlementFromCompare).
+  syncEntitlement: syncEntitlementFromCompare,
   loginChecks: { claude: hasClaudeSession, gemini: isGeminiLoggedIn, chatgpt: isChatGPTLoggedIn },
   tabs: chrome.tabs, scripting: chrome.scripting, cookies: chrome.cookies, runtime: chrome.runtime,
+  // `management.getSelf()` needs no permission; the dev-only COMPARE_PROBE_MULTI gate reads installType
+  // from it and fails closed when absent (#1517 multi-model probe).
+  management: chrome.management,
   storage: chrome.storage.local,
   // Per-provider model choice (COMPARE_MODELS_KEY) — sync, like the other user options.
   storageSync: chrome.storage.sync,
@@ -1617,44 +1672,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // looks like it could answer this, but sync availability and entitlement are independent — it 404s
   // when FOLDER_SYNC_ENABLED=0 (saying nothing about Pro) and its 403 means either 'Pro required' or
   // 'Email mismatch', so its status cannot be read as an entitlement answer.
+  //
+  // Since 1.32.0 (plan compare-quota-premium §2) the same cache is also the AD gate (the sidebars,
+  // the popup — CORE.isAdFree) and is written THROUGH from `GET /api/compare/status` `pro` (the
+  // compare controller's syncEntitlementFromCompare below), so a subscriber who opens the compare
+  // page right after paying sees the ads go without waiting out the 24h TTL. The rules (TTLs, the
+  // negative entry, one fetch in flight) live in bg/entitlement-cache.js; the account resolution above.
   if (message.type === 'GET_ENTITLEMENT') {
     (async () => {
-      const CACHE_KEY = 'ct_entitlement';
-      const TTL_MS = 24 * 60 * 60 * 1000;
-      const config = await getConfig().catch(() => null);
-      const status = await getLastStatus().catch(() => null);
-      let email = status?.snapshot?.user_email;
-      if (!email) {
-        const { independentAccount } = await chrome.storage.local.get({ independentAccount: null });
-        email = independentAccount?.email || null;
-      }
-      // Cache is valid only when it belongs to the current account AND is within TTL.
-      const readFreshCache = async () => {
-        try {
-          const cached = (await chrome.storage.local.get(CACHE_KEY))[CACHE_KEY];
-          if (cached && cached.email === email && email &&
-              (Date.now() - (cached.at || 0) < TTL_MS)) return cached.plan === 'pro' ? 'pro' : 'free';
-        } catch { /* ignore */ }
-        return null; // no usable cache -> caller fails closed to 'free'
-      };
       try {
-        if (!message.force) {
-          const cachedPlan = await readFreshCache();
-          if (cachedPlan) { sendResponse({ plan: cachedPlan, cached: true }); return; }
-        }
-        if (!config?.serverUrl || !email) { sendResponse({ plan: 'free', stale: true }); return; }
-        const resp = await authedFetch(config, `${config.serverUrl}/api/users/entitlement`, {
-          headers: { 'X-User-Email': email },
-        });
-        // Fail CLOSED on any server error: never serve a Pro plan we couldn't
-        // confirm this call. (A fresh same-account cache is already returned by the
-        // non-force path above, so reaching here means we have no trustworthy Pro.)
-        if (!resp.ok) { sendResponse({ plan: 'free', stale: true }); return; }
-        const data = await resp.json();
-        // Flat billingSummary — NOT nested under `billing` like /api/me's payload was.
-        const plan = data?.plan === 'pro' ? 'pro' : 'free';
-        await chrome.storage.local.set({ [CACHE_KEY]: { plan, at: Date.now(), email } });
-        sendResponse({ plan });
+        // Fail CLOSED: never a Pro the server did not confirm (this call, or within the confirmed
+        // TTL). A failed fetch is remembered for 1h so the ad gate's rotation ticks stop re-asking.
+        sendResponse(await entitlementCache.resolve({ email: await resolveEntitlementEmail(), force: !!message.force }));
       } catch (e) {
         sendResponse({ plan: 'free', stale: true });
       }

@@ -9,7 +9,7 @@ import { serverSyncWithheldReason, getLastStatus, isServerSyncPaused } from './b
 import { liveProviderErrors, providerErrorAction, providerErrorSnoozed } from './bg/provider-state.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
-import { buildCapDropView } from './bg/capdrop-view.js';
+import { createCapDropBanner, CAP_DROP_KEY, CAP_DROP_ACK_KEY } from './ui/capdrop-banner.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
@@ -50,112 +50,18 @@ let _syncEmailLive = false;
 // too, but a dropped org produces NO data — so nothing ever pulls that user to the dashboard
 // to see the warning, which is exactly how the drop stayed invisible.
 //
-// ⚠️ Key literal is duplicated from bg/cadence-config.js (CAP_DROP_KEY): the popup is a
-// classic script and cannot import that ESM module. Rename in BOTH or neither.
-const CAP_DROP_KEY = '_ct_cap_drop';
-// The drop SET the user last waved away (#1408). Popup-only — written and read here and nowhere
-// else — so unlike CAP_DROP_KEY it crosses no runtime boundary and needs no drift guard.
-const CAP_DROP_ACK_KEY = '_ct_cap_drop_ack';
-// 🔴 ONLY THE NEWEST READ MAY PAINT — the same rule the provider-error banner above follows, and
-// for a sharper reason here: this check is now re-run by a storage listener, so several reads are
-// routinely in flight. Codex reproduced both directions with delayed storage replies: a newer
-// {A,B} render undone by an older acknowledged {A} read, and a dismissal undone by an older read
-// that predated it. Bumping on entry means every earlier read finds itself stale and returns
-// before touching the DOM.
-let _capDropSeq = 0;
-// The acknowledgement, remembered in memory as well as in storage. Storage is the durable copy;
-// this one is what makes the dismissal honest when the write FAILS — without it the very next
-// listener-driven check re-read storage, found no ack, and reopened the banner the user had just
-// closed. "It lasts until the popup closes" has to be true of the failure path too, or it is not
-// a promise, it is a description of the happy path. (Codex round 2, #1408.)
-let _capDropAckMemory = '';
-
-async function checkCapDrops() {
-  const banner = document.getElementById('capdrop-banner');
-  if (!banner) return;
-  const seq = ++_capDropSeq;
-  let orgs = [];
-  let collectedOrgs = [];
-  let ackSig = '';
-  try {
-    const stored = await chrome.storage.local.get({
-      [CAP_DROP_KEY]: null, [CAP_DROP_ACK_KEY]: null, collectedOrgs: [],
-    });
-    const cur = stored && stored[CAP_DROP_KEY];
-    if (cur && Array.isArray(cur.orgs)) orgs = cur.orgs.filter(Boolean);
-    // 🔑 The org NAMES live here. A dropped org is present in this list because the collect loop
-    // records it "regardless of server POST result" (bg/collect.js) — the drop happens on the
-    // server, after the client already knew the org.
-    if (Array.isArray(stored?.collectedOrgs)) collectedOrgs = stored.collectedOrgs;
-    const ack = stored && stored[CAP_DROP_ACK_KEY];
-    if (ack && typeof ack.sig === 'string') ackSig = ack.sig;
-  } catch { /* storage hiccup → treat as "nothing dropped" and stay quiet */ }
-  if (seq !== _capDropSeq) return;      // a newer check started while this one was reading
-  // The in-memory copy wins only when storage has none: storage is the durable answer, memory is
-  // the fallback for a write that did not land.
-  if (!ackSig) ackSig = _capDropAckMemory;
-
-  // What to SAY is decided by a pure function so it can be executed by a test rather than
-  // pattern-matched — see bg/capdrop-view.js for the invariant it protects.
-  const view = buildCapDropView(orgs, collectedOrgs, ackSig, PROVIDER_LABELS);
-  if (!view) { banner.classList.add('hidden'); return; }
-
-  banner.innerHTML = '';
-  // 🪤 No `|| 'fallback'` on these t() calls. It reads like a safety net and is not one: t()
-  // returns the KEY itself when a translation is missing (i18n.js), which is truthy, so the
-  // right-hand side is unreachable. The surrounding file has the same idiom in older code; these
-  // are simply not adding more of it. (Codex round 2, #1408.)
-  let text;
-  if (view.mode === 'count') {
-    text = t('capdrop_banner_text_count', view.count);
-  } else {
-    const more = view.extra > 0 ? ' ' + t('capdrop_banner_more', view.extra) : '';
-    text = t('capdrop_banner_text', view.names.join(', ') + more);
-  }
-  banner.appendChild(document.createTextNode(text));
-
-  const btn = document.createElement('button');
-  btn.textContent = t('capdrop_banner_btn');
-  btn.addEventListener('click', () => {
-    chrome.tabs.create({ url: 'https://claudetuner.com/dashboard/settings/#active-orgs-card' });
-  });
-  banner.appendChild(btn);
-
-  // 🔴 THE ESCAPE HATCH, AND WHY IT HAS TO EXIST. Self-clearing (applyCapDrop) needs a non-drop
-  // 200 for the same stream — but the client keeps posting orgs it knows will be dropped (#855)
-  // and the server keeps dropping them (#1180), so a full cap re-records the entry every cycle.
-  // Without this the banner is permanent, and "Choose orgs" is not a way out: with the cap full,
-  // choosing a different org only moves the drop.
-  const dismiss = document.createElement('button');
-  dismiss.className = 'prov-err-dismiss';
-  dismiss.textContent = t('capdrop_banner_dismiss');
-  dismiss.title = t('capdrop_banner_dismiss_title');
-  dismiss.addEventListener('click', async () => {
-    // 🔴 HIDE FIRST, PERSIST SECOND — the order is the fix, not an optimisation.
-    // Awaiting the write before hiding meant the hide landed on whatever the banner had become
-    // by then: Codex reproduced render{A} → click → rerender{A,B} → write resolves → the {A,B}
-    // banner vanishes, having acknowledged only {A}. Hiding synchronously binds the hide to the
-    // render that was actually clicked, and no DOM is touched after the await — so a later
-    // render simply rebuilds and re-shows the banner on its own terms.
-    // Recorded in memory BEFORE the await, and bumping the sequence retires any read already in
-    // flight — otherwise a check that started before the click finishes after it and reopens the
-    // banner, which is what the user just told us not to do.
-    _capDropAckMemory = view.sig;
-    _capDropSeq++;
-    banner.classList.add('hidden');
-    try {
-      await chrome.storage.local.set({ [CAP_DROP_ACK_KEY]: { sig: view.sig } });
-    } catch {
-      // Storage hiccup: the acknowledgement did not persist, so this dismissal lasts exactly as
-      // long as the popup does — `_capDropAckMemory` holds it, and it is gone on the next open.
-      // Deliberately NOT re-shown here; overriding the click the user just made is worse than a
-      // dismissal that does not outlive the session.
-    }
-  });
-  banner.appendChild(dismiss);
-
-  banner.classList.remove('hidden');
-}
+// The read (with its stale-read sequence), the paint and the dismissal (hide first, persist
+// second, remembered in memory when the write fails) live in ui/capdrop-banner.js, behind a
+// factory that takes storage and the document — so test/capdrop-banner-guard.mjs EXECUTES them
+// with stubs instead of pattern-matching this file (#1416). What the banner says is decided by
+// bg/capdrop-view.js (#1408); its tone — informational, under the actionable provider-error
+// banner and visibly lighter than it — is set by the module (#1419).
+const capDropBanner = createCapDropBanner({
+  storage: chrome.storage.local, doc: document, labels: PROVIDER_LABELS,
+  t: (key, ...args) => t(key, ...args),          // i18n.js is a classic global; resolved at call time
+  openUrl: (url) => { chrome.tabs.create({ url }); },
+});
+function checkCapDrops() { return capDropBanner.check(); }
 
 // Why a provider stopped collecting (#852).
 //
@@ -855,7 +761,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderLoginCta();
       renderClaimSwitch();   // same reason — every string in it is imperative t() text
       checkProviderPermissions().then(checkProviderErrors);
-      checkCapDrops();   // same reason — imperative t() text, rebuilt via innerHTML=''
+      checkCapDrops();   // same reason — imperative t() text, repainted by the module
       // Same reason: the sync-account note is imperative t() text with no data-i18n attribute.
       // It can't wait for the updateUI() below either — that only runs when lastStatus exists,
       // and provider-only (ChatGPT/Gemini) installs render from collectedOrgs with a null

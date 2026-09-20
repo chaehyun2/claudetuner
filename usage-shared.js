@@ -386,6 +386,45 @@
   // can change at runtime without re-arming (or leaking) a timer.
   const AD_TICK_MS = AD_REFRESH_MIN_MS;
 
+  // ── Premium ad gate (1.32.0, plan compare-quota-premium §2 R4) ──
+  // Premium = no ads, decided on the CLIENT from the billing entitlement (the server's ad
+  // targeting never sees a plan key — privacy notice §9). The gate sits at the CALL SITES (each
+  // surface's fetchAds / the popup's loadPopupAnnouncements), never inside selectAds /
+  // buildAdBannerHtml: those two have a byte-identical sync copy on the dashboard
+  // (test/ads-dry-guard.mjs) and the dashboard gates on /api/me billing.plan itself.
+  /** Pure: the GET_ENTITLEMENT answer (`{plan}`) → true only for a confirmed Premium. */
+  function isAdFree(entitlement) {
+    return !!(entitlement && entitlement.plan === 'pro');
+  }
+  // How long a surface waits for the SW's entitlement answer before it shows ads anyway. The SW
+  // answers from its 24h cache in a few ms; a dead channel (no callback ever) must not become a
+  // "no ads" outcome — the gate FAILS OPEN on every path (missing runtime, thrown sendMessage,
+  // lastError, null / malformed answer, timeout).
+  const AD_GATE_TIMEOUT_MS = 1500;
+  /**
+   * Ask the SW (GET_ENTITLEMENT — its 24h cache, written through from the compare status too) and
+   * answer isAdFree(). Never rejects; false on every failure so ads render as before (fail open).
+   * `runtime` is the caller's chrome.runtime — passed in so the popup and the content scripts share
+   * one implementation and a test can hand in a stub.
+   */
+  function adFreeEntitled(runtime) {
+    return new Promise((resolve) => {
+      let done = false;
+      const settle = (v) => { if (done) return; done = true; resolve(v === true); };
+      try {
+        if (!runtime || typeof runtime.sendMessage !== 'function') { settle(false); return; }
+        setTimeout(() => settle(false), AD_GATE_TIMEOUT_MS);
+        runtime.sendMessage({ type: 'GET_ENTITLEMENT' }, (res) => {
+          // An error on the channel outranks whatever rode with it (Codex U3 1R #3): a set
+          // lastError — or a getter that throws — is "no confirmed answer" → ads as before.
+          let err = null;
+          try { err = runtime.lastError || null; } catch { err = true; }
+          settle(!err && isAdFree(res));
+        });
+      } catch { settle(false); }
+    });
+  }
+
   // Promisified chrome.storage.local get/set. Resolve null/void on any error so a
   // storage hiccup just falls through (never throws into the render path).
   function _adGet(key) {
@@ -910,6 +949,8 @@
     getUnseenCount,
     // ── Ad server (Phase 1 serving) ──
     PLACEMENTS,
+    isAdFree,
+    adFreeEntitled,
     selectAds,
     noteAdServed,
     getAdRefreshMs,

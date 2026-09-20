@@ -64,7 +64,7 @@ const NAMES_SHOWN_MAX = 2;
 /**
  * Decide what the banner renders.
  *
- * @param {Array<{key:string, provider:string}>} orgs   the `_ct_cap_drop` entries
+ * @param {Array<{key:string, provider:string}>} orgs   the CAP_DROP_KEY (bg/constants.js) entries
  * @param {Array<{uuid:string, provider?:string, name?:string}>} collectedOrgs
  *        the popup's local org list. 🔑 A dropped org IS in here: the collect loop pushes to
  *        orgUsageMap/collectedOrgs "regardless of server POST result" (bg/collect.js), which is

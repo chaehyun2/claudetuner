@@ -80,8 +80,10 @@
        (Codex review of the plan). Reuses .perm-banner styling: same "action needed" weight, and
        its dark-theme rules already exist. -->
   <div id="prov-err-banner" class="perm-banner hidden"></div>
-  <!-- Orgs the server is dropping at the 3-org cap. Reuses .perm-banner: same "action needed"
-       styling, and its dark-theme rules already exist. -->
+  <!-- Orgs the server is dropping at the 3-org cap. BELOW #prov-err-banner on purpose: that one is
+       a failure with a fix, this one is the 3-org limit working as chosen. It reuses .perm-banner's
+       layout, and ui/capdrop-banner.js adds `perm-banner-info` when it paints — a neutral surface, so
+       the two never read as one amber story (#1419). -->
   <div id="capdrop-banner" class="perm-banner hidden"></div>
 
   <!-- Login CTA (Phase 2 단계 4): shown to a fresh, not-logged-in install (showLoginPrompt).

@@ -47,9 +47,9 @@
       no_data: '데이터 수집 중...',
       no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
       brand: 'Claude Tuner',
-      cmp_ask_others: 'AI 크로스체크',
-      cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요',
-      cmp_empty_tip: '먼저 질문을 입력하세요',
+      cmp_ask_others: 'ChatGPT·Gemini에도 물어보기',
+      cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)',
+      cmp_msg_tip: '이 질문을 ChatGPT·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)',
     },
     en: {
       usage_5h: '5h usage',
@@ -65,9 +65,9 @@
       no_data: 'Collecting data...',
       no_usage: "Claude isn't providing usage for this account",
       brand: 'Claude Tuner',
-      cmp_ask_others: 'AI Cross-Check',
-      cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers',
-      cmp_empty_tip: 'Type a question first',
+      cmp_ask_others: 'Ask ChatGPT & Gemini too',
+      cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)',
+      cmp_msg_tip: 'Send this question to ChatGPT & Gemini too and cross-check the answers (AI Cross-Check)',
     },
   };
 
@@ -381,7 +381,6 @@
     _torndown = true;
     _intervals.forEach(clearInterval);
     _observers.forEach(o => { try { o.disconnect(); } catch { /* noop */ } });
-    try { document.removeEventListener('input', onAnyInput, true); } catch { /* noop */ }
     return true;
   }
   function ctSetInterval(fn, ms) {
@@ -403,7 +402,7 @@
     if (teardownIfDead()) return;
     if (_remountScheduled) return;
     _remountScheduled = true;
-    requestAnimationFrame(() => { _remountScheduled = false; ensureMounted(); });
+    requestAnimationFrame(() => { _remountScheduled = false; ensureMounted(); syncMessageButtons(); });
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
   _observers.push(observer);
@@ -412,6 +411,11 @@
   const themeObserver = new MutationObserver(() => { if (!teardownIfDead()) syncTheme(); });
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-mode'] });
   _observers.push(themeObserver);
+
+  // Gear glyph (Feather "settings"), shared by the strip's `.ct-settings` button (HTML string in
+  // renderStripInner) and the per-question row's gear (built with createElementNS). One source
+  // so the two never drift.
+  const GEAR_ICON_PATH = 'M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z';
 
   // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
   // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17) sits in the strip's right-hand group. Gate = the CDN dark-launch flag
@@ -432,7 +436,9 @@
   let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
   let _cmpFlagPending = false;
   let _cmpEnabled = true;     // compareEnabled option
-  let _cmpSyncScheduled = false;
+  // compareMsgButtonEnabled option (default on): gates ONLY the per-question rows under the
+  // bubbles (syncMessageButtons), never the strip button — off leaves the composer button alone.
+  let _cmpMsgEnabled = true;
 
   const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
 
@@ -460,43 +466,151 @@
     return String(editor.innerText || editor.textContent || '').trim();
   }
 
-  function syncCompareButtonState(btnEl) {
-    const shadow = $shadow();
-    const btn = btnEl || (shadow && shadow.querySelector('.' + CMP_BTN_CLASS));
-    if (!btn) return;
-    const empty = !readComposerText();
-    btn.disabled = empty;
-    btn.title = empty ? t('cmp_empty_tip') : t('cmp_ask_others_tip');
-  }
-
-  // The composer fires `input` on every keystroke; coalesce the enabled/disabled sync per frame.
-  function onAnyInput() {
-    if (_cmpGen !== globalThis.__ctCmpInputGen) { document.removeEventListener('input', onAnyInput, true); return; }
-    if (teardownIfDead() || _cmpSyncScheduled) return;
-    _cmpSyncScheduled = true;
-    requestAnimationFrame(() => { _cmpSyncScheduled = false; syncCompareButtonState(); });
-  }
-
   function mountCompareButton(strip) {
     // A superseded instance keeps rendering from its own timers while the runtime is alive; it must
     // neither add nor remove the button — the newest instance owns it (Codex 2R #26).
     if (_cmpGen !== globalThis.__ctCmpInputGen) return;
     const existing = strip.querySelector('.' + CMP_BTN_CLASS);
     if (!cmpAllowed()) { if (existing) existing.remove(); return; }
-    if (existing) { syncCompareButtonState(existing); return; }
+    if (existing) return;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = CMP_BTN_CLASS;
     btn.textContent = t('cmp_ask_others');
+    btn.title = t('cmp_ask_others_tip');
+    // Always enabled (2026-09-21, user decision): an empty composer opens the compare page with an
+    // empty question box instead of greying the button out — the page is a valid entry point on its own.
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       const q = readComposerText();
-      if (!q) { syncCompareButtonState(btn); return; }
-      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: CMP_PROVIDER, q }); } catch { /* context dead */ }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: CMP_PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-right') || strip).appendChild(btn);
-    syncCompareButtonState(btn);
+  }
+
+  // Per-question button (2026-09-21, user request; claude.ai only for now): the same label under
+  // every user message bubble, carrying THAT question (placement:'message'). The bubble is
+  // claude.ai's `[data-testid="user-message"]`; the row is inserted right after its CARD (below),
+  // in the page's light DOM (so it is styled by input-usage.css, not the strip's shadow sheet).
+  // Same gate as the strip button (cmpAllowed) and the same newest-instance ownership (_cmpGen).
+  // Driven by the page-wide MutationObserver tick (new messages arrive as DOM mutations) and by
+  // renderStrip (flag / option changes), never by a timer of its own.
+  const CMP_MSG_SELECTOR = '[data-testid="user-message"]';
+  // The bubble sits INSIDE claude.ai's message card (live tree verified 2026-09-21):
+  //   div.rounded-card > div > div.cds-user-message-body > div[data-testid="user-message"] > p
+  // A row placed right after the bubble lands inside the card, i.e. inside the speech bubble the
+  // user sees; it has to go after the CARD to render under it. When that class is gone (it is a
+  // Tailwind token) the bubble itself is the anchor: the button still works, it merely renders
+  // inside the bubble again.
+  const CMP_MSG_CARD_SELECTOR = '.rounded-card';
+  const CMP_MSG_ROW_CLASS = 'ct-cmp-msg';
+  const CMP_MSG_BTN_CLASS = 'ct-cmp-msg-btn';
+  // Which instance built a row: a row from an older injection carries a click handler bound to a
+  // runtime that may be dead (Codex 1R #1) — the newest instance rebuilds it instead of reusing it.
+  const CMP_MSG_GEN_ATTR = 'data-ct-cmp-gen';
+  // Gear in the row (user request, 2026-09-21): opens the options page at the cross-check card, so
+  // the per-question rows can be switched off from where they appear. Same glyph as the strip's
+  // `.ct-settings` (GEAR_ICON_PATH), but built with createElementNS — the row is light DOM and
+  // never touches innerHTML.
+  const CMP_MSG_GEAR_CLASS = 'ct-cmp-msg-gear';
+  const CMP_MSG_GEAR_HASH = 'compare-enabled-row'; // options.html card id (background OPEN_OPTIONS → options.html#<hash>)
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  /** Plain text of one user bubble; '' when empty. The bubble holds only the `p` (attachments,
+   *  "edited" marks and the action row live outside it — verified 2026-09-21); our own row is a
+   *  sibling of the card, never inside the bubble. */
+  function readMessageText(bubble) {
+    return String(bubble.innerText || bubble.textContent || '').trim();
+  }
+
+  /** The element our row is inserted after: the bubble's card, or the bubble when there is none. */
+  function anchorOfBubble(bubble) {
+    return bubble.closest(CMP_MSG_CARD_SELECTOR) || bubble;
+  }
+
+  /** The bubble behind an anchor (a row's previous sibling): the anchor itself when it is the
+   *  bubble, the bubble inside it when it is the card; null when it is neither. */
+  function bubbleOfAnchor(el) {
+    if (!el) return null;
+    return el.matches(CMP_MSG_SELECTOR) ? el : el.querySelector(CMP_MSG_SELECTOR);
+  }
+
+  /** The row's gear: a 12px SVG (no innerHTML) that opens options.html at the cross-check card. */
+  function buildMessageGear(settingsLabel) {
+    const gear = document.createElement('button');
+    gear.type = 'button';
+    gear.className = CMP_MSG_GEAR_CLASS;
+    gear.title = settingsLabel;
+    gear.setAttribute('aria-label', settingsLabel);
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('aria-hidden', 'true');
+    const circle = document.createElementNS(SVG_NS, 'circle');
+    circle.setAttribute('cx', '12'); circle.setAttribute('cy', '12'); circle.setAttribute('r', '3');
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', GEAR_ICON_PATH);
+    svg.appendChild(circle); svg.appendChild(path);
+    gear.appendChild(svg);
+    gear.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try { chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS', hash: CMP_MSG_GEAR_HASH }); } catch { /* context dead */ }
+    });
+    return gear;
+  }
+
+  function syncMessageButtons() {
+    if (_cmpGen !== globalThis.__ctCmpInputGen) return;
+    const rows = document.querySelectorAll('.' + CMP_MSG_ROW_CLASS);
+    if (!cmpAllowed() || !_cmpMsgEnabled) { rows.forEach((r) => r.remove()); return; }
+    // A row whose bubble is gone (message deleted / re-rendered) goes, and so does a row another
+    // instance built (its handler may point at a dead runtime) — the loop below rebuilds it.
+    rows.forEach((r) => {
+      if (!bubbleOfAnchor(r.previousElementSibling) || r.getAttribute(CMP_MSG_GEN_ATTR) !== String(_cmpGen)) r.remove();
+    });
+    const label = t('cmp_ask_others');
+    const tip = t('cmp_msg_tip');
+    const settingsLabel = t('settings');
+    document.querySelectorAll(CMP_MSG_SELECTOR).forEach((bubble) => {
+      const card = anchorOfBubble(bubble);
+      const next = card.nextElementSibling;
+      if (next && next.classList.contains(CMP_MSG_ROW_CLASS)) {
+        // Ours already — keep it, but follow a language change (Codex 1R #2). Write only on a
+        // difference so a settled page produces no DOM mutation (the observer would tick again).
+        const b = next.querySelector('.' + CMP_MSG_BTN_CLASS);
+        if (b && b.textContent !== label) b.textContent = label;
+        if (b && b.title !== tip) b.title = tip;
+        const g = next.querySelector('.' + CMP_MSG_GEAR_CLASS);
+        if (g && g.title !== settingsLabel) { g.title = settingsLabel; g.setAttribute('aria-label', settingsLabel); }
+        return;
+      }
+      if (!card.parentNode) return;
+      const row = document.createElement('div');
+      row.className = CMP_MSG_ROW_CLASS;
+      row.setAttribute(CMP_MSG_GEN_ATTR, String(_cmpGen));
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = CMP_BTN_CLASS + ' ' + CMP_MSG_BTN_CLASS;
+      btn.textContent = label;
+      btn.title = tip;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // The bubble is looked up at click time, not captured: claude.ai may swap the bubble node
+        // in place (an edited question) while our row stays — the row's current neighbour is the
+        // question the user sees (Codex 1R #1).
+        const b = bubbleOfAnchor(row.previousElementSibling);
+        const q = b ? readMessageText(b) : '';
+        try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: CMP_PROVIDER, q, placement: 'message' }); } catch { /* context dead */ }
+      });
+      row.appendChild(btn);
+      row.appendChild(buildMessageGear(settingsLabel));
+      card.parentNode.insertBefore(row, card.nextSibling);
+    });
   }
 
   // ── Render ──
@@ -507,6 +621,7 @@
     const shadow = $shadow();
     const strip = shadow && shadow.querySelector('.ct-strip');
     if (strip) mountCompareButton(strip);
+    syncMessageButtons();
   }
 
   function renderStripInner() {
@@ -595,7 +710,7 @@
       const peakTip = t('peak_body_pre') + range + t('peak_body_post') + '\n' + t('peak_body_2');
       html += `<span class="ct-peak" title="${escapeHtml(peakTip)}">${t('peak')}</span>`;
     }
-    html += `<button class="ct-settings" title="${escapeHtml(t('settings'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>`;
+    html += `<button class="ct-settings" title="${escapeHtml(t('settings'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="${GEAR_ICON_PATH}"/></svg></button>`;
     html += `</div>`;
 
     strip.innerHTML = html;
@@ -691,13 +806,18 @@
   ctSetInterval(ensureMounted, 800);
 
   try {
-    chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true, compareEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', inputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
       _enabled = cfg.inputUsageEnabled !== false;
       _cmpEnabled = cfg.compareEnabled !== false;
-      if (_enabled) { ensureMounted(); requestUsageData(); ensureCompareFlag(); }
+      _cmpMsgEnabled = cfg.compareMsgButtonEnabled !== false;
+      if (_enabled) { ensureMounted(); requestUsageData(); }
+      // The flag is asked regardless of the usage strip: the per-question rows (syncMessageButtons)
+      // do not live in the strip, so a user who switched the strip off still gets them when the
+      // cross-check options are on (1.32.1 batch review: rows were missing on fresh loads with
+      // inputUsageEnabled:false and could not be brought back by toggling the row option).
+      ensureCompareFlag();
     });
-    document.addEventListener('input', onAnyInput, true);
   } catch {
     // Storage read failed (extension context dead) — stay disabled
   }
@@ -707,13 +827,21 @@
       if (area !== 'sync') return;
       if (changes.inputUsageEnabled) {
         _enabled = changes.inputUsageEnabled.newValue !== false;
+        // The rows are independent of the strip: they stay when it goes and need no re-ask when
+        // it comes back (the flag is per page load, see the initial read above).
         if (!_enabled) { const el = document.getElementById(HOST_ID); if (el) el.remove(); }
-        else { ensureMounted(); requestUsageData(); ensureCompareFlag(); }
+        else { ensureMounted(); requestUsageData(); }
       }
       if (changes.compareEnabled) {
         _cmpEnabled = changes.compareEnabled.newValue !== false;
         ensureCompareFlag();
         renderStrip();
+      }
+      if (changes.compareMsgButtonEnabled) {
+        // Only the per-question rows follow this one; the strip is untouched (syncMessageButtons
+        // removes or rebuilds the rows on its own).
+        _cmpMsgEnabled = changes.compareMsgButtonEnabled.newValue !== false;
+        syncMessageButtons();
       }
       if (changes.lang) {
         _lang = changes.lang.newValue === 'auto' ? detectLang() : changes.lang.newValue;

@@ -61,6 +61,22 @@
     .perm-banner button.prov-err-dismiss:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
     [data-theme="dark"] .perm-banner button.prov-err-dismiss { background: transparent; }
     [data-theme="dark"] .perm-banner button.prov-err-dismiss:hover { background: rgba(253, 230, 138, .16); }
+    /* #1419: #capdrop-banner is INFORMATION, not a fault — the server stored nothing for an org the
+       user did not select, which is the 3-org limit working. It sits directly under
+       #prov-err-banner (a real failure with a real fix) and, painted in the same amber, the two
+       read as one story: a user with a broken ChatGPT chased the org limit instead (문의
+       2026-09-11). Same layout, neutral surface: the eye lands on the amber block first. The class
+       is added by ui/capdrop-banner.js when it paints, so the guard can execute it. */
+    .perm-banner.perm-banner-info { background: #f3f4f6; border-color: #d1d5db; color: #4b5563; }
+    .perm-banner.perm-banner-info button { background: #6b7280; }
+    .perm-banner.perm-banner-info button:hover { background: #4b5563; }
+    /* Full opacity: the base rule's .75 dropped this grey text to ~3.8:1 on the neutral surface (Codex). */
+    .perm-banner.perm-banner-info button.prov-err-dismiss { background: transparent; opacity: 1; }
+    .perm-banner.perm-banner-info button.prov-err-dismiss:hover { background: rgba(75, 85, 99, .12); }
+    [data-theme="dark"] .perm-banner.perm-banner-info { background: #1f2937; border-color: #4b5563; color: #d1d5db; }
+    [data-theme="dark"] .perm-banner.perm-banner-info button { background: #4b5563; }
+    [data-theme="dark"] .perm-banner.perm-banner-info button.prov-err-dismiss { background: transparent; }
+    [data-theme="dark"] .perm-banner.perm-banner-info button.prov-err-dismiss:hover { background: rgba(209, 213, 219, .16); }
     [data-theme="dark"] .btn-primary:disabled { background: #3730a3; color: #818cf8; }
     [data-theme="dark"] #privacy-row { background: #1a1500; }
     [data-theme="dark"] #privacy-row .label { color: #fde68a; }

@@ -271,9 +271,21 @@
   }
 
   // ── In-house ad banner (design §2.2/§3.2/§4) ──
+  // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium skips the fetch and
+  // clears the slot. Feature-detected — a stale core (dynamic injection, see docs/EXTENSION.md) has no
+  // adFreeEntitled and must not throw — and FAIL-OPEN: any error or a non-Premium answer → ads as before.
+  const adFree = () => {
+    try {
+      if (!CORE || typeof CORE.adFreeEntitled !== 'function') return Promise.resolve(false);
+      return Promise.resolve(CORE.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
+    } catch { return Promise.resolve(false); }
+  };
   async function fetchAds() {
     if (!isCurrent()) return; // superseded instance — don't fetch or rotate
     if (!adCoreReady()) return; // stale core without the whole ad module — skip the round
+    const gated = await adFree();
+    if (!isCurrent()) return; // superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch
+    if (gated) { _ads = []; renderInlineAd(); return; } // Premium: no fetch, slot cleared
     try {
       const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CLAUDE_SIDEBAR, lang: _lang });
       if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
@@ -891,6 +903,11 @@
 
   function onStorageChanged(changes, area) {
     if (!isCurrent()) return;
+    // Premium (1.32.0, AC3): the SW rewrote the entitlement cache (its own fetch or the compare
+    // status write-through) → re-run the gated fetchAds now, not at the next rotation tick: a
+    // Premium answer clears the slot, a free one brings the ads back. storage.onChanged is the
+    // one signal a content script gets; the key lives in `local`.
+    if (area === 'local' && changes.ct_entitlement) { if (_enabled) fetchAds(); return; } // a disabled panel has no slot to refresh (Codex U3 2R #7)
     if (area !== 'sync') return;
     if (changes.sidebarUsageEnabled) {
       _enabled = changes.sidebarUsageEnabled.newValue !== false;

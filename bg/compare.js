@@ -20,12 +20,31 @@
 //
 // Wire contract (see .omc/handoffs/phase3-contract.md — the SoT shared with the page; ux3 addendum
 // at its end):
-//   runtime.sendMessage   COMPARE_FLAG → {on, cta}   COMPARE_STATUS → {ok, flagOn, loggedIn, providers{[p]: {permitted,
+//   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
 //                         saveHistory}   OPEN_COMPARE{src, q} → {ok}   COMPARE_EVENT{name, params} → {ok}
-//   Port 'ctcmp-compare'  page→SW  SEND{text, targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?} ·
-//                         FOLLOWUP{text, targets, models?, modelsPending?} · ABORT
-//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY
+//                         COMPARE_RESET → {ok, quota} | {ok:false, code}
+//   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?, kind?, round?, src?, session?} ·
+//                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?} · ABORT
+//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY
+//   Columns (cmp-columns contract §2, 2026-09-20): a COLUMN is `provider + model`, id `colId` =
+//   `${provider}:${modelId || 'auto'}`, at most MAX_COLUMNS per round. SEND/FOLLOWUP carry
+//   `columns: [{id, provider, model}]` (ordered; FOLLOWUP may instead name `targets` = colIds);
+//   every per-column event (MODEL/CHUNK/DONE/ERROR/DIAG/ACTIVITY) carries `col` (the colId) beside
+//   `provider`. One vendored client INSTANCE per column (same-provider columns share the pinned
+//   tab — COMPARE_PROBE_MULTI proved the package multiplexes by requestId); readiness (tab lookup +
+//   login verification, `prepare()`) runs ONCE per provider, on that provider's first column, and
+//   its verdict applies to all of the provider's columns. Budget / stall / abort / outcome /
+//   continuation are per column (keyed by colId); the consume body's `targets` are colIds and its
+//   `models` `{colId: modelId|null}`. LEGACY: a SEND without `columns` (an older page) = its
+//   provider `targets` as `${provider}:auto` columns on the stored model choice; a FOLLOWUP whose
+//   `targets` are provider ids is mapped the same way; `resume` keyed by provider maps to
+//   `${provider}:auto`. A duplicate colId or more than MAX_COLUMNS → CONSUME_FAIL{bad_request}
+//   before consume (nothing sent, nothing debited).
+//   DONE{stalled:true} (#1519, see STREAM_STALL_MS): the column's text arrived but the client never
+//   reported `done` — the SW cut the stream after STREAM_STALL_MS of silence and hands the page
+//   the text it streamed; the page treats it as done and may show a note. Never an ERROR: the
+//   user has the answer.
 //   Tabs: SEND and FOLLOWUP both prepare every target with `mayOpenTab: true` — a provider tab the
 //   session opened and the user closed is re-opened on the next send. Tabs we open are pinned and
 //   KEPT across sessions (CLIENT_OPTIONS): the next session finds them with tabs.query.
@@ -116,10 +135,76 @@
 // verification, in the background, on the model the send will use — which is why `readiness`
 // passes `model` to `prepare()` — and the send's `create` segment then reads ~0
 // (`conversation_created {source:'precreated'}`).
+//
+// Beta usage stats + beta reset (2026-09-19, .omc/handoffs/cmp-beta-contract.md §2 — the SW half):
+//   consume  — `POST /api/compare/consume` now carries a JSON body `{kind, targets, models, round?,
+//              src?, session_id?, ext_version?}`: `kind` is what the page said (COMPARE_KINDS: the page decides
+//              send / followup / summary / retry / resume) or, for an older page / garbage, derived
+//              here (SEND with a resume map → 'resume', SEND → 'send', FOLLOWUP → 'followup');
+//              `targets`/`models` describe the READY providers only (what the debit buys, the model
+//              each runs on — id|null); `round` the page's round id (integer 0..ROUND_MAX, else
+//              omitted); `src` the page's provider src when known (omitted otherwise); `session_id`
+//              the page's `session` when it has the SESSION_ID_RE shape (omitted otherwise, §5);
+//              `ext_version` the manifest version (`runtime.getManifest()`, omitted when unreadable).
+//              🔴 The AC18 order is untouched: the body is built from `ready` right before the same
+//              consume() call, nothing moves. Never an email, never the question.
+//   outcome  — the consume 200 body's `event_id` (an integer, else "no event") names the round; the
+//              SW collects per-provider results while the fan-out runs (ok from DONE, code from
+//              ERROR, ttft_ms at the first CHUNK, total_ms at DONE/ERROR, model from MODEL / DONE)
+//              and, once the round has SETTLED — the ALL_DONE point of runSend, which a Stop and a
+//              lost port also reach once the aborted sends have landed — POSTs
+//              `/api/compare/outcome {event_id, results}` ONCE, fire-and-forget (errors swallowed,
+//              never awaited by the send). A ready provider without a result when the round settles
+//              (port lost right after consume) is recorded as `{ok:false, code:'aborted'}`. Never
+//              before consume, never without an event_id (a 429, a body without one, or a failed
+//              consume = no outcome). Strings bounded: code ≤ OUTCOME_CODE_MAX; a model id goes out
+//              ONLY when it has a catalog id's shape (MODEL_ID_RE) — consume `models` and outcome
+//              `model` alike — else the key is omitted (never a cut string, never null).
+//   reset    — runtime message COMPARE_RESET → `POST /api/compare/reset` (the server clears today's
+//              counter only under its COMPARE_BETA_RESET flag; 404 otherwise) → the quota is RE-READ
+//              from /status so the page gets the same fresh object COMPARE_STATUS would → `{ok:true,
+//              quota}`; a reset that failed → `{ok:false, code}`; a reset that succeeded but a
+//              status re-read that did not → `{ok:false, code:'status_unavailable', reset:true}`
+//              (the page re-reads status itself — no invented quota). Touches no provider tab, no
+//              client, no port.
+//   status   — COMPARE_STATUS.betaReset = the /status body's `betaReset === true` (false when absent,
+//              dark, or the status call failed) — the page shows the reset button on it.
+//   events   — COMPARE_EVENT_NAMES += 'quota_reset' (the page reports a successful reset).
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
+// Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
+export const PROBE_MULTI_MSG = 'COMPARE_PROBE_MULTI';
+export const PROBE_MULTI_ABORT_MSG = 'COMPARE_PROBE_ABORT';
+export const PROBE_SEQUENCE_MAX = 40;
+// Bound on each probe client's dispose() (Codex layout 2R #1): a dispose that never settles (a
+// tab gone mid-cleanup, a hung PATCH) must not hold the probe lock forever — every later compare
+// round would be `busy`. Past this the lock is released regardless and the timeout is logged.
+export const PROBE_DISPOSE_TIMEOUT_MS = 10 * 1000;
 export const COMPARE_PAGE = 'compare.html';
+// Where the in-page button lands (2026-09-21, user decision): the site shell, which frames
+// compare.html, rather than the bare extension page — one URL to remember, and the same surface
+// the announcement and /pricing point at. `src` / `q` ride in the FRAGMENT (the shell's contract:
+// the question never reaches a server). An unpacked build whose id is not the published one adds
+// the shell's documented `?ext=<id>` override so the shell frames THIS build.
+export const COMPARE_SITE_URL = 'https://claudetuner.com/multiai/';
+// GA attribution for the button (query, not fragment — the shell forwards utm_* alone into GA's
+// page_location): source/medium say "the extension's in-page button", campaign names the feature,
+// content is the provider page the click came from.
+export const COMPARE_SITE_UTM = 'utm_source=extension&utm_medium=cmp_button&utm_campaign=cross_check';
+// Which button was clicked (utm_content = `<src>_<placement>`, and the SW's own `cmp_button_click`
+// GA event): `composer` = the usage strip next to the input box; `message` = the per-question
+// button under a chat message (planned). Anything else from a content script reads as `composer`
+// — the allow-list keeps GA's content dimension enumerable.
+export const COMPARE_PLACEMENTS = Object.freeze(['composer', 'message']);
+export const COMPARE_DEFAULT_PLACEMENT = 'composer';
+export const PUBLISHED_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
 export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
+// Columns (cmp-columns contract): the most columns one round may have, and the id of the
+// provider's default-model column.
+export const MAX_COLUMNS = 5;
+export const COLUMN_AUTO = 'auto';
+/** `${provider}:${modelId || 'auto'}` — a column's id. */
+export const columnId = (provider, model) => `${provider}:${model || COLUMN_AUTO}`;
 
 // Per-provider answer budget (AC19). A provider that has not finished by then gets ERROR{timeout};
 // the others keep streaming. 🔴 2026-09-18 live: 120 s cut off every column of a three-part travel
@@ -128,6 +213,18 @@ export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
 // idle timeout would fire in the same silence). The budget is now 10 minutes; Stop remains the way
 // to end a round early, and the page tells the user the budget it hit (ERROR.budgetMs).
 export const PROVIDER_SEND_TIMEOUT_MS = 10 * 60 * 1000;
+// Stream STALL watchdog (#1519, live 2026-09-20): a Gemini column received its whole answer but the
+// page script's `reader.read()` never resolved (no `done`), so the client's promise never settled,
+// the round never reached ALL_DONE and the follow-up stayed locked until Stop — for up to the
+// 10-minute budget above. A plain idle timeout is still forbidden by the thinking case (a model
+// can be silent for minutes BEFORE its first token: thinking deltas are not forwarded as events),
+// so this watchdog is armed ONLY once answer text has started (the first CHUNK) and re-armed by
+// EVERY later message the client surfaces (chunk, activity/thinking, model, diag). Once text is
+// flowing, a full minute with nothing at all is a dead stream, not a thinking one — the providers
+// stream tokens continuously once they start. On stall the SW aborts THAT provider's send (the
+// page script's fetch is cancelled, no dangling request in the tab) and posts DONE{stalled:true}
+// with the text it streamed — not ERROR: the user has the answer. Other columns are untouched.
+export const STREAM_STALL_MS = 60 * 1000;
 
 // Bound on each provider's `listModels()` inside COMPARE_STATUS. The package caps its own ChatGPT
 // round trip at the same value; this one is the SW's, so the status probe never waits on a client's
@@ -157,8 +254,39 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'open', 'send', 'column_done', 'column_error', 'round_done', 'consume_fail', 'copy', 'stop', 'new_chat',
   'model_change', 'target_change', 'provider_link_click', 'gate_shown', 'permission_result', 'session_lost',
   'incognito_toggle', 'quota_exhausted', 'jump_to_latest', 'history_open', 'history_load', 'history_delete', 'history_clear', 'consume',
+  // SW-side, from openCompare: the in-page button was clicked (`src` + `placement`, nothing else).
+  'button_click',
+  // 「요약·비교」 (chathub batch 1, C5): the page reports the judge as a provider id (`judge`), never
+  // the prompt or the answer — the same caps as every other event apply.
+  'summarize',
+  // Beta reset (cmp-beta contract): the page reports a successful COMPARE_RESET.
+  'quota_reset',
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
+
+// Usage stats (cmp-beta contract §1/§2): what a consume says it is. The page decides; anything
+// outside this list — or an older page that says nothing — is derived in runSend.
+export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume']);
+// Bounds on what the consume / outcome bodies carry (the server validates the same caps; a body
+// that exceeds them would be refused, and a refused consume is a send that never happens).
+export const ROUND_MAX = 9999;
+export const EXT_VERSION_MAX = 16;
+export const OUTCOME_MODEL_MAX = 64;
+export const OUTCOME_CODE_MAX = 32;
+// The shape of a model id that may leave the browser (consume `models`, outcome `model`): every
+// catalog id is one of these — `claude-opus-4-8`, Gemini's hex hashes (`e051ce1aa80aa576`),
+// ChatGPT slugs with dots or hyphens (`gpt-5-5`, `gpt-5.5`) — and nothing a page, a storage row or
+// a provider could report as an id is private text unless it is NOT one of these (an email, a URL,
+// a sentence). A non-matching id is OMITTED, never truncated (a cut string is still that text)
+// and never null (null means Auto) — Codex cmp-beta SW 1R #1.
+export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// The page's opaque session id (contract §5): the id its history entry uses, forwarded to consume
+// as `session_id` so the rows of one conversation can be grouped. Shape-checked, else omitted.
+export const SESSION_ID_RE = /^[A-Za-z0-9-]{8,40}$/;
+/** A model id that may go on the wire, or null when it must not (see MODEL_ID_RE). */
+export function wireModelId(v) {
+  return typeof v === 'string' && v.length <= OUTCOME_MODEL_MAX && MODEL_ID_RE.test(v) ? v : null;
+}
 // Params: a FLAT object of at most this many string/number/boolean values, keys `[a-z_]{1,40}`,
 // strings cut at this many characters. Never a question, never an email — the page does not send
 // them and the SW would not know one from a label, so the caps are the whole defence here.
@@ -179,8 +307,68 @@ export const COMPARE_FLAG_FIELD = 'compare';
 // (compare.html, the claudetuner.com/multiai shell) can be live while the button stays hidden
 // (2026-09-18: launch the site entry first, the in-page button later). Missing = false.
 export const COMPARE_CTA_FLAG_FIELD = 'compare_cta';
+// Third field, same file: the 「요약·비교」 button on compare.html (chathub batch 1, C5). Like `cta`
+// it needs `compare` too (the button lives on the page), and missing / non-boolean = false, so
+// the feature ships dark and is switched on — or killed — by editing flags.json, no release.
+// Answered as COMPARE_FLAG.summary and COMPARE_STATUS.summaryOn.
+export const COMPARE_SUMMARY_FLAG_FIELD = 'compare_summary';
 export const COMPARE_FLAG_CACHE_KEY = 'ct_compare_flag';
 export const COMPARE_FLAG_TTL_MS = 60 * 60 * 1000;
+
+// Server-provided example prompts for the page's empty state (2026-09-21, #1517): the same CDN,
+// the same 1h TTL cache and the same fail-safe as the flags — `{v:1, ko:[{q, tag}], en:[{q, tag}]}`
+// (cdn/compare-examples.json, published by scripts/publish-compare-examples.sh). Validated here
+// (sanitizeCompareExamples) before anything is cached or answered: a language keeps at most
+// COMPARE_EXAMPLES_MAX items, each `q` a trimmed string of 1..COMPARE_EXAMPLES_Q_MAX chars, `tag`
+// `[a-z]{1,16}` else 'other'; a language with fewer than COMPARE_EXAMPLES_MIN valid items is
+// omitted; any fetch/parse failure or a wrong `v` = null — the page falls back to its built-in
+// chips. Answered in COMPARE_STATUS as `examples` ({ko?, en?} | null), fetched IN PARALLEL with
+// the other status parts and capped by COMPARE_EXAMPLES_TIMEOUT_MS so a slow CDN never delays
+// status (the fetch keeps going and fills the cache for the next one). Never on the send path.
+export const COMPARE_EXAMPLES_URL = 'https://cdn.claudetuner.com/compare-examples.json';
+export const COMPARE_EXAMPLES_CACHE_KEY = 'ct_compare_examples';
+export const COMPARE_EXAMPLES_TTL_MS = 60 * 60 * 1000;
+export const COMPARE_EXAMPLES_TIMEOUT_MS = 3000;
+// Byte caps on what the two CDN fetches will DECODE (Codex examples 1R #1): the body is read
+// through a reader with a running counter and dropped past the cap — never `res.json()` on an
+// unbounded body. The live documents are ~5 KB (examples) and well under 1 KB (flags).
+export const COMPARE_EXAMPLES_MAX_BYTES = 64 * 1024;
+export const COMPARE_FLAG_MAX_BYTES = 4 * 1024;
+// Deadline on the flags fetch itself (the examples fetch uses COMPARE_EXAMPLES_TIMEOUT_MS): the
+// shared in-flight promise is aborted and cleared past it, so the next caller can retry.
+export const COMPARE_FLAG_TIMEOUT_MS = 5000;
+export const COMPARE_EXAMPLES_VERSION = 1;
+export const COMPARE_EXAMPLES_LANGS = Object.freeze(['ko', 'en']);
+export const COMPARE_EXAMPLES_MAX = 30;
+export const COMPARE_EXAMPLES_MIN = 3;
+export const COMPARE_EXAMPLES_Q_MAX = 300;
+const COMPARE_EXAMPLES_TAG_RE = /^[a-z]{1,16}$/;
+
+/**
+ * The validated `{ko?: [{q, tag}], en?: [{q, tag}]}` from an untrusted compare-examples body, or
+ * null when it is not a v1 document or no language survives. Pure; never throws.
+ */
+export function sanitizeCompareExamples(json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json) || json.v !== COMPARE_EXAMPLES_VERSION) return null;
+  const out = {};
+  for (const lang of COMPARE_EXAMPLES_LANGS) {
+    const list = json[lang];
+    if (!Array.isArray(list)) continue;
+    const items = [];
+    // Only the first COMPARE_EXAMPLES_MAX entries are even LOOKED at (Codex examples 1R #1): a
+    // 100k-item array costs the same as a 30-item one; invalid entries inside the window are
+    // dropped (not skipped over), so the answer is never more than the window's valid entries.
+    for (const item of list.slice(0, COMPARE_EXAMPLES_MAX)) {
+      if (!item || typeof item !== 'object') continue;
+      const q = typeof item.q === 'string' ? item.q.trim() : '';
+      if (!q || q.length > COMPARE_EXAMPLES_Q_MAX) continue;
+      const tag = typeof item.tag === 'string' && COMPARE_EXAMPLES_TAG_RE.test(item.tag) ? item.tag : 'other';
+      items.push({ q, tag });
+    }
+    if (items.length >= COMPARE_EXAMPLES_MIN) out[lang] = items;
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 // Options every vendored client gets (package v0.2.1). `tabCreateProps` is merged into the ONE
 // `tabs.create` the client may perform (only under `mayOpenTab: true`): our background tab is
@@ -264,9 +452,46 @@ export const SW_CODES = Object.freeze({
   BUSY: 'busy',                     // CONSUME_FAIL status 0: a send is still in flight on this port
   NETWORK_ERROR: 'network_error',   // CONSUME_FAIL status 0: consume never reached the server
   TIMEOUT: 'timeout',               // per-provider budget exhausted
+  STALLED: 'stalled',               // outcome `code` on a DONE{stalled:true} column (ok stays true — the text arrived)
+  CUT_ERROR: 'stream_error',        // same, but the PROVIDER said it failed mid-answer (package `partial`) — see cutKindOf
   ABORTED: 'aborted',
   UNKNOWN: 'unknown',
+  STATUS_UNAVAILABLE: 'status_unavailable', // COMPARE_RESET: the reset succeeded, the status re-read did not
 });
+
+// The TWO kinds of cut the page has to tell apart, and the only values `DONE.cutReason` ever
+// carries (#1527). The vendored clients report `partial: true` with a free-text `cutReason` whose
+// error form ends in the PROVIDER's own message; this is its bounded projection.
+//
+// 🔴 The free text never leaves this worker. It is not something to paint (length, language and
+// trustworthiness are all unguaranteed) and not something to put in an outcome row (`code` is a
+// closed vocabulary the server groups on). It goes to this worker's console and nowhere else.
+// How much of the provider's own message the console keeps. Diagnostics only.
+const CUT_REASON_LOG_MAX = 200;
+export const CUT_STALLED = 'stalled';
+export const CUT_STREAM_ERROR = 'stream_error';
+
+/**
+ * Which cut, if any, the CLIENT reported on a completed send — `null` when the answer is whole.
+ * Distinct from the stall watchdog below, which is this module noticing silence; this is the
+ * provider (or the page script's own deadline) saying the stream ended early.
+ */
+/**
+ * The detail a DIAG may carry to the PAGE. Everything passes through unchanged except the one
+ * stage whose detail is not ours: `stream_cut.reason` is the package's free-text cut reason, and
+ * its error form embeds the provider's own message. The page gets the same bounded kind `DONE`
+ * carries; the SW console keeps the raw line (see onDiag).
+ */
+export function pageSafeDiag(stage, detail) {
+  if (stage !== 'stream_cut') return detail;
+  const raw = String(detail?.reason || '');
+  return { ...detail, reason: raw.startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED };
+}
+
+export function cutKindOf(result) {
+  if (!result || result.partial !== true) return null;
+  return String(result.cutReason || '').startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED;
+}
 
 // The one status that releases a send (contract: "after POST /api/compare/consume returned 200").
 const CONSUME_OK_STATUS = 200;
@@ -296,12 +521,17 @@ function sanitizeModelMap(raw) {
 // key dropped altogether. The package validates the SHAPE it needs (README "Resume") — this only
 // bounds what reaches it. Input is what a port delivered (structured-clone data: no getters, no
 // prototypes of note); never throws on such input.
+// Keys (cmp-columns): a colId (`provider:model` / `provider:auto`) or, LEGACY, a bare provider id
+// (→ `${provider}:auto`); unknown keys dropped; at most MAX_COLUMNS entries. The result is keyed
+// by colId only.
 export function sanitizeResumeMap(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  for (const p of COMPARE_PROVIDERS) {
-    if (!Object.hasOwn(raw, p)) continue; // own entries only (Codex ux3 SW 1R #3)
-    const c = raw[p];
+  for (const key of Object.keys(raw)) { // own entries only (Codex ux3 SW 1R #3)
+    if (Object.keys(out).length >= MAX_COLUMNS) break;
+    const col = parseColumnId(key);
+    if (!col) continue;
+    const c = raw[key];
     if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
     const keys = Object.keys(c);
     if (keys.length > RESUME_MAX_KEYS) continue;
@@ -310,9 +540,105 @@ export function sanitizeResumeMap(raw) {
       const v = c[k];
       if (typeof v === 'string' && v.length <= RESUME_MAX_VALUE_CHARS && /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(k)) clean[k] = v;
     }
-    if (Object.keys(clean).length) out[p] = clean;
+    if (Object.keys(clean).length && !Object.hasOwn(out, col.id)) out[col.id] = clean;
   }
   return out;
+}
+
+/**
+ * A colId — or a LEGACY bare provider id — parsed into `{ id, provider, model }` (model null =
+ * the provider's default), or null when it names no known provider / carries an id that is not
+ * a model id's shape (MODEL_ID_RE). Pure.
+ */
+export function parseColumnId(raw) {
+  if (typeof raw !== 'string') return null;
+  const at = raw.indexOf(':');
+  const provider = at < 0 ? raw : raw.slice(0, at);
+  if (!COMPARE_PROVIDERS.includes(provider)) return null;
+  const rest = at < 0 ? COLUMN_AUTO : raw.slice(at + 1);
+  if (rest === COLUMN_AUTO || rest === '') return { id: columnId(provider, null), provider, model: null };
+  const model = wireModelId(rest);
+  return model === null ? null : { id: columnId(provider, model), provider, model };
+}
+
+/**
+ * The columns of a round from an untrusted SEND/FOLLOWUP (cmp-columns contract §2), in order:
+ * `{ columns: [{id, provider, model}], code: null }` or `{ columns: [], code }` when the message
+ * must be refused (`bad_request`: a duplicate colId, more than MAX_COLUMNS, or a column whose
+ * `id` does not have a colId's shape for its provider; `no_targets`: nothing usable). Sources, in
+ * precedence: `message.columns` (`[{id, provider, model?}]`, the page's layout — the id is the
+ * page's and authoritative, derived only when absent; with `targets` beside it, only the named
+ * colIds are sent to); else `message.targets` — colIds,
+ * or LEGACY bare provider ids as `${provider}:auto` on `selectedModels[provider]` (the stored
+ * model choice, so an older page keeps today's behaviour). Unknown entries are dropped. Pure.
+ */
+export function resolveColumns(message, selectedModels = {}) {
+  const raw = Array.isArray(message?.columns) && message.columns.length ? message.columns : null;
+  const columns = [];
+  const seen = new Set();
+  const legacySeen = new Set(); // bare provider ids already mapped (deduped silently, as before)
+  const list = raw ?? (Array.isArray(message?.targets) ? message.targets : []);
+  for (const entry of list) {
+    let col = null;
+    if (raw) {
+      const provider = entry && typeof entry === 'object' ? entry.provider : null;
+      if (!COMPARE_PROVIDERS.includes(provider)) continue;
+      const model = typeof entry.model === 'string' && entry.model.trim() ? wireModelId(entry.model.trim()) : null;
+      if (typeof entry.model === 'string' && entry.model.trim() && model === null) continue; // an id that is not one
+      // 🔴 The page's `id` is AUTHORITATIVE (Codex integration #1): a column keeps its id for the
+      // whole session while its MODEL may change (an in-session pick on `claude:auto` → sonnet must
+      // reuse `claude:auto`'s client and conversation, and route its events under that id — never
+      // spawn a `claude:claude-sonnet-5` sibling or borrow one). `model` is a separate field used
+      // only for the send. The id must have a colId's shape and name THIS provider; a mismatch is a
+      // bad_request. Only an entry without an id (an older page) gets its id derived.
+      let id = null;
+      if (entry.id !== undefined) {
+        const parsed = parseColumnId(entry.id);
+        if (!parsed || parsed.provider !== provider || typeof entry.id !== 'string' || !entry.id.includes(':')) return { columns: [], code: 'bad_request' };
+        id = parsed.id;
+      } else {
+        id = columnId(provider, model);
+      }
+      col = { id, provider, model };
+    } else if (COMPARE_PROVIDERS.includes(entry)) {
+      // LEGACY bare provider id: today's column on the stored choice. Repeated bare ids are
+      // deduped silently, as uniqueKnownProviders always did (a bare id next to its own colId
+      // is not that case — it is a duplicate column, refused below).
+      if (legacySeen.has(entry)) continue;
+      legacySeen.add(entry);
+      const model = typeof selectedModels?.[entry] === 'string' && selectedModels[entry] ? wireModelId(selectedModels[entry]) : null;
+      col = { id: columnId(entry, null), provider: entry, model };
+    } else {
+      col = parseColumnId(entry);
+      if (!col) continue;
+    }
+    if (seen.has(col.id)) return { columns: [], code: 'bad_request' };
+    seen.add(col.id);
+    columns.push(col);
+    if (columns.length > MAX_COLUMNS) return { columns: [], code: 'bad_request' };
+  }
+  // A FOLLOWUP carries the whole layout in `columns[]` and names the columns to send to in
+  // `targets` (colIds); with both present only the named columns are sent to (layout order).
+  const only = raw && Array.isArray(message?.targets) && message.targets.length ? new Set(message.targets.filter((t) => typeof t === 'string')) : null;
+  const chosen = only ? columns.filter((c) => only.has(c.id)) : columns;
+  return chosen.length ? { columns: chosen, code: null } : { columns: [], code: SW_CODES.NO_TARGETS };
+}
+
+// A `models` event param (`provider:id,provider:id` — `provider:auto` / `provider:` for Auto, as the
+// page writes it) rebuilt from the pairs whose provider is known and whose id passes MODEL_ID_RE;
+// null when nothing survives or the input is not a string. Order kept, pairs never rewritten.
+export function gateModelsCsv(v) {
+  if (typeof v !== 'string') return null;
+  const kept = [];
+  for (const pair of v.split(',')) {
+    const at = pair.indexOf(':');
+    if (at < 0) continue;
+    const provider = pair.slice(0, at);
+    const id = pair.slice(at + 1);
+    if (!COMPARE_PROVIDERS.includes(provider)) continue;
+    if (id === '' || id === 'auto' || wireModelId(id) !== null) kept.push(pair);
+  }
+  return kept.length ? kept.join(',') : null;
 }
 
 // A COMPARE_EVENT's `{ name, params }` from untrusted input → `{ name, params }` for the GA
@@ -320,6 +646,12 @@ export function sanitizeResumeMap(raw) {
 // not a plain object (absent = `{}`), or more than COMPARE_EVENT_MAX_PARAMS entries. Inside the
 // cap, an entry with a bad key or a non-string/number/boolean value is dropped on its own;
 // strings are cut at COMPARE_EVENT_MAX_STRING. Never throws.
+// GA boundary (contract §5, integration review): two params carry model ids the page got from a
+// provider or from storage — `models` (csv of `provider:id` pairs, the send event) and `model`
+// (one id, column_done). Each id must pass MODEL_ID_RE here, whatever the page did: a pair with a
+// bad id is dropped from the csv (an empty csv drops the key), a bad single id drops the key.
+// The SW is the last line before GA — the page validates too, but a page that forgets must not
+// ship an email or a URL as a "model".
 export function sanitizeCompareEvent(name, params) {
   if (typeof name !== 'string' || !COMPARE_EVENT_NAMES.includes(name)) return null;
   if (params === undefined || params === null) params = {};
@@ -330,20 +662,100 @@ export function sanitizeCompareEvent(name, params) {
   for (const k of keys) {
     if (!COMPARE_EVENT_KEY_RE.test(k)) continue;
     const v = params[k];
+    if (k === 'models' || k === 'model' || k === 'col') {
+      // `col` (cmp-columns) is a colId — kept WHOLE (`provider:model`, never reduced to the
+      // provider) when it has the shape; anything else is dropped.
+      const gated = k === 'models' ? gateModelsCsv(v) : (k === 'col' ? (parseColumnId(v)?.id ?? null) : wireModelId(v));
+      if (gated !== null) clean[k] = gated.slice(0, COMPARE_EVENT_MAX_STRING);
+      continue;
+    }
     if (typeof v === 'string') clean[k] = v.slice(0, COMPARE_EVENT_MAX_STRING);
     else if ((typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean') clean[k] = v;
   }
   return { name: COMPARE_EVENT_PREFIX + name, params: clean };
 }
 
+// The `POST /api/compare/consume` body (cmp-beta contract §2) from what runSend resolved: `kind`
+// as the page said it (COMPARE_KINDS) or derived from the message shape; `targets` = the READY
+// providers; `models` = each one's resolved model (id|null — the key OMITTED when the id fails
+// MODEL_ID_RE, since null would say Auto); `round` only when a valid
+// integer; `src` only when a known provider; `session_id` only when the page's `session` has the
+// SESSION_ID_RE shape (contract §5); `ext_version` only when readable. Plain data —
+// never an email, never the question text — and pure, so the guard can pin its shape.
+export function buildConsumeBody({ kind, followup, resumeAsked, src, session, ready, models, round, extVersion }) {
+  const derived = followup ? 'followup' : (resumeAsked ? 'resume' : 'send');
+  // `ready` = the round's colIds (cmp-columns: `provider:model` / `provider:auto`), ≤ MAX_COLUMNS.
+  const body = { kind: COMPARE_KINDS.includes(kind) ? kind : derived, targets: ready.slice(0, MAX_COLUMNS), models: {} };
+  for (const p of body.targets) {
+    const m = models?.[p];
+    if (m === null || m === undefined) { body.models[p] = null; continue; }
+    const id = wireModelId(m);
+    if (id !== null) body.models[p] = id;
+  }
+  if (Number.isInteger(round) && round >= 0 && round <= ROUND_MAX) body.round = round;
+  if (COMPARE_PROVIDERS.includes(src)) body.src = src;
+  if (typeof session === 'string' && SESSION_ID_RE.test(session)) body.session_id = session;
+  if (typeof extVersion === 'string' && extVersion) body.ext_version = extVersion.slice(0, EXT_VERSION_MAX);
+  return body;
+}
+
+// The `results` half of the outcome body, bounded: colId keys only (≤ MAX_COLUMNS),
+// `ok` a boolean, `code` a cut string, `model` only when it has a model id's shape (MODEL_ID_RE —
+// omitted otherwise, never cut), the two durations non-negative integers. Anything
+// else is dropped rather than sent — the server refuses an unbounded body and an outcome is
+// telemetry, not the send.
+export function sanitizeOutcomeResults(results) {
+  const out = {};
+  if (!results || typeof results !== 'object') return out;
+  // Keys are colIds (`provider:model` / `provider:auto`) or LEGACY bare provider ids, at most
+  // MAX_COLUMNS of them; anything else is dropped.
+  for (const key of Object.keys(results)) {
+    if (Object.keys(out).length >= MAX_COLUMNS) break;
+    const p = parseColumnId(key) ? key : null;
+    if (p === null) continue;
+    const r = results[p];
+    if (!r || typeof r !== 'object' || typeof r.ok !== 'boolean') continue;
+    const clean = { ok: r.ok };
+    if (typeof r.code === 'string' && r.code) clean.code = r.code.slice(0, OUTCOME_CODE_MAX);
+    const model = wireModelId(r.model);
+    if (model !== null) clean.model = model;
+    for (const k of ['ttft_ms', 'total_ms']) {
+      if (typeof r[k] === 'number' && Number.isFinite(r[k]) && r[k] >= 0) clean[k] = Math.round(r[k]);
+    }
+    out[p] = clean;
+  }
+  return out;
+}
+
+const JSON_HEADERS = Object.freeze({ 'Content-Type': 'application/json' });
+
 // What an ERROR tells the page beyond `code`: the client's machine-readable `reason` (a no_tab's
 // cause, package v0.2.3) and its developer-facing message as `detail`. Absent fields are omitted,
 // not sent as null, so the page's `msg.reason` reads undefined either way.
+// `diag` (package v0.5.4): a client's free-form diagnostic line for a failure its code cannot
+// explain — Gemini `empty_response` carries `empty:env=…,bytes=…,cand=…,codes=…,ctx=…` — forwarded
+// bounded (ERROR_DIAG_MAX) beside `detail` (which already carries the same line inside the
+// message, plus the elided stream head). The page may show it; the SW log line names it.
+export const ERROR_DIAG_MAX = 200;
+// Privacy (Codex layout 2R #2): the vendored gemini-client's empty-response message ends with
+// ` head=<elided raw stream>`, and that head still keeps quoted strings of up to 40 chars — a
+// short answer or prompt fragment could ride `detail` into the page's tooltip. Everything from
+// the head marker on is stripped here before forwarding; the compact `(empty:…)` line stays. The
+// package's own console.warn keeps the head (the user's own SW console). 🔴 A structural
+// redaction on the package side (the head as its own field the host never forwards) is the
+// proper fix — #1521 follow-up; this strip is the host-side belt until then.
+export const ERROR_DETAIL_HEAD_MARKER = ' head=';
+function stripStreamHead(detail) {
+  const at = detail.indexOf(ERROR_DETAIL_HEAD_MARKER);
+  return at < 0 ? detail : detail.slice(0, at);
+}
 function errorExtras(e) {
   const out = {};
   if (typeof e?.reason === 'string' && e.reason) out.reason = e.reason;
-  const detail = typeof e?.message === 'string' ? e.message : (e == null ? '' : String(e));
+  const raw = typeof e?.message === 'string' ? e.message : (e == null ? '' : String(e));
+  const detail = stripStreamHead(raw);
   if (detail) out.detail = detail;
+  if (typeof e?.diag === 'string' && e.diag) out.diag = e.diag.slice(0, ERROR_DIAG_MAX);
   return out;
 }
 
@@ -406,6 +818,60 @@ function withTimeout(promise, ms, fallback) {
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
+// A JSON response body decoded under a byte cap: `{ json }` or `{ oversized: true }`. The cap is
+// applied BEFORE parsing — Content-Length first, then the streamed bytes through a running
+// counter (the read is cancelled the moment it passes the cap) — so a hostile or broken CDN
+// answer never reaches JSON.parse whole. A response without a streaming body (an older runtime,
+// a test fake) is read as text and measured the same way. Throws on malformed JSON (callers
+// treat that as a failure like any other).
+export async function readJsonBounded(res, maxBytes) {
+  const declared = Number(res?.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    // Refused unread — and the body released, so the connection is not left draining (Codex 2R #2).
+    try { await res?.body?.cancel?.(); } catch { /* nothing to release */ }
+    return { oversized: true };
+  }
+  const reader = typeof res?.body?.getReader === 'function' ? res.body.getReader() : null;
+  if (reader) {
+    // ONE streaming decoder for the whole body (Codex 2R #1): a multi-byte UTF-8 sequence split
+    // across two chunks must not become U+FFFD — `{stream:true}` carries the partial sequence to
+    // the next chunk, and the final flush closes it. The byte counter stays on the RAW bytes.
+    const decoder = new TextDecoder('utf-8');
+    let text = '';
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const size = value?.byteLength ?? value?.length ?? 0;
+      received += size;
+      if (received > maxBytes) {
+        try { await reader.cancel(); } catch { /* the read is over either way */ }
+        return { oversized: true };
+      }
+      text += typeof value === 'string' ? value : decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return { json: JSON.parse(text) };
+  }
+  const text = typeof res?.text === 'function' ? await res.text() : JSON.stringify(await res.json());
+  if (new TextEncoder().encode(text).length > maxBytes) return { oversized: true };
+  return { json: JSON.parse(text) };
+}
+
+// A CDN fetch with a deadline: `fetchImpl(url, { signal })` aborted after `ms`. The timer is
+// cleared once the response has been handled either way. `cache: 'no-store'` because the CDN JSON
+// files carry no Cache-Control: Chrome's heuristic HTTP cache (Last-Modified-based) otherwise kept
+// a pre-flip flags.json for hours (2026-09-21, options page stayed hidden after compare_cta flip);
+// the storage-side TTLs (COMPARE_FLAG_TTL_MS etc.) are the only caching we mean to have.
+function fetchWithDeadline(fetchImpl, url, ms, handle) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  return Promise.resolve()
+    .then(() => fetchImpl(url, { signal: ac.signal, cache: 'no-store' }))
+    .then((res) => handle(res))
+    .finally(() => clearTimeout(timer));
+}
+
 /**
  * Build the controller. Every dependency is injected (see the header).
  *
@@ -421,8 +887,11 @@ function withTimeout(promise, ms, fallback) {
  * @param {{claude: Function, gemini: Function, chatgpt: Function}} deps.loginChecks — read-only,
  *   tab-free login probes (bg/providers.js hasClaudeSession, bg/api-gemini.js isGeminiLoggedIn,
  *   bg/api-chatgpt.js isChatGPTLoggedIn)
+ * @param {object} [deps.management] — chrome.management (only `getSelf()` is used, which needs no
+ *   permission): the dev-only probe runs only when `installType === 'development'`; absent = never
  * @param {object} deps.tabs, deps.scripting, deps.cookies, deps.runtime — chrome namespaces, handed
- *   to the clients as-is; `tabs.create` is used here ONLY to open our own compare page
+ *   to the clients as-is; `tabs.create` is used here ONLY to open our own compare page;
+ *   `runtime.getManifest()` (optional) supplies the consume body's `ext_version`
  * @param {object} deps.storage — chrome.storage.local (promise API) for the flag TTL cache
  * @param {object} deps.storageSync — chrome.storage.sync (promise API) for the per-provider model choice
  *   (COMPARE_MODELS_KEY); a read that fails reads as "nothing chosen", a write that fails is logged
@@ -435,7 +904,11 @@ function withTimeout(promise, ms, fallback) {
  * @param {Function} [deps.fetch] — defaults to globalThis.fetch
  * @param {Function} [deps.now] — defaults to Date.now
  * @param {number} [deps.sendTimeoutMs] — defaults to PROVIDER_SEND_TIMEOUT_MS (tests shorten it)
+ * @param {number} [deps.streamStallMs] — defaults to STREAM_STALL_MS (tests shorten it)
+ * @param {number} [deps.probeDisposeTimeoutMs] — defaults to PROBE_DISPOSE_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.listModelsTimeoutMs] — defaults to LIST_MODELS_TIMEOUT_MS (tests shorten it)
+ * @param {number} [deps.examplesTimeoutMs] — defaults to COMPARE_EXAMPLES_TIMEOUT_MS (tests shorten it)
+ * @param {number} [deps.flagTimeoutMs] — defaults to COMPARE_FLAG_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.selectedModelsReadTimeoutMs] — defaults to SELECTED_MODELS_READ_TIMEOUT_MS (tests shorten it)
  * @param {Function} [deps.drainPendingHides] — vendor-ai `drainPendingHides(deps)`, called once per
  *   worker life, DRAIN_STARTUP_DELAY_MS after construction (= service-worker start), unless
@@ -449,6 +922,13 @@ function withTimeout(promise, ms, fallback) {
 export function createCompareController({
   createClient, listModels, authedFetch, getConfig, getExtToken, hasProviderPermission, loginChecks,
   tabs, scripting, cookies, runtime, storage, storageSync,
+  management = null,
+  // `pro: boolean => Promise<void>` — the SW's entitlement-cache write-through, background.js
+  // syncEntitlementFromCompare, plan compare-quota-premium §2. Called on a SUCCESSFUL status read
+  // only, awaited so the page's status answer lands after the cache moved, never allowed to throw
+  // into the status. Optional: the package / a test harness without it reads the quota as before.
+  // No parentheses in comments inside this parameter list: ext-import-refs-guard stops at the first closing paren.
+  syncEntitlement = null,
   readCollectedOrgs, planLabel, sendGAEvent,
   drainPendingHides = null,
   fetch: fetchImpl = (...a) => globalThis.fetch(...a),
@@ -456,7 +936,11 @@ export function createCompareController({
   setTimeout: setTimeoutImpl = (fn, ms) => globalThis.setTimeout(fn, ms),
   drainDelayMs = DRAIN_STARTUP_DELAY_MS,
   sendTimeoutMs = PROVIDER_SEND_TIMEOUT_MS,
+  streamStallMs = STREAM_STALL_MS,
+  probeDisposeTimeoutMs = PROBE_DISPOSE_TIMEOUT_MS,
   listModelsTimeoutMs = LIST_MODELS_TIMEOUT_MS,
+  examplesTimeoutMs = COMPARE_EXAMPLES_TIMEOUT_MS,
+  flagTimeoutMs = COMPARE_FLAG_TIMEOUT_MS,
   selectedModelsReadTimeoutMs = SELECTED_MODELS_READ_TIMEOUT_MS,
 }) {
   // `storage` is optional in the package and only the ChatGPT client uses it: the durable backlog
@@ -511,6 +995,30 @@ export function createCompareController({
     return true;
   }
 
+  // ── Usage stats (server-side, cmp-beta contract) ─────────────────────────────────────────
+  // The manifest version for the consume body — through the injected `runtime`, never `chrome`;
+  // null when the namespace cannot say (a test fake, a runtime that throws).
+  function manifestVersion() {
+    try {
+      const v = runtime?.getManifest?.()?.version;
+      return typeof v === 'string' && v ? v : null;
+    } catch { return null; }
+  }
+  // `POST /api/compare/outcome {event_id, results}` — fire-and-forget: not awaited by the send,
+  // every failure swallowed (the round is over; nothing the page could do with it). Only ever
+  // called by a session that holds an integer `event_id` from its own consume 200 (settleOutcome).
+  function postOutcome(eventId, results) {
+    if (!Number.isInteger(eventId) || eventId <= 0) return false;
+    const body = JSON.stringify({ event_id: eventId, results: sanitizeOutcomeResults(results) });
+    Promise.resolve()
+      .then(async () => {
+        const config = await getConfig();
+        await authedFetch(config, `${config.serverUrl}/api/compare/outcome`, { method: 'POST', headers: { ...JSON_HEADERS }, body });
+      })
+      .catch(() => { /* telemetry */ });
+    return true;
+  }
+
   // ChatGPT has no temporary mode: the client hides each conversation it created at cleanup, and
   // keeps the ids it could not hide (or a terminated worker never got to) in `storage`. The
   // package sweeps that backlog only when the host asks, once per worker life; it never opens or
@@ -533,28 +1041,36 @@ export function createCompareController({
       const cached = (await storage.get(COMPARE_FLAG_CACHE_KEY))?.[COMPARE_FLAG_CACHE_KEY];
       // An older cache row has no `cta` (written before the field existed): it reads as false — the
       // fail-safe direction — until the TTL brings the next fetch.
-      if (cached && typeof cached.on === 'boolean' && now() - (cached.at || 0) < COMPARE_FLAG_TTL_MS) return { on: cached.on, cta: cached.cta === true };
+      // `cta` / `summary` are read as conjunctions with `on` here too (Codex batch-1 #5): a row that
+      // was written as {on:false, summary:true} — a hand edit, an older writer — must not answer a
+      // gate the page itself does not have.
+      if (cached && typeof cached.on === 'boolean' && now() - (cached.at || 0) < COMPARE_FLAG_TTL_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true };
     } catch { /* unreadable cache = miss */ }
     return null;
   }
   async function writeFlagCache(flags) {
-    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, at: now() } }); } catch { /* best effort */ }
+    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, at: now() } }); } catch { /* best effort */ }
   }
   // FAIL-SAFE like fetchFolderAvailable: any fetch/parse error, non-2xx or a missing/invalid
-  // `compare` field reads as dark. A network error does not poison the cache. `cta` can never be
-  // true while `on` is false (the button opens the page).
-  const DARK = Object.freeze({ on: false, cta: false });
+  // `compare` field reads as dark. A network error does not poison the cache. Neither `cta` nor
+  // `summary` can be true while `on` is false (both are buttons that need the page).
+  const DARK = Object.freeze({ on: false, cta: false, summary: false });
   async function fetchCompareFlags() {
     const cached = await readFlagCache();
     if (cached !== null) return cached;
     if (!flagInFlight) {
       flagInFlight = (async () => {
         try {
-          const res = await fetchImpl(FLAGS_URL);
-          if (!res.ok) { await writeFlagCache(DARK); return DARK; }
-          const json = await res.json();
+          // Deadline + byte cap (Codex examples 1R): an oversized body is dark like a non-2xx, an
+          // aborted fetch throws into the catch below and clears the in-flight slot for a retry.
+          const { json, oversized } = await fetchWithDeadline(fetchImpl, FLAGS_URL, flagTimeoutMs, async (res) => (res.ok ? readJsonBounded(res, COMPARE_FLAG_MAX_BYTES) : { json: null, oversized: false }));
+          if (oversized || json === null) { await writeFlagCache(DARK); return DARK; }
           const on = !!(json && json[COMPARE_FLAG_FIELD] === true);
-          const flags = { on, cta: on && !!(json && json[COMPARE_CTA_FLAG_FIELD] === true) };
+          const flags = {
+            on,
+            cta: on && !!(json && json[COMPARE_CTA_FLAG_FIELD] === true),
+            summary: on && !!(json && json[COMPARE_SUMMARY_FLAG_FIELD] === true),
+          };
           await writeFlagCache(flags);
           return flags;
         } catch {
@@ -569,6 +1085,51 @@ export function createCompareController({
   /** The page/shell gate alone (`compare`). */
   async function fetchCompareFlag() {
     return (await fetchCompareFlags()).on;
+  }
+
+  // ── Example prompts (same CDN, same cache discipline as the flags) ──────────────────────
+  let examplesInFlight = null;
+  async function readExamplesCache() {
+    try {
+      const cached = (await storage.get(COMPARE_EXAMPLES_CACHE_KEY))?.[COMPARE_EXAMPLES_CACHE_KEY];
+      // Re-validated on read: a hand-edited or older row must not answer more than the rules allow.
+      if (cached && now() - (cached.at || 0) < COMPARE_EXAMPLES_TTL_MS) return sanitizeCompareExamples({ v: COMPARE_EXAMPLES_VERSION, ...cached.examples });
+    } catch { /* unreadable cache = miss */ }
+    return null;
+  }
+  async function writeExamplesCache(examples) {
+    try { await storage.set({ [COMPARE_EXAMPLES_CACHE_KEY]: { examples, at: now() } }); } catch { /* best effort */ }
+  }
+  // FAIL-SAFE: any fetch/parse error, non-2xx, an oversized body (COMPARE_EXAMPLES_MAX_BYTES) or
+  // an invalid document answers null and caches nothing (a transient failure must not pin "no
+  // examples" for an hour); a valid document is cached for COMPARE_EXAMPLES_TTL_MS. One fetch
+  // shared by concurrent callers, aborted at COMPARE_EXAMPLES_TIMEOUT_MS — the shared promise
+  // settles (null) and the slot is cleared, so the next status can start a fresh one (Codex
+  // examples 1R #3). Never throws.
+  function refreshCompareExamples() {
+    if (!examplesInFlight) {
+      examplesInFlight = fetchWithDeadline(fetchImpl, COMPARE_EXAMPLES_URL, examplesTimeoutMs, async (res) => {
+        if (!res.ok) return null;
+        const { json, oversized } = await readJsonBounded(res, COMPARE_EXAMPLES_MAX_BYTES);
+        if (oversized) return null;
+        const examples = sanitizeCompareExamples(json);
+        if (examples) await writeExamplesCache(examples);
+        return examples;
+      })
+        .catch(() => null)
+        .finally(() => { examplesInFlight = null; });
+    }
+    return examplesInFlight;
+  }
+  // What COMPARE_STATUS answers (Codex examples 1R #2): the CACHED document or null, from storage
+  // only — the status never waits on the network for examples (a hanging CDN used to hold the
+  // status at the 3 s cap while the page kept Send disabled). A miss/stale cache kicks ONE
+  // background refresh (shared, deadlined) and the NEXT status gets the result. The storage
+  // read itself is bounded like every other one.
+  async function cachedCompareExamples() {
+    const cached = await withTimeout(readExamplesCache(), selectedModelsReadTimeoutMs, null);
+    if (cached === null) refreshCompareExamples();
+    return cached;
   }
 
   // ── Status probe (page load) ─────────────────────────────────────────────────────────────
@@ -796,15 +1357,32 @@ export function createCompareController({
   }
 
   async function buildStatus() {
-    const flagOn = await fetchCompareFlag();
+    const flags = await fetchCompareFlags();
+    const flagOn = flags.on;
+    // Example prompts: the cached document only (cachedCompareExamples) — never the network; a
+    // miss starts a background refresh for the NEXT status. Dark = nothing to show, no fetch.
+    const examplesPending = flagOn ? cachedCompareExamples() : Promise.resolve(null);
+    // The 「요약·비교」 gate (COMPARE_SUMMARY_FLAG_FIELD) rides the status the page already reads,
+    // so the button needs no second round trip; false whenever the page itself is dark.
+    const summaryOn = flagOn && flags.summary === true;
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
-    const [facts] = await Promise.all([
-      planLabels(),
-      ...COMPARE_PROVIDERS.map(async (p) => { providers[p] = await providerStatus(p); }),
-    ]);
-    for (const p of COMPARE_PROVIDERS) { providers[p].plan = facts[p] ? facts[p].plan : null; providers[p].usage = facts[p] ? facts[p].usage : null; }
+    // 🔴 NOT WHEN DARK (#1463 ①). These are the provider LOGIN PROBES, and with no provider tab
+    // open the Gemini one is a credentialed HEAD over the network — so a page that will only ever
+    // say 「준비 중」 used to wait for all three before it could say it. Everything else already
+    // skipped its work under the same flag (examples, catalogs, quota); this did not.
+    //
+    // `providers` stays an EMPTY OBJECT rather than a filled-in-with-false one: the page reads
+    // nothing out of it while dark (`renderComingSoon()` returns first), and inventing
+    // `loggedIn:false` for a provider nobody asked about would be a claim, not a default.
+    if (flagOn) {
+      const [facts] = await Promise.all([
+        planLabels(),
+        ...COMPARE_PROVIDERS.map(async (p) => { providers[p] = await providerStatus(p); }),
+      ]);
+      for (const p of COMPARE_PROVIDERS) { providers[p].plan = facts[p] ? facts[p].plan : null; providers[p].usage = facts[p] ? facts[p].usage : null; }
+    }
     // Pickers only for providers the page can actually send to (permitted AND signed in) — and only
     // when the page will show anything at all (dark = nothing else, AC24). In parallel: three caps
     // of LIST_MODELS_TIMEOUT_MS must cost one, not three.
@@ -817,40 +1395,85 @@ export function createCompareController({
     const selectedModels = await readSelectedModels();
     const saveHistory = await loadSaveHistory();
 
-    let quota = null;
-    let quotaError = null;
     // Dark = nothing else to show (AC24); do not touch the server for a page that will only say
     // "coming soon". Otherwise the server's answer is the truth, including 401 for a missing
     // ext_token (authedFetch falls back to the shared key, which the route refuses by design).
-    if (flagOn) {
-      try {
-        const config = await getConfig();
-        const resp = await authedFetch(config, `${config.serverUrl}/api/compare/status`);
-        const body = await readJson(resp);
-        if (resp.ok && body && body.ok === true) {
-          quota = {
+    const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
+    let examples = null;
+    try { examples = await examplesPending; } catch { examples = null; }
+    return { ok: true, flagOn, summaryOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory };
+  }
+
+  // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders
+  // (null with a `quotaError` when the server said no or was unreachable) and the beta-reset gate
+  // (`betaReset === true` in the body; false when absent or on any failure). Shared by the status
+  // probe and by COMPARE_RESET, whose answer must be the same fresh object.
+  async function readQuota() {
+    try {
+      const config = await getConfig();
+      const resp = await authedFetch(config, `${config.serverUrl}/api/compare/status`);
+      const body = await readJson(resp);
+      if (resp.ok && body && body.ok === true) {
+        // Entitlement write-through (1.32.0): the server's `pro` here is the same isPro() the
+        // entitlement endpoint reports. Only this ok:true branch may write — a 401/404/network
+        // status says nothing about the plan (Codex focus (d): no demotion from a transient error).
+        if (typeof syncEntitlement === 'function') {
+          try { await syncEntitlement(body.pro === true); } catch { /* the cache is a convenience; the status is not */ }
+        }
+        return {
+          quota: {
             remaining: body.remaining ?? null,
             limit: body.limit ?? null,
             resetsAt: body.resetsAt,
             pro: body.pro === true,
-          };
-        } else {
-          quotaError = { status: resp.status, ...(body?.code ? { code: body.code } : {}) };
-        }
-      } catch {
-        quotaError = { status: 0, code: SW_CODES.NETWORK_ERROR };
+          },
+          quotaError: null,
+          betaReset: body.betaReset === true,
+        };
       }
+      return { quota: null, quotaError: { status: resp.status, ...(body?.code ? { code: body.code } : {}) }, betaReset: false };
+    } catch {
+      return { quota: null, quotaError: { status: 0, code: SW_CODES.NETWORK_ERROR }, betaReset: false };
     }
-    return { ok: true, flagOn, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory };
+  }
+
+  // ── Beta reset (cmp-beta contract) ───────────────────────────────────────────────────────
+  // `POST /api/compare/reset`, then the quota RE-READ from /status so the page applies exactly
+  // what a COMPARE_STATUS would have told it. A re-read that fails AFTER a successful reset is
+  // answered `{ok:false, code:'status_unavailable', reset:true}` — the counter IS cleared, but the
+  // SW will not invent a quota object (the reset body has no `pro`; Codex cmp-beta SW 1R #2): the
+  // page keeps its quota-error path and re-reads status itself. Nothing here touches a provider
+  // tab, a client or a port: it is a server call and a status read, no more.
+  async function resetQuota() {
+    let resp;
+    try {
+      const config = await getConfig();
+      resp = await authedFetch(config, `${config.serverUrl}/api/compare/reset`, { method: 'POST' });
+    } catch {
+      return { ok: false, code: SW_CODES.NETWORK_ERROR, status: 0 };
+    }
+    const body = await readJson(resp);
+    // Exactly 200 + ok:true, like consume: a 404 is the flag off, anything else a failure.
+    if (resp.status !== CONSUME_OK_STATUS || !body || body.ok !== true) {
+      return { ok: false, status: resp.status, code: typeof body?.code === 'string' ? body.code.slice(0, OUTCOME_CODE_MAX) : 'http_error' };
+    }
+    const fresh = await readQuota();
+    if (!fresh.quota) return { ok: false, code: SW_CODES.STATUS_UNAVAILABLE, reset: true, quotaError: fresh.quotaError };
+    return { ok: true, quota: fresh.quota };
   }
 
   // ── Open the compare page from a provider tab (content script → SW) ───────────────────────
-  // The ONE `tabs.create` outside the vendored clients, and it opens our own page only.
+  // The ONE `tabs.create` outside the vendored clients, and it opens our own site shell only
+  // (COMPARE_SITE_URL, which frames compare.html — see the constant).
   async function openCompare(message) {
     const src = COMPARE_PROVIDERS.includes(message.src) ? message.src : null;
     if (!src) return { ok: false, error: 'unknown src' };
     const q = typeof message.q === 'string' ? message.q : '';
-    const url = `${runtime.getURL(COMPARE_PAGE)}?src=${src}&q=${encodeURIComponent(q)}`;
+    const placement = COMPARE_PLACEMENTS.includes(message.placement) ? message.placement : COMPARE_DEFAULT_PLACEMENT;
+    const id = typeof runtime.id === 'string' ? runtime.id : '';
+    const dev = id && id !== PUBLISHED_EXT_ID ? `&ext=${id}` : '';
+    const url = `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}#src=${src}&q=${encodeURIComponent(q)}`;
+    emitEvent('button_click', { src, placement, has_q: q.length > 0 });
     await tabs.create({ url, active: true });
     return { ok: true };
   }
@@ -859,8 +1482,9 @@ export function createCompareController({
   function handleMessage(message, _sender, sendResponse) {
     if (!message || typeof message.type !== 'string') return false;
     if (message.type === 'COMPARE_FLAG') {
-      // `on` = the page/shell gate, `cta` = the in-page button gate (both fields, see COMPARE_CTA_FLAG_FIELD).
-      fetchCompareFlags().then((f) => sendResponse({ on: f.on, cta: f.cta }), () => sendResponse({ on: false, cta: false }));
+      // `on` = the page/shell gate, `cta` = the in-page button gate, `summary` = the 「요약·비교」
+      // button gate (see COMPARE_CTA_FLAG_FIELD / COMPARE_SUMMARY_FLAG_FIELD).
+      fetchCompareFlags().then((f) => sendResponse({ on: f.on, cta: f.on && f.cta === true, summary: f.on && f.summary === true }), () => sendResponse({ on: false, cta: false, summary: false }));
       return true;
     }
     if (message.type === 'COMPARE_STATUS') {
@@ -879,12 +1503,133 @@ export function createCompareController({
       try { sendResponse({ ok }); } catch { /* page gone */ }
       return true;
     }
+    // Beta reset: the ONLY path to POST /reset — a runtime message from the page's button, never a
+    // port message, never a side effect of a send or a status probe.
+    if (message.type === 'COMPARE_RESET') {
+      resetQuota().then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
+      return true;
+    }
+    // Dev-only probe (unpacked builds): see probeMulti.
+    if (message.type === PROBE_MULTI_MSG) {
+      probeMulti(message).then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
+      return true;
+    }
+    if (message.type === PROBE_MULTI_ABORT_MSG) {
+      const running = probeAbort !== null;
+      probeAbort?.abort();
+      try { sendResponse({ ok: true, aborted: running }); } catch { /* page gone */ }
+      return true;
+    }
     return false;
+  }
+
+  // ── Dev-only probe: two conversations, two models, ONE provider session (2026-09-20) ────────
+  // Question before same-provider multi-model columns are designed: can one claude.ai (gemini /
+  // chatgpt) web session, through one pinned tab and our bridge, stream TWO conversations at once
+  // on DIFFERENT models? The probe builds two fresh clients the way the controller does (same
+  // deps, same options, temporary/incognito so nothing lands in the user's history), prepares
+  // both (the tab lookup finds the same tab), then runs BOTH sendMessage calls in parallel and
+  // reports per instance: started_at, ttft_ms, total_ms, chars, the served model, ok / error —
+  // and the order chunks arrived in (`sequence`, first PROBE_SEQUENCE_MAX instance indexes),
+  // from which `interleaved` = both instances produced chunks before either finished.
+  // 🔴 Gated to UNPACKED builds only (`management.getSelf().installType === 'development'`): a store build
+  // answers `{ok:false, code:'not_available'}`. No quota consume, no server call, no
+  // compare_events row, no port — this is not a send. One probe at a time; PROBE_MULTI_ABORT_MSG
+  // (or the per-provider budget) aborts both instances; both are disposed afterwards.
+  // 🔴 Mutual exclusion with compare rounds (Codex layout-branch 1R #1): a probe and a round share
+  // the pinned provider tab and its session, so they never overlap. `probeAbort` is the probe's
+  // lock (held until BOTH clients are disposed); `roundsInFlight` counts every session's runSend
+  // between its start and its finally. A probe while a round runs → `busy`; a round while a probe
+  // holds the lock → CONSUME_FAIL{busy} to the page (the generic error), zero sends, no debit.
+  let probeAbort = null;
+  let roundsInFlight = 0;
+  const DISPOSE_TIMED_OUT = Symbol('dispose timed out');
+  // Unpacked = `chrome.management.getSelf().installType === 'development'` (a packed CRX with no
+  // update_url is NOT unpacked — Codex 1R #2); no API, a rejection or any other type = fail CLOSED.
+  async function isUnpackedBuild() {
+    try {
+      const self = await Promise.resolve(management?.getSelf?.());
+      return self?.installType === 'development';
+    } catch { return false; }
+  }
+  async function probeMulti(message) {
+    if (!(await isUnpackedBuild())) return { ok: false, code: 'not_available' };
+    const provider = COMPARE_PROVIDERS.includes(message?.provider) ? message.provider : null;
+    const models = Array.isArray(message?.models) ? message.models.slice(0, 2).map((m) => (typeof m === 'string' && m.trim() ? m.trim() : null)) : [];
+    const text = typeof message?.text === 'string' ? message.text : '';
+    if (!provider || models.length !== 2 || !text.trim()) return { ok: false, code: 'bad_request' };
+    if (probeAbort || roundsInFlight > 0) return { ok: false, code: SW_CODES.BUSY };
+    const probe = new AbortController();
+    probeAbort = probe;
+    const clients = [];
+    const sequence = [];
+    const results = models.map((model, i) => ({ instance: i, model_requested: model, started_at: null, ttft_ms: null, total_ms: null, chars: 0, model: null, ok: null, code: null, message: null }));
+    const timer = setTimeout(() => probe.abort(), sendTimeoutMs);
+    logInfo('probe-multi', 'start', { provider, models, chars: text.length });
+    try {
+      await leversReady;
+      for (let i = 0; i < 2; i++) clients.push(createClient(provider, clientDeps, clientOptions(provider, false)));
+      // Readiness for both (the second finds the tab the first opened/found — one session, one tab).
+      for (let i = 0; i < 2; i++) {
+        await clients[i].prepare({ mayOpenTab: true, signal: probe.signal, onEvent: (ev) => { if (ev?.type === 'diag') logInfo('probe-multi', `${i}:${ev.stage}`, ev.detail ?? {}); }, model: models[i] });
+      }
+      // Both sends START before either resolves — that is the whole question.
+      const settled = await Promise.allSettled(clients.map((client, i) => {
+        const r = results[i];
+        r.started_at = now();
+        return client.sendMessage(
+          text,
+          (delta) => {
+            if (r.ttft_ms === null) r.ttft_ms = Math.max(0, Math.round(now() - r.started_at));
+            r.chars += String(delta ?? '').length;
+            if (sequence.length < PROBE_SEQUENCE_MAX) sequence.push(i);
+          },
+          probe.signal,
+          { mayOpenTab: true, model: models[i], onEvent: (ev) => { if (ev?.type === 'model') { const m = modelForPage(ev.model); if (m?.id) r.model = m.id; } } },
+        ).then((result) => {
+          r.ok = true;
+          r.total_ms = Math.max(0, Math.round(now() - r.started_at));
+          const served = modelForPage(result?.model);
+          if (served?.id) r.model = served.id;
+          logInfo('probe-multi', `${i}:done`, { ttft_ms: r.ttft_ms, total_ms: r.total_ms, chars: r.chars, model: r.model });
+        }, (e) => {
+          r.ok = false;
+          r.total_ms = Math.max(0, Math.round(now() - r.started_at));
+          r.code = probe.signal.aborted ? SW_CODES.ABORTED : (typeof e?.code === 'string' ? e.code : SW_CODES.UNKNOWN);
+          r.message = String(e?.message || e).slice(0, 300);
+          logInfo('probe-multi', `${i}:error`, { code: r.code, message: r.message });
+          throw e;
+        });
+      }));
+      void settled;
+    } catch (e) {
+      // A prepare failure (no tab, not signed in) — reported per the instance that had not started.
+      for (const r of results) if (r.ok === null) { r.ok = false; r.code = typeof e?.code === 'string' ? e.code : SW_CODES.UNKNOWN; r.message = String(e?.message || e).slice(0, 300); }
+      logInfo('probe-multi', 'failed', { code: results[0].code, message: results[0].message });
+    } finally {
+      clearTimeout(timer);
+      // The lock outlives the sends: released only once both clients are disposed — or, per
+      // client, once PROBE_DISPOSE_TIMEOUT_MS has passed without its dispose settling (logged);
+      // a stuck cleanup must not turn every later round into `busy`.
+      await Promise.allSettled(clients.map((c, i) => withTimeout(
+        Promise.resolve().then(() => c.dispose()),
+        probeDisposeTimeoutMs,
+        DISPOSE_TIMED_OUT,
+      ).then((v) => { if (v === DISPOSE_TIMED_OUT) logInfo('probe-multi', 'dispose timeout', { instance: i, ms: probeDisposeTimeoutMs }); })));
+      probeAbort = null;
+    }
+    // Interleaved = a chunk of one instance arrived after a chunk of the other AND before that
+    // other's last chunk — i.e. the sequence is not two solid blocks.
+    const firstOf = (i) => sequence.indexOf(i);
+    const lastOf = (i) => sequence.lastIndexOf(i);
+    const interleaved = firstOf(0) >= 0 && firstOf(1) >= 0 && (firstOf(1) < lastOf(0) && firstOf(0) < lastOf(1));
+    logInfo('probe-multi', 'result', { interleaved, sequence: sequence.join(''), ok: results.map((r) => r.ok) });
+    return { ok: true, provider, results, interleaved, sequence };
   }
 
   // ── Streaming session: one Port = one session = one client per provider ──────────────────
   function createSession(port) {
-    const clients = new Map();   // provider → vendored client (kept for follow-ups)
+    const clients = new Map();   // colId → vendored client INSTANCE (kept for follow-ups; cmp-columns)
     const inflight = new Set();  // AbortController per in-flight provider send
     let running = false;         // one send at a time per port
     let torndown = false;
@@ -919,23 +1664,49 @@ export function createCompareController({
     // A refresh asked for while one is in flight runs after it (for what is still pending then)
     // instead of being dropped: the ALL_DONE retry must not be lost to a slow CONSUME_OK refresh.
     let refreshQueued = null;
+    // The round's usage record (cmp-beta contract): created by the consume 200 that carried an
+    // integer `event_id`, filled while the fan-out runs, sent ONCE when the round settles
+    // (settleOutcome, from runSend's finally — the ALL_DONE point, which a Stop and a lost port
+    // reach too once the aborted sends have landed) and null in between rounds. One send at a
+    // time per port (`running`), so one record is enough. Null = no outcome for this round:
+    // consume refused, no event_id in its body, or nothing consumed at all.
+    let outcome = null; // { eventId, results: { [colId]: { ok, code?, ttft_ms?, total_ms?, model? } } }
+    const recordOutcome = (colId, patch) => {
+      if (!outcome) return;
+      outcome.results[colId] = { ...(outcome.results[colId] || {}), ...patch };
+    };
+    const elapsed = (t0) => Math.max(0, Math.round(now() - t0));
+    // The round is over: hand the record to postOutcome exactly once. A READY provider that never
+    // got a DONE/ERROR (the port went right after consume, so no column was asked) is recorded
+    // as aborted — the debit happened, the column did not answer.
+    function settleOutcome(readyIds) {
+      const o = outcome;
+      outcome = null;
+      if (!o) return;
+      for (const id of readyIds) {
+        if (typeof o.results[id]?.ok !== 'boolean') o.results[id] = { ...(o.results[id] || {}), ok: false, code: SW_CODES.ABORTED };
+      }
+      postOutcome(o.eventId, o.results);
+    }
 
     const post = (msg) => {
       if (torndown) return;
       try { port.postMessage(msg); } catch { /* page gone — onDisconnect tears down */ }
     };
 
-    const clientFor = (provider) => {
+    // One client INSTANCE per column (`col` = {id, provider, model}); same-provider columns are
+    // separate instances riding the same pinned tab.
+    const clientFor = (col) => {
       // 🔴 After teardown there is nobody left to dispose a new client (the map was snapshot and
       // cleared), so a readiness step that resumes late must not create one (Codex blocker).
       if (torndown) throw abortedError('session torn down');
-      let client = clients.get(provider);
+      let client = clients.get(col.id);
       if (!client) {
-        const continuation = sessionSaveHistory === true && Object.hasOwn(pendingResume, provider) ? pendingResume[provider] : null;
-        delete pendingResume[provider];
-        if (continuation) logInfo(provider, 'resume', { keys: Object.keys(continuation) });
-        client = createClient(provider, clientDeps, clientOptions(provider, sessionSaveHistory === true, continuation));
-        clients.set(provider, client);
+        const continuation = sessionSaveHistory === true && Object.hasOwn(pendingResume, col.id) ? pendingResume[col.id] : null;
+        delete pendingResume[col.id];
+        if (continuation) logInfo(col.provider, 'resume', { col: col.id, keys: Object.keys(continuation) });
+        client = createClient(col.provider, clientDeps, clientOptions(col.provider, sessionSaveHistory === true, continuation));
+        clients.set(col.id, client);
       }
       return client;
     };
@@ -943,12 +1714,17 @@ export function createCompareController({
     // The clients' readiness diagnostics (`{type:'diag', provider, stage, detail}`, package v0.2.3):
     // one line in the SW console and one DIAG port message each. Never throws (a listener that
     // throws would be logged by the client, but the send is not the place to find out).
-    const onDiag = (provider) => (ev) => {
+    const onDiag = (provider, col) => (ev) => {
       if (ev?.type !== 'diag') return;
       const stage = typeof ev.stage === 'string' ? ev.stage : 'unknown';
       const detail = ev.detail && typeof ev.detail === 'object' ? ev.detail : {};
+      // 🔴 The console gets the detail RAW; the page gets it projected. `stream_cut` carries the
+      // package's free-text reason, whose error form ends in the PROVIDER's own message — the same
+      // string `cutKindOf` exists to keep off the wire (#1527). Bounding it on DONE and then
+      // forwarding it here would have made that boundary accidental rather than real: the page
+      // ignores this stage today, so nothing showed it (batch review, B+C).
       logInfo(provider, stage, detail);
-      post({ type: PORT_MSG.DIAG, provider, stage, detail });
+      post({ type: PORT_MSG.DIAG, provider, col, stage, detail: pageSafeDiag(stage, detail) });
     };
 
     // One ERROR to the page + one line in the SW console. `e` is the client's error (or null for
@@ -956,10 +1732,17 @@ export function createCompareController({
     // `more`: fields this module adds beside the client's (a timeout's `budgetMs`) — never written
     // onto the caught error itself (a frozen/sealed error would throw here and swallow ALL_DONE —
     // Codex 1.31.2 #1).
-    const postError = (provider, code, message, e, more = null) => {
+    const postError = (col, code, rawMessage, e, more = null) => {
+      const { provider } = col;
       const extras = { ...errorExtras(e), ...(more && typeof more === 'object' ? more : {}) };
-      logInfo(provider, 'ERROR', { code, reason: extras.reason ?? null, message: extras.detail ?? message });
-      post({ type: PORT_MSG.ERROR, provider, code, ...extras, message });
+      // `message` is the caller's copy of the client message: stripped like `detail` (see
+      // stripStreamHead) so no field of an ERROR carries the stream head.
+      const message = stripStreamHead(typeof rawMessage === 'string' ? rawMessage : String(rawMessage ?? ''));
+      logInfo(provider, 'ERROR', { col: col.id, code, reason: extras.reason ?? null, ...(extras.diag ? { diag: extras.diag } : {}), message: extras.detail ?? message });
+      // A no-op before consume (no record yet): readiness failures are not part of the round the
+      // debit bought. After it, every ERROR — a client's, a timeout, a Stop — is the column's outcome.
+      recordOutcome(col.id, { ok: false, code });
+      post({ type: PORT_MSG.ERROR, provider, col: col.id, code, ...extras, message });
     };
 
     // Step (a). Returns `{ code, error }` naming why this target cannot be sent to, or null.
@@ -972,7 +1755,12 @@ export function createCompareController({
     // the quota is debited (Codex 1R blocker #1; package v0.1.0). Both SEND and FOLLOWUP pass
     // `mayOpenTab: true` (see runSend), so a closed tab costs nothing: a reopen that fails is a
     // readiness failure, not a debited-then-dead column.
-    async function readiness(provider, mayOpenTab, signal, model) {
+    // Runs ONCE per provider (cmp-columns), on that provider's FIRST column's client (`col`); the
+    // verdict applies to every column of the provider. `model` = that column's model, for Claude's
+    // pre-create. The provider's other column clients are built lazily at send time and find the
+    // same tab themselves (the package looks tabs up per send).
+    async function readiness(col, mayOpenTab, signal) {
+      const { provider, model } = col;
       const site = PROVIDER_SITES[provider];
       if (site.optionalHost) {
         let permitted = false;
@@ -984,7 +1772,7 @@ export function createCompareController({
       try {
         // `model` (package v0.3.0): what THIS send will pass to sendMessage, so Claude's pre-created
         // conversation is on the right model (a mismatch would cost a fresh create).
-        await clientFor(provider).prepare({ mayOpenTab: mayOpenTab === true, signal, onEvent: onDiag(provider), model });
+        await clientFor(col).prepare({ mayOpenTab: mayOpenTab === true, signal, onEvent: onDiag(provider, col.id), model });
       } catch (e) {
         if (torndown || signal.aborted) return { code: SW_CODES.ABORTED, error: null };
         return { code: typeof e?.code === 'string' ? e.code : SW_CODES.UNKNOWN, error: e };
@@ -993,12 +1781,13 @@ export function createCompareController({
       return null;
     }
 
-    // Step (b). Never throws; a failure is a CONSUME_FAIL payload.
-    async function consume() {
+    // Step (b). Never throws; a failure is a CONSUME_FAIL payload. `stats` is the usage body
+    // (buildConsumeBody) — what the debit is for, never who.
+    async function consume(stats) {
       let resp;
       try {
         const config = await getConfig();
-        resp = await authedFetch(config, `${config.serverUrl}/api/compare/consume`, { method: 'POST' });
+        resp = await authedFetch(config, `${config.serverUrl}/api/compare/consume`, { method: 'POST', headers: { ...JSON_HEADERS }, body: JSON.stringify(stats) });
       } catch (e) {
         return { ok: false, fail: { status: 0, code: SW_CODES.NETWORK_ERROR, message: String(e?.message || e) } };
       }
@@ -1006,7 +1795,10 @@ export function createCompareController({
       // Exactly 200 — the contract names the status, and a 2xx that is not it is not a debit we
       // recognise (a proxy's 202/204 with a stale body must not release a send).
       if (resp.status === CONSUME_OK_STATUS && body && body.ok === true) {
-        return { ok: true, remaining: body.remaining ?? null, limit: body.limit ?? null, resetsAt: body.resetsAt };
+        // `event_id` names the row the outcome will complete; anything but a positive integer =
+        // no row to complete = no outcome for this round.
+        const eventId = Number.isInteger(body.event_id) && body.event_id > 0 ? body.event_id : null;
+        return { ok: true, remaining: body.remaining ?? null, limit: body.limit ?? null, resetsAt: body.resetsAt, eventId };
       }
       return {
         ok: false,
@@ -1014,6 +1806,10 @@ export function createCompareController({
           status: resp.status,
           code: typeof body?.code === 'string' ? body.code : 'http_error',
           ...(body?.remaining !== undefined ? { remaining: body.remaining } : {}),
+          // `limit` rides along too (1.32.0 batch review #1): the 429 IS a counted answer and the
+          // page rebuilds its quota from this message — without the limit a page that last read
+          // an UNCOUNTED status (worker flag flip, or a failed first read) drew 「0/0」.
+          ...(body?.limit !== undefined ? { limit: body.limit } : {}),
           ...(body?.resetsAt !== undefined ? { resetsAt: body.resetsAt } : {}),
           ...(body?.error ? { message: String(body.error) } : {}),
         },
@@ -1025,7 +1821,8 @@ export function createCompareController({
     //
     // `model` is the resolved choice for this provider (id or null = the provider's default) and is
     // passed on EVERY send, so the client's conversation always runs on what the page shows.
-    async function sendOne(provider, text, mayOpenTab, model, sendSignal) {
+    async function sendOne(col, text, mayOpenTab, sendSignal) {
+      const { id: colId, provider, model } = col;
       const ac = new AbortController();
       inflight.add(ac);
       const onSendAbort = () => ac.abort();
@@ -1042,13 +1839,46 @@ export function createCompareController({
         const at = ev?.detail?.at;
         if (typeof at !== 'number' || typeof ev.stage !== 'string') return;
         stages[ev.stage] = at;
-        if (ev.stage === 'first_chunk' || ev.stage === 'stream_done') logInfo(provider, 'ttft', ttftSegments(stages));
+        if (ev.stage === 'first_chunk' || ev.stage === 'stream_done') logInfo(provider, 'ttft', { col: colId, ...ttftSegments(stages) });
       };
+      // The outcome's clock (cmp-beta contract): this send's start, on the SW's own clock — the
+      // package's timed stages are diagnostics an older page script may not report.
+      const t0 = now();
+      // Stall watchdog (#1519, STREAM_STALL_MS): `lastInbound` is null until the first answer chunk —
+      // nothing is armed while the provider may still be thinking in silence. From the first chunk
+      // on, every inbound message re-arms it; when it fires, the send is aborted and the text
+      // streamed so far (`streamed`) becomes a DONE{stalled:true}. `lastModel` = the served model
+      // reported so far, for that DONE (the client's result never arrives on a stall).
+      let stalled = false;
+      let stallTimer = null;
+      let lastInbound = null;
+      let streamed = '';
+      let lastModel = null;
+      const onStall = () => {
+        stalled = true;
+        logInfo(provider, 'stall', { col: colId, ms: lastInbound === null ? null : now() - lastInbound, chars: streamed.length });
+        ac.abort();
+      };
+      const touch = () => {
+        lastInbound = now();
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(onStall, streamStallMs);
+      };
+      // Re-arm only once text has started: an event before the first chunk is the thinking/readiness
+      // phase, which has no stall clock.
+      const touchIfStreaming = () => { if (lastInbound !== null) touch(); };
+      let client = null; // in scope for the stall branch of the catch
       try {
-        const client = clientFor(provider);
+        client = clientFor(col);
         const result = await client.sendMessage(
           text,
-          (delta) => post({ type: PORT_MSG.CHUNK, provider, delta: String(delta ?? '') }),
+          (delta) => {
+            if (outcome && outcome.results[colId]?.ttft_ms === undefined) recordOutcome(colId, { ttft_ms: elapsed(t0) });
+            const d = String(delta ?? '');
+            streamed += d;
+            touch();
+            post({ type: PORT_MSG.CHUNK, provider, col: colId, delta: d });
+          },
           ac.signal,
           {
             mayOpenTab: mayOpenTab === true,
@@ -1056,11 +1886,16 @@ export function createCompareController({
             // The served model, as soon as the client knows it (before the first chunk where the
             // provider reports it). The page swaps its "waiting" badge for the name.
             onEvent: (ev) => {
-              if (ev?.type === 'diag') { onDiag(provider)(ev); onStage(ev); return; }
-              if (ev?.type === 'activity') { const a = activityForPage(ev); if (a) post({ type: PORT_MSG.ACTIVITY, provider, ...a }); return; }
+              touchIfStreaming(); // anything the client surfaces proves the stream is alive
+              if (ev?.type === 'diag') { onDiag(provider, colId)(ev); onStage(ev); return; }
+              if (ev?.type === 'activity') { const a = activityForPage(ev); if (a) post({ type: PORT_MSG.ACTIVITY, provider, col: colId, ...a }); return; }
               if (ev?.type !== 'model') return;
               const m = modelForPage(ev.model);
-              if (m) post({ type: PORT_MSG.MODEL, provider, model: m });
+              if (m) {
+                lastModel = m;
+                if (m.id) recordOutcome(colId, { model: m.id });
+                post({ type: PORT_MSG.MODEL, provider, col: colId, model: m });
+              }
             },
           },
         );
@@ -1069,18 +1904,45 @@ export function createCompareController({
         // answers null for anything it will still clean up). Omitted otherwise, never null: an
         // incognito session's conversations are gone at dispose, so there is nothing to offer.
         const continuation = sessionSaveHistory === true && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
+        const served = modelForPage(result?.model);
+        // 🔴 A cut the CLIENT reported (package v0.5.5) is still a DONE: what arrived IS the answer,
+        // exactly as it is for the stall watchdog below. It rides the SAME `stalled` flag on purpose
+        // — the page already has four surfaces for "this answer is not complete" and a second flag
+        // would mean a second vocabulary for one idea. `cutReason` only says WHICH, in two words.
+        const cut = cutKindOf(result);
+        if (cut) logInfo(provider, 'cut', { kind: cut, reason: String(result?.cutReason || '').slice(0, CUT_REASON_LOG_MAX) });
+        recordOutcome(colId, {
+          ok: true, total_ms: elapsed(t0),
+          ...(cut ? { code: cut === CUT_STREAM_ERROR ? SW_CODES.CUT_ERROR : SW_CODES.STALLED } : {}),
+          ...(served?.id ? { model: served.id } : {}),
+        });
         post({
-          type: PORT_MSG.DONE, provider, text: String(result?.text ?? ''), model: modelForPage(result?.model),
+          type: PORT_MSG.DONE, provider, col: colId, text: String(result?.text ?? ''), model: served,
+          ...(cut ? { stalled: true, cutReason: cut } : {}),
           ...(continuation && typeof continuation === 'object' ? { continuation } : {}),
         });
       } catch (e) {
+        // A stall is a DONE, not an ERROR (#1519): the text the page already shows IS the answer;
+        // the client's rejection here is the abort the watchdog itself requested. `stalled:true`
+        // lets the page add its note; the outcome keeps ok:true and names the cut in `code`.
+        if (stalled) {
+          const continuation = sessionSaveHistory === true && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
+          recordOutcome(colId, { ok: true, code: SW_CODES.STALLED, total_ms: elapsed(t0), ...(lastModel?.id ? { model: lastModel.id } : {}) });
+          post({
+            type: PORT_MSG.DONE, provider, col: colId, text: streamed, model: lastModel, stalled: true,
+            ...(continuation && typeof continuation === 'object' ? { continuation } : {}),
+          });
+          return;
+        }
         const code = timedOut ? SW_CODES.TIMEOUT
           : (typeof e?.code === 'string' ? e.code : (e?.name === 'AbortError' ? SW_CODES.ABORTED : SW_CODES.UNKNOWN));
+        recordOutcome(colId, { total_ms: elapsed(t0) });
         // A timeout names the budget it hit (the page's copy shows it, so a changed budget never
         // leaves a stale number in a string).
-        postError(provider, code, String(e?.message || e), e, timedOut ? { budgetMs: sendTimeoutMs } : null);
+        postError(col, code, String(e?.message || e), e, timedOut ? { budgetMs: sendTimeoutMs } : null);
       } finally {
         clearTimeout(timer);
+        clearTimeout(stallTimer);
         sendSignal.removeEventListener('abort', onSendAbort);
         inflight.delete(ac);
       }
@@ -1113,13 +1975,22 @@ export function createCompareController({
         post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.BUSY });
         return;
       }
+      // A dev probe holds the provider session (see probeMulti): refused, nothing sent, no debit.
+      if (probeAbort) {
+        post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.BUSY });
+        return;
+      }
       running = true;
+      roundsInFlight++;
       const send = new AbortController();
       currentSend = send;
+      // Hoisted for the finally: the COLUMNS the debit bought (empty until consume), so the
+      // outcome can mark the ones that never answered.
+      let ready = [];
+      const readyIds = () => ready.map((c) => c.id);
       try {
         await leversReady; // the pin policy is fixed before the session's first client exists
         const text = typeof message.text === 'string' ? message.text : '';
-        const targets = uniqueKnownProviders(message.targets);
         // 🔴 A follow-up may open a tab too (supersedes the contract's earlier "FOLLOWUP → false").
         // The tabs a session rides are OURS: the client opened them in the background (pinned)
         // and tracks them. A user who closes one mid-session must not end the
@@ -1130,14 +2001,11 @@ export function createCompareController({
         // What the page still shows as a static/none picker (see refreshCatalogs). Only providers
         // with a live catalog count, whatever the page says.
         catalogPendingSet = new Set(uniqueKnownProviders(message.modelsPending).filter((p) => PROVIDER_SITES[p].liveCatalog === true));
-        if (!text.trim() || !targets.length) {
-          post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.NO_TARGETS });
-          return;
-        }
-        // Model per provider = the current choice overlaid with what this message says; the
-        // message's part becomes the current choice (and is persisted) so the next send and the
-        // next page load agree. The write is not awaited: a slow storage.sync must not hold up the
-        // send, and every later read is served from memory, not from the pending write.
+        // Model per provider (LEGACY path — a page without `columns`) = the current choice overlaid
+        // with what this message says; the message's part becomes the current choice (and is
+        // persisted) so the next send and the next page load agree. The write is not awaited: a
+        // slow storage.sync must not hold up the send, and every later read is served from
+        // memory, not from the pending write. A `columns` message carries its models itself.
         const override = sanitizeModelMap(message.models);
         let models;
         if (Object.keys(override).length) {
@@ -1145,6 +2013,19 @@ export function createCompareController({
           models = applySelectedModels(override);
         } else {
           models = await readSelectedModels();
+        }
+        // The round's columns (cmp-columns contract §2; resolveColumns): `columns[]` from the
+        // page, else colId / legacy provider `targets`. A duplicate colId or > MAX_COLUMNS is a
+        // bad_request BEFORE anything is prepared or debited.
+        const resolved = resolveColumns(message, models);
+        if (resolved.code === 'bad_request') {
+          post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: 'bad_request' });
+          return;
+        }
+        const columns = resolved.columns;
+        if (!text.trim() || !columns.length) {
+          post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.NO_TARGETS });
+          return;
         }
         // History (package v0.3.1): a SEND's boolean is persisted — ONE write per SEND that carries
         // one — and becomes the current preference; the session's flag is fixed by the FIRST SEND
@@ -1166,25 +2047,37 @@ export function createCompareController({
         // exist yet (a column first asked in a later follow-up continues its own conversation —
         // batch-3 Codex #1); only a SEND replaces the map (an empty one for a plain SEND).
         if (!followup) pendingResume = sanitizeResumeMap(message.resume);
-        // (a) readiness, in parallel; a failed target is reported and skipped, not fatal.
-        const verdicts = await Promise.all(targets.map(async (p) => [p, await readiness(p, mayOpenTab, send.signal, models[p])]));
+        // What this round IS, for the usage row (cmp-beta contract): the page's `kind` when it is
+        // one of COMPARE_KINDS, else derived from the message shape. Read here — before readiness
+        // consumes the resume seeds — so a SEND{resume} without a kind still says 'resume'.
+        const resumeAsked = !followup && Object.keys(pendingResume).length > 0;
+        // (a) readiness, ONCE per provider (on its first column), in parallel; a failed provider
+        // is reported on each of its columns and skipped, not fatal.
+        const firstOf = new Map();
+        for (const col of columns) if (!firstOf.has(col.provider)) firstOf.set(col.provider, col);
+        const verdicts = new Map(await Promise.all([...firstOf.values()].map(async (col) => [col.provider, await readiness(col, mayOpenTab, send.signal)])));
         // A Stop before the debit is free; the page hears it as a failed consume.
         if (torndown) return;
         if (send.signal.aborted) {
           post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.ABORTED });
           return;
         }
-        const ready = [];
-        for (const [provider, verdict] of verdicts) {
-          if (verdict) postError(provider, verdict.code, `not ready: ${verdict.code}`, verdict.error);
-          else ready.push(provider);
+        for (const col of columns) {
+          const verdict = verdicts.get(col.provider);
+          if (verdict) postError(col, verdict.code, `not ready: ${verdict.code}`, verdict.error);
+          else ready.push(col);
         }
         if (!ready.length) {
           post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.NO_TARGETS });
           return;
         }
-        // (b) consume — the only server write, and the gate for (c).
-        const c = await consume();
+        const readyProviders = [...new Set(ready.map((c) => c.provider))];
+        // (b) consume — the only server write, and the gate for (c). The body says what the debit
+        // is for (kind / the ready columns and their models / round / src / ext version).
+        const c = await consume(buildConsumeBody({
+          kind: message.kind, followup, resumeAsked, src: message.src, session: message.session,
+          ready: readyIds(), models: Object.fromEntries(ready.map((col) => [col.id, col.model])), round: message.round, extVersion: manifestVersion(),
+        }));
         // The SW's own analytics event (ux3 item 8): the debit's outcome and how many columns it
         // bought. Never the text, never who.
         emitEvent('consume', { ok: c.ok, status: c.ok ? CONSUME_OK_STATUS : c.fail.status, targets_n: ready.length });
@@ -1192,25 +2085,33 @@ export function createCompareController({
           post({ type: PORT_MSG.CONSUME_FAIL, ...c.fail });
           return;
         }
+        // The round's usage record exists from here — and only with the server's event_id.
+        outcome = c.eventId ? { eventId: c.eventId, results: {} } : null;
         post({ type: PORT_MSG.CONSUME_OK, remaining: c.remaining, limit: c.limit, resetsAt: c.resetsAt });
         if (torndown) return;
         // The tabs exist now (readiness opened them): a picker that was static for lack of a tab
         // can be the site's list. Not awaited — the fan-out below is what the user is waiting for.
-        refreshCatalogs(ready);
-        // (c) fan out. Each settles on its own; ALL_DONE once every one has. A Stop that landed
-        // during consume is honoured here too — the unit is spent (no refund), no provider is asked.
+        refreshCatalogs(readyProviders);
+        // (c) fan out, one send per COLUMN. Each settles on its own; ALL_DONE once every one has. A
+        // Stop that landed during consume is honoured here too — the unit is spent (no refund), no
+        // column is asked.
         if (send.signal.aborted) {
-          for (const p of ready) postError(p, SW_CODES.ABORTED, 'stopped before send', null);
+          for (const col of ready) postError(col, SW_CODES.ABORTED, 'stopped before send', null);
         } else {
-          await Promise.all(ready.map((p) => sendOne(p, text, mayOpenTab, models[p], send.signal)));
+          await Promise.all(ready.map((col) => sendOne(col, text, mayOpenTab, send.signal)));
         }
         post({ type: PORT_MSG.ALL_DONE });
         // Still pending after the CONSUME_OK refresh (it ran while the tab was still loading, say):
         // one more try now that the round is over.
-        refreshCatalogs(ready);
+        refreshCatalogs(readyProviders);
       } finally {
+        // The round has settled on every path that got past consume — ALL_DONE above, a Stop (the
+        // aborted sends landed as ERRORs before ALL_DONE), a lost port (same, ALL_DONE unposted),
+        // a return right after CONSUME_OK. Nothing to send when consume never released the round.
+        settleOutcome(readyIds());
         if (currentSend === send) currentSend = null;
         running = false;
+        roundsInFlight--;
       }
     }
 

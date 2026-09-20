@@ -1930,7 +1930,9 @@
           (Date.now() - (cached.at || 0)) < FOLDERS_FLAG_TTL_MS) {
         return cached.folders === true;
       }
-      const res = await fetch(FLAGS_URL);
+      // no-store: flags.json has no Cache-Control; without it Chrome serves a heuristic HTTP-cached
+      // copy for hours after a flip (the storage cache above is the only TTL we mean to have).
+      const res = await fetch(FLAGS_URL, { cache: 'no-store' });
       if (!res.ok) { await _setFoldersFlagCache(false); return false; }
       const json = await res.json();
       const folders = !!(json && json[ADAPTER.flagField] === true);

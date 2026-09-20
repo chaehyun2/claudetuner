@@ -15,6 +15,9 @@ export const RESET_ALARM_KEYS = ['5h', '7d', 'design', 'sonnet'];
 export const ALARM_BOOST = 'claude-boost-poll';
 export const ALARM_WEEKLY_REPORT = 'weekly-report';
 export const ALARM_REC = 'claude-rec-poll';
+// storage.local: orgs the server is dropping at the 3-org cap. Written by bg/cadence-config.js
+// (recordCapDrop), read by the popup's banner (ui/capdrop-banner.js) — ONE literal, both sides.
+export const CAP_DROP_KEY = '_ct_cap_drop';
 
 export const DEFAULT_INTERVAL_MINUTES = 10;
 export const FREE_PLAN_INTERVAL_MINUTES = 60;

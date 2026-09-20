@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'AI 크로스체크', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요', cmp_empty_tip: '먼저 질문을 입력하세요' },
-    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'AI Cross-Check', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers', cmp_empty_tip: 'Type a question first' },
+    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)' },
+    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -242,7 +242,6 @@
   let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
   let _cmpFlagPending = false;
   let _cmpEnabled = true;     // compareEnabled option
-  let _cmpSyncScheduled = false;
 
   const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
 
@@ -271,42 +270,24 @@
     return String(editor.innerText || editor.textContent || '').trim();
   }
 
-  // `btnEl` is passed at mount time: buildStrip() renders BEFORE the strip is inserted into the
-  // document, so a document-wide query would find nothing and leave the button enabled on an
-  // empty composer (caught by test/compare-button-guard.mjs).
-  function syncCompareButtonState(btnEl) {
-    const btn = btnEl || document.querySelector(`#${STRIP_ID} .${CMP_BTN_CLASS}`);
-    if (!btn) return;
-    const empty = !readComposerText();
-    btn.disabled = empty;
-    btn.title = empty ? t('cmp_empty_tip') : t('cmp_ask_others_tip');
-  }
-
-  // The composer fires `input` on every keystroke; coalesce the enabled/disabled sync per frame.
-  function onAnyInput() {
-    if (!isCurrent()) { document.removeEventListener('input', onAnyInput, true); return; }
-    if (_cmpSyncScheduled) return;
-    _cmpSyncScheduled = true;
-    requestAnimationFrame(() => { _cmpSyncScheduled = false; syncCompareButtonState(); });
-  }
-
   function mountCompareButton(strip) {
     const existing = strip.querySelector('.' + CMP_BTN_CLASS);
     if (!cmpAllowed()) { if (existing) existing.remove(); return; }
-    if (existing) { syncCompareButtonState(existing); return; }
+    if (existing) return;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = CMP_BTN_CLASS;
     btn.textContent = t('cmp_ask_others');
+    btn.title = t('cmp_ask_others_tip');
+    // Always enabled (2026-09-21, user decision): an empty composer opens the compare page with an
+    // empty question box instead of greying the button out — the page is a valid entry point on its own.
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       const q = readComposerText();
-      if (!q) { syncCompareButtonState(btn); return; }
-      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q }); } catch { /* context dead */ }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-cg-strip-inner') || strip).appendChild(btn);
-    syncCompareButtonState(btn);
   }
   // Both branches below replace the strip's markup, so the compare button is (re)attached here,
   // after the markup, rather than inside each branch.
@@ -444,7 +425,6 @@
     if (_observer) { _observer.disconnect(); _observer = null; }
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* context dead */ }
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { /* context dead */ }
-    try { document.removeEventListener('input', onAnyInput, true); } catch { /* context dead */ }
   }
 
   // ── Data ──
@@ -538,7 +518,6 @@
       _cmpEnabled = cfg.compareEnabled !== false;
       if (_enabled) { requestUsageData(); ensureCompareFlag(); }
     });
-    document.addEventListener('input', onAnyInput, true);
     loadAccount(); // prefill name/email into the inquiry link
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);

@@ -44,9 +44,9 @@ body {
 /* Korean wraps at word boundaries (keep-all) — long unbroken runs still fall back to anywhere. */
 html[lang="ko"] body { word-break: keep-all; }
 /* App shell: the root is exactly one viewport tall and the columns take whatever the header, the
-   question card and the docked composer leave (.cmp-columns flex: 1) — no `calc(100vh - N)` that
+   notices and the docked composer leave (.cmp-columns flex: 1) — no `calc(100vh - N)` that
    assumes a header height. Wider than that the content overflows the root and the page scrolls
-   (the bottom composer stays docked, .cmp-dock). No max-width: three columns fill a 2200px window. */
+   (the composer stays docked, .cmp-dock). No max-width: three columns fill a 2200px window. */
 #compare-root { display: flex; flex-direction: column; height: 100vh; padding: 16px clamp(24px, 3vw, 64px) 0; gap: 12px; }
 a { color: var(--accent); }
 button { font: inherit; cursor: pointer; color: inherit; }
@@ -58,6 +58,8 @@ button:disabled { cursor: not-allowed; }
    전체 복사 · 중지 · 새 대화). Chips are 26px, action buttons 30px (.cmp-btn-sm), gaps 10px. */
 .cmp-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 36px; }
 .cmp-title { font-size: 20px; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; margin-right: 2px; }
+/* Beta pill next to the heading (cmp-beta-contract §3): accent on its tint — the streaming badge's AA pair. */
+.cmp-beta-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
 .cmp-src-chip { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px; border-radius: var(--radius-pill); background: var(--bg-card); border: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
 /* session history mode chip (「기록 남김」 / 🕶 「시크릿 대화」), shown once the session started */
 .cmp-mode-chip[hidden] { display: none; }
@@ -65,10 +67,24 @@ button:disabled { cursor: not-allowed; }
 .cmp-incognito-glyph { font-size: 13px; line-height: 1; }
 .cmp-incognito-glyph[hidden] { display: none; }
 .cmp-topbar-side { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.cmp-quota { margin-right: 4px; }
+/* Quota widget (plan compare-quota-premium §3 U3, 2026-09-20): count · bar · reset · Premium link.
+   States: is-low (≤5 left, amber) / is-exhausted (0, red) / is-pro (badge, no bar). The bar fills as
+   compares are spent (width = used/limit, set inline by renderQuotaLine). */
+.cmp-quota { margin-right: 4px; display: inline-flex; align-items: center; gap: 8px; }
 .cmp-quota { font-size: 12.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.cmp-quota.is-exhausted { color: var(--warn); font-weight: 600; }
+.cmp-quota-count { font-weight: 600; color: var(--text-primary); }
+.cmp-quota-bar { display: inline-block; width: 72px; height: 6px; border-radius: var(--radius-pill); background: var(--bg-subtle); border: 1px solid var(--border); overflow: hidden; }
+.cmp-quota-fill { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width .25s ease-out; }
+.cmp-quota.is-low .cmp-quota-count, .cmp-quota.is-low .cmp-quota-reset { color: var(--warn); }
+.cmp-quota.is-low .cmp-quota-fill { background: var(--warn); }
+.cmp-quota.is-exhausted .cmp-quota-count, .cmp-quota.is-exhausted .cmp-quota-reset { color: var(--danger); font-weight: 600; }
+.cmp-quota.is-exhausted .cmp-quota-fill { background: var(--danger); }
+.cmp-quota-hint { color: var(--accent); font-weight: 600; text-decoration: none; }
+.cmp-quota-hint:hover { text-decoration: underline; }
+.cmp-quota-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
 .cmp-quota:empty { display: none; }
+/* Composer at 0 left: the send is gated (updateControls ↔ quotaExhausted), the surface says so. */
+.cmp-composer.is-quota-exhausted textarea { opacity: .7; }
 
 /* ── provider mark (dot) ── */
 .cmp-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
@@ -96,6 +112,13 @@ button:disabled { cursor: not-allowed; }
 /* ── column action row (batch 2): retry this column · open the provider tab ── */
 .cmp-col-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .cmp-col-actions[hidden] { display: none; }
+/* C3 (chathub batch 1): the code-specific actions share the row; the tab hint is a full-width line under them. */
+.cmp-action-login { height: 30px; padding: 0 12px; font-size: 12.5px; }
+.cmp-col-readiness { flex-basis: 100%; margin: 0 0 2px; color: var(--danger); font-size: 13px; } /* #1463 ②: the readiness reason, above the buttons that fix it */
+.cmp-action-hint { flex-basis: 100%; margin-top: 0; }
+.cmp-action-hint:empty { display: none; }
+/* C4: 「이 열에만 묻기」 in the column head tools, same 30px line as 「대화 복사」. */
+.cmp-ask-col { height: 30px; }
 
 /* ── copy buttons (every turn, the frozen question, each column head) ── */
 /* Item 5 (2026-09-17): ALWAYS visible — the hover-only ghost was never found. Quiet (secondary
@@ -117,15 +140,21 @@ button:disabled { cursor: not-allowed; }
 /* ── cards ── */
 .cmp-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
 
-/* ── prompt card ── */
-.cmp-prompt { padding: 16px 18px 14px; flex-shrink: 0; }
-/* Committed (the session started): a record plus the thread composer — tighter, so the columns keep the height. */
-.cmp-prompt.is-committed { padding: 10px 14px 10px; }
-.cmp-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; min-height: 26px; }
-.cmp-prompt.is-committed .cmp-prompt-head { margin-bottom: 2px; }
-.cmp-eyebrow { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--text-secondary); }
-.cmp-prompt-text { font-size: 15px; line-height: 1.6; white-space: pre-wrap; max-height: 180px; overflow: auto; }
-.cmp-prompt-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+/* ── question composer (chat layout, 2026-09-20): the dock's first face — a .cmp-composer card like the
+   follow-up one; its meta row (.cmp-prompt-actions) holds 원본 제외 · 시크릿 대화 · the key hint. The old
+   question card (eyebrow, frozen text) is gone: the question lives in the columns (.cmp-turn-q). ── */
+.cmp-prompt-actions { gap: 14px; }
+/* C1 (chathub batch 1): empty-state intro + example chips — centred above the columns (no `?q`). */
+.cmp-examples { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; margin: 0; padding: 28px 6px 12px; flex-shrink: 0; }
+.cmp-examples[hidden] { display: none; }
+.cmp-examples-intro { margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.cmp-examples-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+/* A chip is a whole question (server pool, 2026-09-20): up to two lines with an ellipsis, at most 300px wide
+   so three sit in one row from ~1000px and wrap below; the full text is the title. */
+.cmp-example-chip { display: inline-flex; align-items: center; min-height: 28px; max-width: 300px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12.5px; line-height: 1.4; text-align: left; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+.cmp-example-chip-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; }
+.cmp-example-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.cmp-example-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cmp-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
 .cmp-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0; }
 .cmp-check input:disabled { cursor: not-allowed; }
@@ -133,13 +162,12 @@ button:disabled { cursor: not-allowed; }
 .cmp-check-incognito .cmp-incognito-glyph { margin-right: -2px; }
 .cmp-spacer { flex: 1; }
 /* ── incognito surface (item 6) ── */
-/* `html[data-incognito="1"]` (compare.js syncSaveHistory): the question card and both follow-up
-   composers move onto the slate surface with a dashed border — the page says "this one is not
-   kept" before a word is read. Text on it stays --text-primary / --text-secondary (contrast guard). */
+/* `html[data-incognito="1"]` (compare.js syncSaveHistory): both faces of the dock composer move onto
+   the slate surface with a dashed border — the page says "this one is not kept" before a word is
+   read. Text on it stays --text-primary / --text-secondary (contrast guard). */
 html[data-incognito="1"] .cmp-prompt, html[data-incognito="1"] .cmp-composer-compact { background: var(--bg-incognito); border-color: var(--border-incognito); border-style: dashed; }
 html[data-incognito="1"] .cmp-textarea { background: var(--bg-card); }
 html[data-incognito="1"] .cmp-textarea[readonly] { background: var(--bg-subtle); }
-html[data-incognito="1"] .cmp-prompt-actions, html[data-incognito="1"] .cmp-composer-thread { border-top-color: var(--border-incognito); }
 html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font-weight: 600; }
 
 /* ── notices ── */
@@ -155,6 +183,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* info: a plain hint (no AI signed in yet) — accent bar, ordinary text */
 .cmp-notice.is-info { border-left-color: var(--accent); }
 .cmp-notice .cmp-btn { flex-shrink: 0; }
+/* Beta reset offer (cmp-beta-contract §3): a card of its own under the notices while the count is at 0. */
+.cmp-reset-offer { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 16px; border-radius: var(--radius-card); border: 1px solid var(--border); border-left: 4px solid var(--accent); background: var(--bg-card); box-shadow: var(--shadow-card); animation: cmp-fade-in .2s ease-out both; }
+.cmp-reset-btn { height: auto; min-height: 36px; padding: 8px 16px; white-space: normal; text-align: left; line-height: 1.35; }
+.cmp-reset-err { margin: 0; font-size: 12.5px; color: var(--danger); }
+.cmp-reset-offer[hidden], .cmp-reset-err[hidden], .cmp-reset-pro[hidden] { display: none; }
 
 /* ── coming soon ── */
 .cmp-coming-soon { margin: 18vh auto 0; text-align: center; max-width: 440px; padding: 36px 28px; }
@@ -213,6 +246,36 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-gauge-fill { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
 .cmp-gauge-note { font-size: 11px; color: var(--text-secondary); }
 .cmp-col-plan[hidden] { display: none; }
+/* ── column model (cmp-columns, 2026-09-20): picker · ＋ 열 추가 · ✕ · shared-account chip ── */
+/* The picker button sits in the identity group before the session: the model label + a caret. */
+/* cmp-columns: the picker button is the head's model face; the model select behind it keeps the state
+   and is drawn only when no picker is shown (the SW's catalog unknown in-session). */
+.cmp-col-picker:not([hidden]) ~ .cmp-model { display: none; }
+.cmp-col-picker { height: 30px; padding: 0 8px 0 10px; gap: 4px; font-size: 12px; font-weight: 500; color: var(--text-secondary); background: var(--bg-subtle); border-color: var(--border); }
+.cmp-col-picker:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.cmp-col-picker-text { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-col-picker-caret { font-size: 10px; opacity: .8; }
+/* The popover: under the column head, inside the column card (the card clips overflow, so it scrolls within). */
+/* while a column's picker is open the card releases its overflow clip (the list hangs below a short card) */
+.cmp-col.cmp-col-picking { overflow: visible; }
+.cmp-col-picker-pop { position: absolute; left: 10px; right: 10px; top: 48px; z-index: 3; max-height: min(60vh, 420px); overflow: auto; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); box-shadow: var(--shadow-card); }
+.cmp-col-picker-group + .cmp-col-picker-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+.cmp-col-picker-vendor { display: flex; align-items: center; gap: 7px; padding: 4px 8px 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); }
+.cmp-col-picker-opt { display: block; width: 100%; padding: 6px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cmp-col-picker-opt:hover:not(:disabled), .cmp-col-picker-opt:focus-visible { background: var(--bg-hover); outline: none; }
+.cmp-col-picker-opt[aria-selected="true"] { color: var(--accent); background: var(--accent-light); font-weight: 600; }
+.cmp-col-picker-opt:disabled { color: var(--text-secondary); opacity: .55; cursor: not-allowed; }
+/* ＋ card: a dashed cell at the end of the grid, the same height as a column. */
+.cmp-add-col { display: flex; align-items: center; justify-content: center; min-height: 240px; border: 1px dashed var(--border-strong); background: transparent; box-shadow: none; color: var(--text-secondary); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color .15s ease, color .15s ease; }
+.cmp-add-col:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-add-col:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* ✕ in the tools group: a quiet 30px control, danger on hover. */
+.cmp-col-remove { width: 30px; padding: 0; color: var(--text-secondary); }
+.cmp-col-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+/* The shared-account chip in the gate / plan slot of a sibling column (the provider UI lives on the first column). */
+.cmp-col-shared { display: block; margin: 8px 14px 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cmp-col-shared:hover { color: var(--text-primary); background: var(--bg-hover); }
+.cmp-col-picker[hidden], .cmp-col-picker-pop[hidden], .cmp-add-col[hidden], .cmp-col-remove[hidden], .cmp-col-shared[hidden] { display: none; }
 /* Catalog hint under the pill (#1452 refresh): a full-width muted line in the wrapping header. */
 .cmp-model-hint { flex-basis: 100%; margin-top: -4px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
 .cmp-model-hint[hidden] { display: none; }
@@ -242,21 +305,46 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-col-state-hint:empty { display: none; }
 .cmp-col-joined { color: var(--success); font-weight: 600; }
 
+/* ── per-column input (chat layout; replaces C4's head button) ── */
+/* The tab: a 44×18 chevron centred on the column's bottom edge (rounded top, muted), visible on hover /
+   focus / while the composer is open, and always on touch or narrow screens (no hover there). The
+   column clips its overflow, so the tab sits ON the edge (inside), not across it. */
+.cmp-col-ask { position: relative; flex-shrink: 0; }
+.cmp-col-ask-tab { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 18px; padding: 0; border: 1px solid var(--border); border-bottom: 0; border-radius: 8px 8px 0 0; background: var(--bg-subtle); color: var(--text-secondary); opacity: 0; transition: opacity .15s ease, color .15s ease; }
+.cmp-col-ask-tab svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease; }
+.cmp-col:hover .cmp-col-ask-tab, .cmp-col-ask-tab:focus-visible, .cmp-col-ask.is-open .cmp-col-ask-tab { opacity: 1; }
+.cmp-col-ask-tab:hover { color: var(--text-primary); }
+.cmp-col-ask.is-open .cmp-col-ask-tab svg { transform: rotate(180deg); }
+@media (hover: none), (max-width: 720px) { .cmp-col-ask-tab { opacity: 1; } }
+.cmp-col-ask-box { display: flex; border-top: 1px solid var(--border); padding: 8px 10px; }
+.cmp-col-ask-input { min-height: 36px; max-height: 120px; padding: 7px 10px; font-size: 13px; }
+.cmp-col-ask[hidden], .cmp-col-ask-box[hidden], .cmp-col-ask-tab[hidden] { display: none; }
+/* A stranded draft (the column died / got gated with text in its composer, the dock already holding a draft): shown read-only until 새 대화. */
+.cmp-col-ask.is-stranded .cmp-col-ask-input { color: var(--text-secondary); background: var(--bg-subtle); }
+
 /* turns — each block = the turn's text node + its copy button (compare.js pushUserTurn / pushAssistantTurn) */
 .cmp-turn { animation: cmp-fade-in .2s ease-out both; }
-.cmp-turn-block + .cmp-turn-block, .cmp-turn-block + .cmp-turn, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn { margin-top: 12px; }
-.cmp-turn-block-user { display: flex; align-items: flex-end; gap: 6px; }
-.cmp-turn-block-user .cmp-turn-user { min-width: 0; }
+.cmp-turn-block + .cmp-turn-block, .cmp-turn-block + .cmp-turn, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn-block, .cmp-turn + .cmp-turn, .cmp-q-block + .cmp-turn-block, .cmp-q-block + .cmp-turn { margin-top: 12px; }
+/* Chat layout (2026-09-20): what the user said sits on the RIGHT — the question bubble at the top of
+   the thread (.cmp-q-block, display only: compare.js renderQuestionBubbles) and every follow-up turn
+   (.cmp-turn-block-user) alike; row-reverse keeps the DOM order (text first, then its copy button)
+   while the bubble hugs the right edge and the copy button sits to its left. */
+.cmp-turn-block-user, .cmp-q-block { display: flex; flex-direction: row-reverse; justify-content: flex-start; align-items: flex-end; gap: 6px; }
+.cmp-turn-block-user .cmp-turn-user, .cmp-q-block .cmp-turn-q { min-width: 0; max-width: 88%; }
+.cmp-turn-q { display: inline-block; font-size: 13.5px; color: var(--text-primary); background: var(--bg-subtle); border-radius: 12px 12px 4px 12px; padding: 8px 12px; white-space: pre-wrap; animation: cmp-fade-in .2s ease-out both; }
 /* Assistant turn: the text, then 「답변 복사」 UNDER it (item 5) — a labelled button the eye finds
    where the answer ends, which is where the column's scroll leaves the reader. Column direction:
    the button can never overlap the text and a long answer still ends in its button. */
 .cmp-turn-block-assistant { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .cmp-turn-block-assistant .cmp-turn-assistant { width: 100%; min-width: 0; }
 .cmp-turn-block-assistant > .cmp-copy { margin-left: -2px; }
-.cmp-turn-user { display: inline-block; max-width: 100%; font-size: 13px; color: var(--text-secondary); background: var(--bg-subtle); border-radius: 12px 12px 12px 4px; padding: 7px 12px; white-space: pre-wrap; }
+.cmp-turn-user { display: inline-block; max-width: 100%; font-size: 13px; color: var(--text-primary); background: var(--bg-subtle); border-radius: 12px 12px 4px 12px; padding: 7px 12px; white-space: pre-wrap; }
 .cmp-turn-assistant { min-height: 1.6em; }
 .cmp-turn-assistant.is-skipped { color: var(--text-secondary); font-size: 13px; font-style: italic; }
 .cmp-turn-assistant .cmp-col-error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+/* A stalled answer (#1519): a muted note under what arrived; the badge keeps its done look, only the marker is muted. */
+.cmp-turn-assistant .cmp-col-stalled { color: var(--text-secondary); font-size: 12.5px; margin-top: 6px; }
+.cmp-col-badge .cmp-badge-stalled { color: var(--text-secondary); font-weight: 500; }
 /* ── recent conversations (local history): topbar button + a dialog under the topbar ── */
 .cmp-btn-history::before { content: ''; width: 9px; height: 9px; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; background: linear-gradient(currentColor, currentColor) 50% 50% / 1.5px 4px no-repeat; }
 .cmp-history { position: absolute; top: 56px; right: clamp(24px, 3vw, 64px); z-index: 20; width: min(440px, calc(100vw - 32px)); max-height: 60vh; display: flex; flex-direction: column; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: 0 8px 24px rgba(17, 24, 39, .14); animation: cmp-fade-in .15s ease-out both; }
@@ -275,7 +363,33 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-history-del:hover { background: var(--danger-bg); color: var(--danger); }
 .cmp-history-empty { padding: 14px 10px; font-size: 13px; color: var(--text-secondary); text-align: center; }
 .cmp-history-note { padding: 8px 12px 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; }
+/* C2 (chathub batch 1): search in the head (title / search / clear), 「이어서 →」 beside the row. */
+.cmp-history-head { flex-wrap: wrap; }
+.cmp-history-search { flex: 1 1 140px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); color: var(--text-primary); font: inherit; font-size: 12.5px; }
+.cmp-history-search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.cmp-history-continue { flex-shrink: 0; align-self: center; height: 28px; padding: 0 10px; font-size: 12px; }
 #compare-root { position: relative; }
+/* ── 「요약·비교」 (chathub batch 1, C5): topbar button (a four-point star cut with clip-path — no
+   image; two crossed bars read as a close ✕), the confirm popover under the topbar (the history dialog's box), the folded request
+   turn and the badge on the judge's answer. ── */
+.cmp-btn-summary::before { content: ''; width: 11px; height: 11px; background: currentColor; clip-path: polygon(50% 0, 61% 39%, 100% 50%, 61% 61%, 50% 100%, 39% 61%, 0 50%, 39% 39%); }
+.cmp-btn-summary:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.cmp-btn-summary:not(:disabled):hover { background: var(--accent-light); }
+.cmp-btn-summary:disabled { opacity: .45; }
+.cmp-summary-pop { position: absolute; top: 56px; right: clamp(24px, 3vw, 64px); z-index: 20; width: min(380px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: 0 8px 24px rgba(17, 24, 39, .14); animation: cmp-fade-in .15s ease-out both; }
+.cmp-summary-pop[hidden] { display: none; }
+.cmp-summary-pop-title { font-weight: 650; font-size: 13.5px; color: var(--text-primary); }
+.cmp-summary-pop-desc { font-size: 13px; color: var(--text-primary); line-height: 1.45; }
+.cmp-summary-pop-note { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; }
+.cmp-summary-pop-note[hidden] { display: none; }
+.cmp-summary-judge { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-secondary); }
+.cmp-summary-judge-select { flex: 1 1 auto; min-width: 0; }
+.cmp-summary-pop-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
+.cmp-turn-summary-req { display: block; }
+.cmp-turn-summary-req > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+.cmp-turn-summary-req > summary:hover { color: var(--text-primary); }
+.cmp-summary-req-text { margin: 8px 0 0; max-height: 240px; overflow: auto; font: inherit; font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); }
+.cmp-summary-badge { align-self: flex-start; display: inline-flex; align-items: center; height: 22px; padding: 0 9px; margin-bottom: 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11.5px; font-weight: 650; }
 /* ── activity panel: the provider's process above the answer (details/summary) ── */
 .cmp-act { align-self: stretch; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); font-size: 12px; color: var(--text-secondary); }
 .cmp-act[hidden] { display: none; }
@@ -296,7 +410,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* typing caret at the end of the growing answer */
 .cmp-turn-assistant.is-streaming::after { content: ''; display: inline-block; width: 2px; height: 1em; margin-left: 2px; vertical-align: -.15em; background: var(--accent); border-radius: 1px; animation: cmp-blink 1s steps(2) infinite; }
 
-/* markdown (md-lite output) */
+/* markdown (ui/md-render.js output) */
 .cmp-turn-assistant p { margin: 0 0 10px; }
 .cmp-turn-assistant > p:last-child, .cmp-turn-assistant > ul:last-child, .cmp-turn-assistant > ol:last-child { margin-bottom: 0; }
 .cmp-turn-assistant h1, .cmp-turn-assistant h2, .cmp-turn-assistant h3, .cmp-turn-assistant h4, .cmp-turn-assistant h5, .cmp-turn-assistant h6 { margin: 16px 0 6px; line-height: 1.3; font-weight: 650; letter-spacing: -.005em; }
@@ -322,27 +436,27 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-assistant th[data-align="center"], .cmp-turn-assistant td[data-align="center"] { text-align: center; }
 .cmp-turn-assistant th[data-align="right"], .cmp-turn-assistant td[data-align="right"] { text-align: right; }
 
-/* ── follow-up composer (two instances of one model: thread + bottom) ── */
+/* ── the dock composer (one composer, two faces: .cmp-prompt before the session, .cmp-composer-compact after) ── */
 .cmp-composer { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
-/* Thread instance: lives inside the prompt card under the frozen question — a divider, not a card. */
-.cmp-composer-thread { margin-top: 8px; padding: 8px 0 0; gap: 8px; border-top: 1px solid var(--border); }
-/* Compact (bottom) instance: the textarea row only; the routing lives at the top, the caption names the shared target. */
-.cmp-composer-compact { padding: 8px 10px; }
+/* The follow-up face: the textarea row (caption + send) and, under it, the routing boxes + the key hint. */
+.cmp-composer-compact { padding: 10px 14px; }
 .cmp-composer-target { align-self: center; max-width: 220px; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmp-composer-target:empty { display: none; }
-/* Bottom instance: docked to the viewport bottom. The dock paints the page background under the
-   card so scrolled content never shows through the gap around it (finding C). */
+/* C4: the caption reads as a chip while the target was preset from a column head (compare.js state.presetTarget). */
+.cmp-composer-target.is-preset { color: var(--accent); background: var(--accent-light); border-radius: var(--radius-pill); padding: 3px 9px; }
+/* The dock: docked to the viewport bottom. It paints the page background under the card so scrolled
+   content never shows through the gap around it (finding C). */
 .cmp-dock { position: sticky; bottom: 0; z-index: 2; background: var(--bg-body); padding-bottom: 8px; flex-shrink: 0; }
 .cmp-composer-row { display: flex; gap: 10px; align-items: flex-end; }
-/* ── composer textareas (question card + follow-up) ── */
+/* ── composer textareas (question + follow-up faces of the dock) ── */
 .cmp-textarea { flex: 1 1 auto; min-width: 0; min-height: 44px; max-height: 200px; resize: none; overflow-y: auto; font: inherit; line-height: 1.5; color: var(--text-primary); background: var(--bg-body); border: 1px solid var(--border); border-radius: var(--radius-ctl); padding: 10px 12px; transition: border-color .15s ease, box-shadow .15s ease; }
 .cmp-textarea::placeholder { color: var(--text-secondary); opacity: 1; }
 .cmp-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
 .cmp-textarea:disabled { opacity: .6; cursor: not-allowed; }
 /* Locked while the text is on the wire (readOnly keeps focus + caret; the send button says 보내는 중…). */
 .cmp-textarea[readonly] { color: var(--text-secondary); background: var(--bg-subtle); }
-/* The question composer (before the first send): prompt-sized type. After the shared rule, whose `font: inherit` would otherwise win (Codex 2R #4). */
-.cmp-textarea.cmp-prompt-input { font-size: 15px; line-height: 1.6; }
+/* The question face's textarea: the same type as the follow-up's — one composer, one look (after the shared rule, whose `font: inherit` would otherwise win, Codex 2R #4). */
+.cmp-textarea.cmp-prompt-input { font-size: 14px; line-height: 1.5; }
 .cmp-composer-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .cmp-composer-label { font-size: 12.5px; color: var(--text-secondary); }
 .cmp-composer-hint { margin-left: auto; font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }

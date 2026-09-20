@@ -32,7 +32,9 @@ function _hideAllFolderRows() {
 async function _refreshFoldersAvailability() {
   let json = null;
   try {
-    const res = await fetch(FOLDERS_FLAGS_URL);
+    // no-store: flags.json carries no Cache-Control, so Chrome would otherwise keep a heuristic
+    // (Last-Modified-based, hours-long) HTTP-cached copy and a flag flip would not reach this page.
+    const res = await fetch(FOLDERS_FLAGS_URL, { cache: 'no-store' });
     if (res.ok) json = await res.json();
   } catch { json = null; } // network/parse error → fail-safe below (hidden, keep cache)
   for (const { flag, alsoFlag, rowId, cacheKey } of FOLDER_FLAG_ROWS) {
@@ -185,6 +187,14 @@ function updateNotifyExamples() {
 }
 
 // === Auto-save (debounced 800ms) ===
+// The per-question checkbox follows the master cross-check toggle: greyed out (its stored value
+// kept, so switching the master back on restores the previous choice) while the master is off.
+function syncCompareMsgButtonRow() {
+  const master = document.getElementById('compare-enabled');
+  const sub = document.getElementById('compare-msg-button-enabled');
+  if (master && sub) sub.disabled = !master.checked;
+}
+
 function autoSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(doSave, 800);
@@ -218,6 +228,7 @@ function doSave() {
   const geminiSidebarUsageEnabled = document.getElementById('gemini-sidebar-usage-enabled').checked;
   const geminiInputUsageEnabled = document.getElementById('gemini-input-usage-enabled').checked;
   const compareEnabled = document.getElementById('compare-enabled').checked;
+  const compareMsgButtonEnabled = document.getElementById('compare-msg-button-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
@@ -228,7 +239,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -338,7 +349,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -385,6 +396,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('gemini-sidebar-usage-enabled').checked = config.geminiSidebarUsageEnabled !== false;
       document.getElementById('gemini-input-usage-enabled').checked = config.geminiInputUsageEnabled !== false;
       document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
+      document.getElementById('compare-msg-button-enabled').checked = config.compareMsgButtonEnabled !== false;
+      syncCompareMsgButtonRow();
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
       document.getElementById('notify-usage-warn').checked = config.notifyUsageWarn !== false;
@@ -436,7 +449,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('chatgpt-folders-enabled').addEventListener('change', autoSave);
   document.getElementById('gemini-sidebar-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('gemini-input-usage-enabled').addEventListener('change', autoSave);
-  document.getElementById('compare-enabled').addEventListener('change', autoSave);
+  document.getElementById('compare-enabled').addEventListener('change', () => { syncCompareMsgButtonRow(); autoSave(); });
+  document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {

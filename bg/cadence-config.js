@@ -22,7 +22,7 @@
 import {
   SEND_MIN_INTERVAL_MS, SEND_HEARTBEAT_FLOOR_MS,
   COLLECT_HARD_FLOOR_MS, HEARTBEAT_FLOOR_MIN_MS, HEARTBEAT_FLOOR_MAX_MS,
-  CADENCE_TTL_MS, IMPRESSION_FLUSH_DEFAULT_MS,
+  CADENCE_TTL_MS, IMPRESSION_FLUSH_DEFAULT_MS, CAP_DROP_KEY,
 } from './constants.js';
 
 // Hardcoded defaults = the standalone-safe base (used when no/invalid/stale override).
@@ -71,10 +71,8 @@ export function setCadenceChangeHandler(fn) { _onChange = fn; }
 // `sinceSent >= floor` always true (over-send). Mandatory even with clamps removed.
 function num(v) { return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null; }
 
-// Orgs the server is dropping at the 3-org cap, remembered so the popup can warn.
-// ⚠️ Key literal is duplicated in popup.js (CAP_DROP_KEY) — a classic global script that
-// cannot import this ESM module (runtime boundary). Rename in BOTH or neither.
-const CAP_DROP_KEY = '_ct_cap_drop';
+// Orgs the server is dropping at the 3-org cap, remembered so the popup can warn (key:
+// CAP_DROP_KEY in constants.js, shared with the popup's banner module).
 const CAP_DROP_MAX = 10;   // bound the list; matches the server's MAX_AVAIL_ORGS
 // Tail of the recordCapDrop serialisation chain (see there). Module-level: one background worker.
 let _capDropQueue = Promise.resolve();

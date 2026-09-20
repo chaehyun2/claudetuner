@@ -270,13 +270,15 @@ const TRANSLATIONS = {
     // {0} is a list of ORGS ("Claude · account@dable.io's Organization"), not providers — naming
     // the provider told users their whole Claude was down while one of its orgs was collecting
     // fine (#1408, 문의 #198).
-    'capdrop_banner_text': '{0} 수집이 안 되고 있습니다. 활성 조직 3개 한도가 찼습니다.',
+    // 🔴 Says it is NOT a fault (#1419): under the provider-error banner this read as a second
+    // failure, and the user chased it instead of the real one.
+    'capdrop_banner_text': '{0} — 활성 조직 3개 한도 밖이라 수집하지 않습니다. 고장이 아닙니다.',
     'capdrop_banner_more': '외 {0}개',
     // Used when an org could not be named AND naming its provider instead would be false.
-    'capdrop_banner_text_count': '조직 {0}개가 수집되지 않고 있습니다. 활성 조직 3개 한도가 찼습니다.',
+    'capdrop_banner_text_count': '조직 {0}개 — 활성 조직 3개 한도 밖이라 수집하지 않습니다. 고장이 아닙니다.',
     'capdrop_banner_btn': '조직 고르기',
     'capdrop_banner_dismiss': '그만 보기',
-    'capdrop_banner_dismiss_title': '이 안내를 숨깁니다. 수집되지 않는 조직이 바뀌면 다시 표시됩니다.',
+    'capdrop_banner_dismiss_title': '이 안내를 숨깁니다. 수집하지 않는 조직이 바뀌면 다시 표시됩니다.',
     'collect_interval': '수집 주기 (분)',
     'plan_optimization': '관리자 플랜 변경 요청',
     'opt_mode': '처리 방식',
@@ -307,9 +309,11 @@ const TRANSLATIONS = {
     'gemini_input_usage_desc': '입력창에 사용량 표시',
     'gemini_usage_hint': '5h/7d 사용률과 예측을 표시합니다. (Gemini 수집이 켜져 있어야 함)',
     // AI Cross-Check (#1452; formerly 「다른 AI에게도 물어보기」 / Multi-AI compare, renamed 2026-09-17) — the card is hidden until flags.json.compare is true (dark launch)
-    'compare_title': 'AI 크로스체크',
-    'compare_enabled_desc': '입력창에 「AI 크로스체크」 버튼 표시',
+    'compare_title': 'AI 크로스체크 (베타)',
+    'compare_enabled_desc': '입력창에 「AI 크로스체크 (베타)」 버튼 표시',
     'compare_enabled_hint': '같은 질문을 로그인된 다른 AI에게도 보내 답변을 나란히 놓고 교차 검증합니다. (Claude·ChatGPT·Gemini 페이지)',
+    'compare_msg_btn_desc': '질문 말풍선 아래에도 버튼 표시 (claude.ai)',
+    'compare_msg_btn_hint': '끄면 입력창 옆 버튼만 남습니다.',
     'display_mode': '표시 방식',
     'display_mode_label': '확장 프로그램 열기 방식',
     'display_mode_sidepanel': '사이드패널',
@@ -955,9 +959,9 @@ const TRANSLATIONS = {
     'perm_banner_text': '{0} collection requires site access permission.',
     'perm_banner_btn': 'Grant',
     // 3-org cap drop: the server accepts the POST but stores nothing for a non-selected org.
-    'capdrop_banner_text': '{0} is not being collected — your 3 active-org limit is full.',
+    'capdrop_banner_text': '{0} — outside your 3 active orgs, so not collected. Nothing is broken.',
     'capdrop_banner_more': 'and {0} more',
-    'capdrop_banner_text_count': '{0} organizations are not being collected — your 3 active-org limit is full.',
+    'capdrop_banner_text_count': '{0} organizations — outside your 3 active orgs, so not collected. Nothing is broken.',
     'capdrop_banner_btn': 'Choose orgs',
     'capdrop_banner_dismiss': 'Dismiss',
     'capdrop_banner_dismiss_title': 'Hides this notice. It returns if a different org starts being dropped.',
@@ -991,9 +995,11 @@ const TRANSLATIONS = {
     'gemini_input_usage_desc': 'Show usage in the input area',
     'gemini_usage_hint': 'Shows 5h/7d usage and prediction. (Requires Gemini collection enabled)',
     // AI Cross-Check (#1452; formerly 「다른 AI에게도 물어보기」 / Multi-AI compare, renamed 2026-09-17) — the card is hidden until flags.json.compare is true (dark launch)
-    'compare_title': 'AI Cross-Check',
-    'compare_enabled_desc': 'Show the "AI Cross-Check" button in the composer',
+    'compare_title': 'AI Cross-Check (Beta)',
+    'compare_enabled_desc': 'Show the "AI Cross-Check (Beta)" button in the composer',
     'compare_enabled_hint': 'Sends the same question to the other AIs you are signed in to and shows the answers side by side so you can cross-check them. (Claude, ChatGPT and Gemini pages)',
+    'compare_msg_btn_desc': 'Also show the button under each question (claude.ai)',
+    'compare_msg_btn_hint': 'Off leaves only the button next to the composer.',
     'display_mode': 'Display Mode',
     'display_mode_label': 'Extension open style',
     'display_mode_sidepanel': 'Side Panel',
