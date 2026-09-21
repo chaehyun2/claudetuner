@@ -276,9 +276,17 @@ export function installPort(ctx) {
         for (const col of state.columns.values()) {
           if (col.status === 'streaming') { col.status = 'done'; ctx.setBadge(col, 'col_done', 'is-done'); ctx.foldActivity(col.turns[col.turns.length - 1], true); ctx.paintAssistant(col); ctx.settleTurn(col.turns[col.turns.length - 1]); ctx.renderColumnActions(col); }
         }
-        // Every column of this round failed (not by the user's Stop) → say so once, above the columns.
+        // No answer anywhere (not by the user's Stop) → say so once, above the columns: every
+        // column ASKED this round failed and no other visible column holds an answer (status
+        // 'done') — a not-signed-in column on the first SEND or a column skipped by a 전체
+        // follow-up holds none, so the banner still fires there. NOT when a non-target column
+        // still holds an answer: a single-column retry (「이 열만 다시 보내기」 leaves the other
+        // columns untouched) that fails shows its own inline error + retry in that column — the
+        // page-level 「어느 AI에서도」 banner was wrong there (2026-09-21 user report: one Gemini
+        // retry failed while Claude/ChatGPT had answered).
         const live = state.roundTargets.map((p) => state.columns.get(p)).filter((c) => c && !c.node.hidden);
-        if (live.length && live.every((c) => c.status === 'error') && live.some((c) => c.errorCode !== CODE_ABORTED)) {
+        const answeredElsewhere = [...state.columns.values()].some((c) => !c.node.hidden && !state.roundTargets.includes(c.id) && c.status === 'done');
+        if (live.length && !answeredElsewhere && live.every((c) => c.status === 'error') && live.some((c) => c.errorCode !== CODE_ABORTED)) {
           ctx.showNotice('error', [t('all_failed'), t('all_failed_desc')]);
         }
         if (live.length) {

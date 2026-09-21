@@ -31,15 +31,22 @@
 // of ui/compare/history.js for the contract; the public names stay exported from this file.
 //
 // Page shape (2026-09-20 chat layout, user decision — chathub-style): topbar (중지 · 새 대화) →
-// notices → empty state (intro + example chips, before the first send) → columns → ONE composer,
-// the dock at the viewport bottom. Before the first CONSUME_OK the dock holds the QUESTION
+// notices → columns → ONE composer, the dock (empty state = intro + example chips, then the
+// composer card) at the viewport bottom. Before the first CONSUME_OK the dock holds the QUESTION
 // composer (#cmp-question, 원본 제외 · 시크릿 대화 toggles); from the first CONSUME_OK it holds the
 // FOLLOW-UP composer (#cmp-followup-input, the routing checkboxes) — two sections in one dock,
-// one shown at a time (updateControls). The question itself is drawn INSIDE every column that
-// received it, as a right-aligned bubble at the top of the thread (renderQuestionBubbles) —
-// display only: it is never a stored turn (provenance / history / retry read state.question and
-// the first-round rule exactly as before). 새 대화 closes the port — the SW contract makes that the
-// session's end — and rebuilds the pre-send state.
+// one shown at a time (updateControls).
+// Hero layout (2026-09-21, user decision A — over "collapse the columns only"): BEFORE the first
+// accepted send the dock sits at the TOP, right under the notices, and the columns are a thin
+// strip of heads under it (`#compare-root.is-hero`, compare.css ── hero ──) — three tall empty
+// columns over a composer at the bottom hid where to type. commitPrompt (the first CONSUME_OK,
+// a loaded session) moves the dock below the columns and drops the class; releasePrompt (새 대화)
+// puts it back. `?q=` entry is still pre-session → hero with the prefilled composer.
+// The question itself is drawn INSIDE every column that received it, as a right-aligned bubble
+// at the top of the thread (renderQuestionBubbles) — display only: it is never a stored turn
+// (provenance / history / retry read state.question and the first-round rule exactly as before).
+// 새 대화 closes the port — the SW contract makes that the session's end — and rebuilds the
+// pre-send state.
 //
 // UX batch 3 (2026-09-17, .omc/handoffs/ux3-contract.md): the column head's provider name links
 // to the site (B) and shows the account plan from COMPARE_STATUS.providers[p].plan (A); follow-up
@@ -92,6 +99,8 @@ export function mountComparePage(deps) {
   const t = makeT(lang);
   const root = doc.getElementById('compare-root');
   if (!root) return null;
+  const HERO_CLASS = 'is-hero'; // on the root before the first accepted send (hero layout, see the header)
+  const FOCUS_CLASS = 'is-focus'; // on the root while one column is shown wide (focus mode, see setColumnFocus)
   doc.title = t('page_title');
   doc.documentElement.setAttribute('lang', lang);
 
@@ -126,6 +135,7 @@ export function mountComparePage(deps) {
     storedColumns: null,  // `compareColumns` from storage.sync (validated colIds), null = none / not read yet
     modelSelectSeq: 0,    // per-page monotonic suffix for a later column's model select id (never reused)
     pickerFor: null,      // colId whose picker popover is open (null = closed)
+    focusedCol: null,     // colId shown at full width (focus mode, setColumnFocus); null = the grid. Page-local, never stored
     followupTargets: new Set(), // colIds the next follow-up goes to (C); every participant checked = 「전체」 (AC21 skip rule)
     pendingFollowupCol: null, // colId whose column composer sent the follow-up in flight (null = the dock) — a CONSUME_FAIL hands the draft back to that column's input
     question: '',         // the first-round text as sent (snapshot at click; the card freezes to it on CONSUME_OK)
@@ -199,7 +209,7 @@ export function mountComparePage(deps) {
     syncQuotaNotice, quotaExhaustedTitle, betaReset, renderResetOffer, requestReset, columnFor, setBadge, waitingSeconds,
     ttftSeconds, paintBadge, lastAssistantTurn, setServedModel, waitingColumns, countdownColumns, syncWaitTimer, tickWaiting,
     errorLineText, retireCountdown, sendKindFor, ensureDefaultColumns, ensureLayout, columnChoices, addColumnByUser, removeColumnByUser,
-    chooseColumn, saveLayout, readLayout, removeColumn, renderColumns, anyGate, syncZeroTargetsNotice, followupPlan,
+    chooseColumn, saveLayout, readLayout, removeColumn, renderColumns, setColumnFocus, toggleColumnFocus, syncFocusButton, anyGate, syncZeroTargetsNotice, followupPlan,
     renderFollowupTargets, followupTargetText, updateControls, resetSession, refreshQuota, refreshStatus, setChecking, readStatus,
     autoRefresh, removeAutoRefreshListeners, sendInitial, sendFollowup, mirrorDraft, bumpStatusEpoch,
     currentStatusReadSeq,
@@ -388,11 +398,12 @@ export function mountComparePage(deps) {
   qRow.appendChild(sendBtn);
   qCard.appendChild(controls);
   // Empty state (chathub batch 1, C1): a page opened without `?q` — the web shell's plain entry —
-  // showed one placeholder line and nothing else. Above the columns, centred: one line saying what
-  // the page does (with the free limit once the status knows it — never a hardcoded number) and
-  // EXAMPLE_CHIP_COUNT example prompts that fill the composer. Gone from the first accepted send
-  // (commitPrompt; a loaded session commits the same way) and back with an empty composer after
-  // 「새 대화」 (releasePrompt — Codex 8R #2).
+  // showed one placeholder line and nothing else. Directly above the composer, inside the dock
+  // (2026-09-21 user decision — it used to sit centred above the columns), centred: one line saying
+  // what the page does (with the free limit once the status knows it — never a hardcoded number)
+  // and EXAMPLE_CHIP_COUNT example prompts that fill the composer. Gone from the first accepted
+  // send (commitPrompt; a loaded session commits the same way) and back with an empty composer
+  // after 「새 대화」 (releasePrompt — Codex 8R #2). Appended to the dock below (its first child).
   const examples = el('div', 'cmp-examples');
   examples.id = 'cmp-examples';
   examples.hidden = q.length > 0;
@@ -400,7 +411,6 @@ export function mountComparePage(deps) {
   examples.appendChild(examplesIntro);
   const exampleChips = el('div', 'cmp-examples-chips');
   examples.appendChild(exampleChips);
-  root.appendChild(examples);
   Object.assign(ctx, { qCard, qCopyBtn, qInput, qRow, controls, excludeLabel, excludeInput, incognitoLabel, incognitoInput, incognitoGlyph, qHint, sendBtn, examples, examplesIntro, exampleChips });
   /**
    * The language's server pool as usable items, or null when there is none / too few: each item
@@ -476,7 +486,9 @@ export function mountComparePage(deps) {
    * First CONSUME_OK (and a history load): the session is committed — the question composer
    * leaves the dock (the follow-up composer shows through updateControls), the empty state goes,
    * and the question is what the columns show (renderQuestionBubbles, once the columns hold their
-   * turns). `is-committed` on the dock is the CSS hook for the follow-up face.
+   * turns). `is-committed` on the dock is the CSS hook for the follow-up face. The layout switch
+   * (hero → chat, see the header): the dock leaves the top for its place between the columns and
+   * the footer, and the root drops `is-hero` (the columns grow back to the shell).
    */
   function commitPrompt(text) {
     state.question = text;
@@ -484,6 +496,8 @@ export function mountComparePage(deps) {
     qHint.hidden = true;
     dock.classList.add('is-committed');
     examples.hidden = true;
+    root.classList.remove(HERO_CLASS);
+    root.insertBefore(dock, footer); // after the columns; the footer stays last
   }
   /** New chat: an empty question composer again (the inverse of commitPrompt); the bubbles went with the columns (resetColumn). */
   function releasePrompt() {
@@ -493,6 +507,8 @@ export function mountComparePage(deps) {
     qCopyBtn.hidden = true;
     qCard.appendChild(qCopyBtn); // back to its parking place (the bubble that held it went with the column)
     dock.classList.remove('is-committed');
+    root.classList.add(HERO_CLASS);
+    root.insertBefore(dock, columnsBox); // hero again: the composer above the collapsed columns
     autoGrow(qInput);
     examples.hidden = false; // an empty composer again: the intro + chips come back (8R #2)
     renderExampleChips(); // …re-picked: a new trio for the new conversation
@@ -618,16 +634,20 @@ export function mountComparePage(deps) {
     focusQuietly(next);
   });
 
-  // The dock (compare.css .cmp-dock): docked to the viewport bottom so nothing can push the
-  // composer below the fold. Two faces, one shown at a time (updateControls): the question
-  // composer (qCard, before the session) and the follow-up composer (its routing boxes visible —
-  // the meta row — plus the caption).
+  // The dock (compare.css .cmp-dock): from the first accepted send, docked to the viewport bottom
+  // so nothing can push the composer below the fold; BEFORE it (hero layout, see the header) it
+  // sits above the columns — built there (`root.insertBefore(dock, columnsBox)` + `is-hero` on
+  // the root) and moved by commitPrompt / releasePrompt, the only two layout switches. Two faces,
+  // one shown at a time (updateControls): the question composer (qCard, before the session) and
+  // the follow-up composer (its routing boxes visible — the meta row — plus the caption).
   const followup = makeFollowupComposer(FOLLOWUP_ID_BOTTOM, 'cmp-card cmp-composer cmp-composer-compact');
   const dock = el('div', 'cmp-dock');
   dock.id = 'cmp-dock';
+  dock.appendChild(examples); // the empty-state intro + chips ride the dock, right above the composer
   dock.appendChild(qCard);
   dock.appendChild(followup.section);
-  root.appendChild(dock);
+  root.insertBefore(dock, columnsBox);
+  root.classList.add(HERO_CLASS);
   Object.assign(ctx, { followup, dock });
 
   const footer = el('footer', 'cmp-footer');
@@ -929,6 +949,18 @@ export function mountComparePage(deps) {
     removeBtn.setAttribute('aria-label', t('col_remove'));
     removeBtn.addEventListener('click', () => { if (!removeBtn.hidden) removeColumnByUser(col.id); });
     tools.appendChild(removeBtn);
+    // ⤢ (focus mode, 2026-09-21 user decision A): widens THIS column in place — every other column
+    // collapses to a 48px rail (compare.css ── focus ──). Hidden before the session (the hero has
+    // nothing to widen) and on narrow screens (CSS); reads ⤡ 「원래 크기로」 while this column is the
+    // focused one (syncFocusButton).
+    const focusBtn = el('button', 'cmp-btn cmp-btn-sm cmp-col-focus');
+    focusBtn.type = 'button';
+    focusBtn.hidden = true;
+    // No stopPropagation: the column-node listener is a no-op after the toggle (focus is this column
+    // or none), and the document-level outside-click closers (history panel, summary popover, picker)
+    // must see this click like any other (substitute review 후속 1).
+    focusBtn.addEventListener('click', () => { if (!focusBtn.hidden) toggleColumnFocus(col.id); });
+    tools.appendChild(focusBtn);
     // Item 5 (contract I): 「대화 복사」 — this column's question + every turn as markdown (the same
     // builder as 「전체 복사」 over one column). Shown once the column holds an answer (syncCopyAll).
     const copyColBtn = copyButton(() => columnMarkdown(col), { kind: COPY_KIND_COLUMN, provider, label: t('copy_column'), aria: t('copy_column_aria', meta.label) });
@@ -953,6 +985,9 @@ export function mountComparePage(deps) {
     modelHint.hidden = true;
     head.appendChild(modelHint);
     node.appendChild(head);
+    // A rail (focus mode: some OTHER column is focused) takes the focus on click — anywhere on it,
+    // the rail shows nothing but the dot, the name and the badge. Inert outside focus mode.
+    node.addEventListener('click', () => { if (state.focusedCol && state.focusedCol !== col.id) setColumnFocus(col.id); });
     // Usage mini gauges (2026-09-18, user request): the account's 5h / 7d utilisation for this
     // provider, from status.providers[p].usage — the same numbers the popup's overview cards
     // draw, in a one-line strip under the head. Hidden when nothing was collected; a no-limits
@@ -1076,7 +1111,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, pickerBtn, removeBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -1368,6 +1403,7 @@ export function mountComparePage(deps) {
   function removeColumn(colId) {
     const col = state.columns.get(colId);
     if (!col || col.id !== colId) return;
+    if (state.focusedCol === colId) setColumnFocus(null); // a wide column that goes takes the focus mode with it
     state.columns.delete(colId);
     state.columnIds = state.columnIds.filter((id) => id !== colId);
     state.followupTargets.delete(colId);
@@ -1387,6 +1423,7 @@ export function mountComparePage(deps) {
       renderPickerLabel(col);
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
       col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncFocusButton(col);
       // Provider-level state on the FIRST column of the provider only (cmp-columns §0): plan pill,
       // gauges, gate box. A sibling shows the shared-account chip in that slot instead.
       const first = firstColumnOf(p);
@@ -1404,6 +1441,46 @@ export function mountComparePage(deps) {
       else { clear(col.body); col.gate = null; setBadge(col, null); }
     }
     addColBtn.hidden = state.sessionStarted || state.columnIds.length >= MAX_COLUMNS;
+  }
+  /**
+   * Focus mode (열 포커스, 2026-09-21 user decision A — in place, no DOM moves): `state.focusedCol`
+   * names the column shown at full width; every other column is a 48px rail (compare.css ── focus ──:
+   * `is-focus` on the root, `is-focused` on the column). Page-local, never stored; entered only once
+   * the session started (the hero has nothing to widen — `is-hero` and `is-focus` never meet) and
+   * left by ⤡ / Escape / a rail click (moves it) / 새 대화 / the focused column's removal.
+   * `colId` null (or unknown) = back to the grid.
+   */
+  function setColumnFocus(colId) {
+    const target = colId ? state.columns.get(colId) : null;
+    const next = state.sessionStarted && target && target.id === colId ? colId : null;
+    if (next === state.focusedCol) return;
+    const prev = state.focusedCol;
+    state.focusedCol = next;
+    root.classList.toggle(FOCUS_CLASS, !!next);
+    for (const col of state.columns.values()) { col.node.classList.toggle('is-focused', col.id === next); syncFocusButton(col); }
+    // Columns that were rails (display:none bodies) lost their scroll offsets while hidden; once the
+    // layout is back, put each one where the reader left it — following columns to their end, a
+    // scrolled-up / anchored one keeps its place and its pill (the DONE rule, port.js) (후속 3).
+    raf(() => {
+      for (const col of state.columns.values()) {
+        if (col.id === next || !col.body) continue;
+        if (!col.followAnchored && !col.userScrolledUp) scrollColumnToEnd(col); else syncJumpButton(col);
+      }
+    });
+    if (next) track('col_focus', { provider: target.provider, on: 1 });
+    else track('col_focus', { provider: parseColId(prev).provider, on: 0 });
+  }
+  /** ⤢ / ⤡: focus this column, or back to the grid when it is the focused one. */
+  function toggleColumnFocus(colId) { setColumnFocus(state.focusedCol === colId ? null : colId); }
+  /** The head's ⤢ button: hidden before the session; ⤡ + 「원래 크기로」 on the focused column. */
+  function syncFocusButton(col) {
+    const focused = state.focusedCol === col.id;
+    col.focusBtn.hidden = !state.sessionStarted;
+    col.focusBtn.textContent = focused ? '⤡' : '⤢';
+    const label = t(focused ? 'col_unfocus' : 'col_focus');
+    col.focusBtn.title = label;
+    col.focusBtn.setAttribute('aria-label', label);
+    col.focusBtn.setAttribute('aria-pressed', focused ? 'true' : 'false');
   }
   /** Some column is gated, or the extension itself is signed out — a status re-read could change something. */
   function anyGate() {
@@ -1590,6 +1667,7 @@ export function mountComparePage(deps) {
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
       col.pickerBtn.disabled = state.sending;
       col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncFocusButton(col);
     }
     addColBtn.hidden = state.sessionStarted || state.columnIds.length >= MAX_COLUMNS;
     if (state.pickerFor && (state.sending || (state.sessionStarted && !state.columns.get(state.pickerFor).modelKnown))) closePicker();
@@ -1674,6 +1752,7 @@ export function mountComparePage(deps) {
     state.pendingFollowupCol = null;
     state.summaryPending = null;
     state.judgeChoice = null;
+    setColumnFocus(null); // before sessionStarted is read again: the grid comes back with the hero
     closeSummaryPop();
     closeHistoryPanel();
     syncHistoryButton(null); // count re-read from the last good list (Codex hist 1R #9)
@@ -1732,7 +1811,22 @@ export function mountComparePage(deps) {
   historyBtn.addEventListener('click', () => { if (historyPanel.hidden) openHistoryPanel(); else closeHistoryPanel(); });
   historyClearBtn.addEventListener('click', clearHistory);
   if (typeof doc.addEventListener === 'function') {
+    // Escape leaves focus mode — only when nothing else owns the key: a picker / column composer
+    // Escape arrives defaultPrevented, the history panel and the summary popover are checked here
+    // (this listener runs before theirs — registration order).
+    doc.addEventListener('keydown', (e) => {
+      if (!e || e.key !== 'Escape' || !state.focusedCol || e.defaultPrevented) return;
+      if (state.pickerFor || !historyPanel.hidden || !summaryPop.hidden) return;
+      setColumnFocus(null);
+    });
     doc.addEventListener('keydown', (e) => { if (e && e.key === 'Escape' && !historyPanel.hidden) closeHistoryPanel(); });
+    // Focus mode is a ≥721px layout (compare.css ── focus ──): when the viewport drops into the
+    // single-column range the mode ends rather than lingering as a stale class whose only effect
+    // would be a `col_focus` event on every click in another column (substitute review 후속 2).
+    try {
+      const narrow = win && typeof win.matchMedia === 'function' ? win.matchMedia('(max-width: 720px)') : null;
+      if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', (e) => { if (e.matches) setColumnFocus(null); });
+    } catch { /* no matchMedia (tests) */ }
     doc.addEventListener('click', (e) => {
       if (historyPanel.hidden || !e || !e.target) return;
       const inside = (node) => { for (let n = node; n; n = n.parentNode) if (n === historyPanel || n === historyBtn) return true; return false; };
@@ -2027,7 +2121,7 @@ export function mountComparePage(deps) {
   readLayout().then(() => refreshStatus());
 
   // Exposed for the flow guard only.
-  return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession, fitEntry };
+  return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession, fitEntry, setColumnFocus };
 }
 
 // ── bootstrap (real page only) ──

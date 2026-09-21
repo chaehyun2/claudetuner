@@ -138,16 +138,20 @@
 //
 // Beta usage stats + beta reset (2026-09-19, .omc/handoffs/cmp-beta-contract.md §2 — the SW half):
 //   consume  — `POST /api/compare/consume` now carries a JSON body `{kind, targets, models, round?,
-//              src?, session_id?, ext_version?}`: `kind` is what the page said (COMPARE_KINDS: the page decides
+//              src?, session_id?, ext_version?, q_len?, q_script?, q_lines?, q_code?, q_url?}`: `kind` is what the page said (COMPARE_KINDS: the page decides
 //              send / followup / summary / retry / resume) or, for an older page / garbage, derived
 //              here (SEND with a resume map → 'resume', SEND → 'send', FOLLOWUP → 'followup');
 //              `targets`/`models` describe the READY providers only (what the debit buys, the model
 //              each runs on — id|null); `round` the page's round id (integer 0..ROUND_MAX, else
 //              omitted); `src` the page's provider src when known (omitted otherwise); `session_id`
 //              the page's `session` when it has the SESSION_ID_RE shape (omitted otherwise, §5);
-//              `ext_version` the manifest version (`runtime.getManifest()`, omitted when unreadable).
+//              `ext_version` the manifest version (`runtime.getManifest()`, omitted when unreadable);
+//              `q_*` the question's content-free SIGNALS (#1562, questionSignals — a length bucket
+//              floor, the dominant script id, a line-count bucket floor, and two 0/1 flags for code
+//              and links; omitted for 'summary' and for an empty text).
 //              🔴 The AC18 order is untouched: the body is built from `ready` right before the same
-//              consume() call, nothing moves. Never an email, never the question.
+//              consume() call, nothing moves. Never an email, never the question — the q_* fields
+//              describe the question, and are one-way by construction (bucket / enum / boolean).
 //   outcome  — the consume 200 body's `event_id` (an integer, else "no event") names the round; the
 //              SW collects per-provider results while the fan-out runs (ok from DONE, code from
 //              ERROR, ttft_ms at the first CHUNK, total_ms at DONE/ERROR, model from MODEL / DONE)
@@ -261,6 +265,11 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'summarize',
   // Beta reset (cmp-beta contract): the page reports a successful COMPARE_RESET.
   'quota_reset',
+  // Focus mode (2026-09-21): a column widened (`on: 1`) / the grid restored (`on: 0`), with the provider id.
+  'col_focus',
+  // Gemini <FollowUp> chips (#1572): a chip filled that column's input (`provider` only). The page
+  // emitted this under a `cmp_` name the allow-list never held (1.32.2 batch review 후속 1).
+  'followup_chip',
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
 
@@ -314,6 +323,11 @@ export const COMPARE_CTA_FLAG_FIELD = 'compare_cta';
 export const COMPARE_SUMMARY_FLAG_FIELD = 'compare_summary';
 export const COMPARE_FLAG_CACHE_KEY = 'ct_compare_flag';
 export const COMPARE_FLAG_TTL_MS = 60 * 60 * 1000;
+// A cache row stamped in the future is not ours: `at` comes from Date.now() at write time, so
+// anything beyond a small clock skew was hand-written (a "force on for a year" row from a
+// dark-launch test, 2026-09-21) — such a row would never expire and would freeze every gate it
+// lacks. Beyond this skew the row is a miss and the flags are fetched again.
+export const COMPARE_FLAG_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 // Server-provided example prompts for the page's empty state (2026-09-21, #1517): the same CDN,
 // the same 1h TTL cache and the same fail-safe as the flags — `{v:1, ko:[{q, tag}], en:[{q, tag}]}`
@@ -675,14 +689,145 @@ export function sanitizeCompareEvent(name, params) {
   return { name: COMPARE_EVENT_PREFIX + name, params: clean };
 }
 
+// ── Question signals (#1562) ────────────────────────────────────────────────────────────
+// What the consume body may say ABOUT a question, never the question. The decision (2026-09-21)
+// was NOT to collect question text: the extension's position is "usage metrics only, we never read
+// your conversations", and shipping prompt text would make that false for every user at once.
+// These five derived facts answer the product questions ("is it used for code? by non-Korean
+// speakers? are people pasting documents?") while being one-way: a bucket, a script name and three
+// booleans cannot be turned back into a question.
+//
+// Each value is computed HERE, in the SW, from the text runSend already holds, and is BOUNDED by
+// construction — a bucket floor from a fixed list, a script id from a fixed list, 0/1 — so no
+// free text can reach the wire through this path even if `text` is hostile. `questionSignals` is
+// pure and exported so test/compare-send-order-guard.mjs can pin the mapping directly.
+// Buckets are DESCENDING floors: the reported value is the floor of the bucket the number falls in
+// (a 300-character question reports 200, i.e. "200-999"), so the wire never carries an exact size.
+export const Q_LEN_BUCKETS = Object.freeze([4000, 1000, 200, 50, 0]);
+export const Q_LINE_BUCKETS = Object.freeze([20, 5, 2, 1]);
+// The scripts the signal can report. `other` covers everything unlisted AND a text with no letters
+// at all (digits, punctuation, emoji) — "we could not tell", not a claim about the language.
+export const Q_SCRIPTS = Object.freeze(['ko', 'ja', 'zh', 'latin', 'cyrillic', 'arabic', 'deva', 'other']);
+// A question longer than this is measured up to the cap only: the buckets top out at 4000 anyway,
+// so scanning a megabyte of pasted text per send would buy nothing.
+const Q_SCAN_MAX = 20000;
+// Looks-like-code: a fenced block, a line that ends the way code lines do, or a line that opens
+// with a keyword IN ITS CODE SHAPE (`function f(`, `def f(`, `const x =`, `import … from`,
+// `SELECT … FROM`) — a bare keyword list fired on English (`return my money`, Codex 1R #1), and
+// the heuristic is meant to read the shape of the text, not its words. Coarse on purpose — a
+// false positive costs a slightly wrong ratio, and the alternative (sending the text to find out)
+// is the thing we decided against.
+// 🔴 COST IS BOUNDED BY STRUCTURE, not by regex care: this runs synchronously in the SW right
+// before consume, and two drafts of a single /m regex over the whole text were each super-linear
+// on a shape nobody had thought of (a newline run — 608ms; a CR run — `^` matches after `\r` too;
+// then `import` + 2,000 spaces — 1.56s from `\s+[^\r\n]+\s+` all eating the same spaces; Codex
+// 1R #2 / 2R). So: the text is split into lines on EVERY JS line terminator (what `^`/m means),
+// at most Q_CODE_LINES_MAX of them are looked at, the opener regex sees at most Q_CODE_OPEN_MAX
+// characters of a line, and the ending check is a trimEnd + last-char test. Whatever the regex
+// does, it does it on ≤ 120 characters, ≤ 400 times.
+const Q_LINE_BREAK_RE = /\r\n|[\r\n\u2028\u2029]/;
+const Q_CODE_LINES_MAX = 400;
+const Q_CODE_OPEN_MAX = 120;
+const Q_CODE_OPEN_RE = /^[ \t]*(?:function\b[^(]{0,40}\(|def[ \t]+\w+[ \t]*\(|(?:const|let|var)[ \t]+\w+[ \t]*=|import[ \t]+\S.{0,100}?\bfrom[ \t]+['"]|#include[ \t]*[<"]|<\?php|SELECT[ \t]+\S.{0,100}?\bFROM\b)/;
+const Q_CODE_END_RE = /[{};]$/;
+function looksLikeCode(text) {
+  if (text.includes('```')) return true;
+  for (const line of text.split(Q_LINE_BREAK_RE, Q_CODE_LINES_MAX)) {
+    if (Q_CODE_END_RE.test(line.trimEnd())) return true;
+    if (Q_CODE_OPEN_RE.test(line.length > Q_CODE_OPEN_MAX ? line.slice(0, Q_CODE_OPEN_MAX) : line)) return true;
+  }
+  return false;
+}
+const Q_URL_RE = /\bhttps?:\/\/\S|\bwww\.\S/i;
+// Removed before the script count ONLY (the flags above are read from the original): a URL and a
+// fenced block are latin characters that say nothing about the language the user writes in — left
+// in, 「이 링크 요약해줘 https://…」 reports `latin` and the "do non-Korean speakers use this"
+// question gets the wrong answer.
+const Q_SCRIPT_STRIP_RE = /```[\s\S]*?(?:```|$)|`[^`\n]*`|\bhttps?:\/\/\S+|\bwww\.\S+/gi;
+const Q_SCRIPT_RE = Object.freeze({
+  hangul: /[가-힣ᄀ-ᇿ㄰-㆏]/g,
+  kana: /[぀-ゟ゠-ヿ]/g,
+  han: /[一-鿿㐀-䶿]/g,
+  latin: /[A-Za-zÀ-ɏ]/g,
+  cyrillic: /[Ѐ-ӿ]/g,
+  arabic: /[؀-ۿ]/g,
+  deva: /[ऀ-ॿ]/g,
+});
+
+/**
+ * Code points in `text`, counted only up to `cap` (the top bucket floor — past it every count
+ * buckets the same, so nothing more is learned). A UTF-16 unit count of 2·cap or more is at least
+ * `cap` code points without a scan; below that the walk is bounded by 2·cap units. `[...text]` on
+ * the whole input built an array of every code point (≈179 MB for a 5M-emoji paste, Codex 1R #2).
+ */
+function codePointsUpTo(text, cap) {
+  if (text.length >= cap * 2) return cap;
+  let n = 0;
+  for (const _ of text) if (++n >= cap) return cap;
+  return n;
+}
+
+/** The bucket floor `n` falls in, from DESCENDING floors; the last floor for anything below. */
+function bucketFloor(n, floors) {
+  for (const floor of floors) if (n >= floor) return floor;
+  return floors[floors.length - 1];
+}
+const countOf = (text, re) => (text.match(re) || []).length;
+
+/**
+ * Content-free signals for one question, or null when there is no text to describe.
+ * `{ q_len, q_script, q_lines, q_code, q_url }` — bucket floor, script id, bucket floor, 0|1, 0|1.
+ * Length and line count are measured on the TRIMMED text in code points (a pasted document is
+ * lines, an emoji is one character), so the numbers mean what their names say. The script is read
+ * from the PROSE only (URLs and fenced code removed — see Q_SCRIPT_STRIP_RE).
+ */
+export function questionSignals(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const scanned = trimmed.length > Q_SCAN_MAX ? trimmed.slice(0, Q_SCAN_MAX) : trimmed;
+  const prose = scanned.replace(Q_SCRIPT_STRIP_RE, ' ');
+  const counts = {
+    hangul: countOf(prose, Q_SCRIPT_RE.hangul),
+    kana: countOf(prose, Q_SCRIPT_RE.kana),
+    han: countOf(prose, Q_SCRIPT_RE.han),
+    latin: countOf(prose, Q_SCRIPT_RE.latin),
+    cyrillic: countOf(prose, Q_SCRIPT_RE.cyrillic),
+    arabic: countOf(prose, Q_SCRIPT_RE.arabic),
+    deva: countOf(prose, Q_SCRIPT_RE.deva),
+  };
+  // Kana and Han are ONE bucket for the comparison (Japanese prose mixes them), split afterwards:
+  // any kana at all means Japanese — Chinese text has none.
+  const groups = [
+    ['ko', counts.hangul],
+    [counts.kana > 0 ? 'ja' : 'zh', counts.kana + counts.han],
+    ['latin', counts.latin],
+    ['cyrillic', counts.cyrillic],
+    ['arabic', counts.arabic],
+    ['deva', counts.deva],
+  ];
+  let script = 'other';
+  let best = 0;
+  for (const [id, n] of groups) if (n > best) { script = id; best = n; }
+  return {
+    q_len: bucketFloor(codePointsUpTo(trimmed, Q_LEN_BUCKETS[0]), Q_LEN_BUCKETS),
+    q_script: script,
+    q_lines: bucketFloor(scanned.split('\n').length, Q_LINE_BUCKETS),
+    q_code: looksLikeCode(scanned) ? 1 : 0,
+    q_url: Q_URL_RE.test(scanned) ? 1 : 0,
+  };
+}
+
 // The `POST /api/compare/consume` body (cmp-beta contract §2) from what runSend resolved: `kind`
 // as the page said it (COMPARE_KINDS) or derived from the message shape; `targets` = the READY
 // providers; `models` = each one's resolved model (id|null — the key OMITTED when the id fails
 // MODEL_ID_RE, since null would say Auto); `round` only when a valid
 // integer; `src` only when a known provider; `session_id` only when the page's `session` has the
-// SESSION_ID_RE shape (contract §5); `ext_version` only when readable. Plain data —
-// never an email, never the question text — and pure, so the guard can pin its shape.
-export function buildConsumeBody({ kind, followup, resumeAsked, src, session, ready, models, round, extVersion }) {
+// SESSION_ID_RE shape (contract §5); `ext_version` only when readable; `q_*` the question's
+// content-free signals (questionSignals) for a round that carries a user question — omitted for
+// 'summary', whose text the page composes, so the statistics describe what USERS type. Plain
+// data — never an email, never the question text — and pure, so the guard can pin its shape.
+export function buildConsumeBody({ kind, followup, resumeAsked, src, session, ready, models, round, extVersion, text }) {
   const derived = followup ? 'followup' : (resumeAsked ? 'resume' : 'send');
   // `ready` = the round's colIds (cmp-columns: `provider:model` / `provider:auto`), ≤ MAX_COLUMNS.
   const body = { kind: COMPARE_KINDS.includes(kind) ? kind : derived, targets: ready.slice(0, MAX_COLUMNS), models: {} };
@@ -696,6 +841,8 @@ export function buildConsumeBody({ kind, followup, resumeAsked, src, session, re
   if (COMPARE_PROVIDERS.includes(src)) body.src = src;
   if (typeof session === 'string' && SESSION_ID_RE.test(session)) body.session_id = session;
   if (typeof extVersion === 'string' && extVersion) body.ext_version = extVersion.slice(0, EXT_VERSION_MAX);
+  const signals = body.kind === 'summary' ? null : questionSignals(text);
+  if (signals) Object.assign(body, signals);
   return body;
 }
 
@@ -1039,12 +1186,17 @@ export function createCompareController({
   async function readFlagCache() {
     try {
       const cached = (await storage.get(COMPARE_FLAG_CACHE_KEY))?.[COMPARE_FLAG_CACHE_KEY];
-      // An older cache row has no `cta` (written before the field existed): it reads as false — the
-      // fail-safe direction — until the TTL brings the next fetch.
-      // `cta` / `summary` are read as conjunctions with `on` here too (Codex batch-1 #5): a row that
-      // was written as {on:false, summary:true} — a hand edit, an older writer — must not answer a
-      // gate the page itself does not have.
-      if (cached && typeof cached.on === 'boolean' && now() - (cached.at || 0) < COMPARE_FLAG_TTL_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true };
+      // Only a row THIS writer could have produced is a hit: all three booleans present and `at`
+      // within (now - TTL, now + skew]. A row missing a field (an older writer, a hand edit) or
+      // stamped in the future is a MISS and the flags are fetched again — never "false until the
+      // TTL", which for a future-stamped row meant never (2026-09-21: a hand-written
+      // {on:true, at:<+1y>} row hid the strip button and 「요약·비교」 for good).
+      // `cta` / `summary` are read as conjunctions with `on` (Codex batch-1 #5): a row written as
+      // {on:false, summary:true} must not answer a gate the page itself does not have.
+      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.at === 'number') {
+        const age = now() - cached.at;
+        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true };
+      }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
@@ -2077,6 +2229,7 @@ export function createCompareController({
         const c = await consume(buildConsumeBody({
           kind: message.kind, followup, resumeAsked, src: message.src, session: message.session,
           ready: readyIds(), models: Object.fromEntries(ready.map((col) => [col.id, col.model])), round: message.round, extVersion: manifestVersion(),
+          text,   // for the q_* SIGNALS only (questionSignals) — the text itself never leaves here
         }));
         // The SW's own analytics event (ux3 item 8): the debit's outcome and how many columns it
         // bought. Never the text, never who.

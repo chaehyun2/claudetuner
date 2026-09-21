@@ -487,6 +487,7 @@ export function installHistory(ctx) {
     state.sending = false; state.resuming = false; state.resumed = false; state.idleEnded = false;
     state.summaryPending = null; state.judgeChoice = null; ctx.closeSummaryPop();
     state.roundInFlight = null;
+    ctx.setColumnFocus(null); // a loaded session opens as the grid (the focus was about the session being left)
     state.roundSeq = 0; // re-derived from the stored rounds below (never a leftover of the session being left)
     state.activeRound = entry.activeRound; // the comparison the user was working on when it was saved (validated; null = latest comparison round)
     state.firstRound = entry.firstRound; // the SEND round — the only round whose request is the question card

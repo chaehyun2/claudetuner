@@ -79,6 +79,23 @@ const TABLE_SEP_PREFIX_RE = /^\|[ \t:|-]+$/;
 // matches ONLY the slice from the LAST `<` (see preClean) — that is what makes it linear.
 const CITE_TAG_RE = /<\/?cite\b[^<>\n]{0,200}>/gi;
 const CITE_TAIL_RE = /^<\/?cite\b[^<>\n]{0,200}$/i;
+// Gemini's suggested follow-up questions, appended to an answer as
+// `<FollowUp label="Want to know …?" query="코 안쪽에 염증이 …"/>` (#1571) — a UI element, not
+// answer text. They are a markdown-it INLINE RULE (followUpRule): a code span or a fence holding
+// the tag is code (the backticks rule / the block parser own it first — Codex 1R #1), a complete
+// tag becomes a `followup` token the emitter does not draw (renderAnswer collects them for the
+// column's chips). A HALF-TYPED tag at the END OF THE WHOLE ANSWER — `<Follow`, `<FollowUp
+// label="a < b` — is cut by cutFollowUpTail() before tokenizing (next to the cite tail in the
+// same spot) so the streaming answer never shows it (Codex 1R #3); that cut is text-level on
+// purpose: an inline rule only sees its own span (a link label, a table cell, one paragraph) and
+// would take the end of any of those for the end of the answer (Codex 2R). The attribute run is
+// quoted strings or non-angle characters (a `<` INSIDE a quoted value does not end the tag),
+// bounded, and each alternative is disjoint by its first character so the scan is linear.
+const FOLLOWUP_TAG_RE = /<FollowUp\b((?:"[^"\n]{0,1000}"|[^<>"\n]){0,2000})\/?>/iy;
+const FOLLOWUP_TAIL_RE = /^<FollowUp\b(?:"[^"\n]{0,1000}"|[^<>"\n]){0,2000}(?:"[^"\n]{0,1000})?$/i;
+const FOLLOWUP_NAME = '<FollowUp';
+const FOLLOWUP_ATTR_RE = /\b(label|query)\s*=\s*"([^"]{0,1000})"/gi;
+export const FOLLOWUP_MAX = 8;
 // A break tag in any spelling ON ONE LINE (`<br\n>` is not one: the newline must stay a line
 // break for the block parser — Codex 3R #3); markBreaks checks the backslash run before it
 // (`\<br>` is escaped text, `\\<br>` is an escaped backslash and a real tag — parity, Codex 2R #4).
@@ -110,10 +127,65 @@ md.validateLink = isSafeLinkTarget;
  */
 export function preClean(text) {
   let out = text.replace(CITE_TAG_RE, '');
-  // Mid-stream half tag: `…<cite index="38-` — only the slice from the LAST `<` is tested.
+  // Mid-stream half tag: `…(cite index="38-` — only the slice from the LAST `<` is tested.
   const lt = out.lastIndexOf('<');
   if (lt >= 0 && CITE_TAIL_RE.test(out.slice(lt))) out = out.slice(0, lt);
   return out;
+}
+
+/** The attribute string's `label`/`query` (last one of each wins, `&quot;`/`&#39;`/`&amp;` decoded). */
+function followUpAttrs(attrs) {
+  const out = { label: '', query: '' };
+  FOLLOWUP_ATTR_RE.lastIndex = 0;
+  let m;
+  while ((m = FOLLOWUP_ATTR_RE.exec(attrs)) !== null) {
+    out[m[1].toLowerCase()] = m[2].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
+  }
+  return out;
+}
+
+/**
+ * A half-typed `<FollowUp …` at the very end of the answer (streaming) is cut: the LAST `<FollowUp`
+ * when everything after it is an unfinished tag (an open quote, `<` inside it included), else the
+ * LAST `<` when what follows is a prefix of the name (`<Fo`, at least two chars). Only the end of
+ * the WHOLE text — a `<Fo` inside a link label, a table cell or a mid-answer paragraph is text.
+ */
+export function cutFollowUpTail(src) {
+  const lower = src.toLowerCase();
+  const at = lower.lastIndexOf('<followup');
+  if (at >= 0 && FOLLOWUP_TAIL_RE.test(src.slice(at))) return src.slice(0, at);
+  const lt = src.lastIndexOf('<');
+  if (lt >= 0) {
+    const rest = src.slice(lt);
+    if (rest.length >= 2 && rest.length < FOLLOWUP_NAME.length && FOLLOWUP_NAME.toLowerCase().startsWith(rest.toLowerCase())) return src.slice(0, lt);
+  }
+  return src;
+}
+
+/**
+ * markdown-it inline rule for `<FollowUp …/>` (see FOLLOWUP_TAG_RE). At a `<`: a complete tag is
+ * consumed and, when it names a query or a label, recorded in `state.env.followUps` (at most
+ * FOLLOWUP_MAX, a repeated question dropped) — nothing is pushed, so nothing renders. Anything
+ * else at `<` is text (the streaming tail is cutFollowUpTail's, on the whole text).
+ */
+function followUpRule(state, silent) {
+  const src = state.src;
+  const pos = state.pos;
+  if (src.charCodeAt(pos) !== 0x3C /* < */) return false;
+  const max = state.posMax;
+  FOLLOWUP_TAG_RE.lastIndex = pos;
+  const m = FOLLOWUP_TAG_RE.exec(src);
+  if (m && m.index === pos && pos + m[0].length <= max) {
+    if (!silent) {
+      const env = state.env;
+      const { label, query } = followUpAttrs(m[1]);
+      const key = query || label;
+      if (key && Array.isArray(env.followUps) && env.followUps.length < FOLLOWUP_MAX && !env.followUps.some((f) => (f.query || f.label) === key)) env.followUps.push({ label, query });
+    }
+    state.pos = pos + m[0].length;
+    return true;
+  }
+  return false;
 }
 
 /** True when the `|` at `row[at]` is escaped: preceded by an ODD run of backslashes (`\|` yes, `\\|` no). */
@@ -341,6 +413,76 @@ function texRule(state, silent) {
   return true;
 }
 md.inline.ruler.before('escape', 'tex', texRule);
+md.inline.ruler.before('escape', 'followup', followUpRule);
+
+// ── CJK-friendly emphasis (#1577) ────────────────────────────────────────────────────────────
+// CommonMark's closing `**` must be RIGHT-FLANKING: not after whitespace, and — when it follows
+// punctuation — followed by whitespace or punctuation. English never trips on that (`**x (y)** is`
+// has a space), but a Korean particle sits right on the word: `**칩셋 모델(M4 vs M4 Pro/Max)**에`
+// — `)` before, `에` after — and the bold never closes (live Gemini answer, 2026-09-21). markdown-it
+// follows the spec to the letter, so the flanking test below is the spec's with ONE addition,
+// the markdown-cjk-friendly rule (reimplemented to keep the vendored build byte-identical and
+// dependency-free): in the "punctuation on one side needs whitespace or punctuation on the
+// other" clause, a CJK code point (Hangul, Han, Kana, fullwidth forms) on the other side
+// satisfies it too — CJK has no spaces between words, so a CJK character IS the word boundary
+// that clause is looking for. CJK is NOT punctuation itself: the first version made it so, and
+// then the punctuation clause's CONSTRAINT bit CJK as well — `**최소**8GB`, `メモリは**最小**8GB`
+// (a label right before a number) stopped closing and `주간_보고서_템플릿.docx` grew an <em>
+// (substitute reviewer, 2026-09-21). The `_` intraword rules (can_open/can_close below) are the
+// spec's, untouched: `_밑줄_가` is text, as it is in every CommonMark renderer.
+const { isMdAsciiPunct, isPunctChar, isWhiteSpace } = md.utils;
+function isCjkCodePoint(c) {
+  return (c >= 0x1100 && c <= 0x11FF) || (c >= 0x2E80 && c <= 0x2FFF) || (c >= 0x3000 && c <= 0x30FF) || (c >= 0x3130 && c <= 0x318F)
+    || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF)
+    || (c >= 0xFF00 && c <= 0xFFEF) || (c >= 0x20000 && c <= 0x3134F);
+}
+function isPunct(c) {
+  return isMdAsciiPunct(c) || isPunctChar(String.fromCodePoint(c));
+}
+/** The code point ending at `end` (exclusive) in `src`, surrogate pair aware; 0x20 before the start. */
+function codePointBefore(src, end) {
+  if (end <= 0) return 0x20;
+  const lo = src.charCodeAt(end - 1);
+  if ((lo & 0xFC00) === 0xDC00 && end >= 2) { const hi = src.charCodeAt(end - 2); if ((hi & 0xFC00) === 0xD800) return 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00); }
+  return (lo & 0xF800) === 0xD800 ? 0xFFFD : lo;
+}
+function codePointAt(src, at, max) {
+  if (at >= max) return 0x20;
+  const c = src.codePointAt(at);
+  return (c & 0xF800) === 0xD800 ? 0xFFFD : c;
+}
+/** markdown-it StateInline#scanDelims with the CJK helper in the flanking clauses (see above). */
+function scanDelimsCjk(start, canSplitWord) {
+  const max = this.posMax;
+  const marker = this.src.charCodeAt(start);
+  let pos = start;
+  while (pos < max && this.src.charCodeAt(pos) === marker) pos++;
+  const lastChar = codePointBefore(this.src, start);
+  const nextChar = codePointAt(this.src, pos, max);
+  const isLastPunct = isPunct(lastChar);
+  const isNextPunct = isPunct(nextChar);
+  const isLastWhite = isWhiteSpace(lastChar);
+  const isNextWhite = isWhiteSpace(nextChar);
+  // The spec's two clauses, each with the CJK helper on the "other side" (markdown-cjk-friendly).
+  // On the OPENING side the helper is for runs of two or more (`**`, `__`, `~~`) only: a single
+  // `*` between a CJK character and a parenthesis is arithmetic far more often than italics in
+  // an AI answer (`단가*(1+세율)*수량`, `単価*(1+税率)*数量` — Codex 1R) and must not OPEN. On the
+  // CLOSING side it applies to every run: the italic half of `***강조(x)*는 계속**입니다` has to
+  // close at `)*는` (Codex 2R). A closer adds no OPENING capability, but it can still pair with a
+  // single `*` the spec already lets open — `/tmp/*이고 … (1+세율)*수량` renders as italics from the
+  // wildcard to the multiplication (Codex 3R; a known trade-off, pinned in the guard). The live
+  // defect was bold; a single `*` before a particle (`*이탤릭*은`) already closed under the spec's
+  // own rule, since the particle is not punctuation.
+  const cjkOpenHelper = pos - start >= 2 && isCjkCodePoint(lastChar);
+  const leftFlanking = !isNextWhite && (!isNextPunct || isLastWhite || isLastPunct || cjkOpenHelper);
+  const rightFlanking = !isLastWhite && (!isLastPunct || isNextWhite || isNextPunct || isCjkCodePoint(nextChar));
+  return {
+    can_open: leftFlanking && (canSplitWord || !rightFlanking || isLastPunct),
+    can_close: rightFlanking && (canSplitWord || !leftFlanking || isNextPunct),
+    length: pos - start,
+  };
+}
+md.inline.State.prototype.scanDelims = scanDelimsCjk;
 
 /** `text` as text nodes, each wrapped `<br>` (see markBreaks) as a <br> element; stray marks dropped. */
 function appendText(parent, text, d) {
@@ -455,27 +597,39 @@ function emitBlocks(tokens, root, d) {
   }
 }
 
-/** Render `text` (markdown) into a DocumentFragment of `doc`. Never throws on odd input. */
-export function renderMarkdown(text, doc) {
+/**
+ * Render `text` (markdown) into `{ fragment, followUps }` of `doc`: the DOM and the Gemini
+ * follow-up suggestions the inline rule collected (`[{label, query}]`, source order, ≤ FOLLOWUP_MAX).
+ * Never throws on odd input.
+ */
+export function renderAnswer(text, doc) {
   const d = doc || document;
   const frag = d.createDocumentFragment();
-  let src = preClean(String(text == null ? '' : text).replace(/\r\n?/g, '\n'));
+  let src = cutFollowUpTail(preClean(String(text == null ? '' : text).replace(/\r\n?/g, '\n')));
   let overflow = '';
   if (src.length > MAX_CHARS) { overflow = src.slice(MAX_CHARS); src = src.slice(0, MAX_CHARS); }
   src = markBreaks(src);
+  let followUps = [];
   try {
-    let tokens = md.parse(src, {});
+    let env = { followUps: [] };
+    let tokens = md.parse(src, env);
     // The quirks are planned from this parse's block map and, when one applies, the edited text is
     // parsed once more (only an answer with a multi-line cell or a streaming table start pays).
     const edited = normalizeTables(src, tokens);
-    if (edited !== null) tokens = md.parse(edited, {});
+    if (edited !== null) { env = { followUps: [] }; tokens = md.parse(edited, env); }
     const body = d.createDocumentFragment();
     emitBlocks(tokens, body, d);
     frag.appendChild(body);
+    followUps = env.followUps;
   } catch {
     // The tokenizer is bounded, but a failure must never blank the answer: the text, as text.
     frag.appendChild(d.createTextNode(src));
   }
   if (overflow) frag.appendChild(d.createTextNode(overflow));
-  return frag;
+  return { fragment: frag, followUps };
+}
+
+/** Render `text` (markdown) into a DocumentFragment of `doc`. Never throws on odd input. */
+export function renderMarkdown(text, doc) {
+  return renderAnswer(text, doc).fragment;
 }

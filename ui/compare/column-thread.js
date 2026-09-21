@@ -7,7 +7,7 @@
 
 import { PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
-import { renderMarkdown } from '../md-render.js';
+import { renderAnswer } from '../md-render.js';
 import { COMPARE_I18N } from '../compare-i18n.js';
 
 /** Installs the column-thread slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
@@ -68,12 +68,19 @@ export function installColumnThread(ctx) {
     const turn = col.turns[col.turns.length - 1];
     if (!turn || turn.role !== 'assistant') return;
     clear(turn.node);
+    // Gemini's `<FollowUp label query/>` tags (#1571) are collected by the markdown pass (an inline
+    // rule — never drawn as text) and shown as chips under the answer; a chip fills THIS column's
+    // composer with the question.
+    let followUps = [];
     try {
-      turn.node.appendChild(renderMarkdown(turn.text, doc));
+      const rendered = renderAnswer(turn.text, doc);
+      turn.node.appendChild(rendered.fragment);
+      followUps = rendered.followUps;
     } catch {
       // md-render is bounded, but a renderer failure must never blank the answer: fall back to text.
       turn.node.appendChild(doc.createTextNode(turn.text));
     }
+    if (followUps.length) turn.node.appendChild(renderFollowUps(col, followUps));
     if (turn.errorText) {
       const line = el('p', 'cmp-col-error', ctx.errorLineText(turn));
       if (turn.errorTitle) line.title = turn.errorTitle;
@@ -82,6 +89,51 @@ export function installColumnThread(ctx) {
     }
     if (turn.stalled) turn.node.appendChild(el('p', 'cmp-col-stalled', cutNote(turn)));
     maybeFollowStream(col, turn);
+  }
+
+  /**
+   * The follow-up chips under an answer (#1571): one button per `{label, query}`, text = the query
+   * (what will be sent; the label is Gemini's English caption) or the label when there is none.
+   * Model text lands ONLY in text nodes — the question travels to the click handler by closure,
+   * never through an attribute (the xss guard's attribute allowlist holds for these too).
+   * Click: open this column's composer with the question filled in and focused, so Enter sends it
+   * through the same path as a typed follow-up (quota, gates, session rules unchanged — a chip
+   * never sends by itself, that would spend a counted send on one click). When the column cannot
+   * take a follow-up (columnAskable false: dead, gated, no session — its composer may still be
+   * open read-only with a preserved draft, Codex 1R #2), the dock composer at the bottom gets it
+   * instead. A draft the user already typed is never overwritten: the chip fills an EMPTY
+   * composer (or one already holding this question) and otherwise only focuses it.
+   */
+  function renderFollowUps(col, followUps) {
+    const wrap = el('div', 'cmp-followups');
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', t('followups_label'));
+    const intro = el('span', 'cmp-followups-label', t('followups_label'));
+    wrap.appendChild(intro);
+    for (const f of followUps) {
+      const question = f.query || f.label;
+      const chip = el('button', 'cmp-example-chip cmp-followup-chip');
+      chip.type = 'button';
+      chip.appendChild(el('span', 'cmp-example-chip-text', question));
+      chip.addEventListener('click', () => fillFollowUp(col, question));
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+  /** Put `question` into the column's composer (opened) or, when it cannot follow up, the dock's; focus it. */
+  function fillFollowUp(col, question) {
+    ctx.noteActivity();
+    track('followup_chip', { provider: col.provider }); // the SW prefixes `cmp_` (COMPARE_EVENT_PREFIX)
+    const askable = columnAskable(col);
+    if (askable) setColumnAsk(col, true);
+    const input = askable ? col.askInput : doc.getElementById('cmp-followup-input');
+    if (!input) return;
+    const draft = String(input.value || '').trim();
+    if (!draft || draft === question) {
+      input.value = question;
+      autoGrow(input);
+    }
+    ctx.focusQuietly(input);
   }
 
   // A turn record: `node` is the text node the paints touch (paintAssistant clears and refills it),
@@ -124,7 +176,21 @@ export function installColumnThread(ctx) {
     const node = el('div', 'cmp-turn cmp-turn-assistant is-streaming');
     const turn = { role: 'assistant', text: '', node, root: null, copyBtn: null, ...(kind === TURN_KIND_SUMMARY ? { kind: TURN_KIND_SUMMARY } : {}), ...turnExtra(extra) };
     const root = el('div', 'cmp-turn-block cmp-turn-block-assistant');
-    if (turn.kind === TURN_KIND_SUMMARY) { root.classList.add('cmp-turn-block-summary'); root.appendChild(el('span', 'cmp-summary-badge', t('summary_badge'))); }
+    if (turn.kind === TURN_KIND_SUMMARY) {
+      root.classList.add('cmp-turn-block-summary');
+      const badgeRow = el('div', 'cmp-summary-badge-row');
+      badgeRow.appendChild(el('span', 'cmp-summary-badge', t('summary_badge')));
+      // 「넓게 보기」 (focus mode, 2026-09-21): the verdict carries tables a 340px column squeezes —
+      // one click widens the judge column (setColumnFocus). Shown once the answer settled
+      // (settleTurn, like the copy button); CSS hides it on the focused column and on narrow screens.
+      const widenBtn = el('button', 'cmp-summary-widen', t('summary_widen'));
+      widenBtn.type = 'button';
+      widenBtn.hidden = true;
+      widenBtn.addEventListener('click', () => ctx.setColumnFocus(col.id));
+      badgeRow.appendChild(widenBtn);
+      root.appendChild(badgeRow);
+      turn.widenBtn = widenBtn;
+    }
     // The process panel sits above the answer, hidden until the first activity event arrives.
     const activity = ctx.makeActivityPanel();
     root.appendChild(activity.box);
@@ -165,6 +231,7 @@ export function installColumnThread(ctx) {
   /** The turn stopped streaming: offer its copy button when there is something to copy. */
   function settleTurn(turn) {
     if (turn && turn.copyBtn) turn.copyBtn.hidden = !turn.text;
+    if (turn && turn.widenBtn) turn.widenBtn.hidden = !turn.text; // a summary verdict: 「넓게 보기」 once there is one
     ctx.syncCopyAll();
   }
 

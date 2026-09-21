@@ -160,6 +160,9 @@ export function installExport(ctx) {
         else if (turn.role === 'skipped') blocks.push(`_${t('col_skipped')}_`);
         else {
           if (turn.kind === TURN_KIND_SUMMARY) blocks.push(`**${t('summary_badge')}**`);
+          // The markdown SOURCE, Gemini's trailing `<FollowUp …/>` tags included (#1571): the export
+          // is the answer as sent, and stripping them by text would also strip a code example that
+          // shows the tag (Codex 1R #1). The chips are the page's rendering, not the answer.
           if (turn.text) blocks.push(turn.text);
           if (turn.errorText) blocks.push(`_${turn.errorText}_`);
           if (turn.stalled) blocks.push(`_${ctx.cutNote(turn)}_`);

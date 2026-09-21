@@ -144,8 +144,10 @@ button:disabled { cursor: not-allowed; }
    follow-up one; its meta row (.cmp-prompt-actions) holds 원본 제외 · 시크릿 대화 · the key hint. The old
    question card (eyebrow, frozen text) is gone: the question lives in the columns (.cmp-turn-q). ── */
 .cmp-prompt-actions { gap: 14px; }
-/* C1 (chathub batch 1): empty-state intro + example chips — centred above the columns (no `?q`). */
-.cmp-examples { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; margin: 0; padding: 28px 6px 12px; flex-shrink: 0; }
+/* C1 (chathub batch 1): empty-state intro + example chips (no `?q`) — the dock's first child, centred
+   right above the composer card (2026-09-21; it used to sit above the columns). The dock is sticky and
+   in flow (.cmp-columns flex: 1 gives it room), so the block never overlaps the columns. */
+.cmp-examples { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; margin: 0; padding: 6px 6px 8px; flex-shrink: 0; }
 .cmp-examples[hidden] { display: none; }
 .cmp-examples-intro { margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 .cmp-examples-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
@@ -155,6 +157,10 @@ button:disabled { cursor: not-allowed; }
 .cmp-example-chip-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; }
 .cmp-example-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .cmp-example-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Suggested follow-ups under an answer (#1571): the example-chip look, left-aligned, inside the turn. */
+.cmp-followups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 2px; }
+.cmp-followups-label { width: 100%; font-size: 12px; color: var(--text-secondary); }
+.cmp-followup-chip { max-width: 100%; }
 .cmp-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
 .cmp-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0; }
 .cmp-check input:disabled { cursor: not-allowed; }
@@ -272,6 +278,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* ✕ in the tools group: a quiet 30px control, danger on hover. */
 .cmp-col-remove { width: 30px; padding: 0; color: var(--text-secondary); }
 .cmp-col-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+/* ⤢ / ⤡ (focus mode, see ── focus ──): the same quiet 30px control, accent on hover / while pressed. */
+.cmp-col-focus { width: 30px; padding: 0; font-size: 15px; color: var(--text-secondary); }
+.cmp-col-focus:hover:not(:disabled), .cmp-col-focus[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 /* The shared-account chip in the gate / plan slot of a sibling column (the provider UI lives on the first column). */
 .cmp-col-shared { display: block; margin: 8px 14px 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .cmp-col-shared:hover { color: var(--text-primary); background: var(--bg-hover); }
@@ -389,7 +398,12 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-summary-req > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
 .cmp-turn-summary-req > summary:hover { color: var(--text-primary); }
 .cmp-summary-req-text { margin: 8px 0 0; max-height: 240px; overflow: auto; font: inherit; font-size: 12px; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); }
-.cmp-summary-badge { align-self: flex-start; display: inline-flex; align-items: center; height: 22px; padding: 0 9px; margin-bottom: 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11.5px; font-weight: 650; }
+.cmp-summary-badge-row { align-self: flex-start; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.cmp-summary-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11.5px; font-weight: 650; }
+/* 「넓게 보기」 beside the badge (focus mode): a quiet pill; gone on the column that is already wide. */
+.cmp-summary-widen { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-card); color: var(--text-secondary); font-size: 11.5px; font-weight: 600; white-space: nowrap; transition: background-color .15s ease, color .15s ease, border-color .15s ease; }
+.cmp-summary-widen:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-strong); }
+.cmp-col.is-focused .cmp-summary-widen { display: none; }
 /* ── activity panel: the provider's process above the answer (details/summary) ── */
 .cmp-act { align-self: stretch; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); font-size: 12px; color: var(--text-secondary); }
 .cmp-act[hidden] { display: none; }
@@ -444,8 +458,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-composer-target:empty { display: none; }
 /* C4: the caption reads as a chip while the target was preset from a column head (compare.js state.presetTarget). */
 .cmp-composer-target.is-preset { color: var(--accent); background: var(--accent-light); border-radius: var(--radius-pill); padding: 3px 9px; }
-/* The dock: docked to the viewport bottom. It paints the page background under the card so scrolled
-   content never shows through the gap around it (finding C). */
+/* The dock: docked to the viewport bottom from the first accepted send (before it: static at the
+   top, see ── hero ──). It paints the page background under the card so scrolled content never
+   shows through the gap around it (finding C). */
 .cmp-dock { position: sticky; bottom: 0; z-index: 2; background: var(--bg-body); padding-bottom: 8px; flex-shrink: 0; }
 .cmp-composer-row { display: flex; gap: 10px; align-items: flex-end; }
 /* ── composer textareas (question + follow-up faces of the dock) ── */
@@ -476,6 +491,52 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-seg-item > input:focus-visible + .cmp-seg-label { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cmp-seg-item > input:disabled + .cmp-seg-label { opacity: .5; }
 
+/* ── hero (before the first accepted send; compare.js commitPrompt / releasePrompt) ── */
+/* 2026-09-21 user decision A: the dock (intro + chips + composer) sits at the top under the
+   notices and the columns collapse to their head strip (model/plan pickers, gauges, a gate when
+   the account needs one) — three tall empty columns over a bottom composer hid where to type.
+   Scoped to `#compare-root.is-hero`, so the chat-layout rules above take over untouched from
+   the first CONSUME_OK. The id selector also outranks the ── narrow ── block below: the strip
+   stays a strip on a phone too (the narrow `.cmp-col` min-height is a chat-layout value). */
+#compare-root.is-hero .cmp-dock { position: static; padding-bottom: 0; margin-top: 8px; }
+#compare-root.is-hero .cmp-columns { flex: 0 0 auto; min-height: 0; grid-auto-rows: auto; }
+#compare-root.is-hero .cmp-col { min-height: 0; }
+/* An empty body (no gate, no turns) takes no room — the head (+ usage strip) is the whole card.
+   A gate box stays visible (the user must sign in before sending) but as a compact block. */
+#compare-root.is-hero .cmp-col-body:empty { display: none; }
+#compare-root.is-hero .cmp-col-state { height: auto; min-height: 0; padding: 12px 16px; }
+/* 「＋ 열 추가」 keeps the strip's height (grid stretch) instead of a 240px card. */
+#compare-root.is-hero .cmp-add-col { min-height: 48px; }
+/* Nothing to widen before the session (compare.js hides the button too; is-hero and is-focus never meet). */
+#compare-root.is-hero .cmp-col-focus { display: none; }
+
+/* ── focus (열 포커스 모드, 2026-09-21 user decision A — in place, classes only: compare.js setColumnFocus) ── */
+/* One column wide, the others 48px rails. The grid cannot size items one by one, so the row turns
+   into a flex row under `#compare-root.is-focus`: rails `flex: 0 0 48px`, the focused column takes
+   the rest with its reading width capped at 860px and centred. Scoped to ≥ 721px — below that the
+   ── narrow ── block already stacks the columns, so a focus that is still set when the window
+   shrinks changes nothing (the rules simply stop applying), and the ⤢ / 「넓게 보기」 controls hide. */
+@media (min-width: 721px) {
+  #compare-root.is-focus .cmp-columns { display: flex; align-items: stretch; }
+  #compare-root.is-focus .cmp-col.is-focused { flex: 1 1 auto; min-width: 0; }
+  #compare-root.is-focus .cmp-col.is-focused .cmp-col-body > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+  /* A rail: the provider dot, the name (vertical) and the status badge (vertical) on a column-direction
+     head; everything else — pickers, plan, gauges, tools, body, actions, the per-column composer — is
+     gone. The whole rail is a click target (compare.js: the column node's click handler focuses it),
+     so the name link stops taking the pointer. */
+  #compare-root.is-focus .cmp-col:not(.is-focused) { flex: 0 0 48px; width: 48px; min-width: 48px; cursor: pointer; }
+  #compare-root.is-focus .cmp-col:not(.is-focused):hover { background: var(--bg-hover); }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-head { flex-direction: column; flex-wrap: nowrap; align-items: center; gap: 12px; height: 100%; min-height: 0; padding: 12px 0; border-bottom: 0; background: transparent; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-id { flex: 0 0 auto; flex-direction: column; gap: 10px; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-name { height: auto; writing-mode: vertical-rl; pointer-events: none; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-name .cmp-ext-arrow { display: none; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-tools { margin-left: 0; flex-direction: column; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-badge { height: auto; max-height: 220px; width: 26px; padding: 10px 0; writing-mode: vertical-rl; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-picker, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-plan, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model-hint,
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-remove, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-focus, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-copy-col, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-ask-col,
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-usage, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-shared, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-body, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-jump, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-ask { display: none; }
+}
+
 /* ── footer ── */
 /* One 11.5px line (two spans) — a footnote that costs the columns ~24px, not two paragraphs. */
 .cmp-footer { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; padding: 0 4px 8px; flex-shrink: 0; }
@@ -503,6 +564,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
   .cmp-composer-hint { display: none; }
   .cmp-composer-target { max-width: 120px; }
   .cmp-col-name .cmp-ext-arrow { opacity: .7; }
+  /* One column already — nothing to widen (focus mode is a ≥ 721px rule, see ── focus ──). */
+  .cmp-col-focus, .cmp-summary-widen { display: none; }
 }
 
 /* `hidden` must beat every display rule above (.cmp-composer is display:flex — Codex #16). */
