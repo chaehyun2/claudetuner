@@ -71,6 +71,16 @@ AI 사용량 한도는 불투명합니다 — 얼마나 썼는지, 언제 리셋
 - 429 제한 실시간 감지
 </details>
 
+<details open>
+<summary><b>AI 크로스체크</b> — 베타</summary>
+
+- 질문 하나로 **Claude·ChatGPT·Gemini**의 답변을 나란히 — 내 브라우저에서, 이미 로그인된 계정 그대로. API 키 불필요
+- 각 AI 입력창의 버튼 하나로 시작. 후속 질문은 전체 또는 한 열에만, 「요약·비교」로 한 AI에게 나머지 답변을 판정시킬 수 있음
+- 최근 대화(검색·이어가기)와 시크릿 대화(Claude·Gemini는 임시 대화, ChatGPT는 사후에 기록에서 숨김)
+- 무료 하루 30회, [Premium](https://claudetuner.com/pricing/)은 무제한. 질문·답변은 Claude Tuner API로 전송되지 않으며 API는 하루 한도용 횟수만 셈
+- 웹 셸: [claudetuner.com/multiai](https://claudetuner.com/multiai/). 소스: `compare.html`, `bg/compare.js`, `ui/compare*` — 프로바이더 클라이언트는 비공개 `vendor-ai/` 모듈(아래 *수동 설치* 안내 참조)
+</details>
+
 <details>
 <summary><b>플랜 시뮬레이션 & 최적화</b></summary>
 
@@ -144,6 +154,8 @@ git clone https://github.com/chaehyun2/claudetuner.git
 2. **개발자 모드** 활성화
 3. **압축해제된 확장 프로그램을 로드합니다** 클릭 후 클론한 폴더 선택
 
+> **안내 — 이 저장소에 없는 모듈이 하나 있습니다.** `vendor-ai/`(AI 크로스체크가 사용자 대신 Claude·ChatGPT·Gemini 웹 세션과 대화하는 클라이언트)는 비공개 패키지로 **여기에 공개되지 않습니다**. `background.js`가 이 모듈을 import하므로, 이 저장소를 그대로 클론해 **압축해제 확장 프로그램으로 로드하면 동작하지 않습니다**(누락된 import로 서비스 워커가 시작되지 않음). 실행은 Chrome Web Store 빌드로, 이 저장소는 나머지 코드를 읽고 감사하는 용도로 쓰세요. 그 외 모든 파일은 스토어 패키지와 동일합니다(아래 *CWS 빌드 검증* 참조).
+
 ## 작동 방식
 
 ```
@@ -176,6 +188,7 @@ const CT_CONFIG = {
 ## 개인정보 보호
 
 - 대화 내용은 **절대 수집하지 않습니다** — 메시지, 파일, 프롬프트 없음
+- AI 크로스체크: 질문은 내 브라우저에서 내 로그인 세션을 통해 각 AI로 전달되고, Claude Tuner API는 한도용 횟수와 질문의 내용 없는 특성(길이 구간·문자체계·줄수 구간·코드/링크 포함 여부)만 받습니다 — 질문·답변 본문은 받지 않습니다
 - 사용률, 리셋 시각, 플랜 정보, 조직 멤버십만 수집
 - 셀프 서비스 계정 삭제 가능
 - 개인정보처리방침: [claudetuner.com/privacy](https://claudetuner.com/privacy/)
@@ -195,6 +208,9 @@ background.js          Service worker (알람 스케줄링, 메시지 라우팅)
   bg/badge.js          툴바 배지 업데이트
   bg/notifications.js  사용량 알림, 리셋 알림
   bg/analytics.js      GA4 이벤트 트래킹
+  bg/compare.js        AI 크로스체크 서비스 워커 측 (한도, 프로바이더 세션)
+compare.html / ui/     AI 크로스체크 페이지 (claudetuner.com/multiai가 프레임)
+vendor-ai/             프로바이더 웹세션 클라이언트 — 비공개, 이 저장소에 없음
 config.js              중앙 설정 (서버 URL, API 키)
 content.js             Content script (메시지 중계)
 page-script.js         Claude.ai에 주입 (페이지 인증으로 fetch)
@@ -202,7 +218,7 @@ i18n.js                다국어 헬퍼
 _locales/              영어 및 한국어 번역
 ```
 
-**빌드 스텝 없음** — 이 저장소의 소스 파일은 Chrome Web Store에 게시된 것과 동일합니다.
+**빌드 스텝 없음** — 이 저장소의 소스 파일은 Chrome Web Store에 게시된 것과 동일합니다(단 `vendor-ai/`는 비공개라 여기에 없음).
 
 </details>
 

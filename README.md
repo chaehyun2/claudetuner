@@ -71,6 +71,16 @@ AI rate limits are opaque — you don't know how much you've used, when it reset
 - Real-time 429 rate limit detection
 </details>
 
+<details open>
+<summary><b>AI Cross-Check</b> — beta</summary>
+
+- Ask one question and get **Claude, ChatGPT and Gemini** answering side by side, in your own browser through the accounts you are already signed in to — no API keys
+- One button inside each AI's composer; follow up with all columns or one column only; "Summarize & compare" lets one AI judge the others' answers
+- Recent chats (search, continue) and an Incognito mode (temporary chats on Claude & Gemini; ChatGPT chat hidden from history afterwards)
+- Free 30 times a day, unlimited with [Premium](https://claudetuner.com/pricing/). The question and the answers are never sent to Claude Tuner's API — it only counts one comparison against the daily quota
+- Web shell: [claudetuner.com/multiai](https://claudetuner.com/multiai/). Source: `compare.html`, `bg/compare.js`, `ui/compare*` — the provider clients live in the private `vendor-ai/` module (see the note under *Manual install*)
+</details>
+
 <details>
 <summary><b>Plan Simulation & Optimizer</b></summary>
 
@@ -144,6 +154,8 @@ git clone https://github.com/chaehyun2/claudetuner.git
 2. Enable **Developer mode**
 3. Click **Load unpacked** and select the cloned folder
 
+> **Note — one module is not in this repository.** `vendor-ai/` (the web-session clients that AI Cross-Check uses to talk to Claude, ChatGPT and Gemini on your behalf) is a private package and is **not published here**. `background.js` imports it, so a bare clone of this repository will **not load as an unpacked extension** — the service worker fails on the missing import. Use the Chrome Web Store build to run it; use this repository to read and audit everything else. Every other file is identical to the store package (see *Verify CWS Build* below).
+
 ## How It Works
 
 ```
@@ -176,6 +188,7 @@ See [API.md](API.md) for the full server API specification.
 ## Privacy
 
 - **No conversation content** is ever collected — no messages, files, or prompts
+- AI Cross-Check: your question goes from your browser to each AI through your own session; Claude Tuner's API receives only a quota count and content-free characteristics of the question (length range, script, line-count range, has code / link) — never the question or the answers
 - Only usage metrics, reset timestamps, plan info, and organization membership
 - Self-service account deletion available anytime
 - Full privacy policy: [claudetuner.com/privacy](https://claudetuner.com/privacy/)
@@ -195,6 +208,9 @@ background.js          Service worker (alarm scheduling, message routing)
   bg/badge.js          Toolbar badge updates
   bg/notifications.js  Usage alerts, reset notifications
   bg/analytics.js      GA4 event tracking
+  bg/compare.js        AI Cross-Check service worker side (quota, provider sessions)
+compare.html / ui/     AI Cross-Check page (framed by claudetuner.com/multiai)
+vendor-ai/             Provider web-session clients — PRIVATE, not in this repo
 config.js              Centralized config (server URL, API key)
 content.js             Content script (message relay)
 page-script.js         Injected into Claude.ai (fetch with page auth)
@@ -202,20 +218,20 @@ i18n.js                Localization helper
 _locales/              English and Korean translations
 ```
 
-**No build step** — the source files in this repo are identical to what's published on the Chrome Web Store.
+**No build step** — the source files in this repo are identical to what's published on the Chrome Web Store, except `vendor-ai/` (private, not published).
 
 </details>
 
 <details>
 <summary><b>Verify CWS Build</b></summary>
 
-This extension has no build step. The files in this repository are byte-for-byte identical to the Chrome Web Store package, with one intentional difference: `manifest.json` in the private development repo includes a `pages.dev` preview URL in `externally_connectable` that is stripped during publishing.
+This extension has no build step. The files in this repository are byte-for-byte identical to the Chrome Web Store package, with two intentional differences: `manifest.json` in the private development repo includes a `pages.dev` preview URL in `externally_connectable` that is stripped during publishing, and the `vendor-ai/` directory (the AI Cross-Check provider clients) is private and not published here — it is present in the store package but absent from this repository.
 
 To verify:
 
 1. Install the extension from CWS
 2. Find the installed files at `~/Library/Google/Chrome/Default/Extensions/ajnnckikagphjbgpicpoffockabnhond/<version>/`
-3. Compare with this repository (excluding `_metadata/` added by Chrome)
+3. Compare with this repository (excluding `_metadata/` added by Chrome and `vendor-ai/`, which is not published)
 
 </details>
 
