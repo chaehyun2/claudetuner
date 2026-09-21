@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)' },
-    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)' },
+    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)', cmp_msg_tip: '이 질문을 Claude·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)' },
+    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)', cmp_msg_tip: 'Send this question to Claude & Gemini too and cross-check the answers (AI Cross-Check)' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -225,10 +225,34 @@
     return seg(`${label} ${Math.round(util)}%`, color, note) + bar;
   }
 
-  const GEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
+  // Gear glyph (Feather "settings"). Canonical copy = ui/cmp-msg-rows.js GEAR_ICON_PATH (the
+  // per-question row's gear draws it from there); the literal is the #1421 fallback for a load
+  // without that shared script, and test/compare-button-guard.mjs asserts the two are identical.
+  const GEAR_ICON_PATH = (globalThis.__ctCmpMsgRows && globalThis.__ctCmpMsgRows.GEAR_ICON_PATH) || 'M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z';
+  const GEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="' + GEAR_ICON_PATH + '"/></svg>';
   // Chat-bubble icon (matches the popup's Feedback button).
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
+  // The button may not cost the strip a line (CORE.fitCompareButton): measured on every mount and
+  // again whenever the strip's width changes. Guarded for a tab whose usage-shared.js predates
+  // these helpers (dynamic re-injection, #1421) — then the button simply behaves as before.
+  let _fitStop = null;
+  let _fitTarget = null;
+  function ensureCompareFit(strip) {
+    if (!CORE || !CORE.fitCompareButton) return;
+    // A superseded instance's observer answers null → no-op on the newest instance's button.
+    const find = () => (isCurrent() ? strip.querySelector('.' + CMP_BTN_CLASS) : null);
+    CORE.fitCompareButton(strip, find());
+    if (_fitTarget === strip) return;
+    if (_fitStop) _fitStop();
+    _fitTarget = strip;
+    _fitStop = CORE.observeCompareFit(strip, find);
+  }
+  function stopCompareFit() {
+    if (_fitStop) _fitStop();
+    _fitStop = null;
+    _fitTarget = null;
+  }
   // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
   // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17)
   // next to the gear. Gate = the CDN dark-launch flag (asked ONCE per page
@@ -242,6 +266,9 @@
   let _cmpFlag = null;        // null = not asked yet; true/false = SW answer (cached per page load)
   let _cmpFlagPending = false;
   let _cmpEnabled = true;     // compareEnabled option
+  // compareMsgButtonEnabled option (default on): gates ONLY the per-question rows under the
+  // bubbles (syncMessageButtons), never the strip button — off leaves the composer button alone.
+  let _cmpMsgEnabled = true;
 
   const cmpAllowed = () => _cmpFlag === true && _cmpEnabled;
 
@@ -288,7 +315,72 @@
       try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-cg-strip-inner') || strip).appendChild(btn);
+    ensureCompareFit(strip);
   }
+
+  // Per-question rows (2026-09-21, user request): the same label under every user message
+  // bubble, carrying THAT question (placement:'message'), plus a gear that opens the options page
+  // at the cross-check card. The row/gear/ownership/relabel logic is the SHARED classic script
+  // ui/cmp-msg-rows.js (also used by input-usage.js on claude.ai); this block only says what is
+  // chatgpt-specific. Live chatgpt.com tree of one user turn (verified 2026-09-21):
+  //   section[data-turn="user"] > div > div (GP)
+  //     div (P) > div[data-message-id][data-message-author-role="user"] (MSG) > div > div > div (grey bubble)
+  //     div (ACTION ROW, flex justify-end, always laid out) > div (hover-only copy/share/edit buttons)
+  // The row is APPENDED to the action row: same 40px line right under the bubble, right-aligned
+  // next to the hover actions, zero extra vertical space. Fallback when that row is not found
+  // (chatgpt.com re-shaped the turn): right after MSG, the same degradation claude.ai has.
+  //
+  // 🔴 SOFT dependency (#1421): ui/cmp-msg-rows.js is listed before this file in CHATGPT_INJECT,
+  // but a persisted registration from an older build can run this file without it. Then
+  // `__ctCmpMsgRows` is undefined and the rows are silently off — never a throw, and the strip
+  // (with its own compare button) is untouched.
+  const CMP_MSG_SELECTOR = '[data-message-author-role="user"]';
+
+  /** Plain text of one user bubble (MSG innerText = the question only; attachments and the
+   *  action row live outside it — verified 2026-09-21); '' when empty. */
+  function readMessageText(bubble) {
+    return String(bubble.innerText || bubble.textContent || '').trim();
+  }
+
+  /** Where the row goes: the turn's action row (identified by its buttons) as its last child,
+   *  else right after the bubble. */
+  function anchorOfBubble(bubble) {
+    const p = bubble.parentElement;
+    const act = p && p.nextElementSibling;
+    if (act && act.querySelector('button')) return { parent: act, before: null };
+    return p ? { parent: p, before: bubble.nextSibling } : null;
+  }
+
+  /** The bubble a row belongs to, from the row's current position: the row's previous sibling in
+   *  the fallback placement, else the bubble inside the element before the row's action row. */
+  function bubbleOfRow(row) {
+    const prev = row.previousElementSibling;
+    if (prev && prev.matches(CMP_MSG_SELECTOR)) return prev;
+    const act = row.parentElement;
+    const p = act && act.previousElementSibling;
+    return p ? p.querySelector(CMP_MSG_SELECTOR) : null;
+  }
+
+  const _msgRows = globalThis.__ctCmpMsgRows ? globalThis.__ctCmpMsgRows.create({
+    document, chrome, provider: PROVIDER,
+    bubbleSelector: CMP_MSG_SELECTOR,
+    anchorOf: anchorOfBubble,
+    rowOwnerOf: bubbleOfRow,
+    readText: readMessageText,
+    t,
+    gen: () => _gen,
+    isCurrent: () => _gen === globalThis.__ctCgInputGen,
+    // compareMsgButtonEnabled gates ONLY these rows (the strip button stays on cmpAllowed alone).
+    allowed: () => cmpAllowed() && _cmpMsgEnabled,
+    gearIconPath: GEAR_ICON_PATH,
+  }) : null;
+
+  // Driven by the page-wide MutationObserver tick (new messages arrive as DOM mutations, coalesced
+  // into one rAF) and by renderStrip (flag / option / language changes), never by a timer of its own.
+  function syncMessageButtons() {
+    if (_msgRows) _msgRows.sync();
+  }
+
   // Both branches below replace the strip's markup, so the compare button is (re)attached here,
   // after the markup, rather than inside each branch.
   function renderStripInto(strip) {
@@ -301,7 +393,15 @@
     // only a weekly limit (e.g. ChatGPT Pro 5x 'prolite', where h5 is null).
     const use7d = _data && _data.h5 == null && _data.d7 != null;
     if (!_data || (_data.h5 == null && _data.d7 == null)) {
-      strip.innerHTML = `<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(t('no_data'))}</span>`;
+      // 🔴 "수집 중" is a claim. When the background knows collection is FAILING it says so
+      // (`err`, bg/sidebar-usage.js noDataReason) and this line must not contradict it (#1592).
+      // `CORE.noDataReason` may be absent in a tab whose usage-shared.js predates this script
+      // (dynamic re-injection, #1421) — then the old line is the honest fallback.
+      const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'ChatGPT') : t('no_data')) : t('no_data');
+      // Same `.ct-cg-strip-inner` as the data branch: mountCompareButton appends into it, and the
+      // seg + button spacing rule in chatgpt-usage.css keys off that adjacency. Bare in the strip,
+      // the button sat flush against the sentence.
+      strip.innerHTML = `<div class="ct-cg-strip-inner"><span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(text)}</span></div>`;
       return;
     }
     // 🔴 Labelled by the span the PROVIDER reported, not by the slot. ChatGPT Free and Go report a
@@ -347,6 +447,7 @@
   function renderStrip() {
     const strip = document.getElementById(STRIP_ID);
     if (strip) renderStripInto(strip);
+    syncMessageButtons();
   }
 
   function updateCountdowns() {
@@ -383,6 +484,7 @@
     if (el) el.remove();
     _anchorEl = null;
     _mounted = false;
+    stopCompareFit();
   }
 
   function ensureMounted() {
@@ -420,6 +522,9 @@
   function teardown() {
     _enabled = false;
     unmount();
+    // Superseded: the newer instance rebuilds the rows itself (gen ownership). Revoked (still the
+    // newest instance): nobody else will, so the rows with our handlers go too.
+    if (_msgRows && _gen === globalThis.__ctCgInputGen) _msgRows.removeAll();
     _intervals.forEach(clearInterval);
     _intervals = [];
     if (_observer) { _observer.disconnect(); _observer = null; }
@@ -449,7 +554,7 @@
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
-            _data.plan === res.plan) return;
+            _data.plan === res.plan && _data.err === res.err) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang
         // (a Claude-snapshot field that defaults to 'en' for ChatGPT).
@@ -474,6 +579,12 @@
       _cmpEnabled = changes.compareEnabled.newValue !== false;
       ensureCompareFlag();
       renderStrip();
+    }
+    if (changes.compareMsgButtonEnabled) {
+      // Only the per-question rows follow this one; the strip is untouched (syncMessageButtons
+      // removes or rebuilds the rows on its own).
+      _cmpMsgEnabled = changes.compareMsgButtonEnabled.newValue !== false;
+      syncMessageButtons();
     }
     if (changes.chatgptInputUsageEnabled) {
       _enabled = changes.chatgptInputUsageEnabled.newValue !== false;
@@ -500,10 +611,19 @@
   }
 
   let _observer = null;
+  // chatgpt.com mutates on every streamed token; the rows only need one pass per burst, so the
+  // sync is coalesced into a single rAF tick (input-usage.js does the same).
+  let _rowsSyncScheduled = false;
+  function scheduleRowsSync() {
+    if (_rowsSyncScheduled) return;
+    _rowsSyncScheduled = true;
+    requestAnimationFrame(() => { _rowsSyncScheduled = false; if (isCurrent()) syncMessageButtons(); });
+  }
   function startObserver() {
     if (_observer) return;
     _observer = new MutationObserver(() => {
       if (!isCurrent()) { teardown(); return; }
+      scheduleRowsSync(); // the rows do not depend on the strip option
       if (!_enabled) return;
       if (!document.getElementById(STRIP_ID)) { _mounted = false; mount(); }
     });
@@ -512,11 +632,16 @@
 
   // ── Init ──
   function init() {
-    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true, compareEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
       _enabled = cfg.chatgptInputUsageEnabled !== false;
       _cmpEnabled = cfg.compareEnabled !== false;
-      if (_enabled) { requestUsageData(); ensureCompareFlag(); }
+      _cmpMsgEnabled = cfg.compareMsgButtonEnabled !== false;
+      if (_enabled) requestUsageData();
+      // The flag is asked regardless of the usage strip: the per-question rows do not live in the
+      // strip, so a user who switched it off still gets them when the cross-check options are on
+      // (same fix as input-usage.js, 1.32.1 batch review).
+      ensureCompareFlag();
     });
     loadAccount(); // prefill name/email into the inquiry link
 

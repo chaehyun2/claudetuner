@@ -7,12 +7,37 @@ import {
   parseAdditionalLimits, parseModelAvailability, parseReachedType, summarizeLimitBuckets,
   pickScopedModel,
 } from './parse-chatgpt.js';
-import { chatgptUsageShape } from './drift-obs.js';
-import { noteDriftOutcome, buildDriftRider } from './drift-store.js';
+import { chatgptUsageShape, unclassifiedCode } from './drift-obs.js';
+import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
          noteProviderSendError, noteProviderSendOk } from './provider-state.js';
+
+// An OPTIONAL field of the primary snapshot, parsed on its own. Whatever it does, the 5h/7d
+// numbers go out.
+//
+// 🔴 These four parsers used to run inline inside the same try as the primary snapshot, so a shape
+// we had not seen in ONE of them — a gated model's return time, a bucket's reset — threw past the
+// snapshot and the account collected nothing, every cycle (#1592). Each is display-only or
+// observation-only; none of them is worth the numbers. A failure is logged and counted as an
+// unclassified event with its own stage so the readout can still tell "the decoration broke"
+// from "the collection broke".
+function decoration(name, parse, fallback) {
+  try {
+    return parse();
+  } catch (e) {
+    console.warn(`[Claude Tuner] ChatGPT ${name} skipped:`, e && e.message);
+    // Fire-and-forget: noteDriftEvent never throws (drift-store safe()), and awaiting it here
+    // would make a synchronous field initialiser asynchronous. An EVENT, not an outcome: this
+    // cycle's attempt was already counted as a success.
+    // The field is the stage (`decorate:model_usage`), so four different broken fields do not fold
+    // into one `n:4` row the server cannot split (Codex R2). Names are fixed strings ≤ 23 chars,
+    // inside the server's 32-char code rule.
+    noteDriftEvent('chatgpt', { stage: `decorate:${name}`, code: unclassifiedCode('err_chatgpt_unclassified', e) });
+    return fallback;
+  }
+}
 
 // accounts/check exposes the full multi-workspace roster (one entry per account
 // UUID plus a `default` alias for the session's active account) — and it's the
@@ -182,15 +207,15 @@ export async function collectChatGPT(force = false, userManual = false) {
       spendLimit: null,
       extraUsage: null,
       // Per-feature limit buckets (e.g. Codex weekly) — display-only, popup gauges.
-      additionalLimits: parseAdditionalLimits(usage),
+      additionalLimits: decoration('additional_rate_limits', () => parseAdditionalLimits(usage), []),
       // Models the provider is currently gating (empty on a healthy account — see
       // parseModelAvailability: availability, NOT a usage percentage).
-      modelGates: parseModelAvailability(usage),
+      modelGates: decoration('model_usage', () => parseModelAvailability(usage), []),
       // Which limit the account actually ran into, per the provider. null = nothing exhausted,
       // which is the normal state even at 100% on the weekly window (chat is unmetered since 08-06).
-      reachedType: parseReachedType(usage),
+      reachedType: decoration('rate_limit_reached_type', () => parseReachedType(usage), undefined),
       // Raw-array census for server-side observation only — never rendered (#1184).
-      bucketCensus: summarizeLimitBuckets(usage),
+      bucketCensus: decoration('bucket_census', () => summarizeLimitBuckets(usage), null),
     };
 
     // Append to local usage history (for chart display)
@@ -274,6 +299,13 @@ export async function collectChatGPT(force = false, userManual = false) {
       extraUsage: null,
     }));
 
+    // 🔴 THE WORKSPACE LOOP CANNOT TAKE THE PRIMARY ORG WITH IT. By this line the primary snapshot
+    // has gone out (or been gated) and `org` holds the numbers every surface renders from; a throw
+    // below used to fall through to the catch and return `orgs: []` — the server had the
+    // snapshot, the popup and the in-page strip had nothing, forever, and only for accounts that
+    // HAVE extra workspaces (Business/Enterprise). Recorded like any other failure, but the org
+    // list is returned regardless.
+    try {
     for (const ex of extraOrgs) {
       // Gate per workspace uuid so unchanged workspaces only re-send on the
       // heartbeat floor (with usage null there's never a "changed" trigger).
@@ -293,6 +325,10 @@ export async function collectChatGPT(force = false, userManual = false) {
         return null;
       });
       if (res) await exGate.commit();
+    }
+    } catch (e) {
+      console.warn('[Claude Tuner] ChatGPT extra workspaces skipped:', e && e.message);
+      await noteDriftEvent('chatgpt', { stage: 'workspaces', code: unclassifiedCode('err_chatgpt_unclassified', e) });
     }
 
     await noteProviderSuccess('chatgpt', email);
@@ -343,7 +379,7 @@ export async function collectChatGPT(force = false, userManual = false) {
     await noteDriftOutcome('chatgpt', 'error', {
       stage: 'collect',
       code: (storedCode === 'err_chatgpt_collect_failed' && rawMsg.indexOf('err_') !== 0)
-        ? 'err_chatgpt_unclassified'
+        ? unclassifiedCode('err_chatgpt_unclassified', e)
         : storedCode,
     });
     return { success: false, orgs: [] };

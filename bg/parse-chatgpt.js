@@ -34,6 +34,9 @@ const CHATGPT_PLAN_NAMES = {
   education: 'Education', k12: 'Education (K-12)',
 };
 export function chatgptPlanName(code) {
+  // A plan_type that is not a string is not a plan we can name — and `.toLowerCase()` on it threw
+  // past the primary snapshot (Codex R1, `plan_type: 42`). Unknown, not "Free" (#1431).
+  if (code != null && typeof code !== 'string') return null;
   return CHATGPT_PLAN_NAMES[(code || 'free').toLowerCase()] || capitalizeFirst(code || 'free');
 }
 
@@ -133,10 +136,61 @@ export function parseChatGPTScheduledChange(acc) {
   };
 }
 
-// Convert Unix timestamp (seconds) to ISO string, then normalize to minute precision
+// Values at or above this are read as unix MILLISECONDS, below as SECONDS. 1e12 ms is 2001-09,
+// 1e12 s is year 33658 — no real instant sits on the wrong side of the line in either unit.
+const UNIX_MS_THRESHOLD = 1e12;
+// The latest instant this function will admit. Not ECMAScript's own ±8.64e15 ms: normalizeResetTime
+// rounds UP by a minute, and a Date within a minute of the limit throws on the way back out
+// (Codex R1 reproduction: 8639999999999999 → RangeError in setUTCMinutes → toISOString). A reset
+// time a thousand years out is not a reset time either way, so the bound is the year 3000.
+const MAX_INSTANT_MS = Date.UTC(3000, 0, 1);
+
+// An instant the provider sent → unix milliseconds, or null when it is not one.
+function instantToMs(ts) {
+  let ms;
+  if (typeof ts === 'number') {
+    ms = ts < UNIX_MS_THRESHOLD ? ts * 1000 : ts;
+  } else if (typeof ts === 'string') {
+    const s = ts.trim();
+    if (!s) return null;
+    if (/^-?\d+(\.\d+)?$/.test(s)) {
+      // The unix value with quotes on — same units rule as a number.
+      const n = Number(s);
+      ms = n < UNIX_MS_THRESHOLD ? n * 1000 : n;
+    } else {
+      // A date string. Date.parse already answers in ms; re-applying the units rule to it would
+      // read "2000-01-01" (9.4e11 ms) as seconds and land in year 31969 (Codex R1).
+      ms = Date.parse(s);
+    }
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(ms) || ms <= 0 || ms > MAX_INSTANT_MS) return null;
+  return ms;
+}
+
+// Convert a provider instant (documented shape: unix seconds) to an ISO string normalised to
+// minute precision. Null when absent or unreadable.
+//
+// 🔴 NEVER THROWS. This used to be `new Date(ts * 1000).toISOString()`, and `toISOString()` throws
+// a RangeError on an invalid Date — so any `reset_at` / `available_at` that was not a number (a
+// string, an out-of-range value) took down the WHOLE ChatGPT collection for that account, every
+// cycle, inside the same try as the primary 5h/7d numbers. It surfaced only as
+// `err_chatgpt_unclassified`: 100–150 accounts/day (~6–8% of ChatGPT collectors), persistent per
+// account, with the in-page strip saying "수집 중..." forever (#1592). A null reset time is a
+// display gap; a throw here was a lost account.
+//
+// Accepts what a provider plausibly sends for an instant — unix seconds, unix milliseconds, a
+// numeric string, an ISO string — and answers null for everything else. 0 and negatives are
+// "no reset" rather than 1970. The try/catch is the contract stated mechanically: whatever a
+// future change to normalizeResetTime does at the edges, the caller gets null, not a throw.
 export function unixToResetTime(ts) {
-  if (!ts) return null;
-  return normalizeResetTime(new Date(ts * 1000).toISOString());
+  try {
+    const ms = instantToMs(ts);
+    return ms == null ? null : normalizeResetTime(new Date(ms).toISOString());
+  } catch {
+    return null;
+  }
 }
 
 /**

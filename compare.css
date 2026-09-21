@@ -252,11 +252,14 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-gauge-fill { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
 .cmp-gauge-note { font-size: 11px; color: var(--text-secondary); }
 .cmp-col-plan[hidden] { display: none; }
-/* ── column model (cmp-columns, 2026-09-20): picker · ＋ 열 추가 · ✕ · shared-account chip ── */
-/* The picker button sits in the identity group before the session: the model label + a caret. */
-/* cmp-columns: the picker button is the head's model face; the model select behind it keeps the state
-   and is drawn only when no picker is shown (the SW's catalog unknown in-session). */
+/* ── column model (cmp-columns, 2026-09-20): service ▾ · model picker · ＋ 열 추가 · ✕ · shared-account chip ── */
+/* Two controls in the identity group (2026-09-21, split by place): the service ▾ right after the
+   name (pre-session only — opens the three services) and the model face (the model label + a caret,
+   opens THIS provider's models). The model select behind the face keeps the state and is drawn only
+   when no face is shown (the SW's catalog unknown in-session). */
 .cmp-col-picker:not([hidden]) ~ .cmp-model { display: none; }
+.cmp-col-service { width: 24px; height: 30px; padding: 0; font-size: 12px; color: var(--text-secondary); background: var(--bg-subtle); border-color: var(--border); }
+.cmp-col-service:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .cmp-col-picker { height: 30px; padding: 0 8px 0 10px; gap: 4px; font-size: 12px; font-weight: 500; color: var(--text-secondary); background: var(--bg-subtle); border-color: var(--border); }
 .cmp-col-picker:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .cmp-col-picker-text { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -271,6 +274,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-col-picker-opt:hover:not(:disabled), .cmp-col-picker-opt:focus-visible { background: var(--bg-hover); outline: none; }
 .cmp-col-picker-opt[aria-selected="true"] { color: var(--accent); background: var(--accent-light); font-weight: 600; }
 .cmp-col-picker-opt:disabled { color: var(--text-secondary); opacity: .55; cursor: not-allowed; }
+/* The service list (is-service): three short rows with the provider dot — narrow, hugging the ▾. */
+.cmp-col-picker-pop.is-service { right: auto; min-width: 150px; }
+.cmp-col-picker-pop.is-service .cmp-col-picker-opt { display: flex; align-items: center; gap: 8px; }
 /* ＋ card: a dashed cell at the end of the grid, the same height as a column. */
 .cmp-add-col { display: flex; align-items: center; justify-content: center; min-height: 240px; border: 1px dashed var(--border-strong); background: transparent; box-shadow: none; color: var(--text-secondary); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color .15s ease, color .15s ease; }
 .cmp-add-col:hover { background: var(--bg-hover); color: var(--text-primary); }
@@ -284,7 +290,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* The shared-account chip in the gate / plan slot of a sibling column (the provider UI lives on the first column). */
 .cmp-col-shared { display: block; margin: 8px 14px 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .cmp-col-shared:hover { color: var(--text-primary); background: var(--bg-hover); }
-.cmp-col-picker[hidden], .cmp-col-picker-pop[hidden], .cmp-add-col[hidden], .cmp-col-remove[hidden], .cmp-col-shared[hidden] { display: none; }
+.cmp-col-service[hidden], .cmp-col-picker[hidden], .cmp-col-picker-pop[hidden], .cmp-add-col[hidden], .cmp-col-remove[hidden], .cmp-col-shared[hidden] { display: none; }
 /* Catalog hint under the pill (#1452 refresh): a full-width muted line in the wrapping header. */
 .cmp-model-hint { flex-basis: 100%; margin-top: -4px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
 .cmp-model-hint[hidden] { display: none; }
@@ -532,7 +538,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-name .cmp-ext-arrow { display: none; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-tools { margin-left: 0; flex-direction: column; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-badge { height: auto; max-height: 220px; width: 26px; padding: 10px 0; writing-mode: vertical-rl; }
-  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-picker, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-plan, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model-hint,
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-service, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-picker, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-plan, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model-hint,
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-remove, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-focus, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-copy-col, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-ask-col,
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-usage, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-shared, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-body, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-jump, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-ask { display: none; }
 }

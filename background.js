@@ -318,7 +318,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     for (const tab of tabs) {
       chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ['usage-shared.js', 'sidebar-usage.js', 'input-usage.js'],
+        files: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'input-usage.js'],
       }).catch(() => {});
       chrome.scripting.insertCSS({
         target: { tabId: tab.id },

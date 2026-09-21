@@ -29,7 +29,7 @@ export function hasProviderPermission(provider) {
 const CHATGPT_INJECT = {
   id: 'ct-chatgpt-usage',
   matches: ['https://chatgpt.com/*'],
-  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
+  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'ui/cmp-msg-rows.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
   css: ['chatgpt-usage.css', 'claude-folders.css'],
   runAt: 'document_idle',
 };

@@ -267,6 +267,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'quota_reset',
   // Focus mode (2026-09-21): a column widened (`on: 1`) / the grid restored (`on: 0`), with the provider id.
   'col_focus',
+  // Service picker (2026-09-21): a pre-session column swapped to another service (`from`, `to` provider ids).
+  'provider_change',
   // Gemini <FollowUp> chips (#1572): a chip filled that column's input (`provider` only). The page
   // emitted this under a `cmp_` name the allow-list never held (1.32.2 batch review 후속 1).
   'followup_chip',

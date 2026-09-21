@@ -3,6 +3,7 @@
 import { diurnalProject7dAdaptive } from '../ui/diurnal.js';
 import { hasProviderPermission } from './providers.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
+import { getProviderState, liveProviderErrors } from './provider-state.js';
 
 // === Sidebar Usage: build data for content script ===
 export async function buildSidebarUsageData(reqOrgId, provider) {
@@ -20,7 +21,7 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
 
   // Each provider's in-page panel only displays that provider's data.
   const collectedOrgs = allOrgs.filter(o => (o.provider || 'claude') === wantProvider);
-  if (!snapshot && collectedOrgs.length === 0) return null;
+  if (!snapshot && collectedOrgs.length === 0) return noDataReason(wantProvider);
 
   // Determine which org to show. Claude content scripts pass the active org id
   // (lastActiveOrg cookie) and we respect it strictly. Non-Claude panels pass
@@ -167,6 +168,36 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     // the kind of unvalidated claim this whole change exists to stop making. The AE `cg_obs`
     // stream collects it now — wire the UI once the readout says what values actually occur.
   };
+}
+
+// Nothing collected for this provider: say WHY when we know (#852's in-page remainder, #1592).
+//
+// 🔴 "수집 중" IS A CLAIM — that data is on its way. Every in-page panel used to make it whenever
+// this function answered null, and null covered two different facts: "not collected YET" and
+// "collection is FAILING" (signed out, session expired, blocked, our own parse throw). The popup
+// has said which since #852 (provider-state.js); the panels never asked. So a user whose ChatGPT
+// collection had failed on every cycle since install read "수집 중..." on chatgpt.com for hours
+// while the popup, one click away, named the reason — and an outside diagnosis concluded the
+// extension had hung (#1592).
+//
+// The answer is `{ err: code }` — the STORED code, not copy: the panels are classic content
+// scripts with their own inline i18n, and usage-shared.js turns the code into a sentence in
+// ONE place for all four. No usage fields, so every existing "is there a gauge to draw" check
+// (`h5 == null && d7 == null`) still reads this as no data; the panels branch on `err` first.
+//
+// 🪤 Only READ failures. A send failure (`err_send_*`) means our server, and a provider whose
+// collection succeeded has orgs — this branch is never reached for it. Dismissals (#1130) are
+// deliberately NOT honoured here: they quiet the popup for someone who stopped using the
+// provider, and someone on the provider's own page is not that person.
+//
+// 🪤 Claude stays null. Its panels are driven by `lastStatus` (input-usage.js / sidebar-usage.js
+// have withheld / auth / disconnected states of their own) and reportClaudeCollectFail is the
+// reason axis there — a second voice on the same screen is the double-messaging trap.
+async function noDataReason(provider) {
+  if (provider === 'claude') return null;
+  const st = (await getProviderState())[provider];
+  const err = liveProviderErrors(st).find((e) => e && e.code && !/^err_send_/.test(e.code));
+  return err ? { err: err.code } : null;
 }
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)

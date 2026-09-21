@@ -835,6 +835,93 @@
   };
   function cgUsageNote(lang) { return CG_USAGE_NOTE[lang] || CG_USAGE_NOTE.en; }
 
+  // Why an in-page panel has nothing to draw, as one short sentence (#852 in-page remainder, #1592).
+  //
+  // The panels used to say "수집 중..." for every empty answer, which is a claim — that data is
+  // coming — and it was false whenever collection was failing. bg/sidebar-usage.js now answers
+  // `{ err: <stored code> }` in that case; this turns the code into copy, ONCE, for all four
+  // panels (chatgpt/gemini × input/sidebar), which are classic scripts with inline i18n and would
+  // otherwise carry four copies of ten sentences.
+  //
+  // Bucketed, not per code: a strip is one line and a sidebar row not much more. The popup keeps
+  // the per-code sentence with a button (provider-state.js / i18n.js); this only has to stop the
+  // panel lying and point at where the full answer is. An UNKNOWN code — a newer background than
+  // this injected script, or a future family — reads as the generic "couldn't fetch", never as
+  // "collecting".
+  //
+  // 🪤 No double quote in either locale (interpolated into title="..." by some callers).
+  const NO_DATA_REASON_BUCKETS = [
+    // session problems — signed out, expired, or a token we could not read. Worded as "check your
+    // sign-in", not "you are signed out": no_at_token and auth_failed:403 also arise on a signed-in
+    // session (Codex R1), so the observation supports a prompt, not a verdict.
+    { re: /_(not_logged_in|session_expired|no_cookies|no_at_token|auth_failed)$/, key: 'login' },
+    // the provider is refusing us — time fixes it, not the user
+    { re: /_(cloudflare|rate_limit)$/, key: 'blocked' },
+    { re: /_network$/, key: 'network' },
+  ];
+  const NO_DATA_REASON_TEXT = {
+    ko: {
+      login: '{p} 로그인 상태를 확인해 주세요 — 사용량을 못 가져옵니다',
+      blocked: '{p}가 요청을 막고 있습니다 — 잠시 후 다시 시도합니다',
+      network: '네트워크 오류 — 잠시 후 다시 시도합니다',
+      failed: '{p} 사용량을 가져오지 못했습니다 — 확장 팝업에서 확인',
+    },
+    en: {
+      login: 'Check your {p} sign-in — usage unavailable',
+      blocked: '{p} is blocking requests — retrying later',
+      network: 'Network error — retrying later',
+      failed: 'Could not fetch {p} usage — see the extension popup',
+    },
+  };
+  function noDataReason(code, lang, providerName) {
+    const base = String(code || '').split(':')[0];
+    const bucket = (NO_DATA_REASON_BUCKETS.find((b) => b.re.test(base)) || { key: 'failed' }).key;
+    const table = NO_DATA_REASON_TEXT[lang] || NO_DATA_REASON_TEXT.en;
+    return table[bucket].replace('{p}', providerName || '');
+  }
+
+  // The composer strip's compare button may not cost a line.
+  //
+  // Every strip (claude.ai / chatgpt.com / gemini.google.com) is a wrapping flex row: usage %, a
+  // bar, the reset countdown, sometimes extra usage, then the gear and the 「…에도 물어보기」
+  // button. Narrow the composer and the button is the first thing pushed onto a second line —
+  // and a second line under the composer reads as a broken layout, not as a feature. So the rule
+  // is measured, not guessed from a breakpoint (the width the button needs depends on the plan's
+  // segments and the language): draw it, see whether the strip got taller, and if it did, take
+  // the button out. Widen the composer again and the same measurement puts it back.
+  //
+  // Inline style, not the `hidden` attribute: `.ct-cmp-btn { display: inline-flex }` out-ranks
+  // the UA's `[hidden] { display: none }`.
+  //
+  // Two synchronous layouts per call; the callers run it on render and from a ResizeObserver on
+  // the strip, both of which are already layout-bound moments. The observer cannot loop on its
+  // own toggle: the size it reports is the frame's final one, and this function is idempotent
+  // for a given width.
+  //
+  // 🪤 The threshold is HALF THE BUTTON'S HEIGHT, not a pixel. The pill (18px) is taller than the
+  // strip's text line (~16px), so merely showing it on the SAME line grows the strip by a couple of
+  // pixels — a 1px tolerance read that as "a new line" and hid the button at every width (caught by
+  // the chromium probe test/cmp-btn-fit-probe.mjs). A genuine extra line grows the strip
+  // by at least a line height (≥ 15px); half the pill (9px) sits cleanly between the two.
+  function fitCompareButton(container, btn) {
+    if (!container || !btn || !btn.isConnected) return false;
+    btn.style.display = '';
+    const withBtn = container.getBoundingClientRect().height;
+    const threshold = Math.max(4, btn.getBoundingClientRect().height / 2);
+    btn.style.display = 'none';
+    const without = container.getBoundingClientRect().height;
+    const fits = (withBtn - without) < threshold;
+    btn.style.display = fits ? '' : 'none';
+    return fits;
+  }
+  // Keep the decision current as the composer resizes. Returns a disconnect function.
+  function observeCompareFit(container, findBtn) {
+    if (typeof ResizeObserver !== 'function' || !container) return () => {};
+    const ro = new ResizeObserver(() => { try { fitCompareButton(container, findBtn()); } catch { /* detached */ } });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }
+
   // Buckets in `additional_rate_limits[]` that are NOT per-feature model limits, and so must not be
   // listed under a heading that calls them limits. Shared by every extension surface that renders
   // that array; the dashboard keeps its own copy as NON_MODEL_SLOT_NAMES (site/shared/chart-utils.js)
@@ -935,6 +1022,9 @@
     extraGaugeDrawn,
     windowLabel,
     cgUsageNote,
+    noDataReason,
+    fitCompareButton,
+    observeCompareFit,
     isNonModelBucket,
     bucketDisplayName,
     bucketNote,

@@ -142,3 +142,6 @@
 }
 .ct-cmp-btn:hover:not(:disabled) { background: var(--ct-gm-surface); color: var(--ct-gm-text); }
 .ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Text-only strip (collecting / reason): the sentence is a bare seg, not the padded `-main` pill,
+   so the inner's 2px gap is all that separates it from the button. */
+.ct-gm-strip-inner > .ct-gm-strip-seg + .ct-cmp-btn { margin-left: 8px; }

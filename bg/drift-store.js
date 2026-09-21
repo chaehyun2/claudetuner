@@ -217,6 +217,19 @@ async function noteDriftOutcomeImpl(provider, outcome, event, now) {
 }
 
 /**
+ * Record an event WITHOUT counting an attempt. For a failure inside a cycle whose attempt has
+ * already been counted (a decoration of an otherwise successful snapshot, the extra-workspace
+ * loop after the primary send — #1592). Going through noteDriftOutcome would add a second
+ * attempt to the same cycle and skew the success ratio the readout judges drift by.
+ */
+export async function noteDriftEvent(provider, event, now = Date.now()) {
+  return safe(() => tx(async (rec) => {
+    rec.events = mergeDriftEvent(rec.events, { provider, ...event }, now);
+    await write(rec);
+  }), undefined);
+}
+
+/**
  * Build the rider for a request that is ABOUT TO GO OUT ANYWAY, if this provider is due.
  *
  * @returns {Promise<{rider: object|null, commit: function}>}

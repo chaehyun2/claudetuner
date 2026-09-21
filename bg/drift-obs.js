@@ -488,6 +488,25 @@ export function driftAgeBucket(observedAt, now) {
  *
  * @returns {Array} a new buffer (the input is not mutated).
  */
+// The producer-side code for "an exception out of OUR collection logic" — `err_<p>_unclassified`
+// — with the exception CLASS on the end: `…:range`, `…:type`, `…:error`.
+//
+// 🔴 The bare code could not be acted on. It said "not the provider, us", and the AE event row
+// carries no message — so 100–150 ChatGPT accounts/day sat under one label for ten days with
+// nothing to point at a line (#1592). The class is the cheapest thing that halves the search
+// again: a RangeError after a successful usage fetch is a Date/number that was not one (the
+// `toISOString()` throw fixed alongside this), a TypeError is a field read off the wrong shape.
+//
+// Class, not message: the message can carry response fragments, and this code is GROUP BY'd on
+// the server. Sized to the server's 32-char code rule (DRIFT_CODE_RE in worker ae.ts):
+// 24-char base + ':' + 7. The `Error` suffix is dropped so `RangeError` reads `:range`; a bare
+// `Error` (or no name at all) reads `:error`.
+export const UNCLASSIFIED_CLASS_MAX_CHARS = 7;
+export function unclassifiedCode(base, e) {
+  const name = String((e && e.name) || '').replace(/Error$/, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `${base}:${(name || 'error').slice(0, UNCLASSIFIED_CLASS_MAX_CHARS)}`;
+}
+
 export function mergeDriftEvent(buffer, event, now) {
   // 🔴 Entries are COPIED, not just the array. `buffer.slice()` is shallow, so folding a repeat
   // into `found` would reach through and mutate the caller's own objects — and the caller here is

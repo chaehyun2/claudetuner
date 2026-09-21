@@ -5,7 +5,7 @@ import { platformField } from './platform.js';
 // REPORTS which stored state must then be consulted.
 import { parseGeminiWindows, parseGeminiPolicy, resolveGeminiPlan, geminiUltraSubTier }
   from './parse-gemini.js';
-import { geminiUsageShape } from './drift-obs.js';
+import { geminiUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
@@ -236,7 +236,7 @@ export async function collectGemini(force = false, userManual = false) {
     await noteDriftOutcome('gemini', 'error', {
       stage: 'collect',
       code: (storedCode === 'err_gemini_collect_failed' && rawMsg.indexOf('err_') !== 0)
-        ? 'err_gemini_unclassified'
+        ? unclassifiedCode('err_gemini_unclassified', e)
         : storedCode,
     });
     return { success: false, orgs: [] };

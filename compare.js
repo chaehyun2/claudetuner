@@ -135,6 +135,7 @@ export function mountComparePage(deps) {
     storedColumns: null,  // `compareColumns` from storage.sync (validated colIds), null = none / not read yet
     modelSelectSeq: 0,    // per-page monotonic suffix for a later column's model select id (never reused)
     pickerFor: null,      // colId whose picker popover is open (null = closed)
+    pickerKind: null,     // which list the open popover holds: 'model' (the [Auto ▾] face) | 'service' (the ▾ after the name); null = closed
     focusedCol: null,     // colId shown at full width (focus mode, setColumnFocus); null = the grid. Page-local, never stored
     followupTargets: new Set(), // colIds the next follow-up goes to (C); every participant checked = 「전체」 (AC21 skip rule)
     pendingFollowupCol: null, // colId whose column composer sent the follow-up in flight (null = the dock) — a CONSUME_FAIL hands the draft back to that column's input
@@ -226,7 +227,7 @@ export function mountComparePage(deps) {
   installPort(ctx);
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
   const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
-  const { closePicker, togglePicker, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
+  const { closePicker, togglePicker, toggleServicePicker, syncServiceButton, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
   const { gateKindFor, checkAgainButton, providerLoginLink, requestProviderPermission, renderColumnGate, renderPlan, countdown, usageResetAt, syncGateStatus } = ctx;
   const { renderSummaryPrompt, syncSummaryButton, paintSummaryPop, openSummaryPop, closeSummaryPop, startSummary } = ctx;
   const { scrollMetrics, scrollColumnToEnd, syncJumpButton, renderColumnActions, retryColumnOnAuto, columnAskable, setColumnAsk, toggleColumnAsk, sendColumnFollowup, countedQuota, quotaExhausted, cutNote, retryColumn, resetColumn, closePort, noteActivity, beginSend, currentTargets } = ctx;
@@ -603,8 +604,10 @@ export function mountComparePage(deps) {
   addColBtn.addEventListener('click', addColumnByUser);
   columnsBox.appendChild(addColBtn);
   // The column picker popover (one for the page, positioned under the column whose button opened
-  // it): an ARIA listbox with a group per vendor; options = Auto + the provider's catalog models;
-  // an option the page already shows is disabled. Enter / Space / click choose, Esc closes, arrows move.
+  // it): an ARIA listbox holding either the SERVICE list (the ▾ after the name: Claude / Gemini /
+  // ChatGPT, pre-session) or the MODEL list (the [Auto ▾] face: Auto + the column's own provider's
+  // catalog) — `state.pickerKind` says which; an option the page already shows is disabled.
+  // Enter / Space / click choose, Esc closes, arrows move.
   const picker = el('div', 'cmp-col-picker-pop');
   const PICKING_CLASS = 'cmp-col-picking'; // on the column while its picker is open (the card's overflow is released)
   picker.id = 'cmp-col-picker';
@@ -618,13 +621,13 @@ export function mountComparePage(deps) {
   if (typeof doc.addEventListener === 'function') {
     doc.addEventListener('click', (e) => {
       if (!ctx.pickerCol || !e || !e.target) return;
-      const btn = ctx.pickerCol.pickerBtn;
+      const btn = ctx.pickerOpener; // the button that opened the list (service ▾ or the model face)
       const inside = (node) => { for (let n = node; n; n = n.parentNode) if (n === picker || n === btn) return true; return false; };
       if (!inside(e.target)) closePicker();
     });
   }
   picker.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); const col = state.pickerFor ? state.columns.get(state.pickerFor) : null; closePicker(); if (col) focusQuietly(col.pickerBtn); return; }
+    if (e.key === 'Escape') { e.preventDefault(); const opener = ctx.pickerOpener; closePicker(); if (opener) focusQuietly(opener); return; }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
     const opts = [...picker.querySelectorAll('.cmp-col-picker-opt')].filter((o) => !o.disabled);
@@ -905,11 +908,27 @@ export function mountComparePage(deps) {
     name.appendChild(arrow);
     name.addEventListener('click', () => track('provider_link_click', { provider }));
     identity.appendChild(name);
-    // Column picker (cmp-columns §1): BEFORE the session the head carries a button 「▾」 that opens
-    // the vendor-grouped list (Claude / Gemini / ChatGPT, Auto first, then the catalog models);
-    // choosing sets THIS column's (provider, model) — a provider swap replaces the column, a model
-    // pick re-keys it. Hidden once the session started (the model select below still changes the
-    // MODEL within the provider, as it always did — a thread belongs to its conversation).
+    // Service picker (2026-09-21 user decision — split by place: the service is changed at the
+    // service's name, the model at the model's face): a small 「▾」 right after the name opens the
+    // list of the three services; choosing another REPLACES this column in place by `p:auto` — or,
+    // when that is taken, by `p:<first free model>` (only the pair is unique; the service itself
+    // is always selectable, chooseColumn). Pre-session only — hidden once the session started,
+    // like ✕ (a thread belongs to its conversation).
+    const serviceBtn = el('button', 'cmp-btn cmp-btn-sm cmp-col-service');
+    serviceBtn.type = 'button';
+    serviceBtn.hidden = true;
+    serviceBtn.setAttribute('aria-haspopup', 'listbox');
+    serviceBtn.setAttribute('aria-expanded', 'false');
+    serviceBtn.title = t('col_service_title');
+    serviceBtn.setAttribute('aria-label', t('col_service_title'));
+    serviceBtn.appendChild(el('span', 'cmp-col-picker-caret', '▾'));
+    serviceBtn.addEventListener('click', () => toggleServicePicker(col.id));
+    identity.appendChild(serviceBtn);
+    // Model picker (cmp-columns §1): the head's model face 「Auto ▾」 opens THIS provider's list
+    // (Auto first, then the catalog models) — before the session a pick re-keys the column
+    // (provider:model), in session the id stays and only the model the next send carries moves
+    // (the hidden model select behind it keeps the state). Never another vendor: that is the
+    // service picker's job (above).
     const pickerBtn = el('button', 'cmp-btn cmp-btn-sm cmp-col-picker');
     pickerBtn.type = 'button';
     pickerBtn.hidden = true;
@@ -1111,7 +1130,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -1354,8 +1373,9 @@ export function mountComparePage(deps) {
     track('column_remove', { col: gaCol(col), n: state.columnIds.length });
   }
   /**
-   * The picker's choice for a column (before the session): the same provider → a model change
-   * (setColumnModel re-keys); another provider → the column is REPLACED at its place by a fresh
+   * A picker's choice for a column (before the session): the same provider (the model picker) → a
+   * model change (setColumnModel re-keys); another provider (the service picker: `p:auto`, or the
+   * first free model of `p` when auto is taken) → the column is REPLACED at its place by a fresh
    * one (nothing of it is worth keeping before a send). A choice the page already has is refused.
    */
   function chooseColumn(colId, choice) {
@@ -1423,6 +1443,7 @@ export function mountComparePage(deps) {
       renderPickerLabel(col);
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
       col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncServiceButton(col);
       syncFocusButton(col);
       // Provider-level state on the FIRST column of the provider only (cmp-columns §0): plan pill,
       // gauges, gate box. A sibling shows the shared-account chip in that slot instead.
@@ -1667,10 +1688,11 @@ export function mountComparePage(deps) {
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
       col.pickerBtn.disabled = state.sending;
       col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncServiceButton(col);
       syncFocusButton(col);
     }
     addColBtn.hidden = state.sessionStarted || state.columnIds.length >= MAX_COLUMNS;
-    if (state.pickerFor && (state.sending || (state.sessionStarted && !state.columns.get(state.pickerFor).modelKnown))) closePicker();
+    if (state.pickerFor && (state.sending || (state.sessionStarted && (state.pickerKind === 'service' || !state.columns.get(state.pickerFor).modelKnown)))) closePicker();
     syncCopyAll();
     syncSummaryButton();
     for (const c of composers) c.section.hidden = !state.sessionStarted;

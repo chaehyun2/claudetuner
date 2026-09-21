@@ -1,8 +1,10 @@
 // ui/compare/model-picker.js — the MODEL slice of mountComparePage() (compare.js): the column
-// picker popover (Auto + the provider's catalog, re-keying a pre-session column), the model
-// select and its hint, MODELS from the SW, and the `models` map / csv a send carries. The picker
-// element and its keydown listener stay in compare.js (attached to ctx). Bodies are exactly as
-// they were in compare.js; ctx contract: see ui/compare/history.js.
+// head's two popovers (2026-09-21 user decision, split by place — the SERVICE list behind the ▾
+// after the name, pre-session, replacing the column; the MODEL list behind the 「Auto ▾」 face,
+// Auto + the column's own provider's catalog, re-keying a pre-session column / moving only the
+// model in session), the model select and its hint, MODELS from the SW, and the `models` map /
+// csv a send carries. The ONE popover element and its keydown listener stay in compare.js
+// (attached to ctx); `state.pickerKind` says which list it holds. ctx contract: see ui/compare/history.js.
 
 import { COMPARE_PROVIDERS, colIdOf, parseColId, PROVIDER_META, MODELS_CSV_AUTO, MODELS_CSV_ID_MAX, MODEL_ID_RE, MODEL_AUTO_VALUE } from './constants.js';
 
@@ -13,19 +15,100 @@ export function installModelPicker(ctx) {
   // id lookup at close time would miss the opener (aria-expanded / the picking class stuck — Codex
   // integration #3). `state.pickerFor` (its id) follows a re-key too, for the toggle.
   ctx.pickerCol = null; // a `let` shared with the outside-click listener in compare.js → a ctx field
+  // The button that opened the list (the column's serviceBtn or pickerBtn, by REFERENCE too): the
+  // outside-click closer treats it as inside, Escape / a pick hand the focus back to it.
+  ctx.pickerOpener = null;
+  const SERVICE_POP_CLASS = 'is-service'; // on the popover while it holds the service list (compare.css: narrower)
   function closePicker() {
     const col = ctx.pickerCol;
+    const opener = ctx.pickerOpener;
     ctx.pickerCol = null;
+    ctx.pickerOpener = null;
     state.pickerFor = null;
+    state.pickerKind = null;
     ctx.picker.hidden = true;
     clear(ctx.picker);
+    if (ctx.picker.classList) ctx.picker.classList.remove(SERVICE_POP_CLASS);
     if (ctx.picker.parentNode !== ctx.columnsBox) ctx.columnsBox.appendChild(ctx.picker); // back to its parking place
-    if (col && col.pickerBtn) col.pickerBtn.setAttribute('aria-expanded', 'false');
+    if (opener) opener.setAttribute('aria-expanded', 'false');
     if (col && col.node.classList) col.node.classList.remove(ctx.PICKING_CLASS);
   }
   function togglePicker(colId) {
-    if (state.pickerFor === colId) { closePicker(); return; }
+    if (state.pickerFor === colId && state.pickerKind === 'model') { closePicker(); return; }
     openPicker(colId);
+  }
+  function toggleServicePicker(colId) {
+    if (state.pickerFor === colId && state.pickerKind === 'service') { closePicker(); return; }
+    openServicePicker(colId);
+  }
+  /** The service ▾ after the name: pre-session only (a thread belongs to its conversation), inert while a send is in flight. */
+  function syncServiceButton(col) {
+    col.serviceBtn.hidden = state.sessionStarted;
+    col.serviceBtn.disabled = state.sending;
+  }
+  /** Shared by both lists: the popover under `col`'s head, opened by `opener`, holding `kind`. */
+  function showPicker(col, opener, kind, label) {
+    closePicker();
+    state.pickerFor = col.id;
+    state.pickerKind = kind;
+    ctx.pickerCol = col;
+    ctx.pickerOpener = opener;
+    opener.setAttribute('aria-expanded', 'true');
+    ctx.picker.setAttribute('aria-label', label);
+    if (kind === 'service' && ctx.picker.classList) ctx.picker.classList.add(SERVICE_POP_CLASS);
+  }
+  /** After the list is filled: under the column's head, inside the page (the columns grid is the reference); focus on `first`. */
+  function placePicker(col, first) {
+    if (typeof col.node.appendChild === 'function') col.node.appendChild(ctx.picker);
+    if (col.node.classList) col.node.classList.add(ctx.PICKING_CLASS); // the card stops clipping so the list can hang below it
+    ctx.picker.hidden = false;
+    if (first) ctx.focusQuietly(first);
+  }
+  /**
+   * The SERVICE list (2026-09-21): the three services, the column's own marked. Only the
+   * (provider, model) PAIR is unique on the page — the service itself is always selectable (user
+   * correction: 「Sonnet · Opus · Fable 비교」 = three Claude columns): choosing `p` lands on `p:auto`
+   * when that is free, else on the FIRST catalog model of `p` not on the page yet (columnChoices
+   * order; an alias of auto counts as present); only when every model of `p` is already a column
+   * is the service disabled. The column is replaced in place (chooseColumn), the focus lands on
+   * the fresh column's ▾.
+   */
+  function openServicePicker(colId) {
+    const col = state.columns.get(colId);
+    if (!col || col.id !== colId || state.sessionStarted) return;
+    showPicker(col, col.serviceBtn, 'service', t('col_service_title'));
+    const choices = ctx.columnChoices();
+    let first = null;
+    for (const p of COMPARE_PROVIDERS) {
+      const own = choices.filter((c) => c.provider === p); // Auto first, then the catalog
+      const target = own.find((c) => !c.present) || null; // `p:auto` when free, else the first free model
+      const free = target !== null;
+      const current = p === col.provider;
+      const opt = el('button', 'cmp-col-picker-opt');
+      opt.type = 'button';
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('data-provider', p);
+      opt.setAttribute('data-choice', current ? col.id : free ? target.id : colIdOf(p, null)); // what a pick would land on
+      opt.appendChild(dot(p));
+      opt.appendChild(el('span', 'cmp-col-picker-text', PROVIDER_META[p].label));
+      opt.setAttribute('aria-selected', current ? 'true' : 'false');
+      if (current) opt.classList.add('is-current');
+      opt.disabled = !free && !current; // every (p, model) is already a column
+      if (!free && !current) opt.title = t('col_picker_dup');
+      opt.addEventListener('click', () => {
+        if (opt.disabled) return;
+        if (current) { closePicker(); ctx.focusQuietly(col.serviceBtn); return; } // the same service: nothing to change
+        const from = col.provider;
+        if (!ctx.chooseColumn(state.pickerFor, { provider: p, model: target.model })) return;
+        closePicker();
+        track('provider_change', { from, to: p, model: target.model == null ? '' : String(target.model) });
+        const landed = state.columns.get(target.id);
+        if (landed && landed.id === target.id) ctx.focusQuietly(landed.serviceBtn);
+      });
+      ctx.picker.appendChild(opt);
+      if (!first && !opt.disabled) first = opt;
+    }
+    placePicker(col, first);
   }
   /** In-session pick = the model select's own change (the select is the state; the picker its face). */
   function pickSessionModel(colId, value) {
@@ -53,52 +136,42 @@ export function installModelPicker(ctx) {
   function sessionChoices(col) {
     return [...col.modelSelect.querySelectorAll('option')].map((o) => ({ id: col.id, provider: col.provider, model: o.value === MODEL_AUTO_VALUE ? null : o.value, value: o.value, label: o.textContent, present: false }));
   }
+  /**
+   * The MODEL list: THIS column's provider only, in both phases (2026-09-21 — another service is
+   * the service picker's job, so no vendor title above the single list). Pre-session the choices
+   * are columnChoices() cut to the provider (`present` marks a (provider, model) the page already
+   * shows; a pick re-keys through chooseColumn); in session the select's own options (a pick
+   * moves only the model, pickSessionModel).
+   */
   function openPicker(colId) {
     const col = state.columns.get(colId);
     if (!col || col.id !== colId || (state.sessionStarted && !col.modelKnown)) return;
-    closePicker();
-    state.pickerFor = colId;
-    ctx.pickerCol = col;
-    col.pickerBtn.setAttribute('aria-expanded', 'true');
+    showPicker(col, col.pickerBtn, 'model', t('col_picker_title'));
     const inSession = state.sessionStarted;
-    const choices = inSession ? sessionChoices(col) : ctx.columnChoices();
+    const choices = (inSession ? sessionChoices(col) : ctx.columnChoices()).filter((x) => x.provider === col.provider);
     let first = null;
-    for (const p of inSession ? [col.provider] : COMPARE_PROVIDERS) {
-      const group = el('div', 'cmp-col-picker-group');
-      group.setAttribute('role', 'group');
-      const title = el('div', 'cmp-col-picker-vendor');
-      title.appendChild(dot(p));
-      title.appendChild(el('span', null, PROVIDER_META[p].label));
-      group.appendChild(title);
-      for (const c of choices.filter((x) => x.provider === p)) {
-        const opt = el('button', 'cmp-col-picker-opt', c.label);
-        opt.type = 'button';
-        opt.setAttribute('role', 'option');
-        opt.setAttribute('data-choice', c.id);
-        const current = inSession ? c.value === col.modelSelect.value : c.id === col.id;
-        opt.setAttribute('aria-selected', current ? 'true' : 'false');
-        opt.disabled = c.present && !current; // a combo the page already shows
-        if (c.present && !current) opt.title = t('col_picker_dup');
-        opt.addEventListener('click', () => {
-          if (opt.disabled) return;
-          const picked = inSession ? (pickSessionModel(state.pickerFor, c.value), true) : ctx.chooseColumn(state.pickerFor, c);
-          if (!picked) return;
-          closePicker();
-          // Focus returns to the picker button of the column now carrying the choice (the same column
-          // re-keyed, or the fresh one that replaced it on a provider swap).
-          const landed = state.columns.get(c.id);
-          if (landed && landed.id === c.id) ctx.focusQuietly(landed.pickerBtn);
-        });
-        group.appendChild(opt);
-        if (!first && !opt.disabled) first = opt;
-      }
-      ctx.picker.appendChild(group);
+    for (const c of choices) {
+      const opt = el('button', 'cmp-col-picker-opt', c.label);
+      opt.type = 'button';
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('data-choice', c.id);
+      const current = inSession ? c.value === col.modelSelect.value : c.id === col.id;
+      opt.setAttribute('aria-selected', current ? 'true' : 'false');
+      opt.disabled = c.present && !current; // a combo the page already shows
+      if (c.present && !current) opt.title = t('col_picker_dup');
+      opt.addEventListener('click', () => {
+        if (opt.disabled) return;
+        const picked = inSession ? (pickSessionModel(state.pickerFor, c.value), true) : ctx.chooseColumn(state.pickerFor, c);
+        if (!picked) return;
+        closePicker();
+        // Focus returns to the model face of the column now carrying the choice (the same column, re-keyed pre-session).
+        const landed = state.columns.get(c.id);
+        if (landed && landed.id === c.id) ctx.focusQuietly(landed.pickerBtn);
+      });
+      ctx.picker.appendChild(opt);
+      if (!first && !opt.disabled) first = opt;
     }
-    // Under the column's head, inside the page (the columns grid is the reference).
-    if (typeof col.node.appendChild === 'function') col.node.appendChild(ctx.picker);
-    if (col.node.classList) col.node.classList.add(ctx.PICKING_CLASS); // the card stops clipping so the list can hang below it
-    ctx.picker.hidden = false;
-    if (first) ctx.focusQuietly(first);
+    placePicker(col, first);
   }
   /** The picker button's face: dot-less (the head has the dot) — the model label, or 「Auto」. */
   function renderPickerLabel(col) {
@@ -266,7 +339,7 @@ export function installModelPicker(ctx) {
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
-    closePicker, togglePicker, pickSessionModel, applyModelPick, sessionChoices, openPicker, renderPickerLabel, setColumnModel,
+    closePicker, togglePicker, toggleServicePicker, syncServiceButton, openServicePicker, pickSessionModel, applyModelPick, sessionChoices, openPicker, renderPickerLabel, setColumnModel,
     renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol,
     servedModelId,
   });

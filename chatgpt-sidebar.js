@@ -393,7 +393,9 @@
     if (!content) return;
 
     if (!_data || (_data.h5 == null && _data.d7 == null)) {
-      content.innerHTML = `<div class="ct-cg-message text-token-text-tertiary">${CORE.escapeHtml(t('no_data'))}</div>`;
+      // "수집 중" only when nothing is known to be wrong — see chatgpt-input.js (#1592).
+      const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'ChatGPT') : t('no_data')) : t('no_data');
+      content.innerHTML = `<div class="ct-cg-message text-token-text-tertiary">${CORE.escapeHtml(text)}</div>`;
       return;
     }
 
@@ -710,7 +712,7 @@
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
-            _data.plan === res.plan && sameExtras) return;
+            _data.plan === res.plan && sameExtras && _data.err === res.err) return;
         _data = res;
         // Note: _lang is driven by the user's extension language setting
         // (chrome.storage.sync `lang`, navigator fallback), not res.lang — the

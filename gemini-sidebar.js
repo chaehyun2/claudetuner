@@ -297,7 +297,9 @@
       return;
     }
     if (!_data || (_data.h5 == null && _data.d7 == null)) {
-      content.innerHTML = `<div class="ct-gm-message">${CORE.escapeHtml(t('no_data'))}</div>`;
+      // "수집 중" only when nothing is known to be wrong — see chatgpt-input.js (#1592).
+      const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'Gemini') : t('no_data')) : t('no_data');
+      content.innerHTML = `<div class="ct-gm-message">${CORE.escapeHtml(text)}</div>`;
       return;
     }
 
@@ -542,7 +544,7 @@
         clearEmptyRetry(); // got data — stop fast-polling
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
-            _data.plan === res.plan && _data.noLimits === res.noLimits) return;
+            _data.plan === res.plan && _data.noLimits === res.noLimits && _data.err === res.err) return;
         _data = res;
         // _lang is driven by the user's extension language setting
         // (chrome.storage.sync `lang`, navigator fallback), not res.lang.

@@ -196,7 +196,9 @@
     // just the muted placeholder. Checked AFTER noLimits below because no-limit
     // plans report a 0% window (h5 is 0, not null) and must not fall in here.
     if (!(_data && _data.noLimits) && (!_data || _data.h5 == null)) {
-      strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(t('no_data'))}</span></div>`;
+      // "수집 중" only when nothing is known to be wrong — see chatgpt-input.js (#1592).
+      const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'Gemini') : t('no_data')) : t('no_data');
+      strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(text)}</span></div>`;
       return;
     }
     let logoUrl = '';
@@ -242,6 +244,26 @@
   }
 
 
+  // The button may not cost the strip a line (CORE.fitCompareButton): measured on every mount and
+  // again whenever the strip's width changes. Guarded for a tab whose usage-shared.js predates
+  // these helpers (dynamic re-injection, #1421) — then the button simply behaves as before.
+  let _fitStop = null;
+  let _fitTarget = null;
+  function ensureCompareFit(strip) {
+    if (!CORE || !CORE.fitCompareButton) return;
+    // A superseded instance's observer answers null → no-op on the newest instance's button.
+    const find = () => (isCurrent() ? strip.querySelector('.' + CMP_BTN_CLASS) : null);
+    CORE.fitCompareButton(strip, find());
+    if (_fitTarget === strip) return;
+    if (_fitStop) _fitStop();
+    _fitTarget = strip;
+    _fitStop = CORE.observeCompareFit(strip, find);
+  }
+  function stopCompareFit() {
+    if (_fitStop) _fitStop();
+    _fitStop = null;
+    _fitTarget = null;
+  }
   // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
   // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17)
   // next to the gear. Gate = the CDN dark-launch flag (asked ONCE per page
@@ -301,7 +323,9 @@
       try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-gm-strip-inner') || strip).appendChild(btn);
+    ensureCompareFit(strip);
   }
+
   function renderStrip() {
     const strip = document.getElementById(STRIP_ID);
     if (strip) renderStripInto(strip);
@@ -321,7 +345,7 @@
   function mount() {
     const anchor = findAnchor();
     const existing = document.getElementById(STRIP_ID);
-    if (!anchor) { if (existing) existing.remove(); _mounted = false; warnNoAnchor(); return; }
+    if (!anchor) { if (existing) existing.remove(); _mounted = false; stopCompareFit(); warnNoAnchor(); return; }
     if (existing) {
       // Move it if it drifted from the current composer or became invisible.
       if (existing.previousSibling !== anchor || existing.getClientRects().length === 0) {
@@ -340,6 +364,7 @@
     const el = document.getElementById(STRIP_ID);
     if (el) el.remove();
     _mounted = false;
+    stopCompareFit();
   }
 
   function ensureMounted() {
@@ -398,7 +423,7 @@
         clearEmptyRetry(); // got data — stop fast-polling
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
-            _data.plan === res.plan && _data.noLimits === res.noLimits) return;
+            _data.plan === res.plan && _data.noLimits === res.noLimits && _data.err === res.err) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang.
         renderStrip();

@@ -367,3 +367,45 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 }
 .ct-cmp-btn:hover:not(:disabled) { background: var(--ct-cg-surface); color: var(--ct-cg-text); }
 .ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Text-only strip (collecting / reason): the sentence is a bare seg, not the padded `-main` pill,
+   so the inner's 2px gap is all that separates it from the button. */
+.ct-cg-strip-inner > .ct-cg-strip-seg + .ct-cmp-btn { margin-left: 8px; }
+
+/* Per-question row (ui/cmp-msg-rows.js, 2026-09-21): appended INSIDE the user turn's action row
+   (flex justify-end), so it sits right-aligned on the same 40px line as chatgpt.com's hover
+   copy/share/edit buttons — no margin-top, only a gap from those buttons. chatgpt.com's --text-*
+   variables are plain hex colours (unlike claude.ai's HSL triples), so a bare var() with a hex
+   fallback is correct here. No `color` in the transition (theme switch left stale text colour
+   on claude.ai, 2026-09-21). The row button also carries the strip's `.ct-cmp-btn` class (shared
+   base class, see ui/cmp-msg-rows.js); the descendant selectors below out-rank `.ct-cmp-btn:hover`
+   so the row keeps its own quieter look. */
+.ct-cmp-msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+.ct-cmp-msg .ct-cmp-msg-btn {
+  display: inline-flex; align-items: center; height: 22px; padding: 0 9px; margin-left: 0;
+  border: 1px solid color-mix(in srgb, var(--text-secondary, #6b7280) 30%, transparent);
+  border-radius: 999px; background: transparent;
+  color: var(--text-secondary, #6b7280); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
+}
+/* One step above the strip's `.ct-cmp-btn:hover:not(:disabled)` (0,3,0) so the row's hover wins by
+   specificity, not by source order (substitute review 후속 3b). */
+.ct-cmp-msg .ct-cmp-btn.ct-cmp-msg-btn:hover {
+  opacity: 1; color: var(--text-primary, #111827);
+  background: color-mix(in srgb, var(--text-secondary, #6b7280) 10%, transparent);
+}
+.ct-cmp-msg .ct-cmp-msg-gear {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-secondary, #6b7280) 30%, transparent);
+  border-radius: 999px; background: transparent;
+  color: var(--text-secondary, #6b7280); cursor: pointer; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
+}
+.ct-cmp-msg .ct-cmp-msg-gear svg { width: 12px; height: 12px; }
+.ct-cmp-msg .ct-cmp-msg-gear:hover {
+  opacity: 1; color: var(--text-primary, #111827);
+  background: color-mix(in srgb, var(--text-secondary, #6b7280) 10%, transparent);
+}
