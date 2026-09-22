@@ -102,6 +102,12 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 .ct-cg-limit-sub .ct-cg-name { font-size: 11px; }
 .ct-cg-limit-sub .ct-cg-pct { font-size: 11px; }
 .ct-cg-limit-sub .ct-cg-bar { height: 4px; }
+/* Gated-model row: name + status stay on one line (the sidebar is ~230px; the two together are
+   ~150px), the return time is its own small line beneath. See buildGateRow. */
+.ct-cg-gate .ct-cg-name, .ct-cg-gate .ct-cg-pct { white-space: nowrap; }
+.ct-cg-gate .ct-cg-label-left { overflow: hidden; }
+.ct-cg-gate .ct-cg-name { overflow: hidden; text-overflow: ellipsis; }
+.ct-cg-gate-until { font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; }
 .ct-cg-label-row {
   display: flex;
   align-items: center;

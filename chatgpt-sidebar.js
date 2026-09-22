@@ -75,7 +75,7 @@
       tip_reserve: '정상 한도와 별개로 주어지는 예비 사용량입니다.\nGPT-5.6 Luna로만 쓸 수 있고, 자체 한도가 있습니다.',
       gated: '지금 사용 불가',
       tip_gated: 'ChatGPT가 이 모델을 지금 막아둔 상태입니다.\n사용량 퍼센트가 아니라 가용 여부입니다.',
-      gated_until: '까지',
+      gated_until: '{0}까지',
       addl_toggle: '추가 사용량 접기/펼치기',
     },
     en: {
@@ -90,7 +90,7 @@
       tip_reserve: 'A reserve allowance granted separately from your regular limits.\nIt runs GPT-5.6 Luna only and has its own limit.',
       gated: 'Unavailable now',
       tip_gated: 'ChatGPT is gating this model right now.\nThis is availability, not a usage percentage.',
-      gated_until: 'until',
+      gated_until: 'until {0}',
       addl_toggle: 'Collapse/expand additional usage',
     },
   };
@@ -356,10 +356,20 @@
   // extension, so the fallback always won — the line READ as theme-aware while bypassing the
   // html.dark block every other colour in this panel goes through, and would have survived review
   // on its appearance. One-off use does not earn a token.
+  //
+  // 🔴 THE RETURN TIME IS ITS OWN LINE, under the name — not a `.ct-cg-reset` cell beside it. That
+  // cell is `flex-shrink: 0` (right for the two-line countdown the account windows put there) and
+  // the verbose absolute form is ~200px, so in a 230px sidebar the LEFT group was squeezed to a
+  // few pixels: "gpt-6-astra" broke into three lines, 「지금 사용 불가」 fell one character per
+  // line, and the date printed over both (user report, 2026-09-22). Compact form on the line
+  // (「내일 15:30까지」 / "until Tue 3:30 PM"), verbose form in the tooltip.
+  //
+  // 🪤 `gated_until` is a template, not a prefix. 「까지」 is a POSTposition — the old
+  // `${t('gated_until')} ${until}` printed 「까지 9/22(화) … 리셋」, and the English read
+  // "until Resets Sep 22 …" because the verbose form already carries its own verb.
   function buildGateRow(gate) {
     const row = document.createElement('div');
-    row.className = 'ct-cg-limit ct-cg-limit-sub';
-    const until = gate.availableAt ? CORE.formatResetAbsolute(gate.availableAt, _lang) : '';
+    row.className = 'ct-cg-limit ct-cg-limit-sub ct-cg-gate';
     const labelRow = document.createElement('div');
     labelRow.className = 'ct-cg-label-row';
     labelRow.innerHTML = `
@@ -367,9 +377,16 @@
         <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(gate.model)}</span>
         <span class="ct-cg-pct" style="color:#f59e0b">${CORE.escapeHtml(t('gated'))}</span>
       </span>
-      ${until ? `<span class="ct-cg-reset text-token-text-tertiary">${CORE.escapeHtml(t('gated_until'))} ${CORE.escapeHtml(until)}</span>` : ''}
     `;
     row.appendChild(labelRow);
+    if (gate.availableAt) {
+      const compact = CORE.formatResetAbsolute(gate.availableAt, _lang, { compact: true });
+      const line = document.createElement('div');
+      line.className = 'ct-cg-gate-until text-token-text-tertiary';
+      line.textContent = t('gated_until').replace('{0}', compact);
+      line.title = CORE.formatResetAbsolute(gate.availableAt, _lang);
+      row.appendChild(line);
+    }
     attachTip(row, 'tip_gated');
     return row;
   }
