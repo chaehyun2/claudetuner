@@ -314,6 +314,11 @@ const TRANSLATIONS = {
     'compare_enabled_hint': '같은 질문을 로그인된 다른 AI에게도 보내 답변을 나란히 놓고 교차 검증합니다. (Claude·ChatGPT·Gemini 페이지)',
     'compare_msg_btn_desc': '질문 말풍선 아래에도 버튼 표시 (claude.ai·ChatGPT)',
     'compare_msg_btn_hint': '끄면 입력창 옆 버튼만 남습니다.',
+    // Popup feature row + options card link to the /multiai page (2026-09-22)
+    'compare_entry_title': 'AI 크로스체크',
+    'compare_entry_sub': '같은 질문을 Claude·ChatGPT·Gemini에 한 번에',
+    'compare_entry_open': '열기',
+    'compare_entry_open_page': 'AI 크로스체크 페이지 열기 ↗',
     'display_mode': '표시 방식',
     'display_mode_label': '확장 프로그램 열기 방식',
     'display_mode_sidepanel': '사이드패널',
@@ -1000,6 +1005,11 @@ const TRANSLATIONS = {
     'compare_enabled_hint': 'Sends the same question to the other AIs you are signed in to and shows the answers side by side so you can cross-check them. (Claude, ChatGPT and Gemini pages)',
     'compare_msg_btn_desc': 'Also show the button under each question (claude.ai·ChatGPT)',
     'compare_msg_btn_hint': 'Off leaves only the button next to the composer.',
+    // Popup feature row + options card link to the /multiai page (2026-09-22)
+    'compare_entry_title': 'AI Cross-Check',
+    'compare_entry_sub': 'One question to Claude, ChatGPT and Gemini at once',
+    'compare_entry_open': 'Open',
+    'compare_entry_open_page': 'Open the AI Cross-Check page ↗',
     'display_mode': 'Display Mode',
     'display_mode_label': 'Extension open style',
     'display_mode_sidepanel': 'Side Panel',

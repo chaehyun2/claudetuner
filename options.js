@@ -451,6 +451,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('gemini-input-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-enabled').addEventListener('change', () => { syncCompareMsgButtonRow(); autoSave(); });
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
+  // AI Cross-Check page link (2026-09-22): the SW builds the shell URL (src-less OPEN_COMPARE,
+  // placement `options`) so the utm/GA shape stays in bg/compare.js; nothing is saved here.
+  const compareOpenLink = document.getElementById('compare-open-link');
+  if (compareOpenLink) {
+    compareOpenLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', placement: 'options' }, () => { void chrome.runtime.lastError; });
+    });
+  }
 
   // Notification checkboxes
   document.querySelectorAll('#notify-list input[type="checkbox"]').forEach(cb => {

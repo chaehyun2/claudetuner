@@ -22,7 +22,7 @@
 // at its end):
 //   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
-//                         saveHistory}   OPEN_COMPARE{src, q} → {ok}   COMPARE_EVENT{name, params} → {ok}
+//                         saveHistory}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
 //   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?, kind?, round?, src?, session?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?} · ABORT
@@ -197,10 +197,18 @@ export const COMPARE_SITE_URL = 'https://claudetuner.com/multiai/';
 export const COMPARE_SITE_UTM = 'utm_source=extension&utm_medium=cmp_button&utm_campaign=cross_check';
 // Which button was clicked (utm_content = `<src>_<placement>`, and the SW's own `cmp_button_click`
 // GA event): `composer` = the usage strip next to the input box; `message` = the per-question
-// button under a chat message (planned). Anything else from a content script reads as `composer`
-// — the allow-list keeps GA's content dimension enumerable.
-export const COMPARE_PLACEMENTS = Object.freeze(['composer', 'message']);
+// button under a chat message; `popup` / `options` = the extension's own surfaces (the popup's
+// feature row under the gauges, the options card link — 2026-09-22). Anything else from a content
+// script reads as `composer` — the allow-list keeps GA's content dimension enumerable.
+export const COMPARE_PLACEMENTS = Object.freeze(['composer', 'message', 'popup', 'options']);
 export const COMPARE_DEFAULT_PLACEMENT = 'composer';
+// Placements with no provider page behind them: an OPEN_COMPARE from these may omit `src`, and
+// then opens the bare shell — `utm_content=<placement>`, no `#src`, no `q` (there is no question
+// to carry). Every other placement still requires a provider `src`. GA's `src` param reads
+// COMPARE_SRC_NONE for these so the dimension stays enumerable (three providers + 'none') rather
+// than gaining a null/undefined bucket.
+export const COMPARE_SRCLESS_PLACEMENTS = Object.freeze(['popup', 'options']);
+export const COMPARE_SRC_NONE = 'none';
 export const PUBLISHED_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
 export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
 // Columns (cmp-columns contract): the most columns one round may have, and the id of the
@@ -272,6 +280,10 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // Gemini <FollowUp> chips (#1572): a chip filled that column's input (`provider` only). The page
   // emitted this under a `cmp_` name the allow-list never held (1.32.2 batch review 후속 1).
   'followup_chip',
+  // Column layout (#1525): a column was added / removed / swapped to another (provider, model)
+  // before the session (`col`, `n`). Emitted since #1525 but never added here, so the SW dropped
+  // all three silently (#1525 후속 3).
+  'column_add', 'column_remove', 'column_change',
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
 
@@ -1621,13 +1633,20 @@ export function createCompareController({
   // (COMPARE_SITE_URL, which frames compare.html — see the constant).
   async function openCompare(message) {
     const src = COMPARE_PROVIDERS.includes(message.src) ? message.src : null;
-    if (!src) return { ok: false, error: 'unknown src' };
-    const q = typeof message.q === 'string' ? message.q : '';
     const placement = COMPARE_PLACEMENTS.includes(message.placement) ? message.placement : COMPARE_DEFAULT_PLACEMENT;
+    // A provider `src` wins whenever it is given (the src path is byte-identical to before); only
+    // the extension's own surfaces (COMPARE_SRCLESS_PLACEMENTS) may open without one. 🔴 The
+    // placement is allow-listed BEFORE this check: an unknown placement reads as `composer`, which
+    // is not src-less, so a src-less message with a bogus placement is still refused.
+    const srcless = !src && COMPARE_SRCLESS_PLACEMENTS.includes(placement);
+    if (!src && !srcless) return { ok: false, error: 'unknown src' };
+    const q = src && typeof message.q === 'string' ? message.q : '';
     const id = typeof runtime.id === 'string' ? runtime.id : '';
     const dev = id && id !== PUBLISHED_EXT_ID ? `&ext=${id}` : '';
-    const url = `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}#src=${src}&q=${encodeURIComponent(q)}`;
-    emitEvent('button_click', { src, placement, has_q: q.length > 0 });
+    const url = srcless
+      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}`
+      : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}#src=${src}&q=${encodeURIComponent(q)}`;
+    emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
     await tabs.create({ url, active: true });
     return { ok: true };
   }

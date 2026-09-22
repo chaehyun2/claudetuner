@@ -351,6 +351,18 @@
     </div>
   </div>
 
+  <!-- AI Cross-Check shortcut (2026-09-22): one slim row under the gauges to the /multiai page.
+       Hidden until the SW says the page is live (COMPARE_FLAG.on) — popup.js initCompareEntry.
+       The glyph is the compare page's 「요약·비교」 4-point star (compare.css .cmp-btn-summary). -->
+  <div id="compare-entry" class="ct-card compare-entry hidden">
+    <span class="compare-entry-icon" aria-hidden="true"></span>
+    <div class="compare-entry-text">
+      <div class="compare-entry-title" data-i18n="compare_entry_title"></div>
+      <div class="compare-entry-sub" data-i18n="compare_entry_sub"></div>
+    </div>
+    <button type="button" id="compare-entry-open" class="compare-entry-open" data-i18n="compare_entry_open"></button>
+  </div>
+
   <!-- 추가 사용량 게이지 -->
   <div id="extra-usage-section" style="display:none;margin-bottom:10px">
     <div id="extra-usage-summary" style="cursor:pointer;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text-secondary)"

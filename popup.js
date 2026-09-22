@@ -287,7 +287,25 @@ function _hideClaudeOnlyUI() {
 
 // === Plan Fitness Matrix ===
 
-
+// === AI Cross-Check shortcut (2026-09-22) ===
+// One row under the gauges (#compare-entry) that opens the /multiai page. Gated on the PAGE flag
+// alone (COMPARE_FLAG.on = the site shell is live), not on `cta`: the in-page button can stay dark
+// while the page is public, and this row is the popup's way in. The SW owns the URL — a src-less
+// OPEN_COMPARE with placement `popup` (bg/compare.js openCompare) — so the utm/GA shape lives in
+// one place. Kept free of module imports so test/compare-button-guard.mjs can run it as-is.
+function initCompareEntry() {
+  const row = document.getElementById('compare-entry');
+  const btn = document.getElementById('compare-entry-open');
+  if (!row || !btn) return;
+  chrome.runtime.sendMessage({ type: 'COMPARE_FLAG' }, (r) => {
+    // A missing SW answer (lastError / null) keeps the row hidden — fail closed, like the strips.
+    void chrome.runtime.lastError;
+    if (r && r.on === true) row.classList.remove('hidden');
+  });
+  btn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', placement: 'popup' }, () => { void chrome.runtime.lastError; });
+  });
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
@@ -519,6 +537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadOrgSelector();
   checkProviderPermissions().then(checkProviderErrors);
   checkCapDrops();
+  initCompareEntry();
   loadFitnessMatrix();
 
   // Fitness table click opens dashboard (except link clicks)

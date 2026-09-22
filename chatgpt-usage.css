@@ -363,6 +363,16 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 .ct-cg-strip-muted { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-reset { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-dot { color: var(--ct-cg-text-muted); opacity: 0.5; }
+/* Text-only strip (collecting / reason, #1594×#1595×#1596, 2026-09-21 batch review row 1): the
+   muted seg is a DIRECT child of .ct-cg-strip-inner only in this branch (chatgpt-input.js's
+   text-only innerHTML) — the plan-name seg also carrying .ct-cg-strip-muted is nested one level
+   deeper, inside .ct-cg-strip-main, so this selector leaves it alone. With .ct-cg-strip-seg's
+   nowrap (above) + .ct-cg-strip-inner's flex-wrap:nowrap, the text-only sentence had nothing that
+   could break, so it ran past the strip's right edge on narrow composers instead of wrapping like
+   the numeric strip does (#1595's measured-hide never got a chance to fire). min-width: 0 lets the
+   flex item actually shrink below its (now much smaller, since white-space:normal drops min-content
+   to the longest word) content size. */
+.ct-cg-strip-inner > .ct-cg-strip-seg.ct-cg-strip-muted { white-space: normal; min-width: 0; }
 
 /* 「다른 AI에게도 물어보기」 (compare, #1452) — a pill next to the gear. */
 .ct-cmp-btn {
