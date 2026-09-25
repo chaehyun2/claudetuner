@@ -11,6 +11,7 @@
 import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
 import { autoGrow, sendableTargets } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
+import { linkErrorText } from './link.js';
 
 /** Installs the port / streaming slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installPort(ctx) {
@@ -21,6 +22,33 @@ export function installPort(ctx) {
   function onPortMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
+      // The pasted conversation was read (#1651). A RECEIPT, never the words: the worker keeps the
+      // transcript for the round it composes, and what arrives here is what the chip is made of.
+      case 'LINK_OK': {
+        if (!state.linkReading) return;                 // cancelled while it was being read
+        state.linkReading = false;
+        state.link = {
+          provider: msg.provider,
+          title: typeof msg.title === 'string' ? msg.title : null,
+          turns: Number.isFinite(msg.turns) ? msg.turns : 0,
+          truncated: msg.truncated === true,
+        };
+        ctx.renderAttachment();
+        ctx.updateControls();
+        return;
+      }
+      case 'LINK_FAIL': {
+        if (!state.linkReading) return;
+        // 🔴 Through clearLink(), so the 「시크릿 대화」 toggle this link turned off goes back with
+        // it (Codex 3/3 1R blocker 1) — a read that failed changed nothing, and must leave nothing
+        // changed. The reason survives the clear, because it is the one thing the user needs.
+        const why = linkErrorText(msg.code, msg.provider);
+        ctx.clearLink();
+        state.linkError = why;
+        ctx.renderAttachment();
+        ctx.updateControls();
+        return;
+      }
       case 'CONSUME_OK': {
         const first = !state.sessionStarted;
         if (first) { ctx.commitPrompt(state.question); ctx.renderQuestionBubbles(); if (!state.sessionId) state.sessionId = ctx.newSessionId(); state.firstRound = state.roundInFlight; }
@@ -33,6 +61,10 @@ export function installPort(ctx) {
         // one is history, the keepalive below runs for this one.
         if (state.resuming) { state.resuming = false; state.resumed = true; state.sessionEnded = false; state.idleEnded = false; }
         state.pendingFollowup = '';
+        // The link went out with this round, so nothing of it is left (#1634's rule: when a round
+        // ends, nothing of that round survives it). A REFUSED round keeps it, exactly like the
+        // text draft beside it.
+        if (state.link || state.linkOffer || state.linkError) ctx.clearLink();
         // This round was the DOCK COMPOSER's, so the tray it was composed with is finished: its
         // files went out and its refusal line has nothing left to explain (#1634 3R). A summary, a
         // retry or a column follow-up owns no tray and ends nothing. A REFUSED round keeps
@@ -382,6 +414,18 @@ export function installPort(ctx) {
 
   function closePort() {
     stopKeepalive();
+    // 🔴 THE LINK BELONGS TO THE PORT (Codex 3/3 1R blockers 4 and 5). The receipt on screen is a
+    // claim about what the WORKER is holding, and the worker holds it per port: when the port goes,
+    // `pendingLink` goes with it. A receipt that outlives its port promises a continuation the next
+    // SEND cannot deliver — the worker answered `bad_request` while the chip still said the old
+    // conversation was being continued — and a read in flight became 「불러오는 중…」 forever.
+    if (state.link || state.linkReading || state.linkError || state.linkOffer) {
+      if (state.linkReading) state.linkError = linkErrorText('', null);
+      const keepError = state.linkError;
+      ctx.clearLink();
+      state.linkError = keepError;      // clearLink() wipes it; the reason for the loss stays
+      ctx.renderAttachment();
+    }
     const port = state.port;
     const listener = portListener;
     state.port = null;
@@ -436,6 +480,13 @@ export function installPort(ctx) {
       if (state.port !== port) return; // closed by us (closePort) or already settled — nothing to do
       state.port = null;
       stopKeepalive();
+      // The link went with the port — see closePort(). A read in flight becomes a refusal the user
+      // can act on instead of a spinner that never ends.
+      if (state.link || state.linkReading || state.linkError || state.linkOffer) {
+        const reading = state.linkReading;
+        ctx.clearLink();
+        if (reading) { state.linkError = linkErrorText('', null); ctx.renderAttachment(); }
+      }
       // ONE line so a 「연결이 끊겨…」 seen in the wild can be read: a large sinceLastMessageMs with
       // idleEnded = the SW went idle by design; a small one = the SW restarted / the context died.
       const now = clock.now();
@@ -586,7 +637,11 @@ export function installPort(ctx) {
     // The marker a turn keeps: the first file's name plus how many more (#1634). The whole list
     // would push a byte-capped history entry around for decoration; what a returning user needs is
     // «this question had images, starting with X».
-    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}) } : null;
+    // `ids` (2026-09-26): one per image, so the turn can SHOW them again — the pictures live in the
+    // image store (a preview started at attach, written to disk only by the history write), not here.
+    // The id (and the preview) came with the attachment — see attachFile.
+    const imgIds = roundAtts.map((a) => a.imageId || ctx.newSessionId());
+    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}), ids: imgIds } : null;
     if (type === 'SEND') state.questionImg = imgMark; // the first round's question is the bubble, not a turn
     // The session id exists from the FIRST message out (it rides the wire, §5) — the same id the
     // history entry gets at CONSUME_OK; 새 대화 drops it and the next first SEND mints a new one.
@@ -630,7 +685,17 @@ export function installPort(ctx) {
       return;
     }
     let msg;
-    if (type === 'SEND') msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: !!state.saveHistory };
+    if (type === 'SEND') {
+      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: !!state.saveHistory };
+      // The pasted conversation this round continues (#1651). The worker holds both halves — the
+      // continuation for the link's own column and the transcript for the others — so the page says
+      // only WHETHER to use them, and in which language the frame should be written.
+      if (state.link) { msg.useLink = true; msg.lang = ctx.lang; }
+      // 🔴 A link turned 「시크릿 대화」 off FOR this session only (clearLink puts it back): the SW
+      // must not keep that as the user's preference (1.35.0 batch review — #1655 × #1661: a user who
+      // browses incognito by default lost that default to one pasted link).
+      if (state.linkHistoryForced) msg.saveHistoryOnce = true;
+    }
     else if (resume) {
       // EVERY continuation the page holds, not just the targets': the SW keeps the unused seeds
       // until each provider's client is constructed, so a column first asked in a LATER
@@ -638,7 +703,9 @@ export function installPort(ctx) {
       // true by construction — only a kept session is resumable.
       const cont = {};
       for (const c of ctx.liveColumns()) if (c.continuation) cont[c.id] = c.continuation;
-      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: true, resume: cont };
+      // saveHistoryOnce: the `true` is this resumed session's (only a kept one resumes), not a new
+      // preference — same defect as the link's, reached by continuing a history entry.
+      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: true, saveHistoryOnce: true, resume: cont };
     } else msg = { type: 'FOLLOWUP', text, targets };
     // Beta stats (cmp-beta-contract §3 / §5): the kind, the round, the validated source provider
     // (omitted when the page was opened without one) and the session id, on every wire message.
@@ -698,8 +765,16 @@ export function installPort(ctx) {
     return ctx.allColumns().filter((c) => providers.has(c.provider) && !c.node.hidden).map((c) => c.id);
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
+  /** Ask the worker to read a pasted conversation (#1651). A read debits nothing. */
+  function sendReadLink(url) {
+    const port = ensurePort();
+    const failed = () => { state.linkReading = false; state.linkError = linkErrorText('', null); ctx.renderAttachment(); ctx.updateControls(); };
+    if (!port) { failed(); return; }
+    try { port.postMessage({ type: 'READ_LINK', url, mayOpenTab: true }); } catch { failed(); }
+  }
+
   Object.assign(ctx, {
     columnForMsg, onPortMessage, renderConsumeFail, closePort, ensurePort, settlePortLoss, keepaliveWanted, startKeepalive,
-    stopKeepalive, tickKeepalive, ping, noteActivity, beginSend, finishSend, currentTargets,
+    stopKeepalive, tickKeepalive, ping, noteActivity, beginSend, finishSend, currentTargets, sendReadLink,
   });
 }

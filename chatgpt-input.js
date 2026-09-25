@@ -144,8 +144,19 @@
     });
   }
 
+  // The composer form. 2026-09-26 chatgpt.com UI (Chat/Work tabs): `form[data-chatgpt-composer]`
+  // (with `data-composer-placement="home"|"thread"`); the `data-type="unified-composer"` shape it
+  // replaced is kept as a fallback in case the rollout is A/B. Single source for every lookup here.
+  const COMPOSER_FORM_SELECTOR = 'form[data-chatgpt-composer], form[data-type="unified-composer"]';
+
+  /** The composer form, preferring a laid-out one if the page ever holds several; null if none. */
+  function findComposerForm() {
+    const forms = Array.from(document.querySelectorAll(COMPOSER_FORM_SELECTOR));
+    return forms.find((f) => f.getClientRects().length > 0) || forms[0] || null;
+  }
+
   function findAnchor() {
-    const form = document.querySelector('form[data-type="unified-composer"]');
+    const form = findComposerForm();
     if (form && form.parentNode) {
       const box = composerBox(form);
       // Put the strip BELOW the whole composer container when that container is already full.
@@ -291,7 +302,10 @@
 
   /** Plain text of the composer; '' when empty/absent. */
   function readComposerText() {
-    const editor = document.querySelector('#prompt-textarea, form[data-type="unified-composer"] div.ProseMirror[contenteditable="true"], form[data-type="unified-composer"] textarea');
+    // The new composer has no #prompt-textarea — the editor is the ProseMirror div inside the form.
+    const form = findComposerForm();
+    const editor = (form && form.querySelector('#prompt-textarea, div.ProseMirror[contenteditable="true"], textarea'))
+      || document.querySelector('#prompt-textarea');
     if (!editor) return '';
     if (editor.tagName === 'TEXTAREA') return String(editor.value || '').trim();
     return String(editor.innerText || editor.textContent || '').trim();
@@ -322,43 +336,96 @@
   // bubble, carrying THAT question (placement:'message'), plus a gear that opens the options page
   // at the cross-check card. The row/gear/ownership/relabel logic is the SHARED classic script
   // ui/cmp-msg-rows.js (also used by input-usage.js on claude.ai); this block only says what is
-  // chatgpt-specific. Live chatgpt.com tree of one user turn (verified 2026-09-21):
-  //   section[data-turn="user"] > div > div (GP)
-  //     div (P) > div[data-message-id][data-message-author-role="user"] (MSG) > div > div > div (grey bubble)
-  //     div (ACTION ROW, flex justify-end, always laid out) > div (hover-only copy/share/edit buttons)
-  // The row is APPENDED to the action row: same 40px line right under the bubble, right-aligned
-  // next to the hover actions, zero extra vertical space. Fallback when that row is not found
-  // (chatgpt.com re-shaped the turn): right after MSG, the same degradation claude.ai has.
+  // chatgpt-specific. Live chatgpt.com trees of one user turn — BOTH are handled (the new UI may
+  // be an A/B rollout, so the old shape stays as a fallback):
+  //   NEW (verified 2026-09-26; no data-message-author-role / data-message-id / section[data-turn]):
+  //     div.group/user-message.flex.flex-col.items-end (P)
+  //       div[data-user-message-bubble="true"] (BUBBLE, grey; innerText = the question only)
+  //       div.flex.flex-row-reverse.items-center.gap-1 (ACTION ROW) > copy / share / edit buttons
+  //     (an ancestor div[data-chatgpt-search-unit-key] carries data-chatgpt-search-message-ids —
+  //     not needed: rows are keyed by the bubble NODE in ui/cmp-msg-rows.js, never by an id)
+  //   OLD (verified 2026-09-21):
+  //     section[data-turn="user"] > div > div (GP)
+  //       div (P) > div[data-message-id][data-message-author-role="user"] (MSG) > div > div > div (grey bubble)
+  //       div (ACTION ROW, flex justify-end, always laid out) > div (hover-only copy/share/edit buttons)
+  // The row is APPENDED to the action row: same line right under the bubble next to the actions,
+  // zero extra vertical space. In the NEW row (flex-row-reverse) the last DOM child renders at the
+  // LEFT end, i.e. just left of the buttons, which keep their own positions — acceptable by design.
+  // Fallback when no action row is found (chatgpt.com re-shaped the turn): right after the bubble,
+  // the same degradation claude.ai has.
   //
   // 🔴 SOFT dependency (#1421): ui/cmp-msg-rows.js is listed before this file in CHATGPT_INJECT,
   // but a persisted registration from an older build can run this file without it. Then
   // `__ctCmpMsgRows` is undefined and the rows are silently off — never a throw, and the strip
   // (with its own compare button) is untouched.
-  const CMP_MSG_SELECTOR = '[data-message-author-role="user"]';
+  const CMP_MSG_NEW = '[data-user-message-bubble]';
+  const CMP_MSG_OLD = '[data-message-author-role="user"]';
+  const CMP_MSG_SELECTOR = CMP_MSG_NEW + ', ' + CMP_MSG_OLD;
+  // Row class of ui/cmp-msg-rows.js (ROW_CLASS there; the CSS and the guards use it too).
+  const CMP_MSG_ROW_CLASS = 'ct-cmp-msg';
 
-  /** Plain text of one user bubble (MSG innerText = the question only; attachments and the
-   *  action row live outside it — verified 2026-09-21); '' when empty. */
+  /** Plain text of one user bubble (innerText = the question only in both shapes; attachments and
+   *  the action row live outside it — verified 2026-09-21 old / 2026-09-26 new); '' when empty. */
   function readMessageText(bubble) {
     return String(bubble.innerText || bubble.textContent || '').trim();
   }
 
+  /** Which shape `el` is a bubble of ('new' | 'old'), or null. One selector at a time — never a
+   *  comma list through matches()/closest() (the guard's mini-dom supports those only per part). */
+  function bubbleShape(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (el.matches(CMP_MSG_NEW)) return 'new';
+    if (el.matches(CMP_MSG_OLD)) return 'old';
+    return null;
+  }
+
+  /** A bubble inside another bubble (an A/B page carrying both markers on one turn) is not a
+   *  bubble of its own: only the outermost one gets a row, so one turn never gets two. */
+  function isNestedBubble(bubble) {
+    for (let n = bubble.parentElement; n; n = n.parentElement) if (bubbleShape(n)) return true;
+    return false;
+  }
+
+  /** The next element sibling that is not one of our rows (a fallback row sits right after the
+   *  bubble and carries buttons — it must never be taken for the site's action row). */
+  function nextSiteSibling(el) {
+    let n = el && el.nextElementSibling;
+    while (n && n.classList && n.classList.contains(CMP_MSG_ROW_CLASS)) n = n.nextElementSibling;
+    return n;
+  }
+
+  /** The site's action row: a laid-out element with buttons that is not itself a bubble. */
+  function isActionRow(el) {
+    return !!el && !bubbleShape(el) && !!el.querySelector('button');
+  }
+
   /** Where the row goes: the turn's action row (identified by its buttons) as its last child,
-   *  else right after the bubble. */
+   *  else right after the bubble. New shape: action row = the bubble's next sibling; old shape:
+   *  the next sibling of the bubble's parent. */
   function anchorOfBubble(bubble) {
+    const shape = bubbleShape(bubble);
+    if (!shape || isNestedBubble(bubble)) return null;
     const p = bubble.parentElement;
-    const act = p && p.nextElementSibling;
-    if (act && act.querySelector('button')) return { parent: act, before: null };
+    const act = shape === 'new' ? nextSiteSibling(bubble) : (p && p.nextElementSibling);
+    if (isActionRow(act)) return { parent: act, before: null };
     return p ? { parent: p, before: bubble.nextSibling } : null;
   }
 
   /** The bubble a row belongs to, from the row's current position: the row's previous sibling in
-   *  the fallback placement, else the bubble inside the element before the row's action row. */
+   *  the fallback placement, else the bubble just before (new shape) / inside the element before
+   *  (old shape) the row's action row. A candidate only counts if anchorOfBubble would put its
+   *  row exactly where this row is — the two functions cannot disagree, so no cross-matching
+   *  between shapes and no row kept in a place its bubble no longer points to (it is rebuilt). */
   function bubbleOfRow(row) {
+    const parent = row.parentElement;
+    if (!parent) return null;
+    const owns = (b) => { const at = b && anchorOfBubble(b); return !!at && at.parent === parent; };
     const prev = row.previousElementSibling;
-    if (prev && prev.matches(CMP_MSG_SELECTOR)) return prev;
-    const act = row.parentElement;
-    const p = act && act.previousElementSibling;
-    return p ? p.querySelector(CMP_MSG_SELECTOR) : null;
+    if (bubbleShape(prev) && owns(prev)) return prev;
+    const before = parent.previousElementSibling;
+    if (bubbleShape(before) === 'new' && owns(before)) return before;
+    const inner = before && before.querySelector(CMP_MSG_OLD);
+    return owns(inner) ? inner : null;
   }
 
   const _msgRows = globalThis.__ctCmpMsgRows ? globalThis.__ctCmpMsgRows.create({

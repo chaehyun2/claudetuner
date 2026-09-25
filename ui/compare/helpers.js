@@ -3,7 +3,7 @@
 // textarea) and close over nothing of mountComparePage(). Bodies as they were in compare.js;
 // compare.js re-exports the public ones (listenEmbedTheme, sendableTargets, localHHMM).
 
-import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK } from './constants.js';
+import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK, FEEDBACK_CONTEXT_FIELD, FEEDBACK_CONTEXT_MAX, FEEDBACK_MODEL_UNKNOWN, FEEDBACK_COLUMN_RE, FEEDBACK_UA_RE, FEEDBACK_VERSION_RE, MODEL_ID_RE } from './constants.js';
 
 /** sendMessage as a promise, whether the fake/real runtime answers via callback or promise. */
 export function sendMessage(chrome, msg) {
@@ -122,4 +122,112 @@ export function sendableTargets(status, src, excludeSrc) {
     if (excludeSrc && p === src) return false;
     return true;
   });
+}
+
+// ── feedback / report ──
+// The link's target is built here, away from the DOM, so the guard can assert both halves without
+// mounting a page: what the context block says, and what actually rides on the query string.
+
+/**
+ * The diagnostic block prefilled into the inquiry form's context field.
+ *
+ * 🔴 SHAPES, COUNTS AND IDS ONLY — never the question, an answer, a turn or an attachment's
+ * contents. This is the same rule the analytics path lives under (compare.js track()), and here it
+ * matters more: the form's answer is read by a human and stored in D1, so a leak is permanent.
+ * The one free-text field of the form is the user's own message, which they write and can see.
+ *
+ * Lines the caller has nothing for are dropped rather than printed empty, and the whole block is
+ * bounded at FEEDBACK_CONTEXT_MAX (the query string carries it).
+ */
+/**
+ * A value that is NOT ours: it is printed only if it IS what it claims to be, and dropped whole
+ * otherwise.
+ *
+ * 🔴 NEVER CUT (Codex 2R). The first fix stripped disallowed characters and truncated, which is
+ * not validation — a 19-character `payroll-secret-1234` is a perfectly well-formed model id, and
+ * the reviewer walked it through to a stored D1 row and a Telegram body. bg/compare.js already
+ * says why cutting is the wrong tool for exactly this value: «a cut string is still that text».
+ *
+ * 🪤 Shape is not content, and this does not pretend otherwise: a string that really is shaped
+ * like a model id still rides. That is the same exposure this repo already accepts for
+ * `column_done.model` → GA4 (MODEL_ID_RE, Codex cmp-beta SW 1R #1), on purpose — knowing WHICH
+ * model answered is most of a bad-answer report. What closes here is the prose, the markup and
+ * the line forging; what remains is a ≤64-char token that looks like an id.
+ */
+export function feedbackValid(value, re) {
+  return typeof value === 'string' && re.test(value) ? value : '';
+}
+
+/**
+ * A column as `provider:model`, both validated: the provider against the page's own list, the
+ * model against the id shape. A model that is not one reads `other` — the report still says a
+ * model was pinned, without repeating whatever the provider called it.
+ */
+export function feedbackColumn(provider, model, providers = COMPARE_PROVIDERS) {
+  if (!providers.includes(provider)) return '';
+  if (model == null) return `${provider}:auto`;
+  return `${provider}:${feedbackValid(model, MODEL_ID_RE) || FEEDBACK_MODEL_UNKNOWN}`;
+}
+
+export function feedbackContext(info, max = FEEDBACK_CONTEXT_MAX) {
+  const i = info || {};
+  // 🔴 RE-CHECKED HERE, not trusted from the caller. feedbackColumn() builds these, but this
+  // function is the one that turns a value into a LINE, so it is the one that has to hold the
+  // invariant — the guard caught a raw `'x\ny'` forging a line the moment validation lived only
+  // at the call site (Codex 2R, self-inflicted by the 2R fix).
+  const cols = (Array.isArray(i.columns) ? i.columns : []).filter((c) => feedbackValid(c, FEEDBACK_COLUMN_RE));
+  const pairs = [
+    ['Surface', 'AI Cross-Check (beta)'],
+    ['Extension', feedbackValid(i.version, FEEDBACK_VERSION_RE)],
+    // Which shell the user is looking at: the claudetuner.com iframe or a bare extension tab. The
+    // two differ in what the page may do (a permission prompt, a popup), so a report that does not
+    // say which one costs a round trip.
+    ['Page', i.framed ? 'embedded (web shell)' : 'extension tab'],
+    // Ours, every one of them: a literal, or a phrase this file composes from numbers.
+    ['Language', i.lang === 'ko' || i.lang === 'en' ? i.lang : ''],
+    ['Columns', cols.length ? cols.join(', ') : 'none'],
+    ['Quota', i.quota],
+    ['Rounds', Number.isFinite(i.rounds) ? String(i.rounds) : null],
+    ['Asked from', COMPARE_PROVIDERS.includes(i.src) ? i.src : ''],
+    ['UA', feedbackValid(i.ua, FEEDBACK_UA_RE)],
+  ];
+  const out = pairs
+    .filter(([, v]) => typeof v === 'string' && v !== '')
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+  const cap = Number.isFinite(max) && max > 0 ? max : FEEDBACK_CONTEXT_MAX;
+  return out.length > cap ? `${out.slice(0, cap)}…` : out;
+}
+
+export function feedbackUrl(base, fields) {
+  const f = fields || {};
+  const p = new URLSearchParams();
+  if (f.source) p.set('source', f.source);
+  if (f.name) p.set('user_name', f.name);
+  if (f.email) p.set('user_email', f.email);
+  if (f.context) p.set(FEEDBACK_CONTEXT_FIELD, f.context);
+  const qs = p.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+/**
+ * What one row of the picker says.
+ *
+ * 🔴 A MODEL NAME IS NOT A DESCRIPTION ANY MORE (user request 2026-09-25). chatgpt.com's picker
+ * today offers Sol, Luna, Astra and Pro across two generations, and nothing in those words says
+ * which one answers fast and which one thinks for a minute. The package hands us the model's
+ * NAME and a stable ROLE beside it; the name tells three rows called Sol apart, and the role —
+ * rendered here, in the reader's language — says what any of them is for.
+ *
+ * A provider that reports no role (Claude, Gemini, and any ChatGPT row whose category we have no
+ * word for) keeps exactly the label it always had.
+ *
+ * Shared by the select, the pre-session list and the column face (2026-09-25): once the site's
+ * power-stop titles became the labels (package v0.11.0) the face read 「Medium」 alone.
+ */
+export function modelOptionText(m, tr) {
+  const name = typeof m.name === 'string' && m.name ? m.name : '';
+  const role = typeof m.role === 'string' && m.role ? `model_role_${m.role}` : '';
+  if (name && role && tr(role) !== role) return `${name} · ${tr(role)}`;
+  return String(m.label || m.id || '');
 }

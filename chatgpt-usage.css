@@ -16,7 +16,9 @@
   --ct-cg-tip-text: #0d0d0d;
   --ct-cg-tip-border: rgba(0, 0, 0, 0.1);
 }
-html.dark, html.dark-oled {
+/* html.dark / html.dark-oled = older ChatGPT builds; the new UI (live-measured 2026-09-26) sets
+   only class "chatgpt-theme" and marks dark mode with html[data-theme="dark"]. Keep all three. */
+html.dark, html.dark-oled, html[data-theme="dark"] {
   --ct-cg-text: #ececec;
   --ct-cg-text-muted: #9b9b9b;
   --ct-cg-surface: rgba(255, 255, 255, 0.05);
@@ -65,7 +67,8 @@ html.dark, html.dark-oled {
   font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
   margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,.07);
 }
-html.dark .ct-cg-subhead { border-top-color: rgba(255,255,255,.1); }
+html.dark .ct-cg-subhead, html.dark-oled .ct-cg-subhead,
+html[data-theme="dark"] .ct-cg-subhead { border-top-color: rgba(255,255,255,.1); }
 /* The heading is a real <button> so it is keyboard- and screen-reader reachable; these rules undo
    the UA button chrome without changing the look the <div> had. `width: 100%` is !important for the
    same reason the action icons' sizing is (see the note above): a host rule can reach a classless
@@ -390,8 +393,10 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 /* Per-question row (ui/cmp-msg-rows.js, 2026-09-21): appended INSIDE the user turn's action row
    (flex justify-end), so it sits right-aligned on the same 40px line as chatgpt.com's hover
    copy/share/edit buttons — no margin-top, only a gap from those buttons. chatgpt.com's --text-*
-   variables are plain hex colours (unlike claude.ai's HSL triples), so a bare var() with a hex
-   fallback is correct here. No `color` in the transition (theme switch left stale text colour
+   variables are plain hex colours (unlike claude.ai's HSL triples), so a bare var() is correct
+   here. 🔴 The fallback is OUR theme token, never a fixed hex: the 2026-09-26 UI defines no
+   --text-primary/--text-secondary at all, and the old light-only hex fallback (#111827) put
+   near-black hover text on the black dark-mode page. No `color` in the transition (theme switch left stale text colour
    on claude.ai, 2026-09-21). The row button also carries the strip's `.ct-cmp-btn` class (shared
    base class, see ui/cmp-msg-rows.js); the descendant selectors below out-rank `.ct-cmp-btn:hover`
    so the row keeps its own quieter look. */
@@ -403,25 +408,25 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 }
 .ct-cmp-msg .ct-cmp-msg-btn {
   display: inline-flex; align-items: center; height: 22px; padding: 0 9px; margin-left: 0;
-  border: 1px solid color-mix(in srgb, var(--text-secondary, #6b7280) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 30%, transparent);
   border-radius: 999px; background: transparent;
-  color: var(--text-secondary, #6b7280); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  color: var(--text-secondary, var(--ct-cg-text-muted)); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
   cursor: pointer; white-space: nowrap; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
 }
 /* One step above the strip's `.ct-cmp-btn:hover:not(:disabled)` (0,3,0) so the row's hover wins by
    specificity, not by source order (substitute review 후속 3b). */
 .ct-cmp-msg .ct-cmp-btn.ct-cmp-msg-btn:hover {
-  opacity: 1; color: var(--text-primary, #111827);
-  background: color-mix(in srgb, var(--text-secondary, #6b7280) 10%, transparent);
+  opacity: 1; color: var(--text-primary, var(--ct-cg-text));
+  background: color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 10%, transparent);
 }
 .ct-cmp-msg .ct-cmp-msg-gear {
   display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0;
-  border: 1px solid color-mix(in srgb, var(--text-secondary, #6b7280) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 30%, transparent);
   border-radius: 999px; background: transparent;
-  color: var(--text-secondary, #6b7280); cursor: pointer; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
+  color: var(--text-secondary, var(--ct-cg-text-muted)); cursor: pointer; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
 }
 .ct-cmp-msg .ct-cmp-msg-gear svg { width: 12px; height: 12px; }
 .ct-cmp-msg .ct-cmp-msg-gear:hover {
-  opacity: 1; color: var(--text-primary, #111827);
-  background: color-mix(in srgb, var(--text-secondary, #6b7280) 10%, transparent);
+  opacity: 1; color: var(--text-primary, var(--ct-cg-text));
+  background: color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 10%, transparent);
 }

@@ -5,6 +5,7 @@
 // Bodies are exactly as they were in compare.js; ctx contract: see ui/compare/history.js.
 
 import { PROVIDER_META, COPY_FEEDBACK_MS, SVG_NS, TURN_KIND_SUMMARY } from './constants.js';
+import { modelOptionText } from './helpers.js';
 
 /** Installs the export slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installExport(ctx) {
@@ -188,7 +189,7 @@ export function installExport(ctx) {
     if (model == null) return '';
     const list = state.status && state.status.models && Array.isArray(state.status.models[provider]) ? state.status.models[provider] : [];
     const m = list.find((x) => x && String(x.id) === String(model));
-    return m ? String(m.label || m.id || '') : String(model);
+    return m ? modelOptionText(m, t) : String(model);
   }
   const compareMarkdown = () => markdownFor(participatingColumns());
   const columnMarkdown = (col) => (col.participated ? markdownFor([col]) : '');

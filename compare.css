@@ -55,8 +55,11 @@ button:disabled { cursor: not-allowed; }
 
 /* ── top bar ── */
 /* Two groups on one 36px line: identity (title · source chip · mode chip) and actions (quota ·
-   전체 복사 · 중지 · 새 대화). Chips are 26px, action buttons 30px (.cmp-btn-sm), gaps 10px. */
-.cmp-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 36px; }
+   전체 복사 · 중지 · 새 대화). Chips are 26px, action buttons 30px (.cmp-btn-sm), gaps 10px.
+   flex-shrink: 0 — in the 100vh shell a wrapped bar (the actions on a 2nd line, e.g. an ~800px
+   claudetuner.com/multiai frame) was squeezed back to its 36px min-height and the 2nd line slid
+   under the columns (2026-09-26 user report). */
+.cmp-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 36px; flex-shrink: 0; }
 .cmp-title { font-size: 20px; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; margin-right: 2px; }
 /* Beta pill next to the heading (cmp-beta-contract §3): accent on its tint — the streaming badge's AA pair. */
 .cmp-beta-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
@@ -66,6 +69,11 @@ button:disabled { cursor: not-allowed; }
 .cmp-mode-chip.is-incognito { background: var(--bg-incognito); border-color: var(--border-incognito); color: var(--text-primary); }
 .cmp-incognito-glyph { font-size: 13px; line-height: 1; }
 .cmp-incognito-glyph[hidden] { display: none; }
+/* Feedback / report: a chip, not an action button — it sits with the identity group beside the
+   베타 pill and leaves the page, so it must not read as one of the comparison's controls. */
+.cmp-feedback { color: var(--text-secondary); text-decoration: none; }
+.cmp-feedback:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text-primary); }
+.cmp-feedback-glyph { font-size: 12px; line-height: 1; }
 .cmp-topbar-side { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 /* Quota widget (plan compare-quota-premium §3 U3, 2026-09-20): count · bar · reset · Premium link.
    States: is-low (≤5 left, amber) / is-exhausted (0, red) / is-pro (badge, no bar). The bar fills as
@@ -205,7 +213,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    `minmax(0, 1fr)` so a long answer can never grow a row past the box — the column body scrolls
    instead. When the window is too narrow for three columns the grid wraps to two rows that share
    the same box (each shorter, each scrolling); below 720px the shell gives way (see ── narrow ──). */
-.cmp-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 14px; align-items: stretch; flex: 1 1 auto; min-height: 320px; }
+.cmp-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); grid-auto-rows: minmax(240px, 1fr); gap: 14px; align-items: stretch; flex: 1 1 auto; min-height: 320px; overflow-y: auto; }
 .cmp-columns:empty { display: none; }
 /* Every column shares one height (grid stretch) and scrolls inside — chunks never move the page. */
 /* min-height: a wrapped two-row head (~87px) + the usage strip (~38px) must leave the body its
@@ -222,7 +230,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    identity group rather than truncating a badge, a plan or a model name. */
 .cmp-col-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 9px 12px 9px 14px; min-height: 48px; border-bottom: 1px solid var(--border); background: var(--bg-card); flex-shrink: 0; }
 .cmp-col-id { display: inline-flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
-.cmp-col-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+/* The tools group wraps inside itself too: a long served-model badge (「gpt-5-6-instant · 26.9초」)
+   made the group wider than a 340px column, and .cmp-col's overflow: hidden cut 「이 열에만 묻기」 off. */
+.cmp-col-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 100%; }
 /* Item 1: the name is a link to the site (new tab). Plain text weight, no underline; the ↗ arrow
    shows on hover / focus so the row reads as a heading until it is pointed at. */
 .cmp-col-name { display: inline-flex; align-items: center; gap: 2px; height: 30px; font-weight: 650; font-size: 14px; letter-spacing: -.005em; color: var(--text-primary); text-decoration: none; border-radius: 6px; white-space: nowrap; }
@@ -485,12 +495,46 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-attach-glyph { flex: 0 0 auto; }
 .cmp-turn-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-turn-attach-size { flex: 0 0 auto; opacity: .8; }
+/* The images themselves (2026-09-26): thumbnails on the turn, a viewer over the page. */
+.cmp-turn-attach { flex-wrap: wrap; }
+.cmp-turn-thumbs { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
+.cmp-turn-thumb { width: 64px; height: 64px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); overflow: hidden; cursor: zoom-in; }
+.cmp-turn-thumb:hover, .cmp-turn-thumb:focus-visible { border-color: var(--accent); }
+.cmp-turn-thumb.is-gone { cursor: default; opacity: .5; }
+.cmp-turn-thumb-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cmp-turn-thumb-img[hidden] { display: none; }
+.cmp-viewer { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(15, 20, 25, .82); }
+.cmp-viewer[hidden] { display: none; }
+.cmp-viewer-frame { max-width: 90vw; max-height: 86vh; display: flex; align-items: center; justify-content: center; }
+.cmp-viewer-img { max-width: 90vw; max-height: 86vh; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, .45); }
+.cmp-viewer-img[hidden], .cmp-viewer-gone[hidden] { display: none; }
+.cmp-viewer-gone { color: #f0f0f0; font-size: 14px; }
+.cmp-viewer-prev, .cmp-viewer-next, .cmp-viewer-close { position: absolute; width: 44px; height: 44px; border: 0; border-radius: var(--radius-pill); background: rgba(255, 255, 255, .14); color: #fff; font-size: 26px; line-height: 1; cursor: pointer; }
+.cmp-viewer-prev:hover, .cmp-viewer-next:hover, .cmp-viewer-close:hover { background: rgba(255, 255, 255, .26); }
+.cmp-viewer-prev:disabled, .cmp-viewer-next:disabled { opacity: .3; cursor: default; }
+.cmp-viewer-prev[hidden], .cmp-viewer-next[hidden] { display: none; }
+.cmp-viewer-prev { left: 16px; top: 50%; transform: translateY(-50%); }
+.cmp-viewer-next { right: 16px; top: 50%; transform: translateY(-50%); }
+.cmp-viewer-close { right: 16px; top: 16px; font-size: 22px; }
+.cmp-viewer-count { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); color: #e5e7eb; font-size: 13px; }
 /* ── attachment tray (#1617): one tray in the dock, directly above whichever composer face shows.
    Three rows, each independently hidden: the chip (thumbnail + name + size + ×), the "left out"
    note and the refusal line. The 📎 that fills it is a square button in the composer row. */
 .cmp-attach { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 /* 🔴 A display of any kind beats the UA's [hidden] rule — every class here that sets one says so explicitly (the house rule throughout this file). */
 .cmp-attach[hidden], .cmp-attach-chips[hidden], .cmp-attach-chip[hidden] { display: none; }
+/* The pasted-conversation row (#1651): the offer, the receipt and its refusal in one place. */
+.cmp-link { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
+.cmp-link[hidden], .cmp-link-note[hidden] { display: none; }
+.cmp-link-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; font-size: 12.5px; color: var(--text-primary); }
+/* 🔴 The consent sentence. Quieter than the chip but NOT hidden — it is what the user is agreeing
+   to when they press send, so it stays legible rather than becoming decoration. */
+.cmp-link-note { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+.cmp-link-use { padding: 2px 10px; font-size: 12px; }
+.cmp-link-x { margin-left: auto; padding: 0 4px; border: 0; background: none; color: var(--text-secondary); font-size: 16px; line-height: 1; cursor: pointer; }
+.cmp-link-x:hover { color: var(--text-primary); }
+/* A refusal is not an offer: the accent goes warning-coloured so the row reads differently at a glance. */
+.cmp-link.is-error { border-left-color: var(--danger, #c0392b); }
 .cmp-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cmp-attach-chip { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; max-width: 100%; padding: 6px 8px 6px 6px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
 .cmp-attach-thumb { width: 32px; height: 32px; object-fit: cover; border-radius: 6px; background: var(--bg-card); flex: 0 0 auto; }

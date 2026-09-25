@@ -60,8 +60,8 @@
     // findMoveButtonBox makes injectMoveButton() a no-op there.
     // Sidebar mount anchor — REUSES the single canonical finder exposed by
     // chatgpt-sidebar.js (globalThis.__ctCgFindSidebarAnchor, loaded just before
-    // this file), so the anchor DOM logic is NOT duplicated. Folders mount right
-    // after the top-level menu group and above the pinned/recent sections — the
+    // this file), so the anchor DOM logic is NOT duplicated. Folders mount above
+    // the pinned/projects/recent sections of the sidebar scroll container — the
     // same anchor the usage panel uses (usage inserts first, folders just below).
     findSidebarAnchor() {
       const find = globalThis.__ctCgFindSidebarAnchor;

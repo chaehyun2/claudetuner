@@ -17,6 +17,7 @@
 //     the install block. A `let` shared across files goes through a ctx field (ctx.pendingLoad)
 //     or a setter registered by its owner (ctx.bumpStatusEpoch).
 
+import { imageIdsOf } from './image-store.js';
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY } from './constants.js';
 import { autoGrow } from './helpers.js';
 
@@ -140,6 +141,11 @@ export function installHistory(ctx) {
       for (const k of stale) if (await storageKeyInvalid(k)) stillInvalid.push(k);
       const remove = [...(change.remove || []), ...stillInvalid];
       const ok = await storageWrite(change.set, remove);
+      // `afterWrite` (2026-09-26): what must follow a SUCCESSFUL write while the cross-tab lock is
+      // still held — the images of the entries it wrote or removed. Inside the lock so another tab's
+      // delete cannot land between this write and its images (Codex img 2/2 #2: a delete in tab B,
+      // then tab A's late image write, resurrected the images of an entry that no longer exists).
+      if (ok && typeof change.afterWrite === 'function') { try { await change.afterWrite(); } catch { /* the sweep catches it */ } }
       const after = await storageReadAll();
       if (after.ok) lastHistoryCount = after.list.length;
       return ok && after.ok ? after : { ok: false, list: after.list };
@@ -193,6 +199,8 @@ export function installHistory(ctx) {
       // How many MORE rode with it (#1634) — omitted for a single file, so a 1.33.0 entry is
       // unchanged and a reader that ignores it still reads the entry.
       ...(Number.isFinite(img.more) && img.more > 0 ? { more: img.more } : {}),
+      // The image ids (2026-09-26) — the pictures are in the image store, not the entry.
+      ...(imageIdsOf(img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(img.ids, ATTACH_MAX_FILES) } : {}),
     };
   }
   /**
@@ -271,9 +279,30 @@ export function installHistory(ctx) {
       if (!entry) { logUnfittable(); return null; }
       // Newest first, HISTORY_MAX kept: the oldest beyond the cap are removed in the same write.
       const rest = list.filter((e) => e.id !== snap.id);
-      const evict = rest.slice(HISTORY_MAX - 1).map((e) => historyKey(e.id));
-      return { set: { [historyKey(entry.id)]: entry }, remove: evict };
+      const evicted = rest.slice(HISTORY_MAX - 1).map((e) => e.id);
+      // The images follow the entry (2026-09-26): this session's previews reach the disk only with
+      // its write — a session never written (incognito, nothing to store) never puts one there —
+      // and an evicted entry's go with it. 🔴 The ids come from the ENTRY being written, not from
+      // the page (Codex img 2/2 #1): a write that lands late would otherwise read the NEXT session's
+      // markers — an incognito one's included — and store them under this one's id.
+      const ids = entryImageIds(entry);
+      return {
+        set: { [historyKey(entry.id)]: entry },
+        remove: evicted.map(historyKey),
+        afterWrite: async () => {
+          await ctx.imageStore.persist(entry.id, ids);
+          if (evicted.length) await ctx.imageStore.forget(evicted);
+        },
+      };
     }).then((r) => syncHistoryButton(r.ok ? r.list : null));
+  }
+  /** Every image id a stored entry names (its first-round bubble and every turn). */
+  function entryImageIds(entry) {
+    const ids = [...imageIdsOf(entry.questionImg && entry.questionImg.ids, ATTACH_MAX_FILES)];
+    for (const c of Object.values(entry.columns || {})) {
+      for (const turn of (c && c.turns) || []) if (turn && turn.img) ids.push(...imageIdsOf(turn.img.ids, ATTACH_MAX_FILES));
+    }
+    return [...new Set(ids)];
   }
   /** Case-insensitive substring match over the question and every stored turn (answers and error lines are text too). */
   function historyMatches(entry, term) {
@@ -369,7 +398,8 @@ export function installHistory(ctx) {
     // delete is in flight then writes under the new id instead of resurrecting the deleted one
     // (Codex hist 1R #3).
     if (id === state.sessionId && state.sessionStarted) state.sessionId = newSessionId();
-    historyUpdate(() => ({ remove: [historyKey(id)] })).then((r) => {
+    // Its images go with it (2026-09-26), under the same lock as the removal.
+    historyUpdate(() => ({ remove: [historyKey(id)], afterWrite: () => ctx.imageStore.forget([id]) })).then((r) => {
       renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null);
       track('history_delete', { remaining: r.list.length });
     });
@@ -377,7 +407,7 @@ export function installHistory(ctx) {
   function clearHistory() {
     if (state.sessionStarted) state.sessionId = newSessionId();
     // Every history-prefixed key, valid or not (6R #3) — the read's `keys`, not the validated list.
-    historyUpdate((list, keys) => ({ remove: keys })).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); track('history_clear'); });
+    historyUpdate((list, keys) => ({ remove: keys, afterWrite: () => ctx.imageStore.clear() })).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); track('history_clear'); });
   }
   /**
    * Open a stored session in place of whatever is on screen: the question card freezes to its
@@ -428,7 +458,10 @@ export function installHistory(ctx) {
       const more = v.more === undefined ? 0 : num(v.more);
       if (name === undefined || bytes === undefined || bytes < 0) return undefined;
       if (more === undefined || !Number.isInteger(more) || more < 0 || more > ATTACH_MAX_FILES - 1) return undefined;
-      return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}) };
+      // `ids` are optional and only ever filtered (an entry from before them has none, and a bad id
+      // costs the thumbnail, never the entry).
+      const ids = imageIdsOf(v.ids, ATTACH_MAX_FILES);
+      return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}), ...(ids.length ? { ids } : {}) };
     };
     const questionImg = entry.questionImg === undefined ? null : readImg(entry.questionImg);
     if (questionImg === undefined) return null;
@@ -507,6 +540,7 @@ export function installHistory(ctx) {
     if (state.disabled) return;
     const entry = normalizeEntry(raw);
     if (!entry) return; // not an entry: the session on screen is left as it is
+    ctx.closeViewer(); // an image of the session being replaced must not stay on top of the loaded one
     if (!state.columns.size) { ctx.pendingLoad = raw; closeHistoryPanel(); return; } // applied by readStatus once the columns exist
     // Leave whatever is on screen — accepted or not: a first SEND still waiting for its CONSUME_OK
     // keeps a port whose late answer must never land in the loaded session (Codex hist 1R #1).
@@ -572,6 +606,9 @@ export function installHistory(ctx) {
       }
       if (stored.model && typeof stored.model === 'object') col.servedModel = { id: stored.model.id == null ? null : String(stored.model.id), label: stored.model.label == null ? '' : String(stored.model.label), source: 'reported' };
       col.continuation = stored.continuation && typeof stored.continuation === 'object' ? stored.continuation : null;
+      // Now that the turns are back, the thread's mode is known: the model chosen above (before
+      // them) is put back in it (1.35.0 batch review).
+      ctx.reconcileMode(col);
       ctx.renderQuestionBubbles(); // this column's thread is restored: its bubble (from entry.question) goes on top
       const last = col.turns[col.turns.length - 1];
       col.status = last && last.role === 'assistant' && last.errorText ? 'error' : 'done';

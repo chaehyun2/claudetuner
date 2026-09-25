@@ -7,6 +7,8 @@
 // (attached to ctx); `state.pickerKind` says which list it holds. ctx contract: see ui/compare/history.js.
 
 import { COMPARE_PROVIDERS, colIdOf, parseColId, PROVIDER_META, MODELS_CSV_AUTO, MODELS_CSV_ID_MAX, MODEL_ID_RE, MODEL_AUTO_VALUE } from './constants.js';
+import { CHATGPT_EFFORT_SEPARATOR, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
+import { modelOptionText } from './helpers.js';
 
 /** Installs the model-picker slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installModelPicker(ctx) {
@@ -110,6 +112,42 @@ export function installModelPicker(ctx) {
     }
     placePicker(col, first);
   }
+  /**
+   * 🔴 A ChatGPT conversation has a MODE, fixed when it is created (package v0.12.0, measured live
+   * 2026-09-25): a Work model sent into a Chat conversation is answered by `gpt-5-6`, a Chat model
+   * into a Work one by `gpt-5.6-sol-wm` — silently. So in session a column only offers models of
+   * its own mode; the other mode needs a new conversation. (The package refuses the send too; this
+   * is so the user never gets as far as an error.)
+   */
+  const isWorkValue = (v) => v != null && v !== MODEL_AUTO_VALUE && isChatgptWorkSlug(parseChatgptModelId(String(v)).slug);
+  /**
+   * The thread's mode is what ANSWERED — not the model the column asked for (Codex ext 1R): a
+   * conversation continued from a link has no known mode, and a Work conversation asked with a
+   * Chat model answers with `gpt-5.6-sol-wm`. Read from the latest answer turn that recorded its
+   * model, not from `col.servedModel`: that one is reset every round, so a round that failed before
+   * its model arrived would forget the mode (Codex ext 2R). Turns survive rounds and restores.
+   * Before any answer, the column's own model is all there is.
+   */
+  function threadIsWork(col) {
+    for (let i = col.turns.length - 1; i >= 0; i--) {
+      const turn = col.turns[i];
+      if (turn.role === 'assistant' && turn.model && turn.model.id != null) return isWorkValue(turn.model.id);
+    }
+    return isWorkValue(col.model);
+  }
+  function crossesMode(col, value) {
+    return state.sessionStarted && col.provider === 'chatgpt' && isWorkValue(value) !== threadIsWork(col);
+  }
+  /**
+   * 🔴 Put the column's model back in its thread's mode once the thread says which it is (1.35.0
+   * batch review — #1661 × #1673): a conversation continued from a link can turn out to be Work
+   * only when its answer arrives (asked with Pro, answered by `gpt-5.6-sol-wm`), and a restored one
+   * only once its turns are back. The picker gate stops a new pick; this moves the pick the column
+   * ALREADY holds, which would otherwise go out with the next follow-up.
+   */
+  function reconcileMode(col) {
+    if (col && crossesMode(col, col.model == null ? MODEL_AUTO_VALUE : String(col.model))) renderModelSelect(col);
+  }
   /** In-session pick = the model select's own change (the select is the state; the picker its face). */
   function pickSessionModel(colId, value) {
     const col = state.columns.get(colId);
@@ -121,6 +159,12 @@ export function installModelPicker(ctx) {
   }
   /** The user's own model pick on this page — from the select's change or the in-session picker. */
   function applyModelPick(col) {
+    // Every in-session pick lands here (the popover and the select's own change): a pick across the
+    // conversation's mode is put back, never applied.
+    if (crossesMode(col, col.modelSelect.value)) {
+      col.modelSelect.value = col.model == null ? MODEL_AUTO_VALUE : String(col.model);
+      return;
+    }
     col.modelTouched = true; // renderModelSelect keeps it over the stored seed
     setColumnModel(col, col.modelSelect.value === MODEL_AUTO_VALUE ? null : col.modelSelect.value);
     renderPickerLabel(col); // in-session: the id stays, the face follows the model
@@ -157,8 +201,10 @@ export function installModelPicker(ctx) {
       opt.setAttribute('data-choice', c.id);
       const current = inSession ? c.value === col.modelSelect.value : c.id === col.id;
       opt.setAttribute('aria-selected', current ? 'true' : 'false');
-      opt.disabled = c.present && !current; // a combo the page already shows
+      const otherMode = inSession && crossesMode(col, c.value);
+      opt.disabled = (c.present && !current) || otherMode; // a combo the page already shows / the other mode
       if (c.present && !current) opt.title = t('col_picker_dup');
+      else if (otherMode) opt.title = t('col_picker_other_mode');
       opt.addEventListener('click', () => {
         if (opt.disabled) return;
         const picked = inSession ? (pickSessionModel(state.pickerFor, c.value), true) : ctx.chooseColumn(state.pickerFor, c);
@@ -219,13 +265,33 @@ export function installModelPicker(ctx) {
     }
     const toValue = (id) => (id == null ? MODEL_AUTO_VALUE : String(id));
     const known = new Set(list.map((m) => toValue(m.id)));
+    // 🔴 A model id from before the catalog carried power stops (package v0.11.0): a stored
+    // `gpt-5-6-thinking` is no row any more — its rows are `gpt-5-6-thinking__standard` / `__extended`
+    // / `__max`. Without this the user's Thinking choice fell back to the default (Instant),
+    // silently. It is carried to the FIRST row of the same model, which in the site's slider order
+    // is its lowest stop (Medium) — what the plain slug always sent (no effort = the site's default).
+    const carry = (id) => {
+      if (id == null || known.has(toValue(id))) return id;
+      const prefix = `${String(id)}${CHATGPT_EFFORT_SEPARATOR}`;
+      const row = list.find((m) => m.id != null && String(m.id).startsWith(prefix));
+      return row ? row.id : id;
+    };
     // The stored per-provider choice (`compareModels`, written by the SW from the FIRST column of the
     // provider on each send) seeds the provider's FIRST column only (a later column was added with
     // its own model). The LAYOUT is authoritative (Codex integration #2): when the page already has an
     // explicit column for that provider+model, seeding the `auto` column with it would send the same
     // request twice (bad_request at the SW) — the seed is skipped and the column stays Auto.
-    let stored = st.selectedModels && Object.hasOwn(st.selectedModels, col.provider) && ctx.firstColumnOf(col.provider) === col ? st.selectedModels[col.provider] : undefined;
-    if (stored != null) { const seeded = state.columns.get(colIdOf(col.provider, String(stored))); if (seeded && seeded !== col && seeded.id === colIdOf(col.provider, String(stored))) stored = undefined; }
+    let stored = st.selectedModels && Object.hasOwn(st.selectedModels, col.provider) && ctx.firstColumnOf(col.provider) === col ? carry(st.selectedModels[col.provider]) : undefined;
+    // 🔴 Compared AFTER carry on both sides (Codex ext 1R): a layout restored from before the stops
+    // holds `chatgpt:gpt-5-6-thinking` while the seed is now `…__standard` — looked up by the new id
+    // the explicit column was missed and both columns sent the same model.
+    if (stored != null) {
+      for (const other of state.columns.values()) {
+        if (other === col || other.provider !== col.provider) continue;
+        const om = parseColId(other.id).model;
+        if (om != null && String(carry(om)) === String(stored)) { stored = undefined; break; }
+      }
+    }
     const fallback = list.find((m) => m.default) || list[0];
     let value;
     // The column's own model: the user's pick on this page, or the model it was created with (a
@@ -237,7 +303,7 @@ export function installModelPicker(ctx) {
     // INCLUDING a null one (Codex 3R): an auto column that started its thread on Auto (no seed at
     // the time) stays Auto when another compare tab later writes a seed for the provider.
     const explicit = parseColId(col.id).model != null;
-    const current = col.modelTouched || state.sessionStarted || (explicit && col.model != null) ? col.model : undefined;
+    const current = col.modelTouched || state.sessionStarted || (explicit && col.model != null) ? carry(col.model) : undefined;
     if (current !== undefined && known.has(toValue(current))) value = toValue(current);
     // An intentional Auto (null — the user's pick, or 「Auto로 바꿔 다시 보내기」) on a catalog that has no
     // Auto entry reconciles to the catalog's DEFAULT, never back to the stored model that was just
@@ -245,12 +311,34 @@ export function installModelPicker(ctx) {
     else if (current === null) value = toValue(fallback.id);
     else if (stored !== undefined && known.has(toValue(stored))) value = toValue(stored);
     else value = toValue(fallback.id);
+    // 🔴 In session a ChatGPT thread keeps its mode even when the list no longer has its model (a
+    // restore on the static list, a MODELS refresh — Codex ext 1R): falling back across the mode
+    // would send a Chat model into a Work conversation, answered silently by the Work equivalent.
+    // A same-mode row is taken if there is one; else the thread's own model is kept as an option.
+    let kept = null;
+    if (crossesMode(col, value) && current != null) {
+      const same = list.find((m) => !crossesMode(col, toValue(m.id)));
+      if (same) value = toValue(same.id);
+      else { kept = toValue(current); value = kept; }
+    }
     clear(sel);
     for (const m of list) {
-      const o = el('option', null, String(m.label || m.id || ''));
+      const o = el('option', null, modelOptionText(m, t));
+      // The site's own one-liner, where it gives one (v0.10.2): 「리서치급 추론 능력」,
+      // 「10월 14일 지원 종료」. 🔴 On the TITLE, not in the option text — it is written in the
+      // SITE's language, which is usually but not always the reader's, and a mixed-language row
+      // reads as broken. The visible line stays ours; this is the detail behind it.
+      if (typeof m.explainer === 'string' && m.explainer) o.title = m.explainer;
       o.value = toValue(m.id);
       o.setAttribute('value', toValue(m.id));
       if (o.value === value) o.setAttribute('selected', 'selected');
+      sel.appendChild(o);
+    }
+    if (kept != null && !known.has(kept)) {
+      const o = el('option', null, ctx.modelLabelOf(col.provider, kept));
+      o.value = kept;
+      o.setAttribute('value', kept);
+      o.setAttribute('selected', 'selected');
       sel.appendChild(o);
     }
     sel.value = value;
@@ -341,6 +429,6 @@ export function installModelPicker(ctx) {
   Object.assign(ctx, {
     closePicker, togglePicker, toggleServicePicker, syncServiceButton, openServicePicker, pickSessionModel, applyModelPick, sessionChoices, openPicker, renderPickerLabel, setColumnModel,
     renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol,
-    servedModelId,
+    servedModelId, reconcileMode,
   });
 }

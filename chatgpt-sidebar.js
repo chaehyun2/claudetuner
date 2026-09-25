@@ -1,7 +1,7 @@
 // Claude Tuner — ChatGPT Sidebar Usage Panel
-// Injects a compact usage display into ChatGPT's left sidebar, just above the
-// account/profile footer. Self-contained styling (chatgpt-usage.css) with
-// ChatGPT dark-mode (html.dark) support. Shares pure helpers via __ctUsageCore.
+// Injects a compact usage display into ChatGPT's left sidebar, above the
+// pinned/recent sections. Self-contained styling (chatgpt-usage.css) with ChatGPT
+// dark-mode (html.dark, or html[data-theme="dark"] since 2026-09-26) support. Shares pure helpers via __ctUsageCore.
 
 (() => {
   'use strict';
@@ -146,11 +146,50 @@
     el.addEventListener('mouseleave', hideTooltip);
   }
 
-  // ── Sidebar anchor: just below the "More" menu group ──
-  // Preferred placement is inside the scrollable nav, right after the top-level
-  // menu items (Library/Projects/Apps/More) and before the pinned/recent
+  // ── Sidebar anchor: above the pinned/recent sections ──
+  // Current ChatGPT UI (live-measured 2026-09-26, Chat/Work tabs + icon rail):
+  //   nav[aria-label] > header + div[data-app-action-sidebar-scroll]
+  //     > div.contents > div.contents > [Pinned wrapper, Projects wrapper, Recents drop-target]
+  // Each wrapper holds a section[data-app-action-sidebar-section]. A second narrow
+  // nav (class group/sidebar-rail) is the collapsed icon rail — never mount there.
+  // The account button, #stage-sidebar-tiny-bar and sidebar-expando-section are
+  // gone in that build; the legacy finder below stays as a fallback for older builds.
+  const SIDEBAR_SCROLL_SEL = '[data-app-action-sidebar-scroll]';
+  const SIDEBAR_SECTION_SEL = 'section[data-app-action-sidebar-section]';
+  const SIDEBAR_RAIL_CLASS = 'sidebar-rail';
+
+  // A bare layout wrapper (div.contents, no data-* markers). Section wrappers such as
+  // the Recents drop-target carry data-* attributes, so with only ONE section present
+  // we stop above it instead of descending into it and mounting inside Recents.
+  function isPlainContentsWrapper(el) {
+    if (Array.from(el.attributes || []).some(a => a.name.startsWith('data-'))) return false;
+    if (el.classList && el.classList.contains('contents')) return true;
+    try { return getComputedStyle(el).display === 'contents'; } catch { return false; }
+  }
+
+  function findScrollSidebarAnchor() {
+    for (const scroll of document.querySelectorAll(SIDEBAR_SCROLL_SEL)) {
+      const nav = scroll.closest('nav');
+      if (!nav || String(nav.className || '').includes(SIDEBAR_RAIL_CLASS)) continue;
+      // Descend the single-child display:contents wrapper chain to the element whose
+      // children are the section wrappers — our panel becomes their sibling.
+      let content = scroll;
+      while (content.children.length === 1 && isPlainContentsWrapper(content.children[0])) {
+        content = content.children[0];
+      }
+      const section = content.querySelector(SIDEBAR_SECTION_SEL);
+      if (!section) return { parent: content, ref: null }; // no sections yet: append
+      let ref = section;
+      while (ref.parentElement && ref.parentElement !== content) ref = ref.parentElement;
+      if (ref.parentElement === content) return { parent: content, ref };
+    }
+    return null;
+  }
+
+  // Legacy (pre-2026-09-26) placement: inside the scrollable nav, right after the
+  // top-level menu items (Library/Projects/Apps/More) and before the pinned/recent
   // sections. Falls back to the account/profile footer if that nav isn't found.
-  function findSidebarAnchor() {
+  function findLegacySidebarAnchor() {
     // There can be two profile buttons (collapsed tiny-bar + expanded sidebar).
     // Pick the one that is NOT inside the collapsed rail; use it to locate the
     // expanded sidebar column (the wrapper with a direct <nav> child).
@@ -184,6 +223,10 @@
 
     // Fallback: above the account/profile footer.
     return { parent: column, ref: footer };
+  }
+
+  function findSidebarAnchor() {
+    return findScrollSidebarAnchor() || findLegacySidebarAnchor();
   }
 
   // Single canonical ChatGPT sidebar-anchor finder — also consumed by the folders
@@ -354,7 +397,7 @@
   // noise, and noise next to a limit reads as a limit.
   // 🪤 The amber is inlined, not a var(--ct-cg-warn, …). That token is defined nowhere in the
   // extension, so the fallback always won — the line READ as theme-aware while bypassing the
-  // html.dark block every other colour in this panel goes through, and would have survived review
+  // dark-theme token block every other colour in this panel goes through, and would have survived review
   // on its appearance. One-off use does not earn a token.
   //
   // 🔴 THE RETURN TIME IS ITS OWN LINE, under the name — not a `.ct-cg-reset` cell beside it. That

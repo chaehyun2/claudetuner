@@ -171,6 +171,23 @@ export const DEFAULT_SEND_BUDGET_MS = 10 * 60 * 1000;
 export const MS_PER_MINUTE = 60 * 1000;
 // Page-local pseudo code: the port that carried the session is gone (never sent by the SW).
 export const CODE_SESSION_ENDED = 'session_ended';
+// Continuing a conversation the user pasted a link to (#1651). LINK_FAIL carries the package's own
+// code; these are the ones with a sentence of their own, and anything else falls back to the
+// generic line — a code the page does not know must not become a blank notice.
+export const CODE_NOT_FOUND = 'not_found';
+export const CODE_UNSUPPORTED = 'unsupported';
+export const CODE_BAD_REQUEST = 'bad_request';
+export const CODE_LINK_CONTEXT_MISSING = 'link_context_missing';
+export const CODE_LINK_NEEDS_HISTORY = 'link_needs_history';
+// 🔴 The ORIGIN decides which provider a pasted link belongs to — never a substring, or
+// `chatgpt.com.evil.test` is ChatGPT. The SW checks again (providerForLink); this copy exists so
+// the chip can appear before the message is sent, and the drift guard pins the two together.
+export const LINK_ORIGINS = Object.freeze({
+  'https://claude.ai': 'claude',
+  'https://chatgpt.com': 'chatgpt',
+  'https://chat.openai.com': 'chatgpt',
+  'https://gemini.google.com': 'gemini',
+});
 // DONE{stalled:true} has TWO sources and one meaning — "this answer did not finish" (#1527):
 // the stall watchdog below, and a cut the CLIENT reported (`DONE.cutReason`, two values: 'stalled'
 // or 'stream_error', the latter = the provider failed mid-answer). Same badge, same retry, same
@@ -373,9 +390,67 @@ export const ATTACH_ERR_SIZE = 'size';
 export const ATTACH_ERR_READ = 'read';
 export const ATTACH_ERR_COUNT = 'count';
 export const ATTACH_ERR_TOTAL = 'total';
+
+// Seeing the images again (2026-09-26, user request: 「히스토리를 봐도 어떤 이미지를 올렸는지 알 수가
+// 없다」). A turn that carried images keeps their IDs; the pictures themselves live in IndexedDB
+// (ui/compare/image-store.js) — never in the history entry, which is byte-capped at
+// HISTORY_ENTRY_MAX_BYTES and would lose its text to them, and never in storage.local, whose
+// 10 MB quota (no unlimitedStorage) twenty sessions of photos would fill.
+// What is kept is a PREVIEW, not the original: long edge ≤ IMAGE_PREVIEW_MAX_EDGE, re-encoded —
+// enough to recognise and read the image, a fraction of a 10 MB upload.
+export const IMAGE_DB_NAME = 'ctcmp-images';
+export const IMAGE_DB_VERSION = 1;
+export const IMAGE_STORE = 'previews';
+export const IMAGE_SESSION_INDEX = 'session';
+export const IMAGE_PREVIEW_MAX_EDGE = 1600;
+export const IMAGE_PREVIEW_TYPE = 'image/webp';
+export const IMAGE_PREVIEW_QUALITY = 0.85;
+// An image id: what the page mints (crypto.randomUUID-shaped) — anything else read back from a
+// history entry is dropped, never looked up.
+export const IMAGE_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
+// Stored previews whose session is in no history entry are removed — but only once they are this
+// old: a session that has not reached its first history write yet (this tab's, or another compare
+// tab's) owns previews no entry names so far.
+export const IMAGE_ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 // The file name a TURN keeps (#1616 ④ history marker), clipped. 🔴 A MARKER, NEVER THE IMAGE:
 // a history entry is capped at HISTORY_ENTRY_MAX_BYTES and shrunk by evicting whole rounds, and
 // `fitEntry` has no idea how to shrink a picture — a few data-URL thumbnails would push real
 // answers out of the entry to make room for decoration. What a returning user needs is «this
 // question had an image called X», which is two short fields.
 export const HISTORY_ATTACH_NAME_MAX = 64;
+
+// ── feedback / report (Tally) ──
+// ONE inquiry form is shared by every Claude Tuner surface (popup header, the composer strips, the
+// site footer, the ad label) — reusing it keeps the replies in one inbox instead of splitting them
+// per feature. `source` names the surface that opened it.
+export const FEEDBACK_URL = 'https://tally.so/r/q4dyQk';
+export const FEEDBACK_SOURCE = 'compare';
+// 🔴 `error_report` IS THE FORM'S EXISTING HIDDEN CONTEXT FIELD, and a Tally prefill param that
+// names no field of the form is silently dropped. The dashboard's error reporter already fills it
+// (site/dashboard/error-report.js), and POST /api/webhooks/tally appends it to the inquiry body —
+// so this is the one channel where prefilled context actually reaches D1 / Telegram. Renaming it
+// means adding the new field in Tally FIRST.
+export const FEEDBACK_CONTEXT_FIELD = 'error_report';
+// The context block is bounded: Tally takes the prefill through the query string, and the webhook
+// slices each field at 5000 chars anyway. 1200 fits every line below with room to spare.
+export const FEEDBACK_CONTEXT_MAX = 1200;
+// 🔴 VALUES THAT ARE NOT OURS ARE VALIDATED AND OMITTED, NEVER TRUNCATED (Codex 1R 배포차단 1,
+// 2R). Two of the block's values come from outside: a column's model id is the PROVIDER's string
+// (test/compare-send-order-guard.mjs treats it as the one untrusted string on this page) and the
+// UA is the browser's. Measured: prose and an attachment's contents smuggled into a model id
+// reached D1 and a Telegram alert verbatim.
+//
+// 🔑 THIS REPO ALREADY DECIDED HOW TO DO THIS, one sink earlier — bg/compare.js MODEL_ID_RE, for
+// the same ids going to GA4: «A non-matching id is OMITTED, never truncated (A CUT STRING IS
+// STILL THAT TEXT)». The first fix here cut instead, which is the thing that comment forbids. So
+// the rule is the same one, applied to the same kind of value: match the shape or say `other`.
+export const FEEDBACK_MODEL_UNKNOWN = 'other';
+// What a built column entry must look like by the time it becomes a line. 🔴 feedbackColumn()
+// produces this, but feedbackContext() re-checks it rather than trusting its caller: when the
+// first fix moved validation OUT to the caller, the block itself went defenceless and a raw
+// `'x\ny'` forged a context line — caught by the guard, not by review.
+export const FEEDBACK_COLUMN_RE = /^[a-z]+:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// A UA that is not shaped like one is not a UA — same rule, no cutting. A real Chrome UA is ~130
+// characters; the cap is what a HEADER is worth, not a budget to fill with something else.
+export const FEEDBACK_UA_RE = /^[A-Za-z0-9 ._:;,()/-]{1,180}$/;
+export const FEEDBACK_VERSION_RE = /^[0-9]+(\.[0-9]+){0,3}$/;

@@ -5,9 +5,10 @@
 // pair and the error copy. Bodies are exactly as they were in compare.js
 // (test/mutants/compare-page.json anchors on them). The ctx contract is written up in history.js.
 
-import { HISTORY_ATTACH_NAME_MAX, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
+import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { retryNeedsAttachment } from './attachments.js';
+import { imageIdsOf } from './image-store.js';
 import { renderAnswer } from '../md-render.js';
 import { COMPARE_I18N } from '../compare-i18n.js';
 
@@ -179,6 +180,7 @@ export function installColumnThread(ctx) {
         name: extra.img.name.slice(0, HISTORY_ATTACH_NAME_MAX),
         bytes: Number.isFinite(extra.img.bytes) ? extra.img.bytes : 0,
         ...(Number.isFinite(extra.img.more) && extra.img.more > 0 ? { more: extra.img.more } : {}),
+        ...(imageIdsOf(extra.img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(extra.img.ids, ATTACH_MAX_FILES) } : {}),
       };
     }
     return out;

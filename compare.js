@@ -58,10 +58,13 @@
 // commits a height (H); every copy is visible (I).
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
+import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, TAB_LOST_CODES, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_TYPES, ATTACH_ERR_READ } from './ui/compare/constants.js';
+import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
 import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
-import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets } from './ui/compare/helpers.js';
+import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
+import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl } from './ui/compare/helpers.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
 import { installColumnGate } from './ui/compare/column-gate.js';
@@ -96,6 +99,10 @@ export function mountComparePage(deps) {
   // model choices; injectable for the flow guard. Read once at mount, applied at the first status
   // (ensureDefaultColumns), written on every layout change (saveLayout).
   const syncStorage = deps.syncStorage || (chrome && chrome.storage && chrome.storage.sync) || null;
+  // The signed-in account, for prefilling the feedback form (see syncFeedbackLink). chrome.storage
+  // .local is where the popup and the composer strips keep it; injectable for the flow guard. Read
+  // once at mount — this page never signs anyone in, so it cannot change under us.
+  const accountStorage = deps.accountStorage || (chrome && chrome.storage && chrome.storage.local) || null;
   // Randomness (the example pick) — injectable so the flow guard can pin a shuffle.
   const random = typeof deps.random === 'function' ? deps.random : Math.random;
   const t = makeT(lang);
@@ -140,6 +147,15 @@ export function mountComparePage(deps) {
     questionImg: null,    // `{name, bytes}` marker of the file the FIRST round carried (its question is the bubble, not a turn) — restored from history
     roundOwnsTray: false, // the round on the wire came from the DOCK composer — only such a round retires its tray (files AND notice) at CONSUME_OK
     attachError: null,    // `{key, arg}` of the refusal line under the composer, or null — cleared by the next attach attempt
+    // Continuing a pasted conversation (#1651). `linkOffer` is a link SEEN but not accepted yet;
+    // `link` is one the worker has READ (a receipt: provider, title, turns — never the words);
+    // `linkReading` is the gap between the two. Only one at a time, and only before the first round.
+    linkOffer: null,      // `{provider, url}` — the chip asking "continue this?"
+    linkReading: false,
+    link: null,           // `{provider, title, turns, truncated}` once LINK_OK arrives
+    linkError: null,      // `{key, arg}` of the refusal line, or null
+    linkHistoryForced: false, // the 「시크릿 대화」 toggle was turned off FOR the link, and we said so
+    linkPrevSave: null,   // `{saveHistory, touched}` as they were before that — restored when the link goes
     sending: false,       // a SEND/FOLLOWUP is in flight (until ALL_DONE or CONSUME_FAIL)
     sessionStarted: false, // SEND has been accepted at least once (follow-ups allowed)
     sessionEnded: false,  // the port that carried this session is gone — the SW disposed its clients (a kept session may still resume, canResume())
@@ -161,6 +177,10 @@ export function mountComparePage(deps) {
     rounds: 0,            // rounds accepted (CONSUME_OK) in this session — analytics `send.round`
     sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
     historyCache: [],     // the last history list read for the panel — the search filters this, never storage (C2)
+    // The signed-in account, read once at mount (readFeedbackAccount) and used for nothing but
+    // prefilling the feedback form. 🔴 Never put on the wire and never in analytics.
+    feedbackName: '',
+    feedbackEmail: '',
     roundStartedAt: null, // clock.now() at the last beginSend — analytics `round_done.ms`
     checking: false,      // a COMPARE_STATUS read is in flight (gates show 「확인 중…」)
     notice: null,         // { kind, owner } of the notice on screen (see NOTICE_OWNER_*), null when none
@@ -209,6 +229,31 @@ export function mountComparePage(deps) {
    */
   function attachMark(img) {
     const w = el('span', 'cmp-turn-attach');
+    // The images themselves (2026-09-26, user request: the name alone did not say which picture it
+    // was). One thumbnail per id, filled in when the image store answers; a click opens the viewer.
+    // A marker from before the ids (or an image the store no longer has) keeps the name line below.
+    const ids = imageIdsOf(img.ids, ATTACH_MAX_FILES);
+    if (ids.length) {
+      const strip = el('span', 'cmp-turn-thumbs');
+      ids.forEach((id, i) => {
+        const b = el('button', 'cmp-turn-thumb');
+        b.type = 'button';
+        b.title = t('attach_view');
+        b.setAttribute('aria-label', t('attach_view_n', i + 1));
+        const pic = el('img', 'cmp-turn-thumb-img');
+        pic.setAttribute('alt', '');
+        pic.hidden = true;
+        b.appendChild(pic);
+        b.addEventListener('click', () => openImageViewer(ids, i, b));
+        strip.appendChild(b);
+        imageStore.url(id).then((u) => {
+          if (u) { pic.src = u; pic.hidden = false; return; }
+          b.classList.add('is-gone');
+          b.title = t('attach_gone');
+        });
+      });
+      w.appendChild(strip);
+    }
     w.appendChild(el('span', 'cmp-turn-attach-glyph', '📎'));
     w.setAttribute('title', t('attach'));
     const name = el('span', 'cmp-turn-attach-name', img.name);
@@ -220,6 +265,85 @@ export function mountComparePage(deps) {
     if (Number.isFinite(img.more) && img.more > 0) w.appendChild(el('span', 'cmp-turn-attach-more', t('attach_more', img.more)));
     return w;
   }
+  // ── the image viewer (2026-09-26): one overlay for the page, built on first use ──
+  let viewer = null;
+  function buildViewer() {
+    const node = el('div', 'cmp-viewer');
+    node.hidden = true;
+    node.setAttribute('role', 'dialog');
+    node.setAttribute('aria-modal', 'true');
+    node.setAttribute('aria-label', t('attach_view'));
+    const frame = el('div', 'cmp-viewer-frame');
+    const pic = el('img', 'cmp-viewer-img');
+    pic.setAttribute('alt', '');
+    const gone = el('p', 'cmp-viewer-gone', t('attach_gone'));
+    const btn = (cls, glyph, label, fn) => {
+      const b = el('button', cls, glyph);
+      b.type = 'button';
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      return b;
+    };
+    const prev = btn('cmp-viewer-prev', '‹', t('attach_prev'), () => stepViewer(-1));
+    const next = btn('cmp-viewer-next', '›', t('attach_next'), () => stepViewer(1));
+    const close = btn('cmp-viewer-close', '×', t('attach_viewer_close'), closeViewer);
+    const count = el('span', 'cmp-viewer-count');
+    frame.appendChild(pic);
+    frame.appendChild(gone);
+    node.appendChild(frame);
+    node.appendChild(prev);
+    node.appendChild(next);
+    node.appendChild(close);
+    node.appendChild(count);
+    // The backdrop closes it; the picture does not.
+    node.addEventListener('click', (e) => { if (e.target === node) closeViewer(); });
+    node.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeViewer(); }
+      else if (e.key === 'ArrowLeft') stepViewer(-1);
+      else if (e.key === 'ArrowRight') stepViewer(1);
+    });
+    root.appendChild(node);
+    return { node, pic, gone, prev, next, close, count, ids: [], index: 0, opener: null, seq: 0 };
+  }
+  function openImageViewer(ids, index, opener) {
+    if (!viewer) viewer = buildViewer();
+    viewer.ids = ids;
+    viewer.opener = opener;
+    viewer.node.hidden = false;
+    showViewerImage(index);
+    viewer.close.focus();
+  }
+  function stepViewer(delta) {
+    if (!viewer || viewer.node.hidden) return;
+    const to = viewer.index + delta;
+    if (to >= 0 && to < viewer.ids.length) showViewerImage(to);
+  }
+  function showViewerImage(index) {
+    viewer.index = index;
+    const n = viewer.ids.length;
+    viewer.count.textContent = n > 1 ? `${index + 1} / ${n}` : '';
+    viewer.prev.hidden = viewer.next.hidden = n < 2;
+    viewer.prev.disabled = index === 0;
+    viewer.next.disabled = index === n - 1;
+    viewer.pic.hidden = true;
+    viewer.gone.hidden = true;
+    // A slow read for an image the user already stepped past must not replace the current one.
+    const seq = ++viewer.seq;
+    imageStore.url(viewer.ids[index]).then((u) => {
+      if (seq !== viewer.seq) return;
+      if (u) { viewer.pic.src = u; viewer.pic.hidden = false; } else viewer.gone.hidden = false;
+    });
+  }
+  function closeViewer() {
+    if (!viewer || viewer.node.hidden) return;
+    viewer.node.hidden = true;
+    viewer.seq += 1;
+    const opener = viewer.opener;
+    viewer.opener = null;
+    if (opener && typeof opener.focus === 'function') opener.focus();
+  }
+
   /** Provider mark: a brand-coloured dot (CSS keys off data-mark; data-provider stays the column's selector) — no logos. */
   const dot = (provider) => {
     const d = el('span', 'cmp-dot');
@@ -236,10 +360,13 @@ export function mountComparePage(deps) {
   // its TDZ until defined and is registered right after its definition (`ctx.x = x;`). A `let`
   // shared with a slice goes through a ctx field (ctx.pendingLoad) or a setter (bumpStatusEpoch).
   // The contract is written up in ui/compare/history.js (the template slice).
-  const ctx = { chrome, doc, win, location, lang, t, state, clock, nav, con, syncStorage, random, raf, root, params, src, q, embedHost, track, el, clear, link, dot, deps };
+  // The previews of the images this page sends (2026-09-26): shown on the turns, kept with the
+  // history. Injectable — the guard passes one over fakes (mini-dom has no IndexedDB or canvas).
+  const imageStore = deps.imageStore || createImageStore({ backend: typeof indexedDB !== 'undefined' ? idbBackend(indexedDB) : null });
+  const ctx = { chrome, doc, win, location, lang, t, state, clock, nav, con, syncStorage, random, raf, root, params, src, q, embedHost, track, el, clear, link, dot, deps, imageStore };
   Object.assign(ctx, {
     // stays in compare.js
-    openInExtensionTab, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
+    openInExtensionTab, closeViewer, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
     renderQuestionBubbles, makeFollowupComposer, syncSaveHistory, showNotice, showLoginRequired, renderComingSoon, renderQuota, renderQuotaLine,
     syncQuotaNotice, quotaExhaustedTitle, betaReset, renderResetOffer, requestReset, columnFor, setBadge, waitingSeconds,
     ttftSeconds, paintBadge, lastAssistantTurn, setServedModel, waitingColumns, countdownColumns, syncWaitTimer, tickWaiting,
@@ -274,6 +401,19 @@ export function mountComparePage(deps) {
   const betaPill = el('span', 'cmp-beta-pill', t('beta_badge'));
   betaPill.id = 'cmp-beta';
   topbar.appendChild(betaPill);
+  // 「의견 보내기」 — the beta's way back to us, right beside the pill that says it is a beta (the
+  // action group on the right is already six controls wide, and this is not an action on the
+  // comparison). The shared Tally inquiry form, opened in a new tab with the account and a
+  // diagnostic block prefilled, so a report arrives with its own context attached.
+  const feedbackLink = link(FEEDBACK_URL, null, 'cmp-src-chip cmp-feedback');
+  feedbackLink.id = 'cmp-feedback';
+  feedbackLink.title = t('feedback_title');
+  feedbackLink.setAttribute('aria-label', t('feedback_title'));
+  const feedbackGlyph = el('span', 'cmp-feedback-glyph', '\u{1F4AC}');
+  feedbackGlyph.setAttribute('aria-hidden', 'true');
+  feedbackLink.appendChild(feedbackGlyph);
+  feedbackLink.appendChild(el('span', null, t('feedback')));
+  topbar.appendChild(feedbackLink);
   if (src) {
     const chip = el('span', 'cmp-src-chip');
     chip.appendChild(dot(src));
@@ -340,10 +480,91 @@ export function mountComparePage(deps) {
   topbarSide.appendChild(newChatBtn);
   topbar.appendChild(topbarSide);
   root.appendChild(topbar);
-  Object.assign(ctx, { topbar, betaPill, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, copyAllBtn, stopBtn, newChatBtn });
+  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, copyAllBtn, stopBtn, newChatBtn });
 
   // ── copy to clipboard: ui/compare/export.js (installExport, installed above) ──
   attachCopy(copyAllBtn, () => compareMarkdown(), (copied) => { copyAllBtn.textContent = t(copied ? 'copied' : 'copy_all'); }, COPY_KIND_ALL, null);
+
+  // ── feedback / report: the prefilled inquiry link (topbar) ──
+  // The href is rebuilt the moment the user REACHES for the link — pointerdown covers mouse and
+  // touch, focus covers the keyboard, and both run before the navigation reads `href`. Hanging
+  // this off the page's sync functions instead would tie the freshness of a report to whichever
+  // of them happened to fire last; reading the state once, late, cannot drift.
+  function extVersion() {
+    try {
+      const m = chrome && chrome.runtime && typeof chrome.runtime.getManifest === 'function' ? chrome.runtime.getManifest() : null;
+      return m && typeof m.version === 'string' ? m.version : '';
+    } catch { return ''; } // the runtime is gone (update / reload) — a version is not worth an error
+  }
+  /** The quota as one phrase, from the SAME predicate the widget and the send gate read (countedQuota). */
+  function feedbackQuotaText() {
+    const quota = state.status && state.status.quota;
+    if (!quota) return 'unknown';
+    if (quota.pro) return 'premium';
+    const counted = countedQuota(quota);
+    if (counted) return `${counted.remaining} of ${counted.limit} left`;
+    // Neither number with a reset time = the server is not counting (the billing gates are dark),
+    // which is what the widget draws as 「무제한」 — NOT Premium (renderQuotaLine, Codex #23).
+    if (quota.limit == null && quota.remaining == null && quota.resetsAt) return 'uncounted';
+    return 'unknown';
+  }
+  /**
+   * The page's columns as `provider:model` — the provider checked against the page's own list and
+   * the model against the id shape (feedbackColumn); a model that is not one reads `other`. The
+   * model is as CHOSEN (`auto` = the provider picks), not as served.
+   */
+  function feedbackColumns() {
+    return state.columnIds
+      .map((colId) => { const col = state.columns.get(colId); return col ? feedbackColumn(parseColId(colId).provider, col.model) : ''; })
+      .filter(Boolean);
+  }
+  function syncFeedbackLink() {
+    const context = feedbackContext({
+      version: extVersion(),
+      framed: !!embedHost,
+      lang,
+      columns: feedbackColumns(),
+      quota: feedbackQuotaText(),
+      rounds: state.rounds,
+      src: src || '',
+      ua: nav && typeof nav.userAgent === 'string' ? nav.userAgent : '',
+    });
+    feedbackLink.setAttribute('href', feedbackUrl(FEEDBACK_URL, {
+      source: FEEDBACK_SOURCE,
+      name: state.feedbackName,
+      email: state.feedbackEmail,
+      context,
+    }));
+  }
+  /** The account the popup / the composer strips cached, read once. Absent = no prefill, not an error. */
+  function readFeedbackAccount() {
+    if (!accountStorage || typeof accountStorage.get !== 'function') return;
+    const done = (r) => {
+      const a = (r && r.accountCache) || {};
+      const ia = (r && r.independentAccount) || {};
+      const pick = (key) => (typeof a[key] === 'string' && a[key] ? a[key] : (typeof ia[key] === 'string' ? ia[key] : ''));
+      state.feedbackName = pick('name');
+      state.feedbackEmail = pick('email');
+      syncFeedbackLink();
+    };
+    try {
+      const r = accountStorage.get(['accountCache', 'independentAccount'], (res) => { void (chrome && chrome.runtime && chrome.runtime.lastError); done(res); });
+      if (r && typeof r.then === 'function') r.then(done, () => done(null));
+    } catch { done(null); }
+  }
+  feedbackLink.addEventListener('pointerdown', syncFeedbackLink);
+  feedbackLink.addEventListener('focus', syncFeedbackLink);
+  // 🔴 …and on the activation itself (Codex 1R 후속 3). pointerdown/focus cover the mouse, touch
+  // and keyboard paths, but an ALREADY-FOCUSED link activated by an assistive technology fires
+  // neither — measured sending `Rounds: 0 / Quota: 3 of 3 left` for a page that had run a round
+  // and spent a compare. A handler runs BEFORE the navigation reads `href`, so this is the last
+  // point at which the truth can still be attached; sparse context is tolerable, wrong is not.
+  feedbackLink.addEventListener('click', () => {
+    syncFeedbackLink();
+    track('feedback_open', { framed: !!embedHost, rounds: state.rounds });
+  });
+  syncFeedbackLink();
+  Object.assign(ctx, { syncFeedbackLink, feedbackColumns, feedbackQuotaText });
 
   const noticeBox = el('div', 'cmp-notices');
   noticeBox.id = 'cmp-notices';
@@ -462,6 +683,19 @@ export function mountComparePage(deps) {
   attachBox.appendChild(attachErr);
   // The picker behind every 📎. `accept` is a hint to the OS dialog, never the check — a user can
   // always pick "all files", so attachmentError() decides either way.
+  // The link row (#1651): the offer, the receipt and its refusal share one box, because they are
+  // one conversation with the user and only one of them is ever true at a time.
+  const linkBox = el('div', 'cmp-link');
+  linkBox.id = 'cmp-link';
+  linkBox.hidden = true;
+  const linkLine = el('p', 'cmp-link-line');
+  linkLine.id = 'cmp-link-line';
+  linkBox.appendChild(linkLine);
+  const linkNote = el('p', 'cmp-link-note');
+  linkNote.id = 'cmp-link-note';
+  linkNote.hidden = true;
+  linkBox.appendChild(linkNote);
+  attachBox.appendChild(linkBox);
   const attachInput = el('input');
   attachInput.type = 'file';
   attachInput.id = 'cmp-attach-input';
@@ -485,7 +719,7 @@ export function mountComparePage(deps) {
   }
   const qAttachBtn = makeAttachBtn('cmp-attach-btn');
   qRow.insertBefore(qAttachBtn, sendBtn);
-  Object.assign(ctx, { attachBox, attachChips, attachNote, attachErr, attachInput, qAttachBtn });
+  Object.assign(ctx, { attachBox, attachChips, attachNote, attachErr, attachInput, qAttachBtn, linkBox, linkLine, linkNote });
 
   /**
    * No attaching, replacing or removing while the round that carries it is on the wire — the bytes
@@ -608,7 +842,12 @@ export function mountComparePage(deps) {
       return;
     }
     const item = slot();
-    Object.assign(item, next, { reading: false, preview: '' });   // fills ITS slot — the order is the user's
+    // `imageId` (2026-09-26): the image's id from the moment it is ATTACHED, and its preview is
+    // started now — so it is ready long before the round's history write, the only moment it can
+    // reach the disk (image-store `ready`).
+    const imageId = ctx.newSessionId();
+    imageStore.add(imageId, ok);
+    Object.assign(item, next, { reading: false, preview: '', imageId });   // fills ITS slot — the order is the user's
     if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
       try { item.preview = URL.createObjectURL(ok); } catch { item.preview = ''; }
     }
@@ -666,7 +905,8 @@ export function mountComparePage(deps) {
     }
     attachErr.hidden = !state.attachError;
     if (state.attachError) attachErr.textContent = state.attachError.arg == null ? t(state.attachError.key) : t(state.attachError.key, state.attachError.arg);
-    attachBox.hidden = attachChips.hidden && attachNote.hidden && attachErr.hidden;
+    renderLink();
+    attachBox.hidden = attachChips.hidden && attachNote.hidden && attachErr.hidden && linkBox.hidden;
     for (const b of [qAttachBtn, ...composers.map((c) => c.attachBtn)]) {
       if (!b) continue;
       // Full is not the same as locked: the 📎 goes dim at five so the limit is visible before a
@@ -675,6 +915,132 @@ export function mountComparePage(deps) {
       b.classList.toggle('is-on', any);
     }
   }
+  /**
+   * The link row (#1651): at most one of offer / reading / receipt / refusal, because at most one
+   * of them is ever true.
+   *
+   * 🔴 The consent line is part of the RECEIPT, not a separate dialog — it sits under the chip
+   * from the moment the conversation is read until the round goes out, so the sentence "this
+   * conversation is passed to the other AIs as well" is on screen while the user decides to send.
+   * A modal they clicked through three screens ago is not consent at the moment it matters.
+   */
+  function renderLink() {
+    clear(linkLine);
+    linkNote.hidden = true;
+    linkBox.classList.toggle('is-error', !!state.linkError);
+    if (state.linkError) {
+      linkLine.textContent = state.linkError.arg == null ? t(state.linkError.key) : t(state.linkError.key, state.linkError.arg);
+      linkLine.appendChild(makeLinkX('link_remove', () => { state.linkError = null; renderAttachment(); }));
+      linkBox.hidden = false;
+      return;
+    }
+    if (state.linkReading) {
+      linkLine.textContent = t('link_reading');
+      // 🔴 A read must be cancellable (Codex 3/3 1R blocker 5): a lost port used to leave 「불러오는
+      // 중…」 on screen with no × and no way back — and the send is disabled while it shows.
+      linkLine.appendChild(makeLinkX('link_remove', clearLink));
+      linkBox.hidden = false;
+      return;
+    }
+    if (state.link) {
+      const { key, args } = linkChipText(state.link);
+      linkLine.textContent = t(key, ...args);
+      linkLine.appendChild(makeLinkX('link_remove', clearLink));
+      // 🔴 The consent sentence, and — when we changed a setting for them — what we changed.
+      linkNote.textContent = state.linkHistoryForced ? `${t('link_consent')} ${t('link_history_on')}` : t('link_consent');
+      linkNote.hidden = false;
+      linkBox.hidden = false;
+      return;
+    }
+    if (state.linkOffer) {
+      linkLine.textContent = t('link_found', PROVIDER_META[state.linkOffer.provider].label);
+      const use = el('button', 'cmp-btn cmp-link-use', t('link_use'));
+      use.type = 'button';
+      use.addEventListener('click', acceptLink);
+      linkLine.appendChild(use);
+      linkLine.appendChild(makeLinkX('link_remove', () => { state.linkOffer = null; renderAttachment(); }));
+      linkBox.hidden = false;
+      return;
+    }
+    linkBox.hidden = true;
+  }
+
+  function makeLinkX(titleKey, onClick) {
+    const x = el('button', 'cmp-link-x', '×');
+    x.type = 'button';
+    x.title = t(titleKey);
+    x.setAttribute('aria-label', t(titleKey));
+    x.addEventListener('click', onClick);
+    return x;
+  }
+
+  /** Everything the link left behind, gone. Used by the ×, by a new conversation and by CONSUME_OK. */
+  function clearLink() {
+    // 🔴 THE SETTING GOES BACK WITH THE LINK (Codex 3/3 1R blocker 1). The toggle was turned off
+    // FOR this link; if the link is cancelled, fails or is spent, leaving it off would hand the
+    // user a session that keeps their chats when they had chosen the opposite — a privacy setting
+    // they never changed, changed on their behalf and not changed back.
+    if (state.linkHistoryForced && state.linkPrevSave) {
+      state.saveHistory = state.linkPrevSave.saveHistory;
+      state.saveTouched = state.linkPrevSave.touched;
+      incognitoInput.checked = !state.saveHistory;
+      syncSaveHistory();
+    }
+    state.linkPrevSave = null;
+    state.linkOffer = null;
+    state.link = null;
+    state.linkReading = false;
+    state.linkError = null;
+    state.linkHistoryForced = false;
+    renderAttachment();
+  }
+
+  /**
+   * The user accepted the offer: the link leaves the composer (it is an instruction to the page,
+   * not part of the question) and the worker is asked to read it.
+   *
+   * 🔴 CONTINUING NEEDS THE CHAT KEPT. The worker refuses a link round on an incognito session —
+   * appending to a conversation in the user's history is the opposite of what that toggle says, and
+   * letting it through would start a NEW conversation while the chip claims the old one is being
+   * continued. So the toggle is turned off here, and the chip SAYS SO (link_history_on): a setting
+   * changed silently is a setting the user will be surprised by later.
+   */
+  function acceptLink() {
+    if (!state.linkOffer || state.linkReading) return;
+    // 🔴 THE OFFSETS ARE RE-FOUND, NEVER REUSED (Codex 3/3 1R blocker 2). The offer was made when
+    // the text was something else; typing in front of the link moves it, and cutting at the old
+    // `start/end` deleted the question and left a piece of the URL. The offer says WHICH link the
+    // user agreed to — where it is now is a question only the current text can answer.
+    const offer = findLink(qInput.value);
+    if (!offer || offer.url !== state.linkOffer.url) { state.linkOffer = offer; renderAttachment(); return; }
+    qInput.value = textWithoutLink(qInput.value, offer);
+    state.linkOffer = null;
+    state.linkError = null;
+    state.linkReading = true;
+    if (!state.saveHistory) {
+      state.linkPrevSave = { saveHistory: state.saveHistory, touched: state.saveTouched };
+      state.saveHistory = true;
+      state.saveTouched = true;
+      incognitoInput.checked = false;
+      state.linkHistoryForced = true;
+      syncSaveHistory();
+    }
+    renderAttachment();
+    updateControls();
+    ctx.sendReadLink(offer.url);
+  }
+
+  /** A link in the composer's text → the offer chip, while a first round is still ahead. */
+  function offerLinkFrom(text) {
+    if (!mayOfferLink(state)) return;
+    const found = findLink(text);
+    if (!found) { if (state.linkOffer) { state.linkOffer = null; renderAttachment(); } return; }
+    if (state.linkOffer && state.linkOffer.url === found.url) return;
+    state.linkOffer = found;
+    renderAttachment();
+  }
+  Object.assign(ctx, { clearLink, renderLink });
+
   /** One chip: thumbnail, name, size (or 「읽는 중…」), ×. */
   function makeChip(att, reading) {
     const chip = el('div', 'cmp-attach-chip');
@@ -1570,6 +1936,9 @@ export function mountComparePage(deps) {
     const live = col.turns[col.turns.length - 1];
     if (live && live.role === 'assistant') live.model = { id, label };
     paintBadge(col);
+    // The answer may reveal the thread's mode (a linked Work conversation asked with a Chat model):
+    // the column's model follows it before the next follow-up (1.35.0 batch review).
+    ctx.reconcileMode(col);
   }
 
   // ── waiting-time ticker ──
@@ -2001,7 +2370,11 @@ export function mountComparePage(deps) {
     // — quotaExhausted() (plan compare-quota-premium §3 U3). Drafting stays possible; only the
     // send waits, like it does while a round streams. The server's 429 remains the backstop.
     const exhausted = quotaExhausted();
-    const canSend = !state.sending && !state.sessionStarted && !exhausted && !attachBusy() && currentQuestion().length > 0 && attachableTargets(currentTargets()).length > 0;
+    // 🔴 `linkReading` blocks the send (Codex 3/3 1R blocker 3): sending while the conversation is
+    // still being read asked all three columns the question WITHOUT the context — the round that
+    // the chip promised would continue a conversation was a plain one, and the late LINK_OK then
+    // built a receipt for a session already under way.
+    const canSend = !state.sending && !state.sessionStarted && !exhausted && !attachBusy() && !state.linkReading && currentQuestion().length > 0 && attachableTargets(currentTargets()).length > 0;
     sendBtn.disabled = !canSend;
     sendBtn.textContent = state.sending ? t('sending') : t('send');
     qCard.classList.toggle('is-quota-exhausted', exhausted);
@@ -2097,6 +2470,7 @@ export function mountComparePage(deps) {
     // No session → nothing to leave; the guard is repeated here so a stale-enabled button cannot
     // tear down a first SEND that is still waiting for its CONSUME_OK.
     if (state.disabled || !state.sessionStarted) return;
+    closeViewer(); // the image on show belongs to the session being left
     track('new_chat', { rounds: state.rounds, resumable: canResume() });
     if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* port already gone */ } }
     closePort();
@@ -2204,7 +2578,14 @@ export function mountComparePage(deps) {
       if (!inside(e.target)) closeHistoryPanel();
     });
   }
-  if (historyStorage) historyUpdate(null).then((r) => syncHistoryButton(r.ok ? r.list : null));
+  if (historyStorage) {
+    historyUpdate(null).then((r) => {
+      syncHistoryButton(r.ok ? r.list : null);
+      // Stored images no history entry names any more — a delete that did not finish, another tab's
+      // abandoned session — once old enough to be nobody's work in progress (image-store sweep).
+      if (r.ok) imageStore.sweep(r.list.map((e) => e.id));
+    });
+  }
 
   // The confirm popover: what goes where, what it costs, the judge select, send / cancel. Built
   // once; its lines are refilled on open. Same dialog conventions as the history panel (Esc,
@@ -2446,12 +2827,24 @@ export function mountComparePage(deps) {
     });
   }
   bindPaste(qInput);
+  // A conversation link in the composer offers itself (#1651) — on paste AND on typing, because a
+  // link can arrive either way and the offer must not depend on how.
+  qInput.addEventListener('input', () => offerLinkFrom(qInput.value));
   excludeInput.addEventListener('change', () => {
     state.excludeSrc = !!excludeInput.checked;
     renderColumns();
     updateControls();
   });
   incognitoInput.addEventListener('change', () => {
+    // 🔴 Incognito and a held link cannot both be true (Codex 3/3 1R blocker 6). The worker refuses
+    // that round (`link_needs_history`) and the page used to show a generic "try again", with the
+    // chip still claiming a conversation was being continued. The toggle is the user's newer
+    // choice, so it wins and the link goes — visibly, rather than as a refusal three steps later.
+    if (incognitoInput.checked && (state.link || state.linkReading || state.linkOffer)) {
+      state.linkHistoryForced = false;   // they are choosing incognito NOW; nothing to restore
+      state.linkPrevSave = null;
+      clearLink();
+    }
     state.saveHistory = !incognitoInput.checked;
     state.saveTouched = true;
     syncSaveHistory();
@@ -2533,6 +2926,7 @@ export function mountComparePage(deps) {
   if (q && typeof qInput.setSelectionRange === 'function') qInput.setSelectionRange(q.length, q.length);
 
   track('open', { src: src || '', framed: !!embedHost, lang, has_q: !!q });
+  readFeedbackAccount();
   // The stored layout must be known before the first status builds the columns.
   readLayout().then(() => refreshStatus());
 
