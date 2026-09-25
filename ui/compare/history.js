@@ -17,7 +17,7 @@
 //     the install block. A `let` shared across files goes through a ctx field (ctx.pendingLoad)
 //     or a setter registered by its owner (ctx.bumpStatusEpoch).
 
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, TURN_KIND_SUMMARY } from './constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY } from './constants.js';
 import { autoGrow } from './helpers.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
@@ -169,7 +169,7 @@ export function installHistory(ctx) {
       };
     }
     if (!Object.keys(columns).length) return null;
-    return { id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
+    return { id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), ...(state.questionImg ? { questionImg: storedImg(state.questionImg) } : {}), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
   }
   /**
    * A turn as stored. `kind` / `round` / `model` only when set (an entry written before a field,
@@ -183,7 +183,17 @@ export function installHistory(ctx) {
       const sm = turn.summary;
       return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })) } };
     }
-    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+  }
+  /** The attachment MARKER a turn keeps — name (clipped) and size. Never the image; see HISTORY_ATTACH_NAME_MAX. */
+  function storedImg(img) {
+    return {
+      name: String(img.name || '').slice(0, HISTORY_ATTACH_NAME_MAX),
+      bytes: Number.isFinite(img.bytes) ? img.bytes : 0,
+      // How many MORE rode with it (#1634) — omitted for a single file, so a 1.33.0 entry is
+      // unchanged and a reader that ignores it still reads the entry.
+      ...(Number.isFinite(img.more) && img.more > 0 ? { more: img.more } : {}),
+    };
   }
   /**
    * Keep the COMPLETE persisted object under HISTORY_ENTRY_MAX_BYTES (6R #4: measured with
@@ -402,6 +412,26 @@ export function installHistory(ctx) {
     const num = (v) => (v === undefined ? 0 : (typeof v === 'number' && Number.isFinite(v) ? v : undefined));
     const int = (v) => (v == null ? null : (Number.isInteger(v) ? v : undefined)); // nullable by design
     const plain = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+    /**
+     * An attachment MARKER (#1616 ④): `{name, bytes}` or `undefined` for a malformed one — which,
+     * like every other typed field here, drops the WHOLE entry rather than being cleaned up. A
+     * history that silently repairs what it reads would let a live session be replaced by a tidied
+     * version of a broken one.
+     */
+    const readImg = (v) => {
+      if (!plain(v)) return undefined;
+      const name = str(v.name);
+      const bytes = num(v.bytes);
+      // 🔴 An INTEGER inside the cap (2R follow-up 2). `num()` alone accepted `1.5` and `1e100`,
+      // and the marker then read 「외 1.5장」 / 「외 1e+100장」 — a stored file cannot be half a
+      // file, and nothing can have ridden with more than the cap allows.
+      const more = v.more === undefined ? 0 : num(v.more);
+      if (name === undefined || bytes === undefined || bytes < 0) return undefined;
+      if (more === undefined || !Number.isInteger(more) || more < 0 || more > ATTACH_MAX_FILES - 1) return undefined;
+      return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}) };
+    };
+    const questionImg = entry.questionImg === undefined ? null : readImg(entry.questionImg);
+    if (questionImg === undefined) return null;
     const question = str(entry.question);
     const updatedAt = num(entry.updatedAt);
     const createdAt = num(entry.createdAt);
@@ -448,7 +478,8 @@ export function installHistory(ctx) {
         const text = str(turn.text);
         const errorText = str(turn.errorText);
         const tm = turn.model === undefined ? null : model(turn.model); // absent on a turn = never got a MODEL event
-        if (round === undefined || text === undefined || errorText === undefined || tm === undefined) return null;
+        const img = turn.img === undefined ? null : readImg(turn.img); // absent on every pre-#1616 turn
+        if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined) return null;
         const kind = turn.kind === TURN_KIND_SUMMARY ? TURN_KIND_SUMMARY : null;
         let summary = null;
         if (kind && turn.role === 'user') {
@@ -459,7 +490,7 @@ export function installHistory(ctx) {
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
         const k = kind && (turn.role === 'assistant' || summary) ? kind : null;
-        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
+        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
     }
@@ -470,7 +501,7 @@ export function installHistory(ctx) {
     const activeRound = activeRoundRaw !== null && seenRounds.has(activeRoundRaw) ? activeRoundRaw : null;
     const lowest = seenRounds.size ? Math.min(...seenRounds) : null;
     const firstRound = firstRoundRaw !== null ? firstRoundRaw : lowest;
-    return { id: entry.id, question, rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src };
+    return { id: entry.id, question, ...(questionImg ? { questionImg } : {}), rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src };
   }
   function loadSession(raw) {
     if (state.disabled) return;
@@ -498,6 +529,7 @@ export function installHistory(ctx) {
     for (const c of ctx.composers) { c.input.value = ''; autoGrow(c.input); }
     ctx.clearNotice();
     state.question = String(entry.question || '');
+    state.questionImg = entry.questionImg || null; // the first round's marker rides the entry, not a turn
     state.sessionId = entry.id;
     state.sessionStarted = true;
     state.sessionEnded = true;      // no port carries it: a follow-up resumes (canResume) or is refused
@@ -530,7 +562,11 @@ export function installHistory(ctx) {
         if (round !== null && round > state.roundSeq) state.roundSeq = round; // the next send must not reuse a stored round id
         // A summary request loads from its STRUCTURE (regenerated prompt); one stored as bare text
         // (no structure) is a plain user turn. Absent kind (older entries) = plain.
-        if (turn.role === 'user') ctx.pushUserTurn(col, summary ? ctx.renderSummaryPrompt(summary) : turn.text, kind, { round, summary });
+        // 🔴 `img` rides the restore too. It is not decoration: the retry gate reads it to decide
+        // whether a round went out WITH an image, so a marker lost here would let a reloaded
+        // session retry an image round without its image — and be charged for it (the very defect
+        // 1.33.0's batch review found).
+        if (turn.role === 'user') ctx.pushUserTurn(col, summary ? ctx.renderSummaryPrompt(summary) : turn.text, kind, { round, summary, ...(turn.img ? { img: turn.img } : {}) });
         else if (turn.role === 'skipped') ctx.pushSkippedTurn(col);
         else restoreAssistantTurn(col, turn, kind, { round, model: turn.model || stored.model });
       }

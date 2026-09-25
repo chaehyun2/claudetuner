@@ -478,6 +478,38 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-textarea[readonly] { color: var(--text-secondary); background: var(--bg-subtle); }
 /* The question face's textarea: the same type as the follow-up's — one composer, one look (after the shared rule, whose `font: inherit` would otherwise win, Codex 2R #4). */
 .cmp-textarea.cmp-prompt-input { font-size: 14px; line-height: 1.5; }
+/* The 📎 marker a turn keeps when its round carried an image (#1616 ④) — name and size, never the
+   image itself (a history entry is byte-capped and shrinks by evicting rounds). Its own line under
+   the question text so a long name cannot push the words around. */
+.cmp-turn-attach { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 11.5px; color: var(--text-secondary); }
+.cmp-turn-attach-glyph { flex: 0 0 auto; }
+.cmp-turn-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-turn-attach-size { flex: 0 0 auto; opacity: .8; }
+/* ── attachment tray (#1617): one tray in the dock, directly above whichever composer face shows.
+   Three rows, each independently hidden: the chip (thumbnail + name + size + ×), the "left out"
+   note and the refusal line. The 📎 that fills it is a square button in the composer row. */
+.cmp-attach { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+/* 🔴 A display of any kind beats the UA's [hidden] rule — every class here that sets one says so explicitly (the house rule throughout this file). */
+.cmp-attach[hidden], .cmp-attach-chips[hidden], .cmp-attach-chip[hidden] { display: none; }
+.cmp-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cmp-attach-chip { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; max-width: 100%; padding: 6px 8px 6px 6px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
+.cmp-attach-thumb { width: 32px; height: 32px; object-fit: cover; border-radius: 6px; background: var(--bg-card); flex: 0 0 auto; }
+.cmp-attach-name { font-size: 12.5px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-attach-size { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
+/* While the bytes are being read: the chip is there and named, but nothing can be sent with it yet. */
+.cmp-attach-chip.is-reading { opacity: .75; }
+.cmp-attach-x { width: 22px; height: 22px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-secondary); font-size: 15px; line-height: 1; cursor: pointer; }
+.cmp-attach-x:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-attach-x:disabled { opacity: .45; cursor: not-allowed; }
+/* Which columns this round leaves behind. `is-blocking` = nothing can take it, so the send is off. */
+.cmp-attach-note { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+.cmp-attach-note.is-blocking { color: var(--danger); }
+.cmp-attach-err { margin: 0; font-size: 11.5px; color: var(--danger); }
+/* Square, so the row reads as [textarea][📎][send] rather than three words. */
+.cmp-attach-btn { width: 36px; padding: 0; font-size: 15px; flex: 0 0 auto; }
+.cmp-attach-btn.is-on { border-color: var(--accent); color: var(--accent); }
+/* A file is over the dock: the whole composer area is the drop target, so it is the whole area that lights up. */
+.cmp-dock.is-dropping { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: var(--radius-ctl); }
 .cmp-composer-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .cmp-composer-label { font-size: 12.5px; color: var(--text-secondary); }
 .cmp-composer-hint { margin-left: auto; font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }

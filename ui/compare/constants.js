@@ -318,6 +318,17 @@ export const TTFT_MAX_MS = 60 * 60 * 1000;
 // Waiting-time badge: the badge key of the "after CONSUME_OK, before the first CHUNK" state, how
 // often its seconds are repainted, and how long a wait must be before a number is worth showing.
 export const BADGE_WAITING = 'col_waiting';
+// The column's files are going up (#1616 ④ / #1617 진행 표시). Its own state rather than a
+// variant of BADGE_WAITING because the two differ in what the user can conclude: waiting is the
+// model thinking, uploading is bytes moving — and with files attached the columns genuinely
+// diverge (measured 2026-09-24: Claude 2.6 s, ChatGPT 3.4 s, Gemini 8.9 s to first token, one
+// image each). Nine silent seconds read as a hang; naming the phase does not. Shares the waiting
+// clock, so it also gets the elapsed seconds once the wait is worth a number.
+export const BADGE_UPLOADING = 'col_uploading';
+// The package's per-file diag (`{index, name, type, bytes, ms}`) — one per attachment, when its
+// bytes have landed. Already forwarded as DIAG by the SW; the page counts them to know when a
+// column's LAST file is up (#1634: a round carries up to five).
+export const STAGE_ATTACHMENT_UPLOADED = 'attachment_uploaded';
 export const WAIT_TICK_MS = 1000;
 export const WAIT_ELAPSED_SHOW_MS = 3000;
 export const MS_PER_SECOND = 1000;
@@ -329,3 +340,42 @@ export const ERROR_TITLE_MAX = 300;
 // Theme values the web shell may post as `{__ctTheme}` (site/multiai/multiai.js) — anything else is ignored.
 export const EMBED_THEME_LIGHT = 'light';
 export const EMBED_THEME_DARK = 'dark';
+// ── Attachments the composer may carry (#1617, page side of the #1616 wire) ────────────────────
+// 🔴 A MIRROR of bg/compare.js's SEND_MAX_ATTACHMENTS / SEND_MAX_ATTACHMENT_BYTES /
+// SEND_ATTACHMENT_TYPES, and of which PROVIDER_SITES entries have `uploads`. Not an import: the SW
+// module is 2,500 lines with no bundler between us, so importing it for four values would ship the
+// whole worker to the page. The copy is pinned to the original by the drift check in
+// test/compare-page-flow-guard.mjs — change one side and that guard fails.
+//
+// The page repeats the bounds so a file that cannot work is refused where refusing is FREE: in the
+// composer, with a line saying why, before a port message exists. The SW's own copy stays the
+// authority (a page can be stale, or wrong); this one only spares the user a round trip to learn
+// what the chip could have told them.
+// 🔴 Mirrors the SW's SEND_MAX_ATTACHMENTS / _TOTAL_BYTES (#1634). The COUNT is a UI comfort; the
+// TOTAL is the bound that actually protects the worker, and it is unchanged from when the count
+// was one — five 2 MB screenshots cost exactly what one 10 MB image did.
+export const ATTACH_MAX_FILES = 5;
+export const ATTACH_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+// RAW bytes, not the base64 length — what `File.size` reports.
+// 🪤 LINE comments here and below, never a JSDoc block: the provider origins above end in a slash
+// plus a star, which test/lib/forbidden-scan.mjs reads as the start of a block comment. It then
+// runs to the next block-comment CLOSE in the file, so adding one further down moves that close
+// past the CODE_* constants and eats them (caught by test:compare-i18n's wire-code lift,
+// 2026-09-24). Writing the two characters anywhere below — even inside a line comment describing
+// this trap — is enough to trip it.
+export const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+export const ATTACH_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+// Providers with an upload path. The others cannot be asked with a file and are said so BEFORE the send.
+export const ATTACH_PROVIDERS = Object.freeze(['claude', 'chatgpt', 'gemini']);
+// Why a file was refused — the suffix of the `attach_err_<reason>` copy.
+export const ATTACH_ERR_TYPE = 'type';
+export const ATTACH_ERR_SIZE = 'size';
+export const ATTACH_ERR_READ = 'read';
+export const ATTACH_ERR_COUNT = 'count';
+export const ATTACH_ERR_TOTAL = 'total';
+// The file name a TURN keeps (#1616 ④ history marker), clipped. 🔴 A MARKER, NEVER THE IMAGE:
+// a history entry is capped at HISTORY_ENTRY_MAX_BYTES and shrunk by evicting whole rounds, and
+// `fitEntry` has no idea how to shrink a picture — a few data-URL thumbnails would push real
+// answers out of the entry to make room for decoration. What a returning user needs is «this
+// question had an image called X», which is two short fields.
+export const HISTORY_ATTACH_NAME_MAX = 64;

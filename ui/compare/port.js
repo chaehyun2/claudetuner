@@ -8,8 +8,9 @@
 // they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract is
 // written up in history.js.
 
-import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, MS_PER_SECOND } from './constants.js';
+import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
 import { autoGrow, sendableTargets } from './helpers.js';
+import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 
 /** Installs the port / streaming slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installPort(ctx) {
@@ -32,6 +33,14 @@ export function installPort(ctx) {
         // one is history, the keepalive below runs for this one.
         if (state.resuming) { state.resuming = false; state.resumed = true; state.sessionEnded = false; state.idleEnded = false; }
         state.pendingFollowup = '';
+        // This round was the DOCK COMPOSER's, so the tray it was composed with is finished: its
+        // files went out and its refusal line has nothing left to explain (#1634 3R). A summary, a
+        // retry or a column follow-up owns no tray and ends nothing. A REFUSED round keeps
+        // everything, exactly like the text draft beside it.
+        // Read BEFORE consumeAttachment() empties the tray — the badges below need to know how
+        // many files this round is carrying, and the chips are dropped in the same pass.
+        const uploadCount = state.roundOwnsTray ? state.attachItems.filter((a) => !a.reading).length : 0;
+        if (state.roundOwnsTray) ctx.consumeAttachment();
         state.summaryPending = null; // the compare was spent: the summary round is under way (C5)
         for (const col of state.columns.values()) {
           // The round is accepted: the last pre-round turn is history now — its countdown retires (3R #7).
@@ -42,7 +51,17 @@ export function installPort(ctx) {
           // ROLLED BACK needs the column-level copy (#1463 ②) — keeping it past a commit made the
           // next send wipe a committed error's badge and tooltip along with it.
           col.readiness = null;
-          if (col.status === 'streaming' && !col.turns[col.turns.length - 1].text) ctx.setBadge(col, BADGE_WAITING, 'is-streaming');
+          // A round carrying files starts in the UPLOADING state on every column that is actually
+          // uploading them (#1617 진행 표시): with images attached the columns diverge by seconds,
+          // and nine silent seconds read as a hang. Each `attachment_uploaded` below counts one
+          // file down; the LAST one moves that column on to the ordinary wait.
+          if (col.status === 'streaming' && !col.turns[col.turns.length - 1].text) {
+            const uploading = uploadCount > 0 && ctx.providerTakesFiles(col.provider);
+            col.uploadsTotal = uploading ? uploadCount : 0;
+            col.uploadsDone = 0;
+            col.uploadsSeen = null;   // a fresh round counts its own files
+            ctx.setBadge(col, uploading ? BADGE_UPLOADING : BADGE_WAITING, 'is-streaming');
+          }
         }
         if (state.roundGen === state.quotaGen) {
           // `pro` is not on CONSUME_OK — keep the status answer's value (limit:null alone is not Pro).
@@ -251,6 +270,28 @@ export function installPort(ctx) {
         // so instead of 「응답 대기 중…」. Only a streaming column with no text yet; the first CHUNK's
         // 「답변 중…」 replaces it. Not a waiting state, so the ticker adds no seconds to it (the
         // search has its own pace; a stale count would read as the search's).
+        // One of this column's files is up (package `attachment_uploaded`). Count it; the LAST one
+        // hands the column over to the ordinary wait — bytes stopped moving, the model starts.
+        // Only from the uploading state: a late diag must not reset a column that has since begun
+        // streaming text, and the wait that follows runs its own fresh clock.
+        if (msg.stage === STAGE_ATTACHMENT_UPLOADED) {
+          if (col.badgeKey !== BADGE_UPLOADING || col.status !== 'streaming') return;
+          // 🔴 COUNT FILES, NOT EVENTS (1R follow-up 1). The diag names which file it is, so a
+          // repeat of one is not progress: five copies of `index: 0` used to finish a five-file
+          // round. Defensive — no path in the package or the SW is known to repeat one — but the
+          // whole point of this badge is to say how far along the upload is, and a counter that
+          // trusts arrivals rather than identities cannot.
+          const idx = msg.detail && Number.isInteger(msg.detail.index) ? msg.detail.index : null;
+          if (idx !== null) {
+            if (!col.uploadsSeen) col.uploadsSeen = new Set();
+            if (col.uploadsSeen.has(idx)) return;
+            col.uploadsSeen.add(idx);
+          }
+          col.uploadsDone = (col.uploadsDone || 0) + 1;
+          if (col.uploadsDone >= (col.uploadsTotal || 1)) ctx.setBadge(col, BADGE_WAITING, 'is-streaming');
+          else ctx.paintBadge(col);   // 「이미지 2/5 올리는 중」 — the same state, one file further on
+          return;
+        }
         if (msg.stage === STAGE_TOOL_USE) {
           const turn = col.turns[col.turns.length - 1];
           if (col.status === 'streaming' && turn && turn.role === 'assistant' && !turn.text) ctx.setBadge(col, BADGE_SEARCHING, 'is-streaming');
@@ -537,6 +578,16 @@ export function installPort(ctx) {
     const sendKind = ctx.sendKindFor(type, kind, retry, resume);
     // The first round fixes the routing set at 「전체」 (every participant); C's checkboxes prune it.
     if (type === 'SEND') { state.followupTargets = new Set(targets); ctx.examples.hidden = true; }
+    // 🔴 The SAME predicate the wire uses below (`carries`), needed here because the turns are
+    // drawn before the message is built. Kept as one expression in `attachmentForRound` so the
+    // two can never disagree — a marker on a round that sent no file is a lie, and a round that
+    // sent one with no marker loses it from the history for good.
+    const roundAtts = attachmentsForRound(state, sendKind, via);
+    // The marker a turn keeps: the first file's name plus how many more (#1634). The whole list
+    // would push a byte-capped history entry around for decoration; what a returning user needs is
+    // «this question had images, starting with X».
+    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}) } : null;
+    if (type === 'SEND') state.questionImg = imgMark; // the first round's question is the bubble, not a turn
     // The session id exists from the FIRST message out (it rides the wire, §5) — the same id the
     // history entry gets at CONSUME_OK; 새 대화 drops it and the next first SEND mints a new one.
     if (!state.sessionId) state.sessionId = ctx.newSessionId();
@@ -564,7 +615,7 @@ export function installPort(ctx) {
       if (targets.includes(col.id)) {
         col.participated = true;
         // The first round's question is the prompt card above — shown once; follow-ups repeat theirs.
-        if (type !== 'SEND') ctx.pushUserTurn(col, text, kind, { round, summary });
+        if (type !== 'SEND') ctx.pushUserTurn(col, text, kind, { round, summary, ...(imgMark ? { img: imgMark } : {}) });
         ctx.pushAssistantTurn(col, kind, { round });
       } else if (skipped.includes(col.id)) {
         ctx.pushUserTurn(col, text);
@@ -593,6 +644,21 @@ export function installPort(ctx) {
     // (omitted when the page was opened without one) and the session id, on every wire message.
     msg.kind = sendKind;
     msg.round = round;
+    // The round's image (#1617), `{name, type, data}` as bg/compare.js normalizes it — `bytes` is
+    // the page's own bookkeeping for the chip and has no meaning on the other side. The key is
+    // omitted when there is no file, so a round without one is the message it has always been.
+    //
+    // 🔴 THE FILE GOES WITH THE BOX IT SITS ABOVE, and with nothing else. A summary, a retry and a
+    // column's own follow-up are rounds the user did NOT choose a file for: the tray is the dock's,
+    // and the chip is still showing because it is waiting for the dock's next question. Putting it
+    // on any of them re-uploads the same image and charges a compare for it — the same family of
+    // defect as the #1616 review's "the attachment repeats on every follow-up", which passed 619
+    // checks because no test had a round WITHOUT one before a round WITH one.
+    const carries = roundAtts.length > 0;
+    if (carries) msg.attachments = roundAtts.map((a) => ({ name: a.name, type: a.type, data: a.data }));
+    // Only a round that actually CARRIED it may consume it at CONSUME_OK (below); otherwise a
+    // summary accepted while a file waits would swallow a file that never left the page.
+    state.roundOwnsTray = roundOwnsTray(sendKind, via);
     if (src) msg.src = src;
     if (typeof state.sessionId === 'string' && SESSION_ID_RE.test(state.sessionId)) msg.session = state.sessionId;
     // The columns of this send (cmp-columns contract §1): `{id, provider, model}` each — the SW
@@ -603,7 +669,7 @@ export function installPort(ctx) {
     const models = ctx.modelsFor(targets);
     // `models` = ids only (never labels), one `provider:id|auto` per target, in target order.
     // GA `targets` stays the PROVIDER list (a colId carries the model id, which only `models` puts on the wire — validated); `targets_n` counts columns.
-    track('send', { round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: type === 'SEND' ? !!state.saveHistory : state.sessionSaveHistory === true, followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), ...(via ? { via } : {}) });
+    track('send', { round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: type === 'SEND' ? !!state.saveHistory : state.sessionSaveHistory === true, followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), has_img: carries, ...(via ? { via } : {}) });
     // The pickers this page still shows as static/none (#1452 refresh): the SW re-lists exactly these
     // once the tabs exist and answers with MODELS, which updates this list.
     const targetProviders = new Set(targets.map((id) => (state.columns.get(id) || {}).provider));

@@ -58,7 +58,9 @@
 // commits a height (H); every copy is visible (I).
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, TAB_LOST_CODES, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, TAB_LOST_CODES, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_TYPES, ATTACH_ERR_READ } from './ui/compare/constants.js';
+import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets } from './ui/compare/helpers.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
@@ -124,6 +126,20 @@ export function mountComparePage(deps) {
     saveTouched: false,   // the user toggled it on this page (a status re-read no longer overrides it)
     sessionSaveHistory: null, // what the first SEND of the current session carried (the topbar chip)
     port: null,
+    // The image the NEXT round carries (#1617): `{name, type, bytes, data}` with `data` base64, as
+    // the wire wants it — read once, when it is attached, so the send itself has nothing to await.
+    // One per round (ATTACH_MAX_FILES); dropped when the round is accepted (CONSUME_OK), kept when
+    // it is refused, exactly like the text draft beside it.
+    // The round's files (#1634), ONE ORDERED LIST in the order the user chose them:
+    // `[{id, name, reading}]` while a read runs, filled in place with `{type, bytes, data,
+    // preview}` when it lands. `data` is base64, as the wire wants it — read once, when attached,
+    // so the send itself has nothing to await. Dropped when the round is accepted (CONSUME_OK),
+    // kept when it is refused, exactly like the text draft beside them.
+    attachItems: [],
+    attachSeq: 0,         // slot ids — a read fills the slot it reserved (see attachFile)
+    questionImg: null,    // `{name, bytes}` marker of the file the FIRST round carried (its question is the bubble, not a turn) — restored from history
+    roundOwnsTray: false, // the round on the wire came from the DOCK composer — only such a round retires its tray (files AND notice) at CONSUME_OK
+    attachError: null,    // `{key, arg}` of the refusal line under the composer, or null — cleared by the next attach attempt
     sending: false,       // a SEND/FOLLOWUP is in flight (until ALL_DONE or CONSUME_FAIL)
     sessionStarted: false, // SEND has been accepted at least once (follow-ups allowed)
     sessionEnded: false,  // the port that carried this session is gone — the SW disposed its clients (a kept session may still resume, canResume())
@@ -186,6 +202,24 @@ export function mountComparePage(deps) {
     a.setAttribute('rel', 'noopener noreferrer');
     return a;
   };
+  /**
+   * The 📎 marker a turn carries when its round had an image (#1616 ④): the file's name and size,
+   * never the image. Drawn inside the user bubble, so it travels with the turn through every
+   * repaint, the rollback and a reload.
+   */
+  function attachMark(img) {
+    const w = el('span', 'cmp-turn-attach');
+    w.appendChild(el('span', 'cmp-turn-attach-glyph', '📎'));
+    w.setAttribute('title', t('attach'));
+    const name = el('span', 'cmp-turn-attach-name', img.name);
+    w.appendChild(name);
+    const size = formatBytes(img.bytes);
+    if (size) w.appendChild(el('span', 'cmp-turn-attach-size', size));
+    // …and how many more rode with it (#1634). The whole list would push a byte-capped history
+    // entry around for decoration; the count is what tells a returning user there were others.
+    if (Number.isFinite(img.more) && img.more > 0) w.appendChild(el('span', 'cmp-turn-attach-more', t('attach_more', img.more)));
+    return w;
+  }
   /** Provider mark: a brand-coloured dot (CSS keys off data-mark; data-provider stays the column's selector) — no logos. */
   const dot = (provider) => {
     const d = el('span', 'cmp-dot');
@@ -398,6 +432,291 @@ export function mountComparePage(deps) {
   sendBtn.disabled = true;
   qRow.appendChild(sendBtn);
   qCard.appendChild(controls);
+  // ── attachment tray (#1617) ────────────────────────────────────────────────────────────────
+  // ONE tray for the page, in the dock directly above whichever composer face is showing (the
+  // question card before the session, the follow-up card after) — the dock is a column, and only
+  // one face is ever visible, so the chip always sits on top of the box being typed in without
+  // anything having to move it. One tray also means one attachment: the round carries it whether
+  // it was attached before the first question or before a follow-up.
+  //
+  // Three rows, each hidden until it has something to say: the CHIP (thumbnail, name, size, ×),
+  // the NOTE (which columns this round will leave out, because their site has no upload path) and
+  // the ERROR (why a file was refused).
+  const attachBox = el('div', 'cmp-attach');
+  attachBox.id = 'cmp-attach';
+  attachBox.hidden = true;
+  // One row of chips — the tray holds up to ATTACH_MAX_FILES of them plus whatever is still being
+  // read. Built per render (makeChip) so a chip can never outlive the file it stood for.
+  const attachChips = el('div', 'cmp-attach-chips');
+  attachChips.id = 'cmp-attach-chips';
+  attachChips.hidden = true;
+  attachBox.appendChild(attachChips);
+  const attachNote = el('p', 'cmp-attach-note');
+  attachNote.id = 'cmp-attach-note';
+  attachNote.hidden = true;
+  attachBox.appendChild(attachNote);
+  const attachErr = el('p', 'cmp-attach-err');
+  attachErr.id = 'cmp-attach-err';
+  attachErr.hidden = true;
+  attachErr.setAttribute('role', 'alert');
+  attachBox.appendChild(attachErr);
+  // The picker behind every 📎. `accept` is a hint to the OS dialog, never the check — a user can
+  // always pick "all files", so attachmentError() decides either way.
+  const attachInput = el('input');
+  attachInput.type = 'file';
+  attachInput.id = 'cmp-attach-input';
+  attachInput.accept = ATTACH_TYPES.join(',');
+  attachInput.multiple = true; // #1634 — the OS dialog offers several at once
+  attachInput.hidden = true;
+  attachBox.appendChild(attachInput);
+  /**
+   * The 📎 of a composer row — the only way in that a keyboard reaches (drag needs a mouse, paste
+   * needs a clipboard image). `id` in full rather than a suffix: FOLLOWUP_ID_BOTTOM is the empty
+   * string, so a shared stem would give the two rows the SAME id.
+   */
+  function makeAttachBtn(id) {
+    const b = el('button', 'cmp-btn cmp-attach-btn', '📎');
+    b.id = id;
+    b.type = 'button';
+    b.title = `${t('attach')} — ${t('attach_limit', 'PNG · JPEG · GIF · WebP', formatBytes(ATTACH_MAX_TOTAL_BYTES), ATTACH_MAX_FILES)}`;
+    b.setAttribute('aria-label', t('attach'));
+    b.addEventListener('click', () => { if (!attachLocked()) attachInput.click(); });
+    return b;
+  }
+  const qAttachBtn = makeAttachBtn('cmp-attach-btn');
+  qRow.insertBefore(qAttachBtn, sendBtn);
+  Object.assign(ctx, { attachBox, attachChips, attachNote, attachErr, attachInput, qAttachBtn });
+
+  /**
+   * No attaching, replacing or removing while the round that carries it is on the wire — the bytes
+   * are already in the SW's hands. Quota does NOT lock it: drafting stays possible when the counter
+   * is at zero, exactly as the text does (updateControls).
+   */
+  function attachLocked() {
+    return state.sending || state.disabled;
+  }
+  /**
+   * ONE ORDERED LIST, and the order is the order the user CHOSE (#1634 1R #3).
+   *
+   * 🔴 The first plural version kept two lists — pending reads and finished files — and pushed to
+   * the second as each read landed. That made the wire order the COMPLETION order: drop
+   * [first.png, second.png], let the second finish first, and 「compare these two photos」 gets them
+   * the wrong way round. It also meant two places to ask "what is in the tray".
+   *
+   * So one list, in selection order, and a read fills its slot IN PLACE. `reading` is a field, not
+   * a separate collection: the item's presence answers「is this read still wanted」(removing it
+   * cancels the read) and its position answers「which photo is this」.
+   */
+  function attachBusy() {
+    return state.attachItems.some((i) => i.reading);
+  }
+  /** The files that are ready to ride a round, in the order they were chosen. */
+  function readyAttachments() {
+    return state.attachItems.filter((i) => !i.reading);
+  }
+  /** The columns this round would go to right now — the question composer's before the session, the follow-up's after. */
+  function roundTargetsNow() {
+    return state.sessionStarted ? followupPlan().targets : currentTargets();
+  }
+  /** The targets a round with files can actually reach (the rest are refused by the SW, undebited). */
+  function attachableTargets(targets) {
+    return state.attachItems.length ? targetsTakingFiles(targets, (id) => state.columns.get(id)) : targets;
+  }
+  function setAttachError(key, arg) {
+    state.attachError = key ? { key, arg } : null;
+    // 🔴 updateControls(), not renderAttachment(): a refusal usually ENDS a read, and the send is
+    // gated on reads in flight. Drawing only would leave the composer dead after a failed read.
+    updateControls();
+  }
+  /** Raw bytes the round is holding — what the SW's TOTAL cap is about (#1634). */
+  function attachedBytes() {
+    return readyAttachments().reduce((n, a) => n + a.bytes, 0);
+  }
+  /**
+   * `URL.createObjectURL` hands out a reference the document holds until it is revoked, so
+   * dropping twenty images in a row would pin all twenty — the thumbnail is the only reason the
+   * URL exists, and it dies with the image it showed.
+   */
+  function revokePreview(att) {
+    if (att && att.preview && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try { URL.revokeObjectURL(att.preview); } catch { /* already gone */ }
+    }
+  }
+  /**
+   * Forget everything. Through updateControls(), because whether there are files decides whether
+   * the round can go out.
+   *
+   * 🔴 EMPTYING THE LIST IS WHAT CANCELS THE READS IN FLIGHT. There is no separate generation
+   * counter: a read is still wanted exactly while its item is on the list, so one list answers
+   * both「what is the composer waiting for」and「is this result still ours」. Two mechanisms for
+   * one question is how the singular version grew three defects (1.33.0 verify).
+   */
+  function clearAttachment() {
+    for (const a of state.attachItems) revokePreview(a);
+    state.attachItems = [];
+    attachInput.value = '';
+    updateControls();
+  }
+  /** Drop ONE chip (its ×) — cancelling its read if it has not landed. The others are untouched. */
+  function removeAttachment(id) {
+    const at = state.attachItems.findIndex((a) => a.id === id);
+    if (at < 0) return;
+    revokePreview(state.attachItems[at]);
+    state.attachItems.splice(at, 1);
+    // The picker remembers the last selection, so choosing the SAME file again would fire no
+    // `change` and the user would think the click did nothing (1R follow-up).
+    attachInput.value = '';
+    updateControls();
+  }
+  /**
+   * The round was accepted: its files went with it (CONSUME_OK), so the next one starts empty. A
+   * refused round keeps them.
+   *
+   * 🔴 AND ITS REFUSAL LINE ENDS HERE (2R blocker). Making a successful read stop clearing the
+   * batch's refusal was right — one file landing says nothing about the five that were dropped —
+   * but it left the line with no end at all: 「한 번에 최대 5장」 stayed on screen after the round
+   * had gone out, over an empty tray, with nothing left to explain. The notice is ABOUT the round
+   * that just left; when that round is accepted, its subject is gone.
+   */
+  function consumeAttachment() {
+    if (!state.attachItems.length && !state.attachError) return;
+    state.attachError = null;
+    clearAttachment();
+  }
+  /**
+   * Read one file takeFiles() has already found attachable, into the slot it reserved. The bytes
+   * are read HERE, not at send: a 10 MB image takes a moment to encode, and the moment belongs to
+   * the click that chose it rather than to the send.
+   */
+  async function attachFile(ok, id) {
+    const slot = () => state.attachItems.find((a) => a.id === id);
+    let next;
+    try {
+      next = await readAttachment(ok);
+    } catch {
+      if (!slot()) return;                    // cancelled (× / 새 대화 / CONSUME_OK) — its result is nobody's
+      removeAttachment(id);
+      setAttachError(`attach_err_${ATTACH_ERR_READ}`, null);
+      return;
+    }
+    if (!slot()) return;
+    // The TOTAL is re-checked HERE, not only when the file was picked: the reads land
+    // independently, so the one that tips the round over is only knowable now.
+    if (attachedBytes() + next.bytes > ATTACH_MAX_TOTAL_BYTES) {
+      removeAttachment(id);
+      setAttachError('attach_err_total', formatBytes(ATTACH_MAX_TOTAL_BYTES));
+      return;
+    }
+    const item = slot();
+    Object.assign(item, next, { reading: false, preview: '' });   // fills ITS slot — the order is the user's
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      try { item.preview = URL.createObjectURL(ok); } catch { item.preview = ''; }
+    }
+    // 🔴 The batch's refusal is NOT cleared here (1R #1). One file landing says nothing about the
+    // five that were dropped for being over the count, and wiping that line let a round go out
+    // short of images with no explanation. Only a NEW attempt (takeFiles) or a × clears it.
+    updateControls();
+    noteActivity();
+  }
+  /**
+   * The files of a drop / a paste / the picker. Nothing here consumes a transfer that carried no
+   * file: a pasted sentence must still reach the textarea (pickAttachableAll answers an empty
+   * `usable` and no error for it), and only a transfer that HELD files can report "not an image".
+   * @returns {boolean} true when the transfer was taken as an attachment attempt (the caller then
+   *   stops the event), false when it was not about files at all.
+   */
+  function takeFiles(files) {
+    const { usable, error } = pickAttachableAll(files);
+    if (!usable.length && !error) return false;
+    state.attachError = null;   // a NEW attempt: the previous refusal is answered by this one
+    if (error && !usable.length) { setAttachError(`attach_err_${error}`, formatBytes(ATTACH_MAX_BYTES)); return true; }
+    const room = ATTACH_MAX_FILES - state.attachItems.length;
+    if (room <= 0) { setAttachError('attach_err_count', ATTACH_MAX_FILES); return true; }
+    // Slots are reserved NOW, in the order the user chose, and each read fills its own.
+    for (const f of usable.slice(0, room)) {
+      const id = ++state.attachSeq;
+      state.attachItems.push({ id, name: typeof f.name === 'string' && f.name.trim() ? f.name.trim() : 'image', reading: true });
+      attachFile(f, id);
+    }
+    updateControls();
+    if (usable.length > room) setAttachError('attach_err_count', ATTACH_MAX_FILES);
+    else if (error) setAttachError(`attach_err_${error}`, formatBytes(ATTACH_MAX_BYTES));
+    return true;
+  }
+  /**
+   * The chips (one per file, plus one per read still running), the "left out" note and the
+   * refusal line. Rebuilt from state each time — cheap at five, and there is then no way for a
+   * chip to outlive the file it stood for.
+   */
+  function renderAttachment() {
+    clear(attachChips);
+    for (const a of state.attachItems) attachChips.appendChild(makeChip(a, a.reading));
+    const any = state.attachItems.length > 0;
+    attachChips.hidden = !any;
+    // Which columns this round would leave behind — computed from the targets as they stand, so
+    // unticking a column in the follow-up boxes makes the line go away by itself.
+    const left = any ? unsupportedProviders(roundTargetsNow(), (id) => state.columns.get(id)) : [];
+    const none = any && roundTargetsNow().length > 0 && attachableTargets(roundTargetsNow()).length === 0;
+    attachNote.hidden = !left.length;
+    attachNote.classList.toggle('is-blocking', none); // outside the branch: a note that stops being blocking must lose the class even as it hides
+    if (left.length) {
+      attachNote.textContent = none
+        ? t('attach_unsupported_none')
+        : t('attach_unsupported', left.map((p) => PROVIDER_META[p].label).join(' · '));
+    }
+    attachErr.hidden = !state.attachError;
+    if (state.attachError) attachErr.textContent = state.attachError.arg == null ? t(state.attachError.key) : t(state.attachError.key, state.attachError.arg);
+    attachBox.hidden = attachChips.hidden && attachNote.hidden && attachErr.hidden;
+    for (const b of [qAttachBtn, ...composers.map((c) => c.attachBtn)]) {
+      if (!b) continue;
+      // Full is not the same as locked: the 📎 goes dim at five so the limit is visible before a
+      // sixth file is chosen, rather than after.
+      b.disabled = attachLocked() || state.attachItems.length >= ATTACH_MAX_FILES;
+      b.classList.toggle('is-on', any);
+    }
+  }
+  /** One chip: thumbnail, name, size (or 「읽는 중…」), ×. */
+  function makeChip(att, reading) {
+    const chip = el('div', 'cmp-attach-chip');
+    chip.classList.toggle('is-reading', reading);
+    const thumb = el('img', 'cmp-attach-thumb');
+    thumb.setAttribute('alt', '');
+    thumb.hidden = reading || !att.preview;
+    if (!reading && att.preview) thumb.src = att.preview;
+    chip.appendChild(thumb);
+    const name = el('span', 'cmp-attach-name', att.name);
+    name.title = att.name;
+    chip.appendChild(name);
+    chip.appendChild(el('span', 'cmp-attach-size', reading ? t('attach_reading') : formatBytes(att.bytes)));
+    const x = el('button', 'cmp-attach-x', '×');
+    x.type = 'button';
+    x.title = t('attach_remove');
+    x.setAttribute('aria-label', t('attach_remove'));
+    x.disabled = attachLocked();
+    x.addEventListener('click', () => {
+      if (attachLocked()) return;
+      state.attachError = null; // the × means "not this one" — the refusal line goes with it
+      removeAttachment(att.id);
+    });
+    chip.appendChild(x);
+    return chip;
+  }
+  /**
+   * Did `round` go out with images? Read from the MARKERS the turns already keep (and, for the
+   * first round, the question bubble's) — no extra bookkeeping, and it survives a reload for free.
+   */
+  function roundHadImage(col, round) {
+    if (Number.isFinite(round) && round === state.firstRound) return !!state.questionImg;
+    return col.turns.some((tn) => tn.role === 'user' && tn.round === round && tn.img);
+  }
+  /** The column says why its retry is held back, in its own action hint — no notice, no spend. */
+  function showRetryNeedsImage(col) {
+    if (!col.actionHint) return;
+    col.actionHint.textContent = t('retry_needs_image');
+    col.actionHint.hidden = false;
+  }
+  Object.assign(ctx, { clearAttachment, consumeAttachment, attachableTargets, renderAttachment, takeFiles, attachLocked, attachMark, roundHadImage, showRetryNeedsImage, removeAttachment, providerTakesFiles });
+
   // Empty state (chathub batch 1, C1): a page opened without `?q` — the web shell's plain entry —
   // showed one placeholder line and nothing else. Directly above the composer, inside the dock
   // (2026-09-21 user decision — it used to sit centred above the columns), centred: one line saying
@@ -529,7 +848,10 @@ export function mountComparePage(deps) {
       // Its own classes (not cmp-turn / cmp-turn-user): everything that counts turns in the DOM
       // — the guards, the markdown export's readers — must keep seeing exactly the stored turns.
       const block = el('div', 'cmp-q-block');
-      block.appendChild(el('div', 'cmp-turn-q', state.question));
+      const qNode = el('div', 'cmp-turn-q', state.question);
+      // The first round has no user TURN — its question is this bubble — so its marker lives here.
+      if (state.questionImg) qNode.appendChild(attachMark(state.questionImg));
+      block.appendChild(qNode);
       if (col.provider === src) { qCopyBtn.hidden = false; block.appendChild(qCopyBtn); }
       col.qBubble = block;
       col.body.insertBefore(block, col.body.firstChild);
@@ -572,6 +894,10 @@ export function mountComparePage(deps) {
     caption.id = `cmp-followup-caption${idSuffix}`;
     caption.title = t('followup_target_label');
     row.appendChild(caption);
+    // The same 📎 as the question row: a follow-up carries a file the same way a first question
+    // does (the SW takes `attachments` on FOLLOWUP too), and the tray it fills is the shared one.
+    const attachBtn = makeAttachBtn(`cmp-followup-attach${idSuffix}`);
+    row.appendChild(attachBtn);
     const btn = el('button', 'cmp-btn cmp-btn-primary', t('followup_send'));
     btn.id = `cmp-followup-send${idSuffix}`;
     btn.type = 'button';
@@ -589,7 +915,7 @@ export function mountComparePage(deps) {
     meta.appendChild(select);
     meta.appendChild(el('span', 'cmp-composer-hint', t('composer_hint')));
     section.appendChild(meta);
-    const composer = { section, input, btn, select, caption, radioName: select.id };
+    const composer = { section, input, btn, select, caption, attachBtn, radioName: select.id };
     composers.push(composer);
     return composer;
   }
@@ -647,6 +973,7 @@ export function mountComparePage(deps) {
   const dock = el('div', 'cmp-dock');
   dock.id = 'cmp-dock';
   dock.appendChild(examples); // the empty-state intro + chips ride the dock, right above the composer
+  dock.appendChild(attachBox); // between the chips and BOTH composer faces — only one shows, so it is always directly above the active one
   dock.appendChild(qCard);
   dock.appendChild(followup.section);
   root.insertBefore(dock, columnsBox);
@@ -1130,7 +1457,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -1145,19 +1472,25 @@ export function mountComparePage(deps) {
    */
   const MODEL_BADGE_KEYS = new Set(['col_waiting', 'col_streaming', 'col_done']);
   ctx.MODEL_BADGE_KEYS = MODEL_BADGE_KEYS;
+  // Both states are "nothing has arrived yet, here is how long" — uploading (bytes moving) and
+  // waiting (the model thinking). They share one clock, and the switch between them at the last
+  // `attachment_uploaded` deliberately RESTARTS it: the seconds after the upload are the model's,
+  // and carrying the upload's seconds into them would overstate how long the answer has taken.
+  const TIMED_BADGES = new Set([BADGE_WAITING, BADGE_UPLOADING]);
+  ctx.TIMED_BADGES = TIMED_BADGES;
   function setBadge(col, key, cls) {
-    const wasWaiting = col.badgeKey === BADGE_WAITING;
+    const was = col.badgeKey;
     col.badgeKey = key || null;
     col.badgeCls = cls || '';
-    // Entering the waiting state starts its clock; leaving it (first CHUNK, DONE, ERROR, ALL_DONE,
+    // Entering a timed state starts its clock; leaving it (first CHUNK, DONE, ERROR, ALL_DONE,
     // a CONSUME_FAIL rollback) drops it. Re-entering (a follow-up round) starts a fresh one.
-    if (col.badgeKey === BADGE_WAITING) { if (!wasWaiting) col.waitingSince = clock.now(); } else col.waitingSince = null;
+    if (TIMED_BADGES.has(col.badgeKey)) { if (col.badgeKey !== was) col.waitingSince = clock.now(); } else col.waitingSince = null;
     paintBadge(col);
     syncWaitTimer();
   }
   /** Whole seconds the column has been waiting for its first chunk, or null before WAIT_ELAPSED_SHOW_MS (and outside the state). */
   function waitingSeconds(col) {
-    if (col.badgeKey !== BADGE_WAITING || col.waitingSince == null) return null;
+    if (!TIMED_BADGES.has(col.badgeKey) || col.waitingSince == null) return null;
     const ms = clock.now() - col.waitingSince;
     return ms >= WAIT_ELAPSED_SHOW_MS ? Math.floor(ms / MS_PER_SECOND) : null;
   }
@@ -1186,7 +1519,16 @@ export function mountComparePage(deps) {
     // already replaced the words (Claude reports it at send time), the seconds ride after it.
     const secs = waitingSeconds(col);
     let text = showModel ? modelText : (col.badgeKey ? t(col.badgeKey) : '');
-    if (secs != null) text = showModel ? `${modelText} · ${t('elapsed_seconds', secs)}` : t('col_waiting_elapsed', secs);
+    // 🔴 The uploading line keeps its OWN words even when the served model is known (Claude
+    // reports the model at send time, before the upload finishes): 「Opus 5 · 3초」 during an
+    // upload would say the model is thinking when it has not been asked yet. With several files
+    // it also says WHICH one, so a long wait reads as progress rather than a stall.
+    if (col.badgeKey === BADGE_UPLOADING) {
+      const total = col.uploadsTotal || 1;
+      const nth = Math.min((col.uploadsDone || 0) + 1, total);
+      if (total > 1) text = secs == null ? t('col_uploading_n', nth, total) : t('col_uploading_n_elapsed', nth, total, secs);
+      else text = secs == null ? t('col_uploading') : t('col_uploading_elapsed', secs);
+    } else if (secs != null) text = showModel ? `${modelText} · ${t('elapsed_seconds', secs)}` : t('col_waiting_elapsed', secs);
     // Once DONE, the time to first token rides after the model / 완료 (batch 2): 「Opus 5 · 4.2초」;
     // the tooltip carries the breakdown. Only when the stages were reported — never a NaN.
     const ttft = col.status === 'done' && col.badgeKey === 'col_done' ? ttftSeconds(col) : null;
@@ -1241,7 +1583,7 @@ export function mountComparePage(deps) {
   // only rewritten when the text changed; once the instant is past the countdown is dropped.
   let waitTimer = null;
   function waitingColumns() {
-    return [...state.columns.values()].filter((c) => c.badgeKey === BADGE_WAITING && c.status === 'streaming');
+    return [...state.columns.values()].filter((c) => TIMED_BADGES.has(c.badgeKey) && c.status === 'streaming');
   }
   /** Columns whose last turn shows a live reset countdown (error state, a future reset instant, still on the page). */
   function countdownColumns() {
@@ -1659,7 +2001,7 @@ export function mountComparePage(deps) {
     // — quotaExhausted() (plan compare-quota-premium §3 U3). Drafting stays possible; only the
     // send waits, like it does while a round streams. The server's 429 remains the backstop.
     const exhausted = quotaExhausted();
-    const canSend = !state.sending && !state.sessionStarted && !exhausted && currentQuestion().length > 0 && currentTargets().length > 0;
+    const canSend = !state.sending && !state.sessionStarted && !exhausted && !attachBusy() && currentQuestion().length > 0 && attachableTargets(currentTargets()).length > 0;
     sendBtn.disabled = !canSend;
     sendBtn.textContent = state.sending ? t('sending') : t('send');
     qCard.classList.toggle('is-quota-exhausted', exhausted);
@@ -1730,7 +2072,9 @@ export function mountComparePage(deps) {
       renderFollowupTargets();
       // Drafting is allowed while a round streams (the textarea stays enabled); only the send
       // waits for the round to settle.
-      const noTargets = followupPlan().targets.length === 0;
+      // An attached file that no participating column can take leaves nothing to send to (#1617) —
+      // the same "no targets" the routing boxes produce when they are all unticked.
+      const noTargets = attachableTargets(followupPlan().targets).length === 0 || attachBusy();
       const canType = canFollowUp();
       const targetText = followupTargetText();
       for (const c of composers) {
@@ -1739,6 +2083,9 @@ export function mountComparePage(deps) {
         if (c.caption) c.caption.textContent = targetText;
       }
     }
+    // Last: the tray reads the targets this pass just settled, so unticking the only column that
+    // takes files repaints the note in the same frame that disables the button.
+    renderAttachment();
   }
 
   /**
@@ -1783,6 +2130,8 @@ export function mountComparePage(deps) {
     releasePrompt();
     clearCopyFeedback();
     for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
+    state.attachError = null;
+    clearAttachment(); // 새 대화 starts empty in every sense — the file belonged to the session that just ended
     clearNotice();
     stopBtn.disabled = true;
     syncWaitTimer();
@@ -2058,6 +2407,45 @@ export function mountComparePage(deps) {
   }
 
   // ── events ──
+  // Attachments (#1617): three ways in, one handler. The picker is the 📎's; drop and paste are the
+  // ones people reach for, and both hand over a `files` list this page treats identically.
+  attachInput.addEventListener('change', () => { if (!attachLocked()) takeFiles(attachInput.files); });
+  const DROP_CLASS = 'is-dropping';
+  /** A drag that carries FILES — a dragged selection or link carries text and must not paint the dock. */
+  const dragHasFiles = (e) => {
+    const types = e && e.dataTransfer && e.dataTransfer.types;
+    if (!types) return false;
+    return Array.prototype.indexOf.call(types, 'Files') >= 0;
+  };
+  if (typeof dock.addEventListener === 'function') {
+    // 🔴 preventDefault FIRST, and for every file drag — whether this page will TAKE the file is a
+    // separate question from whether the browser may navigate away to it (Codex 1R follow-up). A
+    // drop on an unprevented page replaces the document with the image: the compare session, its
+    // answers and the draft all go, mid-round, for a gesture the user meant as an attachment.
+    dock.addEventListener('dragover', (e) => {
+      if (!dragHasFiles(e)) return;
+      e.preventDefault();
+      if (!attachLocked()) dock.classList.add(DROP_CLASS);
+    });
+    dock.addEventListener('dragleave', (e) => { if (!e || !e.relatedTarget || !dock.contains(e.relatedTarget)) dock.classList.remove(DROP_CLASS); });
+    dock.addEventListener('drop', (e) => {
+      dock.classList.remove(DROP_CLASS);
+      if (!dragHasFiles(e)) return;
+      e.preventDefault(); // see dragover: navigation is refused even when the file itself is not taken
+      if (attachLocked()) return;
+      takeFiles(e.dataTransfer.files);
+    });
+  }
+  /** Ctrl+V of an image. A text paste carries no files and falls through to the textarea untouched. */
+  function bindPaste(textarea) {
+    if (typeof textarea.addEventListener !== 'function') return;
+    textarea.addEventListener('paste', (e) => {
+      if (attachLocked() || !e || !e.clipboardData) return;
+      if (!takeFiles(e.clipboardData.files)) return;
+      e.preventDefault();
+    });
+  }
+  bindPaste(qInput);
   excludeInput.addEventListener('change', () => {
     state.excludeSrc = !!excludeInput.checked;
     renderColumns();
@@ -2078,7 +2466,12 @@ export function mountComparePage(deps) {
     // status could re-enable the button between renders), so the guard is repeated here. The
     // `sending` check also makes Enter + click in the same tick a single send: beginSend flips
     // it synchronously before anything is awaited.
-    if (state.disabled || !targets.length || state.sending || state.sessionStarted || !text || quotaExhausted()) return;
+    // 🔴 `targets` stays the FULL list even with a file attached: the columns whose site has no
+    // upload path are refused by the SW (`unsupported`, undebited) and say so in their own column,
+    // which is where the user is looking. Only a round where NOTHING could take the file is held
+    // back here — the SW would answer CONSUME_FAIL{no_targets}, which names no column and explains
+    // nothing (#1617).
+    if (state.disabled || !attachableTargets(targets).length || attachBusy() || state.sending || state.sessionStarted || !text || quotaExhausted()) return;
     state.question = text;
     state.sessionSaveHistory = !!state.saveHistory; // fixed for the session (FOLLOWUP carries no field)
     beginSend(text, targets, 'SEND');
@@ -2098,7 +2491,7 @@ export function mountComparePage(deps) {
     noteActivity();
     const text = String(from.input.value || '').trim();
     const { targets, skipped } = followupPlan();
-    if (!text || !targets.length || state.sending || !canFollowUp() || quotaExhausted()) return;
+    if (!text || !attachableTargets(targets).length || attachBusy() || state.sending || !canFollowUp() || quotaExhausted()) return;
     state.pendingFollowup = text;
     state.pendingFollowupCol = null; // typed in the dock: a rollback restores it there
     for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
@@ -2130,6 +2523,7 @@ export function mountComparePage(deps) {
     bindComposer(c.input, () => sendFollowup(c), () => mirrorDraft(c), win);
     c.input.addEventListener('keydown', noteActivity);
     c.btn.addEventListener('click', () => sendFollowup(c));
+    bindPaste(c.input);
   }
 
   // The question card takes focus on load: empty → start typing; pre-filled from `?q` → the

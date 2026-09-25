@@ -5,8 +5,9 @@
 // pair and the error copy. Bodies are exactly as they were in compare.js
 // (test/mutants/compare-page.json anchors on them). The ctx contract is written up in history.js.
 
-import { PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
+import { HISTORY_ATTACH_NAME_MAX, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
+import { retryNeedsAttachment } from './attachments.js';
 import { renderAnswer } from '../md-render.js';
 import { COMPARE_I18N } from '../compare-i18n.js';
 
@@ -156,6 +157,7 @@ export function installColumnThread(ctx) {
       node.appendChild(el('pre', 'cmp-summary-req-text', text));
     } else node = el('div', 'cmp-turn cmp-turn-user', text);
     const turn = { role: 'user', text, node, root: null, ...(summary ? { kind: TURN_KIND_SUMMARY } : {}), ...turnExtra(extra) };
+    if (turn.img) node.appendChild(ctx.attachMark(turn.img));
     const root = el('div', 'cmp-turn-block cmp-turn-block-user');
     root.appendChild(node);
     root.appendChild(ctx.copyButton(() => turn.text, { kind: COPY_KIND_THREAD, provider: col.provider }));
@@ -170,6 +172,15 @@ export function installColumnThread(ctx) {
     if (Number.isFinite(extra.round)) out.round = extra.round;
     if (extra.summary && typeof extra.summary === 'object') out.summary = extra.summary;
     if (extra.model && typeof extra.model === 'object') out.model = { id: extra.model.id == null ? null : String(extra.model.id), label: extra.model.label == null ? '' : String(extra.model.label) };
+    // The round's attachment, as a MARKER (name + size). See HISTORY_ATTACH_NAME_MAX for why the
+    // image itself is not kept.
+    if (extra.img && typeof extra.img === 'object' && typeof extra.img.name === 'string') {
+      out.img = {
+        name: extra.img.name.slice(0, HISTORY_ATTACH_NAME_MAX),
+        bytes: Number.isFinite(extra.img.bytes) ? extra.img.bytes : 0,
+        ...(Number.isFinite(extra.img.more) && extra.img.more > 0 ? { more: extra.img.more } : {}),
+      };
+    }
     return out;
   }
   function pushAssistantTurn(col, kind = null, extra = null) {
@@ -431,6 +442,10 @@ export function installColumnThread(ctx) {
     const pair = retryPair(col);
     if (!pair || !pair.text) return;
     const { text, kind, summary, round } = pair;
+    // 🔴 The round had an image and we no longer hold it: re-asking the question ALONE is a
+    // DIFFERENT question, and the server would charge for it (1.33.0 batch review). The column
+    // says so instead of spending a compare on it.
+    if (retryNeedsAttachment(ctx.roundHadImage(col, round))) { ctx.showRetryNeedsImage(col); return; }
     if (kind === TURN_KIND_SUMMARY) state.summaryPending = col.id;
     // A retry REPEATS a round, it does not open one: its turns carry the round of the answer it
     // replaces, so the comparison round still counts this column (a fresh round would silently

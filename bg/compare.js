@@ -24,9 +24,16 @@
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
 //                         saveHistory}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
-//   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?, kind?, round?, src?, session?} ·
-//                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?} · ABORT
+//   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, resume?, kind?, round?, src?, session?, attachments?} ·
+//                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
 //                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY
+//   Attachments (#1616): `attachments: [{name, type, data}]`, `data` BASE64 — a Port message is
+//   JSON, so a Blob/ArrayBuffer cannot cross this hop. Bounded by SEND_MAX_ATTACHMENTS /
+//   SEND_MAX_ATTACHMENT_BYTES / SEND_ATTACHMENT_TYPES (one PNG/JPEG/GIF/WebP, ≤ 10 MB) and validated BEFORE
+//   readiness: a refused shape is CONSUME_FAIL{bad_request} with nothing prepared and nothing
+//   debited. A round that carries one is sent only to columns whose provider has an upload path
+//   (PROVIDER_SITES.uploads); the others get ERROR{code:'unsupported'} in the readiness pass and
+//   are not part of the debit.
 //   Columns (cmp-columns contract §2, 2026-09-20): a COLUMN is `provider + model`, id `colId` =
 //   `${provider}:${modelId || 'auto'}`, at most MAX_COLUMNS per round. SEND/FOLLOWUP carry
 //   `columns: [{id, provider, model}]` (ordered; FOLLOWUP may instead name `targets` = colIds);
@@ -178,6 +185,11 @@
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
 export const PROBE_MULTI_MSG = 'COMPARE_PROBE_MULTI';
+// Dev-only (unpacked builds): one send with attachments through the vendored client (#1613), see probeUpload.
+export const PROBE_UPLOAD_MSG = 'COMPARE_PROBE_UPLOAD';
+// The probe's own bound on what it will carry, below the package's 30 MB cap: an executeScript
+// argument of that size is exactly the question the probe exists to ask, one file at a time.
+export const PROBE_UPLOAD_MAX_FILES = 3;
 export const PROBE_MULTI_ABORT_MSG = 'COMPARE_PROBE_ABORT';
 export const PROBE_SEQUENCE_MAX = 40;
 // Bound on each probe client's dispose() (Codex layout 2R #1): a dispose that never settles (a
@@ -431,11 +443,115 @@ export const PIN_DISABLED_KEY = 'ctcmp_pin_disabled';
 // `liveCatalog`: the package asks the SITE for this provider's picker (through an open tab), so a
 // static answer is a fallback worth retrying once a tab exists; false = the static catalog IS the
 // catalog (never refreshed, never "pending").
+// `uploads`: the vendored client has an upload path for `sendMessage({attachments})` (#1612). A
+// COPY of the package's `SUPPORTS_ATTACHMENTS` statics, because this gate has to answer BEFORE a
+// client exists — the unsupported columns of a round with a file are refused in the readiness
+// pass, so nothing is debited for a column that cannot be asked. The drift guard in
+// test/compare-send-order-guard.mjs pins the copy against the real classes.
 export const PROVIDER_SITES = Object.freeze({
-  claude: { origin: 'https://claude.ai', relayFile: 'vendor-ai/bridge/claude-relay.js', optionalHost: false, liveCatalog: false },
-  gemini: { origin: 'https://gemini.google.com', relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: false },
-  chatgpt: { origin: 'https://chatgpt.com', relayFile: 'vendor-ai/bridge/chatgpt-relay.js', optionalHost: true, liveCatalog: true },
+  claude: { origin: 'https://claude.ai', relayFile: 'vendor-ai/bridge/claude-relay.js', optionalHost: false, liveCatalog: false, uploads: true },
+  gemini: { origin: 'https://gemini.google.com', relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: false, uploads: true },
+  chatgpt: { origin: 'https://chatgpt.com', relayFile: 'vendor-ai/bridge/chatgpt-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
 });
+
+// ── Attachments a compare ROUND may carry (#1616, count raised in #1634) ──────────────────────
+// Deliberately far below the package's own bounds (20 files / 30 MB each / 100 MB total), because
+// of THIS HOP rather than the providers: a runtime Port serialises its messages as JSON, so the
+// bytes cross page→SW as base64 (+33%) and are held whole in the worker.
+//
+// 🔴 THE COUNT IS NOT WHAT PROTECTS THE WORKER — THE TOTAL IS (#1634, 2026-09-24 user decision).
+// The 1-file cap read as a memory bound and was not one: the same cap with 30 MB files would have
+// been three times worse than five 2 MB screenshots. What the worker actually holds is the sum,
+// and the sum is what is bounded — unchanged at 10 MB, so the worst case here is byte-for-byte
+// what it was when the cap was one. (Measured, #1616 review: 10 MB is 13,981,016 base64 chars, and
+// port → validation → per-column map → package normalisation all REFERENCE the same string, so
+// there are no copies. Memory scales with the total and nothing else.)
+export const SEND_MAX_ATTACHMENTS = 5;
+/** Per file, RAW bytes (not the base64 length) — a 10 MB image is ~13.4 MB on the wire. */
+export const SEND_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/**
+ * And the SUM of them, raw bytes. The real bound; the per-file cap only stops one absurd file
+ * early. Equal to the per-file cap on purpose: one 10 MB image and five 2 MB ones cost the worker
+ * the same, which is the whole argument for raising the count.
+ */
+export const SEND_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+/**
+ * The only `type`s this build accepts — NOT `image/*` (Codex 1R blocker).
+ *
+ * 🔴 The set is the package's `image-meta.js` raster walk: PNG, GIF87a/89a, WebP and JPEG. It is
+ * not a taste question. chatgpt.com's message part must DECLARE the pixel size, so the client
+ * reads it out of the file's own header and rejects — locally, deterministically, with
+ * `attachment_failed` — anything it cannot read. `image/*` let a perfectly valid SVG through this
+ * gate and through readiness, and the round was DEBITED before the package refused it: a quota
+ * unit spent on a question nobody was asked. A format that can never work must fail here, where
+ * failing is free, not there.
+ *
+ * Narrower than it strictly has to be for Claude, which needs no declared size and would take an
+ * SVG. Widening it is therefore possible — but it would mean a per-provider type gate beside
+ * `uploads`, and one image that half the board refuses. One rule for the board until a user asks.
+ *
+ * Residual, on purpose: the declared type is a PROXY for the bytes. A file called `image/png`
+ * whose bytes are SVG still reaches the package, which reads magic bytes and refuses it. That is
+ * a malformed caller, not a user path, and a second byte-sniffer here would be a weaker opinion
+ * than the one the package already holds.
+ */
+export const SEND_ATTACHMENT_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+/** Filenames are shown, never resolved; this only stops an unbounded string riding the wire. */
+const SEND_ATTACHMENT_NAME_MAX = 200;
+// `=` is excluded from the class on purpose, so padding can only be trailing.
+const SEND_ATTACHMENT_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Raw bytes a base64 string of this length decodes to. Length is already known to be a multiple of 4. */
+function base64Bytes(b64) {
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  return (b64.length / 4) * 3 - pad;
+}
+
+/**
+ * The round's attachments as the package will receive them — or `null` when the page sent a shape
+ * this build refuses, which is a CONSUME_FAIL{bad_request} before anything is prepared or debited.
+ * `undefined`/`null`/`[]` → `[]` (every round a 1.32.x page sends).
+ *
+ * 🔴 The bounds are checked on the DECLARED base64 length, before any decode: the point of a cap
+ * is to be cheaper than the thing it refuses (the same lesson as the package's own Codex 3R #3).
+ * The bytes themselves are never inspected here — whether they really are a PNG is the provider's
+ * answer to give, and sniffing them would only add a second, weaker opinion.
+ *
+ * Pure, so the guard can pin the bounds without driving a send.
+ * @returns {{name: string, type: string, bytes: number, data: string}[] | null}
+ */
+export function normalizeSendAttachments(list) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) return null;
+  if (list.length === 0) return [];
+  if (list.length > SEND_MAX_ATTACHMENTS) return null;
+  const out = [];
+  let total = 0;
+  for (const a of list) {
+    if (!a || typeof a !== 'object') return null;
+    const data = typeof a.data === 'string' ? a.data : '';
+    if (!data || data.length % 4 !== 0) return null;
+    // 🔴 SIZE FIRST, THEN THE CHARSET (Codex 1R follow-up 1). Both are cheap next to a decode, but
+    // the regex walks the WHOLE string and the length check does not: with the old order a 12 MB
+    // paste was scanned end to end (16.7 M characters) before the cap refused it. The cap is
+    // decidable from the length and the padding alone, so it decides first and the scan only ever
+    // runs on a string already known to be inside the bound.
+    const bytes = base64Bytes(data);
+    if (bytes <= 0 || bytes > SEND_MAX_ATTACHMENT_BYTES) return null;
+    // 🔴 The SUM, decided from the declared lengths like the per-file cap and for the same reason
+    // (#1634): the point of a cap is to be cheaper than the thing it refuses. Checked as it
+    // accumulates, so a list that goes over is refused at the file that crossed the line rather
+    // than after every one of them has been scanned.
+    total += bytes;
+    if (total > SEND_MAX_TOTAL_BYTES) return null;
+    if (!SEND_ATTACHMENT_B64_RE.test(data)) return null;
+    const type = typeof a.type === 'string' ? a.type.trim().toLowerCase() : '';
+    if (!SEND_ATTACHMENT_TYPES.includes(type)) return null;
+    const name = typeof a.name === 'string' ? a.name.trim().slice(0, SEND_ATTACHMENT_NAME_MAX) : '';
+    out.push({ name: name || 'image', type, bytes, data });
+  }
+  return out;
+}
 
 // Where a provider's picker list came from (COMPARE_STATUS `modelsSource[p]`, MODELS): the package's
 // `models_listed` diag sources, plus `none` for an empty list.
@@ -490,6 +606,11 @@ export const SW_CODES = Object.freeze({
 // The TWO kinds of cut the page has to tell apart, and the only values `DONE.cutReason` ever
 // carries (#1527). The vendored clients report `partial: true` with a free-text `cutReason` whose
 // error form ends in the PROVIDER's own message; this is its bounded projection.
+//
+// 🔑 The first client to actually produce one is Gemini at vendor-ai v0.9.2 (#1642):
+// `stream_truncated`, for a stream that ended without the batchexecute end row — live-confirmed
+// both ways before it was allowed to decide anything. It lands in CUT_STALLED, which is right:
+// the answer stopped and nobody said why, which is what that note means.
 //
 // 🔴 The free text never leaves this worker. It is not something to paint (length, language and
 // trustworthiness are all unguaranteed) and not something to put in an outcome row (`code` is a
@@ -946,6 +1067,11 @@ function modelForPage(m) {
 // The timed send-path stages (package v0.3.0), in order, and the segment name each one closes.
 export const TTFT_STAGES = Object.freeze([
   ['send_start', null], ['org_resolved', 'org'], ['tab_ready', 'tab'], ['conversation_created', 'create'],
+  // `upload` (#1642): the attachments, as one span. The stage is reported once PER FILE and the map
+  // keeps the last `at`, so the segment runs from whatever came before the first upload to the
+  // moment the last file landed — which is the question the log has to answer ("was that minute the
+  // pictures or the model?"). A send with no attachments never reports it and the segment is null.
+  ['attachment_uploaded', 'upload'],
   ['bridge_connected', 'bridge'], ['request_sent', 'request'], ['first_chunk', 'first'],
 ]);
 // `stages` = { stageName: at }. Each segment is its stage's `at` minus the `at` of the PREVIOUS
@@ -958,7 +1084,11 @@ export function ttftSegments(stages) {
   let prev = at('send_start');
   for (const [stage, segment] of TTFT_STAGES) {
     const t = at(stage);
-    if (segment) segments[segment] = t != null && prev != null ? t - prev : null;
+    // 🔴 A NEGATIVE span is not a measurement (Codex #1642 1R follow-up 3): a Claude retry
+    // re-reports `conversation_created` AFTER the uploads it reuses, so `upload` came out at
+    // -16 ms. That attempt did not upload anything, and null says so; a negative number would
+    // be read as one.
+    if (segment) { const d = t != null && prev != null ? t - prev : null; segments[segment] = d != null && d < 0 ? null : d; }
     if (t != null) prev = t;
   }
   const start = at('send_start');
@@ -1682,6 +1812,11 @@ export function createCompareController({
       resetQuota().then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
       return true;
     }
+    // Dev-only probe (unpacked builds): see probeUpload (#1613).
+    if (message.type === PROBE_UPLOAD_MSG) {
+      probeUpload(message).then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
+      return true;
+    }
     // Dev-only probe (unpacked builds): see probeMulti.
     if (message.type === PROBE_MULTI_MSG) {
       probeMulti(message).then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
@@ -1798,6 +1933,95 @@ export function createCompareController({
     const interleaved = firstOf(0) >= 0 && firstOf(1) >= 0 && (firstOf(1) < lastOf(0) && firstOf(0) < lastOf(1));
     logInfo('probe-multi', 'result', { interleaved, sequence: sequence.join(''), ok: results.map((r) => r.ok) });
     return { ok: true, provider, results, interleaved, sequence };
+  }
+
+  // ── Dev probe: attachments through the web session (#1613, unpacked builds only) ─────────
+  // `{ type: 'COMPARE_PROBE_UPLOAD', provider, text, attachments: [{ name, type, data: <base64> }] }`
+  // → ONE client (temporary, no history trace), prepare, one sendMessage carrying the files →
+  // `{ ok, provider, uploads: [{ index, name, type, bytes, ms }], ttft_ms, total_ms, chars,
+  //    text_head, model, code, message }`. This is the FIRST live exercise of the package's
+  // upload path (its protocol came from a competitor bundle, not from a capture of the site):
+  // the point is whether claude.ai's `/api/<org>/upload` accepts the multipart the tab builds
+  // and whether the completion sees the file. consume/status/outcome/port: none — not a send.
+  // Same gate and the same mutual exclusion with rounds as probeMulti (one provider session).
+  // The attachment BYTES are never logged — only name/type/size/timing (`attachment_uploaded`).
+  async function probeUpload(message) {
+    if (!(await isUnpackedBuild())) return { ok: false, code: 'not_available' };
+    const provider = COMPARE_PROVIDERS.includes(message?.provider) ? message.provider : null;
+    const text = typeof message?.text === 'string' ? message.text : '';
+    const raw = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (!provider || !text.trim() || raw.length === 0 || raw.length > PROBE_UPLOAD_MAX_FILES) return { ok: false, code: 'bad_request' };
+    const attachments = raw.map((a) => ({
+      name: typeof a?.name === 'string' ? a.name : undefined,
+      type: typeof a?.type === 'string' ? a.type : undefined,
+      data: typeof a?.data === 'string' ? a.data : '',
+    }));
+    if (attachments.some((a) => !a.data)) return { ok: false, code: 'bad_request' };
+    if (probeAbort || roundsInFlight > 0) return { ok: false, code: SW_CODES.BUSY };
+    const probe = new AbortController();
+    probeAbort = probe;
+    const model = typeof message?.model === 'string' && message.model.trim() ? message.model.trim() : null;
+    const r = { ok: false, provider, uploads: [], started_at: null, ttft_ms: null, total_ms: null, chars: 0, text_head: '', model: null, code: null, message: null };
+    const timer = setTimeout(() => probe.abort(), sendTimeoutMs);
+    let client = null;
+    logInfo('probe-upload', 'start', { provider, files: attachments.map((a) => ({ name: a.name, type: a.type, b64_len: a.data.length })), chars: text.length });
+    try {
+      await leversReady;
+      client = createClient(provider, clientDeps, clientOptions(provider, false));
+      const onEvent = (ev) => {
+        if (ev?.type === 'diag') {
+          if (ev.stage === 'attachment_uploaded') r.uploads.push(ev.detail ?? {});
+          logInfo('probe-upload', ev.stage, ev.detail ?? {});
+        } else if (ev?.type === 'model') {
+          const m = modelForPage(ev.model);
+          if (m?.id) r.model = m.id;
+        }
+      };
+      await client.prepare({ mayOpenTab: true, signal: probe.signal, onEvent, model });
+      r.started_at = now();
+      let full = '';
+      const result = await client.sendMessage(
+        text,
+        (delta) => {
+          if (r.ttft_ms === null) r.ttft_ms = Math.max(0, Math.round(now() - r.started_at));
+          const d = String(delta ?? '');
+          r.chars += d.length;
+          if (full.length < 200) full += d;
+        },
+        probe.signal,
+        { mayOpenTab: true, model, attachments, onEvent },
+      );
+      r.ok = true;
+      r.total_ms = Math.max(0, Math.round(now() - r.started_at));
+      r.text_head = full.slice(0, 200);
+      const served = modelForPage(result?.model);
+      if (served?.id) r.model = served.id;
+      logInfo('probe-upload', 'done', { uploads: r.uploads.length, ttft_ms: r.ttft_ms, total_ms: r.total_ms, chars: r.chars, model: r.model });
+    } catch (e) {
+      r.ok = false;
+      if (r.started_at !== null) r.total_ms = Math.max(0, Math.round(now() - r.started_at));
+      // A shape TypeError from the package (its message names `attachments`) is the caller's
+      // `bad_request`; any other TypeError (a null deref here, `Failed to fetch`) stays `unknown`
+      // so a probe reading is not misled (1618 review #3).
+      r.code = probe.signal.aborted ? SW_CODES.ABORTED : (typeof e?.code === 'string' ? e.code : (e instanceof TypeError && /attachments/.test(String(e.message)) ? 'bad_request' : SW_CODES.UNKNOWN));
+      r.message = String(e?.message || e).slice(0, 300);
+      if (typeof e?.status === 'number') r.status = e.status;
+      if (typeof e?.attachment === 'string') r.attachment = e.attachment;
+      logInfo('probe-upload', 'error', { code: r.code, status: r.status, attachment: r.attachment, message: r.message });
+    } finally {
+      clearTimeout(timer);
+      if (client) {
+        // 🔴 The lock is released whatever dispose() does (1618 review #1): `withTimeout` is a
+        // race and propagates a rejection, and a rejection here would skip `probeAbort = null`
+        // — every later probe AND every compare round `busy` until the worker restarts. The
+        // package contracts that dispose() never throws; the `.catch` is for the day it does.
+        const v = await withTimeout(Promise.resolve().then(() => client.dispose()).catch((e) => { logInfo('probe-upload', 'dispose failed', { message: String(e?.message || e).slice(0, 200) }); }), probeDisposeTimeoutMs, DISPOSE_TIMED_OUT);
+        if (v === DISPOSE_TIMED_OUT) logInfo('probe-upload', 'dispose timeout', { ms: probeDisposeTimeoutMs });
+      }
+      probeAbort = null;
+    }
+    delete r.started_at;
+    return r;
   }
 
   // ── Streaming session: one Port = one session = one client per provider ──────────────────
@@ -1994,8 +2218,12 @@ export function createCompareController({
     //
     // `model` is the resolved choice for this provider (id or null = the provider's default) and is
     // passed on EVERY send, so the client's conversation always runs on what the page shows.
-    async function sendOne(col, text, mayOpenTab, sendSignal) {
+    // `attachments` = the round's files (normalizeSendAttachments), the SAME array for every
+    // column: each client uploads its own copy to its own site, and none of them mutates it.
+    async function sendOne(col, text, mayOpenTab, sendSignal, attachments = []) {
       const { id: colId, provider, model } = col;
+      // Names and sizes only — the bytes never reach a log line.
+      if (attachments.length > 0) logInfo(provider, 'attachments', { col: colId, files: attachments.map((a) => ({ name: a.name, type: a.type, bytes: a.bytes })) });
       const ac = new AbortController();
       inflight.add(ac);
       const onSendAbort = () => ac.abort();
@@ -2012,7 +2240,14 @@ export function createCompareController({
         const at = ev?.detail?.at;
         if (typeof at !== 'number' || typeof ev.stage !== 'string') return;
         stages[ev.stage] = at;
-        if (ev.stage === 'first_chunk' || ev.stage === 'stream_done') logInfo(provider, 'ttft', { col: colId, ...ttftSegments(stages) });
+        if (ev.stage === 'first_chunk' || ev.stage === 'stream_done') {
+          // The provider's own account of the stream rides `stream_done` (Gemini, vendor-ai v0.9.1):
+          // `{envelopes, bytes, end, chars}`, where `end` is the batchexecute end row. It is the only
+          // thing that could tell "the model finished" from "the connection closed while it was still
+          // writing" — see #1642. Logged, never acted on, until a live capture says it is reliable.
+          const stream = ev.stage === 'stream_done' && ev.detail && ev.detail.stream;
+          logInfo(provider, 'ttft', { col: colId, ...ttftSegments(stages), ...(stream ? { stream } : {}) });
+        }
       };
       // The outcome's clock (cmp-beta contract): this send's start, on the SW's own clock — the
       // package's timed stages are diagnostics an older page script may not report.
@@ -2056,6 +2291,9 @@ export function createCompareController({
           {
             mayOpenTab: mayOpenTab === true,
             model,
+            // Only the three fields the package reads — `bytes` is this module's own bookkeeping
+            // and has no meaning on the other side of the call.
+            attachments: attachments.map((a) => ({ name: a.name, type: a.type, data: a.data })),
             // The served model, as soon as the client knows it (before the first chunk where the
             // provider reports it). The page swaps its "waiting" badge for the name.
             onEvent: (ev) => {
@@ -2164,6 +2402,14 @@ export function createCompareController({
       try {
         await leversReady; // the pin policy is fixed before the session's first client exists
         const text = typeof message.text === 'string' ? message.text : '';
+        // The round's files (#1616) — validated HERE, before readiness opens a tab and long before
+        // consume, so a page that sent a shape this build refuses spends nothing. `[]` when there
+        // are none, which is every round a page without the attachment UI sends.
+        const attachments = normalizeSendAttachments(message.attachments);
+        if (attachments === null) {
+          post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: 'bad_request' });
+          return;
+        }
         // 🔴 A follow-up may open a tab too (supersedes the contract's earlier "FOLLOWUP → false").
         // The tabs a session rides are OURS: the client opened them in the background (pinned)
         // and tracks them. A user who closes one mid-session must not end the
@@ -2227,7 +2473,12 @@ export function createCompareController({
         // (a) readiness, ONCE per provider (on its first column), in parallel; a failed provider
         // is reported on each of its columns and skipped, not fatal.
         const firstOf = new Map();
-        for (const col of columns) if (!firstOf.has(col.provider)) firstOf.set(col.provider, col);
+        // A provider this round cannot use (no upload path, and there is a file) is not prepared at
+        // all: preparing it would open its tab, and a tab that is slow to load would spend the
+        // readiness budget — up to TAB_LOAD_TIMEOUT_MS — on a column that is refused either way.
+        // Its verdict is the `uploads` branch below, which does not need a client.
+        const skipReadiness = (col) => attachments.length > 0 && PROVIDER_SITES[col.provider].uploads !== true;
+        for (const col of columns) if (!skipReadiness(col) && !firstOf.has(col.provider)) firstOf.set(col.provider, col);
         const verdicts = new Map(await Promise.all([...firstOf.values()].map(async (col) => [col.provider, await readiness(col, mayOpenTab, send.signal)])));
         // A Stop before the debit is free; the page hears it as a failed consume.
         if (torndown) return;
@@ -2238,7 +2489,14 @@ export function createCompareController({
         for (const col of columns) {
           const verdict = verdicts.get(col.provider);
           if (verdict) postError(col, verdict.code, `not ready: ${verdict.code}`, verdict.error);
-          else ready.push(col);
+          // A file on a provider with no upload path (#1616) — the columns readiness above skipped.
+          // The package would reject this send itself (`unsupported`, before any tab work) but only
+          // AFTER the debit, which would charge the round for a column that was never going to
+          // answer. Same code, same place as every other "cannot be asked" verdict: out of `ready`,
+          // so out of the consume body.
+          else if (skipReadiness(col)) {
+            postError(col, 'unsupported', `${col.provider} has no upload path yet (${attachments.length} attached)`, null);
+          } else ready.push(col);
         }
         if (!ready.length) {
           post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.NO_TARGETS });
@@ -2272,7 +2530,7 @@ export function createCompareController({
         if (send.signal.aborted) {
           for (const col of ready) postError(col, SW_CODES.ABORTED, 'stopped before send', null);
         } else {
-          await Promise.all(ready.map((col) => sendOne(col, text, mayOpenTab, send.signal)));
+          await Promise.all(ready.map((col) => sendOne(col, text, mayOpenTab, send.signal, attachments)));
         }
         post({ type: PORT_MSG.ALL_DONE });
         // Still pending after the CONSUME_OK refresh (it ran while the tab was still loading, say):
