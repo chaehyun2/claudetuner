@@ -273,7 +273,15 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-col-picker { height: 30px; padding: 0 8px 0 10px; gap: 4px; font-size: 12px; font-weight: 500; color: var(--text-secondary); background: var(--bg-subtle); border-color: var(--border); }
 .cmp-col-picker:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .cmp-col-picker-text { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The model face is the one head control that gives way: a long label + a plan pill (ChatGPT
+   「GPT-5.6 Sol · 빠른 답변」 · Pro 5x) pushed ✕ past the card edge (2026-09-26). The face shrinks and
+   its label ellipsizes; every other identity item keeps its width. */
+.cmp-col-id > * { flex-shrink: 0; }
+.cmp-col-id > .cmp-col-picker { flex-shrink: 1; min-width: 44px; }
+.cmp-col-picker-text { min-width: 0; }
 .cmp-col-picker-caret { font-size: 10px; opacity: .8; }
+/* The service ▾ is an SVG chevron (compare.js) — the glyph alone read as a dot in its 24px box (2026-09-26 UI pass). */
+.cmp-col-service-icon { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 /* The popover: under the column head, inside the column card (the card clips overflow, so it scrolls within). */
 /* while a column's picker is open the card releases its overflow clip (the list hangs below a short card) */
 .cmp-col.cmp-col-picking { overflow: visible; }
@@ -291,8 +299,10 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-add-col { display: flex; align-items: center; justify-content: center; min-height: 240px; border: 1px dashed var(--border-strong); background: transparent; box-shadow: none; color: var(--text-secondary); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color .15s ease, color .15s ease; }
 .cmp-add-col:hover { background: var(--bg-hover); color: var(--text-primary); }
 .cmp-add-col:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* ✕ in the tools group: a quiet 30px control, danger on hover. */
-.cmp-col-remove { width: 30px; padding: 0; color: var(--text-secondary); }
+/* ✕: a quiet 30px control, danger on hover, last in the identity row and pushed to its end — the
+   head's top-right corner when the tools wrap below (2026-09-26: in the tools row, next to ⤢ ·
+   대화 복사 · 이 열에만 묻기, it wrapped onto a line of its own). Rails (focus mode) have no ✕. */
+.cmp-col-remove { flex: 0 0 auto; margin-left: auto; width: 30px; padding: 0; color: var(--text-secondary); }
 .cmp-col-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 /* ⤢ / ⤡ (focus mode, see ── focus ──): the same quiet 30px control, accent on hover / while pressed. */
 .cmp-col-focus { width: 30px; padding: 0; font-size: 15px; color: var(--text-secondary); }
@@ -503,6 +513,18 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-thumb.is-gone { cursor: default; opacity: .5; }
 .cmp-turn-thumb-img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cmp-turn-thumb-img[hidden] { display: none; }
+/* Images in the answer (#1684): the picture at column width, a save button under it. */
+.cmp-out-imgs { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+.cmp-out-img { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.cmp-out-img-btn { display: block; max-width: 100%; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); overflow: hidden; cursor: zoom-in; }
+.cmp-out-img-btn:hover, .cmp-out-img-btn:focus-visible { border-color: var(--accent); }
+.cmp-out-img-btn.is-gone { cursor: default; opacity: .5; min-width: 64px; min-height: 64px; }
+.cmp-out-img-pic { display: block; max-width: 100%; max-height: 420px; object-fit: contain; }
+.cmp-out-img-pic[hidden] { display: none; }
+.cmp-out-img-dl { font: inherit; font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.cmp-out-img-dl:hover, .cmp-out-img-dl:focus-visible { color: var(--text-primary); border-color: var(--accent); }
+.cmp-out-img-dl[hidden] { display: none; }
+.cmp-out-img-failed { margin: 0; font-size: 13px; color: var(--text-secondary); }
 .cmp-viewer { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(15, 20, 25, .82); }
 .cmp-viewer[hidden] { display: none; }
 .cmp-viewer-frame { max-width: 90vw; max-height: 86vh; display: flex; align-items: center; justify-content: center; }
@@ -581,7 +603,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    the first CONSUME_OK. The id selector also outranks the ── narrow ── block below: the strip
    stays a strip on a phone too (the narrow `.cmp-col` min-height is a chat-layout value). */
 #compare-root.is-hero .cmp-dock { position: static; padding-bottom: 0; margin-top: 8px; }
-#compare-root.is-hero .cmp-columns { flex: 0 0 auto; min-height: 0; grid-auto-rows: auto; }
+#compare-root.is-hero .cmp-columns { flex: 0 0 auto; min-height: 0; grid-auto-rows: auto; overflow: visible; }
+/* ↑ overflow: visible — the strip is content-sized, so its own scroller only ever came from the ▾
+   list hanging below the last row: the box then scrolled INSIDE itself (the first row's heads cut
+   off, the list out of sight until that inner scroll moved — 2026-09-26 user feedback). Visible,
+   the list overlays the page below and revealNode scrolls the page when it must. */
 #compare-root.is-hero .cmp-col { min-height: 0; }
 /* An empty body (no gate, no turns) takes no room — the head (+ usage strip) is the whole card.
    A gate box stays visible (the user must sign in before sending) but as a compact block. */
@@ -613,6 +639,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-name { height: auto; writing-mode: vertical-rl; pointer-events: none; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-name .cmp-ext-arrow { display: none; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-tools { margin-left: 0; flex-direction: column; }
+  #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-remove { display: none; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-badge { height: auto; max-height: 220px; width: 26px; padding: 10px 0; writing-mode: vertical-rl; }
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-service, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-picker, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-plan, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-model-hint,
   #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-remove, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-col-focus, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-copy-col, #compare-root.is-focus .cmp-col:not(.is-focused) .cmp-ask-col,

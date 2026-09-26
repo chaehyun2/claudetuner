@@ -11,6 +11,22 @@ import {
 } from './prediction-core.js';
 export { calcPredictedAtReset, estimateCapHitTime, windowForecast, windowTier };
 
+// The viewer's UTC offset in minutes (+540 = KST) for the 7d forecast, which uses a KST-shaped
+// activity curve only for KST (or unknown) viewers. Read HERE, at the UI edge: prediction-core.js
+// is shared with the Worker and must not read the environment.
+export function viewerTzOffsetMin() {
+  return -new Date().getTimezoneOffset();
+}
+
+// The provider of the org the detail view is showing — it selects the 7d model (pace-how is
+// Claude-only, ui/diurnal.js p7Applies). No selection, or an org not in the collected list, is the
+// legacy single-org Claude view (the same rule _filteredHistory uses for legacy rows).
+export function selectedForecastProvider() {
+  if (!state.selectedOrgId) return 'claude';
+  const org = (state.collectedOrgs || []).find((o) => o.uuid === state.selectedOrgId);
+  return (org && org.provider) || 'claude';
+}
+
 // The tier ladder and every verdict derived from it live in ui/usage-tiers.js — the SoT shared
 // with the dashboard through a generated twin. Re-exported here so existing importers (and the
 // popup renderers below) keep one obvious place to reach for them.
@@ -189,8 +205,10 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
   // Use common prediction function
   // Scope the cache to the org currently selected in the popup. One popup only ever shows one
   // account, but the cache no longer assumes that — see prediction-core.js.
-  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt,
-    { cache: popupForecastCache, scope: state.selectedOrgId || 'default' });
+  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt, {
+    cache: popupForecastCache, scope: state.selectedOrgId || 'default',
+    windowSeconds: spanSeconds, tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider(),
+  });
   if (!pred) {
     showFallback();
     return;
@@ -302,7 +320,8 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
   // preferred 5h on a tie — a different rule from the one the shared helper documents, which is
   // how 'both banners agree' quietly stops being true.
   const candidate = (util, key, resetsAt, label, spanSeconds) => {
-    const fc = windowForecast(util, key, resetsAt, history, spanSeconds);
+    const fc = windowForecast(util, key, resetsAt, history, spanSeconds,
+      { tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider() });
     if (!fc) return null;
     const hoursToReset = resetsAt ? (new Date(resetsAt).getTime() - Date.now()) / 3600000 : null;
     return { tier: fc.tier, eta: etaWithinWindow(fc.hoursTo100, hoursToReset), label };

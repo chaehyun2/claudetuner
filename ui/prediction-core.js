@@ -13,7 +13,7 @@
 // The Worker can import this directly (its tsconfig is moduleResolution:"Bundler" and wrangler
 // bundles with esbuild), so unlike diurnal.js/usage-tiers.js — which the DASHBOARD cannot import
 // because it has no bundler and needs a synced global-script twin — no third copy is needed here.
-import { diurnalProject7dAdaptive } from './diurnal.js';
+import { diurnalProject7dAdaptive, p7ProjectAtReset, p7Applies } from './diurnal.js';
 import {
   AT_LIMIT_TIER, projectionTier, windowAverageProjection, projectFlatWindow,
 } from './usage-tiers.js';
@@ -70,14 +70,29 @@ export const popupForecastCache = forecastCache();
 //
 // So the caller must name the account (or org, or whatever isolation boundary applies) and the
 // scope is folded in first. A caller that cannot name one gets no caching — see forecastCache().
-function _predCacheKey(scope, history, key, currentUtil, resetsAt) {
-  void 0;
+//
+// 🔴 Every forecast INPUT that is not the history must be in the key too — the window span, the
+// viewer's timezone and any caller-supplied prior cycles (`_priorDigest`). Prior cycles DERIVED
+// from the history need nothing extra: they come from its oldest part, and a front trim moves
+// `first.t`/`n`.
+// The digest carries EVERY field the 7d model reads from a prior (ui/diurnal.js p7PriorFinals):
+// resetMs/endDate place it, startDate+endDate decide whether it is a whole cycle, finalUtil
+// (else peakUtil) is its value. Dropping one lets a changed prior reuse a stale entry (Codex R1).
+function _priorDigest(priorCycles) {
+  if (!Array.isArray(priorCycles)) return '';
+  return priorCycles.map((c) => (c
+    ? [c.resetMs, c.startDate, c.endDate, c.finalUtil, c.peakUtil].map((v) => (v == null ? '' : String(v))).join(':')
+    : '')).join(',');
+}
+
+function _predCacheKey(scope, history, key, currentUtil, resetsAt, fcOpts) {
   const n = history.length;
   const first = history[0];
   const last = history[n - 1];
   const mid = history[n >> 1];
   return `${scope}\u0000${key}|${currentUtil}|${resetsAt}|${n}|${first.t}|${last.t}|${last.org}`
-    + `|${last.h5}|${last.d7}|${last.r7}|${mid.t}|${mid.d7}`;
+    + `|${last.h5}|${last.d7}|${last.r7}|${mid.t}|${mid.d7}`
+    + `|${fcOpts.provider ?? ''}|${fcOpts.windowSeconds ?? ''}|${fcOpts.tzOffsetMin ?? ''}|${_priorDigest(fcOpts.priorCycles)}`;
 }
 
 function _predCacheGet(cache, cacheKey, nowMs) {
@@ -106,6 +121,18 @@ export function estimateCapHitTime(history, key) {
 }
 
 // Used by both gauge prediction and banner evaluation (and the overview cards).
+// opts (all optional):
+//   cache, scope   — the memo (see above); both or neither
+//   windowSeconds  — the provider-reported window span (7d slot: 7 days for Claude, 30 days for
+//                    ChatGPT Free/Go). Unknown -> 7 days
+//   tzOffsetMin    — the viewer's UTC offset in minutes. Passed by the CALLER
+//                    (`-new Date().getTimezoneOffset()`); this file must not read the environment
+//   priorCycles    — daily_usage summaries (p7PriorCyclesFromDaily), when the caller has them
+//   provider       — 'claude' | 'chatgpt' | 'gemini'. 🔴 Selects the 7d model (p7Applies): the
+//                    pace-how projection is fitted on Claude's 7-day window only, so every other
+//                    provider — and a caller that does not say — keeps the adaptive projector
+// The pace-how 7d result additionally carries `willHit` ("likely to hit the limit") and
+// `predictedMedian`; its `predicted` already encodes willHit for the tier ladder (p7ProjectAtReset).
 export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts = {}) {
   // Caching is OPT-IN and needs both a store and a scope. Omit either and every call recomputes —
   // slower, never wrong. That default is deliberate: the failure mode of the other default is a
@@ -122,18 +149,21 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
   let rate, hoursDiff;
 
   if (key === 'd7') {
-    // 7d: activity-normalized adaptive projection (docs/DESIGN-rate-estimator.md).
-    // Estimate the burn rate with a recency-weighted EWMA over ~48h of ACTIVITY time and
-    // project through the user's PERSONAL diurnal + weekly curve (global fallback when data
-    // is thin). Replaces the old thin/noisy last-6h flat window; the activity-mass model,
-    // discount-only clamp and remaining-mass floor are unchanged. Passing the full local
-    // history (extension keeps 30d) is what lets the personal curve be built.
+    // 7d: the pace-how projection (ui/diurnal.js p7ProjectAtReset, #1681) — cycle-to-date pace,
+    // recent 24h rate and the user's prior-cycle finals, on a global hour-of-week activity curve.
+    // Passing the full local history (extension keeps 30d) is what supplies the prior cycles.
     //
     // Memoized (see the "7d projection memo" block above): the model build is the expensive part
     // of a renderOverview() pass. Skip the cache entirely near a reset, where the forecast is
     // both shortest-lived and most sensitive.
+    const fcOpts = {
+      provider: typeof opts.provider === 'string' ? opts.provider : null,
+      windowSeconds: Number.isFinite(opts.windowSeconds) && opts.windowSeconds > 0 ? opts.windowSeconds : null,
+      tzOffsetMin: Number.isFinite(opts.tzOffsetMin) ? opts.tzOffsetMin : null,
+      priorCycles: Array.isArray(opts.priorCycles) ? opts.priorCycles : null,
+    };
     const cacheKey = (_cache && _scope !== null && hoursToReset >= PRED_CACHE_MIN_HOURS_TO_RESET)
-      ? _predCacheKey(_scope, history, key, currentUtil, resetsAt)
+      ? _predCacheKey(_scope, history, key, currentUtil, resetsAt, fcOpts)
       : null;
     if (cacheKey) {
       const cached = _predCacheGet(_cache, cacheKey, now);
@@ -144,11 +174,22 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
     const samples = history
       .filter(p => p.d7 != null && p.r7)
       .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
-    const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: resetTime, nowMs: now });
+    // Claude 7d -> pace-how (#1681). Anything else -> the adaptive projector, exactly as before it.
+    const dp = p7Applies(fcOpts.provider, fcOpts.windowSeconds)
+      ? p7ProjectAtReset({
+        samples, currentUtil, resetMs: resetTime, nowMs: now,
+        windowSeconds: fcOpts.windowSeconds ?? undefined,
+        tzOffsetMin: fcOpts.tzOffsetMin ?? undefined,
+        priorCycles: fcOpts.priorCycles ?? undefined,
+      })
+      : diurnalProject7dAdaptive({ samples, currentUtil, resetMs: resetTime, nowMs: now });
     if (!dp) return null;
     const result = {
       rate: dp.rate,
       predicted: dp.predicted,
+      // pace-how only; undefined on the adaptive path (its tier comes from `predicted` as before)
+      predictedMedian: dp.predictedMedian,
+      willHit: dp.willHit,
       hoursToReset: dp.hoursToReset,
       hoursDiff: dp.hoursDiff,
       hoursTo100: dp.hoursTo100,
@@ -188,21 +229,27 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
 // its own. `rate` is null on the degraded path (there is no measured rate to report).
 // `spanSeconds` is the window length the PROVIDER reported for this slot — 2592000 for a
 // ChatGPT Free/Go 30-day "7d" window, null when the provider did not say (Claude, Gemini, any
-// client before 1.29.46), which falls back to the 5h/7d constants. It only reaches the DEGRADED
-// branch: the measured forecast derives its rate from timestamps and never assumes a length.
+// client before 1.29.46), which falls back to the 5h/7d constants. It feeds the DEGRADED branch
+// and, since #1681, the measured 7d forecast too (its cycle-to-date pace needs the cycle start).
 // Threading it is #978 — before, `remaining` came from the real resets_at while the denominator
 // was hard-coded to 7 days, which inflated the projection inside ~6.3 days of a 30-day reset.
-export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds) {
+// `fcOpts` ({ provider, tzOffsetMin, priorCycles }) is forwarded to calcPredictedAtReset; the span is threaded
+// in as its windowSeconds, so the measured 7d forecast uses the real window length too (#978).
+export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds, fcOpts = {}) {
   if (currentUtil == null || !resetsAt) return null;
   // Already at the cap: there is no forecast past 100, and no pace verdict is true of someone
   // who is blocked and waiting. AT_LIMIT is its own rung for exactly this — the old code took
   // the loudest PACE rung here and told a stopped user they were "한도를 크게 넘는 페이스".
   if (currentUtil >= 100) return { tier: AT_LIMIT_TIER, predicted: currentUtil, rate: null, hoursTo100: null, measured: false };
-  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt);
+  const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt, {
+    windowSeconds: spanSeconds, tzOffsetMin: fcOpts.tzOffsetMin, priorCycles: fcOpts.priorCycles,
+    provider: fcOpts.provider,
+  });
   if (pred) {
     return {
       tier: projectionTier(pred.predicted), predicted: pred.predicted, rate: pred.rate,
       hoursTo100: pred.hoursTo100 != null ? pred.hoursTo100 : null, measured: true,
+      willHit: pred.willHit === true,
     };
   }
   const degraded = windowAverageProjection(currentUtil, key, resetsAt, spanSeconds);
@@ -211,6 +258,6 @@ export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds)
 }
 
 // Tier-only convenience for callers that render nothing but the verdict.
-export function windowTier(currentUtil, key, resetsAt, history, spanSeconds) {
-  return windowForecast(currentUtil, key, resetsAt, history, spanSeconds)?.tier ?? null;
+export function windowTier(currentUtil, key, resetsAt, history, spanSeconds, fcOpts = {}) {
+  return windowForecast(currentUtil, key, resetsAt, history, spanSeconds, fcOpts)?.tier ?? null;
 }

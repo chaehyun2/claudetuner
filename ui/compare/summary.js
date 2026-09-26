@@ -26,10 +26,17 @@ export function installSummary(ctx) {
    * original answers. `partial` = text that streamed before an ERROR cut it, or before the
    * provider went silent (DONE{stalled}, #1519) — the prompt marks both the same way.
    */
+  // The answer as the judge reads it: its text, plus one line saying images were part of it
+  // (#1684) — the judge gets no pictures, and an image-only answer must not vanish from the
+  // comparison (nor read as an empty one).
+  function answerText(turn) {
+    const n = ctx.outImageCount(turn);
+    return n ? `${turn.text}${turn.text ? '\n\n' : ''}[${t('summary_image_note', n)}]` : turn.text;
+  }
   function answerInRound(col, round) {
     for (let i = col.turns.length - 1; i >= 0; i--) {
       const turn = col.turns[i];
-      if (turn.role === 'assistant' && turn.text && turn.kind !== TURN_KIND_SUMMARY && turn.round === round) return { text: turn.text, partial: !!turn.errorText || turn.stalled === true, model: turn.model || null };
+      if (turn.role === 'assistant' && answerText(turn) && turn.kind !== TURN_KIND_SUMMARY && turn.round === round) return { text: answerText(turn), partial: !!turn.errorText || turn.stalled === true, model: turn.model || null };
     }
     return null;
   }
@@ -43,7 +50,7 @@ export function installSummary(ctx) {
     for (const col of ctx.liveColumns()) {
       if (ctx.columnDead(col)) continue;
       for (const turn of col.turns) {
-        if (turn.role !== 'assistant' || !turn.text || turn.kind === TURN_KIND_SUMMARY || !Number.isFinite(turn.round)) continue;
+        if (turn.role !== 'assistant' || !answerText(turn) || turn.kind === TURN_KIND_SUMMARY || !Number.isFinite(turn.round)) continue;
         if (!perRound.has(turn.round)) perRound.set(turn.round, new Set());
         perRound.get(turn.round).add(col.id);
       }

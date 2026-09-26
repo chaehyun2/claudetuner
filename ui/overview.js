@@ -13,7 +13,7 @@ import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
 import { popupForecastCache } from './prediction-core.js';
 import {
   calcPredictedAtReset, estimateCapHitTime, tierColor, isAlertTier, degradedApprox,
-  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, viewerTzOffsetMin,
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
@@ -272,7 +272,8 @@ function _renderCard(org, hist) {
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
     rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
-    const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d);
+    const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
+      { windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
     rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'), org.w7s);
   }
 

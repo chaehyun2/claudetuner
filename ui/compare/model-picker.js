@@ -64,6 +64,10 @@ export function installModelPicker(ctx) {
     if (typeof col.node.appendChild === 'function') col.node.appendChild(ctx.picker);
     if (col.node.classList) col.node.classList.add(ctx.PICKING_CLASS); // the card stops clipping so the list can hang below it
     ctx.picker.hidden = false;
+    // The list hangs below the head: a column on a lower grid row (a ＋-added one) opened it past the
+    // fold, and nothing said the services were there until the page was scrolled (2026-09-26 user
+    // feedback) — bring the whole list into view (nearest edge: no jump when it already shows).
+    ctx.revealNode(ctx.picker);
     if (first) ctx.focusQuietly(first);
   }
   /**
@@ -129,11 +133,16 @@ export function installModelPicker(ctx) {
    * Before any answer, the column's own model is all there is.
    */
   function threadIsWork(col) {
+    const answered = threadModelId(col);
+    return isWorkValue(answered != null ? answered : col.model);
+  }
+  /** The model that answered the thread last (the latest answer turn that recorded one), or null. */
+  function threadModelId(col) {
     for (let i = col.turns.length - 1; i >= 0; i--) {
       const turn = col.turns[i];
-      if (turn.role === 'assistant' && turn.model && turn.model.id != null) return isWorkValue(turn.model.id);
+      if (turn.role === 'assistant' && turn.model && turn.model.id != null) return String(turn.model.id);
     }
-    return isWorkValue(col.model);
+    return null;
   }
   function crossesMode(col, value) {
     return state.sessionStarted && col.provider === 'chatgpt' && isWorkValue(value) !== threadIsWork(col);
@@ -315,11 +324,18 @@ export function installModelPicker(ctx) {
     // restore on the static list, a MODELS refresh — Codex ext 1R): falling back across the mode
     // would send a Chat model into a Work conversation, answered silently by the Work equivalent.
     // A same-mode row is taken if there is one; else the thread's own model is kept as an option.
+    // 🔴 …and when the list has no row of that mode at all (the static list — the site's catalog did
+    // not load), the column keeps a model OF the thread's mode: its own pick if it is one, else the
+    // model that answered the thread (1.35.0 batch review residual — a Chat pick restored onto a
+    // linked Work conversation went out as `gpt-5-5`). An Auto column is held to it too.
     let kept = null;
-    if (crossesMode(col, value) && current != null) {
+    if (crossesMode(col, value)) {
       const same = list.find((m) => !crossesMode(col, toValue(m.id)));
       if (same) value = toValue(same.id);
-      else { kept = toValue(current); value = kept; }
+      else {
+        const keep = [current == null ? null : toValue(current), threadModelId(col)].find((v) => v != null && !crossesMode(col, v));
+        if (keep != null) { kept = keep; value = keep; }
+      }
     }
     clear(sel);
     for (const m of list) {

@@ -165,6 +165,8 @@ export function installExport(ctx) {
           // is the answer as sent, and stripping them by text would also strip a code example that
           // shows the tag (Codex 1R #1). The chips are the page's rendering, not the answer.
           if (turn.text) blocks.push(turn.text);
+          // Images in the answer (#1684) are not text: the export says they were there.
+          if (ctx.outImageCount(turn)) blocks.push(`_[${t('out_image_md', ctx.outImageCount(turn))}]_`);
           if (turn.errorText) blocks.push(`_${turn.errorText}_`);
           if (turn.stalled) blocks.push(`_${ctx.cutNote(turn)}_`);
         }
@@ -176,8 +178,15 @@ export function installExport(ctx) {
   const participatingColumns = () => state.columnIds.map((id) => state.columns.get(id)).filter((c) => c && c.participated);
   /** Columns in page order. */
   const allColumns = () => state.columnIds.map((id) => state.columns.get(id)).filter(Boolean);
-  /** The first column of a provider on the page (the one that carries the provider-level UI), or null. */
-  const firstColumnOf = (provider) => allColumns().find((c) => c.provider === provider) || null;
+  /**
+   * The first column of a provider on the page (the one that carries the provider-level UI), or
+   * null — the first VISIBLE one when there is one: a closed / excluded column must not keep the
+   * plan, the gauges and the gate while its siblings point at it with 「같은 계정」.
+   */
+  const firstColumnOf = (provider) => {
+    const own = allColumns().filter((c) => c.provider === provider);
+    return own.find((c) => !c.node.hidden) || own[0] || null;
+  };
   /** A column's display label: the provider, plus its model label when it has one (`Claude (Opus 5)`). */
   function colLabel(col) {
     const base = PROVIDER_META[col.provider].label;
@@ -193,8 +202,8 @@ export function installExport(ctx) {
   }
   const compareMarkdown = () => markdownFor(participatingColumns());
   const columnMarkdown = (col) => (col.participated ? markdownFor([col]) : '');
-  /** A column holds at least one answer with text. */
-  const columnHasAnswer = (c) => c.turns.some((turn) => turn.role === 'assistant' && turn.text);
+  /** A column holds at least one answer — text, or images alone (#1684). */
+  const columnHasAnswer = (c) => c.turns.some((turn) => turn.role === 'assistant' && (turn.text || ctx.outImageCount(turn)));
   /** 「전체 복사」 is worth pressing once some column holds an answer; a column's 「대화 복사」 once THAT column does. */
   function syncCopyAll() {
     ctx.copyAllBtn.disabled = ![...state.columns.values()].some(columnHasAnswer);

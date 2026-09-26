@@ -18,7 +18,8 @@
 //     or a setter registered by its owner (ctx.bumpStatusEpoch).
 
 import { imageIdsOf } from './image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY } from './constants.js';
+import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, OUT_IMAGE_PERSIST_WAIT_MS } from './constants.js';
 import { autoGrow } from './helpers.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
@@ -163,7 +164,9 @@ export function installHistory(ctx) {
   function snapshotSession() {
     if (!state.sessionStarted || !state.sessionId || state.sessionSaveHistory !== true) return null;
     const columns = {};
-    for (const col of state.columns.values()) {
+    // Page order (state.columnIds), not the Map's insertion order — a replaced or re-keyed column
+    // is re-inserted at the Map's end, and the entry's key order is what the history row's dots show.
+    for (const col of ctx.allColumns()) {
       if (!col.participated) continue; // an excluded (hidden) column that took part earlier is still part of the record (Codex hist 1R #2)
       columns[col.id] = {
         provider: col.provider,
@@ -189,7 +192,7 @@ export function installHistory(ctx) {
       const sm = turn.summary;
       return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })) } };
     }
-    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
   }
   /** The attachment MARKER a turn keeps — name (clipped) and size. Never the image; see HISTORY_ATTACH_NAME_MAX. */
   function storedImg(img) {
@@ -238,13 +241,13 @@ export function installHistory(ctx) {
     }
     // Round-group eviction. A turn without a round (an entry from before provenance) belongs to
     // the oldest group. The protected round is the active one, else the latest comparison round
-    // (≥ SUMMARY_MIN_COLUMNS columns with a real answer in it).
+    // (≥ SUMMARY_MIN_COLUMNS columns with a real answer in it — an image-only answer counts, #1684).
     const roundOf = (turn) => (Number.isFinite(turn.round) ? turn.round : -Infinity);
     const rounds = () => { const set = new Set(); for (const c of Object.values(entry.columns)) for (const turn of c.turns) set.add(roundOf(turn)); return [...set].sort((a, b) => a - b); };
     const protectedRound = () => {
       if (Number.isFinite(entry.activeRound)) return entry.activeRound;
       const per = new Map();
-      for (const [p, c] of Object.entries(entry.columns)) for (const turn of c.turns) if (turn.role === 'assistant' && turn.text && turn.kind !== TURN_KIND_SUMMARY && Number.isFinite(turn.round)) { if (!per.has(turn.round)) per.set(turn.round, new Set()); per.get(turn.round).add(p); }
+      for (const [p, c] of Object.entries(entry.columns)) for (const turn of c.turns) if (turn.role === 'assistant' && (turn.text || outImageCountOf(turn)) && turn.kind !== TURN_KIND_SUMMARY && Number.isFinite(turn.round)) { if (!per.has(turn.round)) per.set(turn.round, new Set()); per.get(turn.round).add(p); }
       let best = null;
       for (const [r, cols] of per) if (cols.size >= SUMMARY_MIN_COLUMNS && (best === null || r > best)) best = r;
       return best;
@@ -290,17 +293,50 @@ export function installHistory(ctx) {
         set: { [historyKey(entry.id)]: entry },
         remove: evicted.map(historyKey),
         afterWrite: async () => {
+          // A preview still being made cannot be written now (#1684: an answer's image lands right
+          // before its DONE); once it exists it is written on its own — see persistLateImages.
+          // 🔴 Taken BEFORE persist() (Codex B 2R): one that completes while persist() is still
+          // writing the others was skipped by it AND no longer pending afterwards — lost for good.
+          // A preview that makes it into both is simply written twice (persist is idempotent).
+          // Its own try (Codex B 3R follow-up): a failure here must not cost the images persist() can write now.
+          let late = null;
+          try { late = typeof ctx.imageStore.whenReady === 'function' ? ctx.imageStore.whenReady(ids, OUT_IMAGE_PERSIST_WAIT_MS) : null; } catch { late = null; }
+          if (late) late.then(() => persistLateImages(entry.id, ids));
           await ctx.imageStore.persist(entry.id, ids);
           if (evicted.length) await ctx.imageStore.forget(evicted);
         },
       };
     }).then((r) => syncHistoryButton(r.ok ? r.list : null));
   }
+  /**
+   * The previews of `ids` for the stored entry `entryId`, once they exist (#1684). 🔴 Decided INSIDE
+   * the history lock from what is stored NOW, never from the page: only while that entry still
+   * exists and still names the image — a delete in any tab since the write wins (nothing is
+   * resurrected), and a switch to another conversation meanwhile changes nothing (the entry was
+   * already written; the wait never held the conversation back). The round's write itself never
+   * waits (Codex B 1R: a wait before the write lost the round to a 「새 대화」 and resurrected an
+   * entry another tab had deleted). Idempotent: persist() re-puts what is already there.
+   */
+  function persistLateImages(entryId, ids) {
+    historyUpdate((list) => {
+      const stored = list.find((e) => e.id === entryId);
+      if (!stored) return null;
+      const named = new Set(entryImageIds(stored));
+      const keep = ids.filter((id) => named.has(id));
+      if (!keep.length) return null;
+      return { afterWrite: () => ctx.imageStore.persist(entryId, keep) };
+    });
+  }
   /** Every image id a stored entry names (its first-round bubble and every turn). */
   function entryImageIds(entry) {
     const ids = [...imageIdsOf(entry.questionImg && entry.questionImg.ids, ATTACH_MAX_FILES)];
     for (const c of Object.values(entry.columns || {})) {
-      for (const turn of (c && c.turns) || []) if (turn && turn.img) ids.push(...imageIdsOf(turn.img.ids, ATTACH_MAX_FILES));
+      for (const turn of (c && c.turns) || []) {
+        if (turn && turn.img) ids.push(...imageIdsOf(turn.img.ids, ATTACH_MAX_FILES));
+        // The answer's own images (#1684; `null` slots are failures and are filtered here) — without them here they are never persisted, and the
+        // orphan sweep would then remove the previews of a kept entry.
+        if (turn && turn.images) ids.push(...imageIdsOf(turn.images.ids, ATTACH_MAX_FILES));
+      }
     }
     return [...new Set(ids)];
   }
@@ -512,7 +548,8 @@ export function installHistory(ctx) {
         const errorText = str(turn.errorText);
         const tm = turn.model === undefined ? null : model(turn.model); // absent on a turn = never got a MODEL event
         const img = turn.img === undefined ? null : readImg(turn.img); // absent on every pre-#1616 turn
-        if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined) return null;
+        const images = turn.images === undefined ? null : readOutImagesMarker(turn.images); // #1684, absent on every older turn
+        if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined || images === undefined) return null;
         const kind = turn.kind === TURN_KIND_SUMMARY ? TURN_KIND_SUMMARY : null;
         let summary = null;
         if (kind && turn.role === 'user') {
@@ -523,7 +560,7 @@ export function installHistory(ctx) {
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
         const k = kind && (turn.role === 'assistant' || summary) ? kind : null;
-        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
+        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
     }
@@ -570,10 +607,19 @@ export function installHistory(ctx) {
     state.sessionSaveHistory = true; // only kept sessions are stored
     state.rounds = typeof entry.rounds === 'number' ? entry.rounds : 1;
     ctx.commitPrompt(state.question);
-    // The entry's columns come first, in their stored order (created when the page does not have
-    // them — a stored Opus column next to the page's auto one); the page's other columns stay as
-    // empty bystanders, up to MAX_COLUMNS.
+    // The entry's columns are shown in the PAGE's order (created next to their service's column when
+    // the page does not have them — a stored Opus column next to the page's auto one). The page's
+    // other columns are CLOSED for this conversation (closeColumn's state — 새 대화 reopens them):
+    // left open they sat beside the thread as empty 「로그인됨 — 새 대화부터」 cards and, being first of
+    // their service, carried its plan / gauges / 「같은 계정」 chip (2026-09-26 user feedback).
     ctx.ensureLayout(Object.keys(entry.columns));
+    // An entry with no column (never written by snapshotSession — a damaged row) closes nothing: an empty page helps no one (Codex cmp-load 1R 후속).
+    if (Object.keys(entry.columns).length) for (const col of ctx.allColumns()) {
+      if (Object.prototype.hasOwnProperty.call(entry.columns, col.id)) continue;
+      col.closed = true;
+      col.node.hidden = true;
+    }
+    ctx.renderColumns(); // the provider-level UI moves to the first VISIBLE column of each service
     const targets = [];
     for (const colId of Object.keys(entry.columns)) {
       const stored = entry.columns[colId];
@@ -659,6 +705,7 @@ export function installHistory(ctx) {
     if (stored.errorText) { turn.errorText = String(stored.errorText); turn.node.classList.add('is-error'); }
     if (stored.stalled === true) turn.stalled = true;
     if (stored.cutError === true) turn.cutError = true;
+    if (stored.images) ctx.restoreOutputImages(turn, stored.images);
     turn.node.classList.remove('is-streaming');
     col.status = 'done';
     ctx.paintAssistant(col);
@@ -668,7 +715,7 @@ export function installHistory(ctx) {
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
     historyStorage, underHistoryLock, lastErr, storageReadAll, storageKeyInvalid, storageWrite, historyUpdate, historyKey,
-    newSessionId, clipText, snapshotSession, storedTurn, jsonBytes, fitEntry, logUnfittable, persistSession,
+    newSessionId, clipText, snapshotSession, storedTurn, jsonBytes, fitEntry, logUnfittable, persistSession, persistLateImages,
     historyMatches, syncHistoryButton, relativeTime, renderHistoryList, paintHistoryList, openHistoryPanel, closeHistoryPanel, deleteSession,
     clearHistory, boundContinuation, normalizeEntry, loadSession, storedSummary, restoreAssistantTurn,
   });

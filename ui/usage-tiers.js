@@ -134,9 +134,13 @@ export function isRisingNotice(predicted, rate, currentUtil) {
 // up: a green "nothing to worry about" badge sitting next to a red "about to run out" warning is a
 // contradiction the user has to resolve, and the level-based warning is the one that matters.
 // (The amber WARMING line is informational, not a warning, so it does not withhold the badge.)
+// 🔴 Nor while the window is projected to HIT the cap: the "grows < 3pt" test reads a user at 98%
+// projected to 100 as "stable", and the green badge then sits beside the limit-time wait block.
+// The 7d forecast (#1681) reports exactly 100 when it expects the cap, so 98 -> 100 is a real case.
 export function isStableLook(predicted, rate, currentUtil) {
   return (rate <= 0 || predicted - currentUtil < STABLE_DELTA_PCT) &&
-    !isNearLimit(predicted, rate, currentUtil);
+    !isNearLimit(predicted, rate, currentUtil) &&
+    !isAtRiskOfCap(predicted, rate, currentUtil);
 }
 
 // === The short-window (5h) forecast ==========================================================

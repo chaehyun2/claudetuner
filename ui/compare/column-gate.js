@@ -11,7 +11,7 @@ import { gaugeColor } from '../util.js';
 
 /** Installs the column-gate slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installColumnGate(ctx) {
-  const { chrome, t, state, clock, embedHost, track, el, clear, link, dot } = ctx;
+  const { chrome, t, state, clock, embedHost, track, el, clear, link, dot, src } = ctx;
   /** Which gate a provider's status calls for; null = sendable (no gate). */
   function gateKindFor(pstate) {
     if (!pstate || !pstate.permitted) return GATE_PERMISSION;
@@ -42,28 +42,59 @@ export function installColumnGate(ctx) {
     return login;
   }
   /**
+   * The providers ONE prompt should cover when `provider`'s button is pressed: that provider first,
+   * then every other provider on the page that still lacks site access (2026-09-26 — GA 09-21~25:
+   * ~150 users met a gate per provider but only ~40 granted each; two separate prompts were the
+   * funnel's widest leak). Only providers that are VISIBLE columns on this page — never a site the
+   * user did not pick: 「원본 제외」 hides the source column but keeps it in the Map (Codex 1R), and a
+   * column closed for this conversation (`col.closed`) is not one the user wants either.
+   * Read from STATE, not `col.node.hidden`: renderColumns updates columns in order, so an earlier
+   * column's label would see a later column's stale hidden flag (Codex 2R).
+   * Chrome grants a multi-origin request all-or-nothing, in a single bubble.
+   */
+  function providersNeedingPermission(provider) {
+    const out = [provider];
+    for (const col of state.columns.values()) {
+      if (out.includes(col.provider) || !PROVIDER_META[col.provider] || (state.excludeSrc && col.provider === src) || col.closed) continue; // closed = ✕ in the session / not in a loaded entry (1.36.0 batch review)
+      const pstate = state.status && state.status.providers ? state.status.providers[col.provider] : null;
+      if (gateKindFor(pstate) === GATE_PERMISSION) out.push(col.provider);
+    }
+    return out;
+  }
+  /**
+   * A permission button's label: its own single-site words (`singleKey` — the gate's 「권한 허용」 or
+   * the C3 action row's 「사이트 접근 허용」), or 「Gemini·ChatGPT 한 번에 허용」 when the prompt covers more.
+   */
+  function permissionButtonLabel(provider, singleKey = 'provider_permission_btn') {
+    const providers = providersNeedingPermission(provider);
+    if (providers.length < 2) return t(singleKey);
+    return t('provider_permission_btn_many', providers.map((p) => PROVIDER_META[p].label).join(t('provider_list_sep')));
+  }
+  /**
    * 🔴 The ONLY chrome.permissions.request in the compare feature, and it runs from a click
    * handler: optional host permissions need a user gesture, which content scripts can never supply
    * (AC16). Two buttons share it — the column gate's 「권한 허용」 and the C3 action row's 「사이트 접근
-   * 허용」 — so the call site count stays one. After the prompt, re-ask the SW so the column flips
-   * to sendable/login (gate) or gets its retry back (action row, col.gateCleared).
-   * `hint` is where the "the prompt moved to an extension tab" line goes.
+   * 허용」 — so the call site count stays one. The request covers every column still gated on
+   * permission (providersNeedingPermission), so one "allow" clears them all. After the prompt,
+   * re-ask the SW so the columns flip to sendable/login (gate) or get their retry back (action
+   * row, col.gateCleared). `hint` is where the "the prompt moved to an extension tab" line goes.
    */
   async function requestProviderPermission(provider, btn, hint) {
     if (state.disabled) return;
-    const meta = PROVIDER_META[provider];
+    const providers = providersNeedingPermission(provider);
     btn.disabled = true;
     let promptUnavailable = false;
     try {
       let granted = false;
-      try { granted = (await chrome.permissions.request({ origins: [meta.origin] })) === true; } catch {
+      try { granted = (await chrome.permissions.request({ origins: providers.map((p) => PROVIDER_META[p].origin) })) === true; } catch {
         // Refused / unavailable. Inside the web shell's iframe Chrome may decline to SHOW the
         // prompt at all (the call rejects — a user's "no" resolves false and does not land here):
         // the extension's own tab is where the prompt is guaranteed, so open this page there with
         // the same query and say so. The button stays; a plain retry is still possible.
         promptUnavailable = !!embedHost;
       }
-      track('permission_result', { provider, granted });
+      // One event per provider the prompt covered, so the per-provider gate → grant funnel stays comparable.
+      for (const p of providers) track('permission_result', { provider: p, granted });
       if (promptUnavailable) ctx.openInExtensionTab();
       hint.textContent = '';
       await ctx.refreshStatus();
@@ -93,12 +124,13 @@ export function installColumnGate(ctx) {
     const box = el('div', 'cmp-col-state');
     box.setAttribute('data-gate', kind);
     box.appendChild(dot(col.provider));
-    const gate = { kind, box, status: null, hint: null };
+    const gate = { kind, box, status: null, hint: null, btn: null };
     if (kind === GATE_PERMISSION) {
       box.appendChild(el('p', 'cmp-col-state-title', t('provider_permission_required')));
       box.appendChild(el('p', 'cmp-col-state-desc', t('provider_permission_desc', meta.label)));
-      const btn = el('button', 'cmp-btn cmp-btn-primary cmp-perm-btn', t('provider_permission_btn'));
+      const btn = el('button', 'cmp-btn cmp-btn-primary cmp-perm-btn', permissionButtonLabel(col.provider));
       btn.type = 'button';
+      gate.btn = btn;
       btn.setAttribute('data-origin', meta.origin);
       // Where the "the prompt moved to an extension tab" hint goes (appended under the buttons below).
       const hint = el('p', 'cmp-col-state-hint');
@@ -210,10 +242,13 @@ export function installColumnGate(ctx) {
   }
   function syncGateStatus(col) {
     if (col.gate && col.gate.status) col.gate.status.textContent = state.checking ? t('gate_checking') : '';
+    // The gate is kept across status re-reads, so the label follows the set it would request now
+    // (another column granted elsewhere / a column added or removed).
+    if (col.gate && col.gate.btn) col.gate.btn.textContent = permissionButtonLabel(col.provider);
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
-    gateKindFor, checkAgainButton, providerLoginLink, requestProviderPermission, renderColumnGate, renderPlan, countdown, usageResetAt,
+    gateKindFor, checkAgainButton, providerLoginLink, permissionButtonLabel, requestProviderPermission, renderColumnGate, renderPlan, countdown, usageResetAt,
     windowText, miniGauge, renderUsage, syncGateStatus,
   });
 }

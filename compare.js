@@ -73,6 +73,7 @@ import { installExport } from './ui/compare/export.js';
 import { installColumnThread } from './ui/compare/column-thread.js';
 import { installActivity } from './ui/compare/activity.js';
 import { installPort } from './ui/compare/port.js';
+import { installOutputImages } from './ui/compare/output-images.js';
 // The public surface stays on compare.js (test/compare-page-flow-guard.mjs imports it from here).
 export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, MODEL_AUTO_ID, colIdOf, parseColId, normalizeColId, PROVIDER_META, LOGIN_URL, PRO_URL, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS } from './ui/compare/constants.js';
 export { listenEmbedTheme, sendableTargets, localHHMM } from './ui/compare/helpers.js';
@@ -119,7 +120,11 @@ export function mountComparePage(deps) {
   const embedHost = embedHostOf(win);
   /** Open THIS page (same query) as a top-level extension tab — the fallback when the frame cannot show a prompt. */
   function openInExtensionTab() {
-    try { chrome.tabs.create({ url: chrome.runtime.getURL(`compare.html${location.search || ''}`) }); } catch { /* tabs API unavailable */ }
+    // Same query, with `lang` set to the language THIS page speaks: the tab is not framed, so the
+    // bootstrap would otherwise resolve the extension setting and switch language mid-flow.
+    const query = new URLSearchParams(location.search || '');
+    query.set('lang', lang);
+    try { chrome.tabs.create({ url: chrome.runtime.getURL(`compare.html?${query.toString()}`) }); } catch { /* tabs API unavailable */ }
   }
 
   const params = new URLSearchParams(location.search || '');
@@ -366,7 +371,7 @@ export function mountComparePage(deps) {
   const ctx = { chrome, doc, win, location, lang, t, state, clock, nav, con, syncStorage, random, raf, root, params, src, q, embedHost, track, el, clear, link, dot, deps, imageStore };
   Object.assign(ctx, {
     // stays in compare.js
-    openInExtensionTab, closeViewer, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
+    openInExtensionTab, openImageViewer, closeViewer, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
     renderQuestionBubbles, makeFollowupComposer, syncSaveHistory, showNotice, showLoginRequired, renderComingSoon, renderQuota, renderQuotaLine,
     syncQuotaNotice, quotaExhaustedTitle, betaReset, renderResetOffer, requestReset, columnFor, setBadge, waitingSeconds,
     ttftSeconds, paintBadge, lastAssistantTurn, setServedModel, waitingColumns, countdownColumns, syncWaitTimer, tickWaiting,
@@ -383,6 +388,7 @@ export function mountComparePage(deps) {
   installColumnGate(ctx);
   installModelPicker(ctx);
   installExport(ctx);
+  installOutputImages(ctx);
   installColumnThread(ctx);
   installActivity(ctx);
   installPort(ctx);
@@ -1614,7 +1620,16 @@ export function mountComparePage(deps) {
     serviceBtn.setAttribute('aria-expanded', 'false');
     serviceBtn.title = t('col_service_title');
     serviceBtn.setAttribute('aria-label', t('col_service_title'));
-    serviceBtn.appendChild(el('span', 'cmp-col-picker-caret', '▾'));
+    // An SVG chevron, not the 「▾」 glyph the model face uses: alone in its 24px box the glyph drew
+    // as a 6px dot at any font size and read as nothing to click (2026-09-26 UI pass).
+    const serviceChevron = doc.createElementNS(SVG_NS, 'svg');
+    serviceChevron.setAttribute('viewBox', '0 0 12 12');
+    serviceChevron.setAttribute('aria-hidden', 'true');
+    serviceChevron.setAttribute('class', 'cmp-col-service-icon');
+    const serviceChevronPath = doc.createElementNS(SVG_NS, 'path');
+    serviceChevronPath.setAttribute('d', 'M3 4.5l3 3 3-3');
+    serviceChevron.appendChild(serviceChevronPath);
+    serviceBtn.appendChild(serviceChevron);
     serviceBtn.addEventListener('click', () => toggleServicePicker(col.id));
     identity.appendChild(serviceBtn);
     // Model picker (cmp-columns §1): the head's model face 「Auto ▾」 opens THIS provider's list
@@ -1653,14 +1668,23 @@ export function mountComparePage(deps) {
     const badge = el('span', 'cmp-col-badge');
     badge.setAttribute('aria-live', 'polite');
     tools.appendChild(badge);
-    // ✕ (cmp-columns §1): drops the column — before the session only, never the last one.
+    // ✕ (cmp-columns §1): before the session it drops the column (and the stored layout with it);
+    // in a session it CLOSES the column for this conversation (closeColumn — hidden, out of the
+    // follow-up routing, its thread kept in the saved entry; 새 대화 brings it back). Never the last
+    // visible one.
     const removeBtn = el('button', 'cmp-btn cmp-btn-sm cmp-col-remove', '✕');
     removeBtn.type = 'button';
     removeBtn.hidden = true;
     removeBtn.title = t('col_remove');
     removeBtn.setAttribute('aria-label', t('col_remove'));
-    removeBtn.addEventListener('click', () => { if (!removeBtn.hidden) removeColumnByUser(col.id); });
-    tools.appendChild(removeBtn);
+    removeBtn.addEventListener('click', () => {
+      if (removeBtn.hidden || removeBtn.disabled) return;
+      if (state.sessionStarted) closeColumn(col.id); else removeColumnByUser(col.id);
+    });
+    // At the END of the identity row (compare.css margin-left: auto): the head's top-right corner
+    // whenever the tools wrap below — in a session they do, and in the tools row it took a line of
+    // its own (2026-09-26 UI pass).
+    identity.appendChild(removeBtn);
     // ⤢ (focus mode, 2026-09-21 user decision A): widens THIS column in place — every other column
     // collapses to a 48px rail (compare.css ── focus ──). Hidden before the session (the hero has
     // nothing to widen) and on narrow screens (CSS); reads ⤡ 「원래 크기로」 while this column is the
@@ -1699,7 +1723,7 @@ export function mountComparePage(deps) {
     node.appendChild(head);
     // A rail (focus mode: some OTHER column is focused) takes the focus on click — anywhere on it,
     // the rail shows nothing but the dot, the name and the badge. Inert outside focus mode.
-    node.addEventListener('click', () => { if (state.focusedCol && state.focusedCol !== col.id) setColumnFocus(col.id); });
+    node.addEventListener('click', () => { if (state.focusedCol && state.focusedCol !== col.id && !col.closed) setColumnFocus(col.id); });
     // Usage mini gauges (2026-09-18, user request): the account's 5h / 7d utilisation for this
     // provider, from status.providers[p].usage — the same numbers the popup's overview cards
     // draw, in a one-line strip under the head. Hidden when nothing was collected; a no-limits
@@ -1823,7 +1847,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false, closed: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -2013,9 +2037,9 @@ export function mountComparePage(deps) {
     for (const id of ids) columnFor(id);
   }
   /**
-   * The page shows at least these columns (a loaded history entry's), in their order, ahead of
-   * whatever else it has — created when missing, existing ones moved to the front; never more
-   * than MAX_COLUMNS in total (the page's own extra columns go first when there is no room).
+   * The page shows at least these columns (a loaded history entry's) — created when missing, next
+   * to their service's column (else at the end); the page's order is kept; never more than MAX_COLUMNS in total (the page's own
+   * non-participating columns go first when there is no room).
    */
   function ensureLayout(ids) {
     const wanted = ids.map(normalizeColId).filter(Boolean).filter((id, i, arr) => arr.indexOf(id) === i);
@@ -2026,11 +2050,18 @@ export function mountComparePage(deps) {
       if (!victim) break;
       removeColumn(victim);
     }
-    for (const id of missing) columnFor(id);
-    // Stored order first, then the rest as they were.
-    const rest = state.columnIds.filter((id) => !wanted.includes(id));
-    state.columnIds = [...wanted.filter((id) => state.columns.has(id) && state.columns.get(id).id === id), ...rest];
-    for (const id of state.columnIds) columnsBox.appendChild(state.columns.get(id).node); // appendChild moves — DOM order = state order
+    // The page keeps ITS order (2026-09-26 user feedback: loading a session reshuffled Claude /
+    // ChatGPT / Gemini — the entry's key order is not the user's layout); a column the page did not
+    // have goes right after the page's last column of the same service (a stored Opus column next
+    // to Claude), else at the end.
+    for (const id of missing) {
+      if (!columnFor(id)) continue;
+      const { provider } = parseColId(id);
+      const rest = state.columnIds.filter((x) => x !== id);
+      const at = rest.map((x) => parseColId(x).provider).lastIndexOf(provider);
+      if (at >= 0) { rest.splice(at + 1, 0, id); state.columnIds = rest; }
+    }
+    for (const id of state.columnIds) columnsBox.insertBefore(state.columns.get(id).node, addColBtn); // DOM order = state order, the ＋ card last
     renderColumns();
   }
   /**
@@ -2059,17 +2090,74 @@ export function mountComparePage(deps) {
     }
     return out;
   }
-  /** 「＋ 열 추가」: the first (provider, model) not on the page yet, at the end (columnFor holds the MAX_COLUMNS cap). */
+  /**
+   * 「＋ 열 추가」: a service the page does not show yet comes first (its `auto`), and only when every
+   * service already has a column, the first (provider, model) not on the page — at the end
+   * (columnFor holds the MAX_COLUMNS cap). The new column is scrolled into view: on a second grid
+   * row it would otherwise sit below the fold with its ▾ list (2026-09-26 user feedback).
+   */
   function addColumnByUser() {
     if (state.sessionStarted) return;
-    const choice = columnChoices().find((c) => !c.present);
+    const choices = columnChoices().filter((c) => !c.present);
+    const shown = new Set(state.columnIds.map((id) => parseColId(id).provider));
+    const choice = choices.find((c) => !shown.has(c.provider)) || choices[0];
     if (!choice) return;
     const col = columnFor(choice.id);
     if (!col) return; // past the cap
     renderColumns();
     updateControls();
     saveLayout();
+    revealNode(col.node);
     track('column_add', { col: gaCol(col), n: state.columnIds.length });
+  }
+  /** Scrolls a node into view when it is not (nearest edge, no jump when it already is); no-op without a layout engine. */
+  function revealNode(node) {
+    if (!node || typeof node.scrollIntoView !== 'function') return;
+    try { node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* no layout engine */ }
+  }
+  ctx.revealNode = revealNode;
+  /**
+   * The head's ✕: before the session it removes the column (never the last one); in a session it
+   * closes it (closeColumn) while another column stays visible, and is inert while a round is in
+   * flight (state.sending, until ALL_DONE — the round's targets were fixed at the send).
+   */
+  function syncRemoveButton(col) {
+    const label = t(state.sessionStarted ? 'col_close' : 'col_remove');
+    col.removeBtn.title = label;
+    col.removeBtn.setAttribute('aria-label', label);
+    if (!state.sessionStarted) { col.removeBtn.hidden = state.columnIds.length <= 1; col.removeBtn.disabled = false; return; }
+    col.removeBtn.hidden = col.node.hidden || allColumns().filter((c) => !c.node.hidden).length <= 1;
+    col.removeBtn.disabled = state.sending;
+  }
+  /**
+   * In-session ✕ (2026-09-26 user request — a loaded or running session could not drop a service):
+   * the column is hidden for THIS conversation — every consumer that reads `node.hidden` (the live
+   * set, the routing boxes, the round sweep) leaves it — while its thread stays in the saved entry
+   * (snapshotSession stores participated columns, hidden or not). 새 대화 and a history load reopen
+   * it (resetColumn). Nothing is sent or stored by the close itself.
+   */
+  function closeColumn(colId) {
+    const col = state.columns.get(colId);
+    if (!col || col.id !== colId || !state.sessionStarted || state.sending || col.node.hidden) return;
+    if (allColumns().filter((c) => !c.node.hidden).length <= 1) return;
+    if (state.pickerFor === colId) closePicker();
+    if (state.focusedCol === colId) setColumnFocus(null);
+    // A draft in the column's own box must not vanish with the column (Codex cmp-ui 1R): it joins
+    // the dock's text — appended when the dock already holds some, since the stranded read-only
+    // box updateControls keeps for a gone column would sit inside the hidden node.
+    const draft = String(col.askInput.value || '').trim();
+    if (draft) {
+      const dockText = String(followup.input.value || '').trim();
+      followup.input.value = dockText ? `${followup.input.value.replace(/\s+$/, '')}\n\n${col.askInput.value}` : col.askInput.value;
+      autoGrow(followup.input);
+      col.askInput.value = '';
+      setColumnAsk(col, false);
+    }
+    col.closed = true;
+    col.node.hidden = true;
+    state.followupTargets.delete(colId);
+    updateControls();
+    track('column_close', { col: gaCol(col), participated: col.participated ? 1 : 0 });
   }
   /** ✕: before the session, never the last column. */
   function removeColumnByUser(colId) {
@@ -2144,16 +2232,17 @@ export function mountComparePage(deps) {
     const st = state.status;
     if (!st || !st.providers) return;
     ensureDefaultColumns();
+    // Visibility first, for every column: firstColumnOf (below) picks the first VISIBLE column of a
+    // service, so a later column's state must be settled before an earlier one asks.
+    for (const col of allColumns()) col.node.hidden = (state.excludeSrc && col.provider === src) || col.closed;
     for (const col of allColumns()) {
       const p = col.provider;
       const pstate = st.providers[p] || { permitted: false, loggedIn: null };
-      const excluded = state.excludeSrc && p === src;
-      col.node.hidden = excluded;
-      if (excluded) continue;
+      if (col.node.hidden) continue;
       renderModelSelect(col);
       renderPickerLabel(col);
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
-      col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncRemoveButton(col);
       syncServiceButton(col);
       syncFocusButton(col);
       // Provider-level state on the FIRST column of the provider only (cmp-columns §0): plan pill,
@@ -2402,7 +2491,7 @@ export function mountComparePage(deps) {
       renderColumnActions(col);
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
       col.pickerBtn.disabled = state.sending;
-      col.removeBtn.hidden = state.sessionStarted || state.columnIds.length <= 1;
+      syncRemoveButton(col);
       syncServiceButton(col);
       syncFocusButton(col);
     }
@@ -2501,6 +2590,7 @@ export function mountComparePage(deps) {
     syncHistoryButton(null); // count re-read from the last good list (Codex hist 1R #9)
     statusEpoch++; // a status answer asked before the reset describes the old session
     for (const col of state.columns.values()) resetColumn(col);
+    renderColumns(); // a column closed in the session is back (resetColumn cleared `closed`)
     releasePrompt();
     clearCopyFeedback();
     for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
@@ -2938,8 +3028,10 @@ export function mountComparePage(deps) {
 if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById('compare-root')) {
   listenEmbedTheme(window, document);
   // Framed by the web shell: the SHELL's language (`?lang=ko|en`, the site header's toggle) wins,
-  // so the page matches the site around it; the extension's own tab keeps the extension setting.
-  const shellLang = embedHostOf(window) ? new URLSearchParams(window.location.search || '').get('lang') : null;
+  // so the page matches the site around it; an extension tab without `?lang=` keeps the extension setting.
+  // Unframed, `?lang=` comes only from openInExtensionTab (the frame's fallback tab), which keeps
+  // the language the framed page was speaking — so it is honoured there too.
+  const shellLang = new URLSearchParams(window.location.search || '').get('lang');
   chrome.storage.sync.get({ lang: 'auto' }, (cfg) => {
     mountComparePage({
       chrome,

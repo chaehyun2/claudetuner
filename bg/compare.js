@@ -26,7 +26,11 @@
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
 //   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryOnce? (the boolean is this session's only — not stored as the preference), resume?, kind?, round?, src?, session?, attachments?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
-//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY
+//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
+//   Output images (#1684, package v0.13.0): IMAGE{provider, col, mime, data, width, height, alt} or
+//   IMAGE{provider, col, error, width, height, alt} — an image the provider GENERATED, bytes as
+//   base64 (never a provider URL), validated by imageForPage and always posted BEFORE that
+//   column's DONE. An answer that is only images is a DONE with text ''.
 //   Attachments (#1616): `attachments: [{name, type, data}]`, `data` BASE64 — a Port message is
 //   JSON, so a Blob/ArrayBuffer cannot cross this hop. Bounded by SEND_MAX_ATTACHMENTS /
 //   SEND_MAX_ATTACHMENT_BYTES / SEND_ATTACHMENT_TYPES (one PNG/JPEG/GIF/WebP, ≤ 10 MB) and validated BEFORE
@@ -182,6 +186,10 @@
 //              dark, or the status call failed) — the page shows the reset button on it.
 //   events   — COMPARE_EVENT_NAMES += 'quota_reset' (the page reports a successful reset).
 
+// The output-image contract (#1684) — the package's own numbers, so the host never refuses an image
+// the client accepted. A pure module (no browser global), safe for the Node guard.
+import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
+
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
 export const PROBE_MULTI_MSG = 'COMPARE_PROBE_MULTI';
@@ -249,6 +257,14 @@ export const PROVIDER_SEND_TIMEOUT_MS = 10 * 60 * 1000;
 // page script's fetch is cancelled, no dangling request in the tab) and posts DONE{stalled:true}
 // with the text it streamed — not ERROR: the user has the answer. Other columns are untouched.
 export const STREAM_STALL_MS = 60 * 1000;
+// …stretched to this once the client says a picture is coming (STAGE_IMAGE_PENDING, #1684), for the
+// REST OF THAT SEND — not only until the first image: Gemini fetches its images one after another
+// (up to 90 s each) after a single image_pending, so dropping back to STREAM_STALL_MS at the first
+// image cut the column before the second (host batch review #1). Stretched, NOT switched off (package batch review #1): ChatGPT
+// announces the image when the model CALLS image_gen, and a call the tool then refuses produces no
+// image event at all — an off watchdog left only the 10-minute budget. Above the ChatGPT client's
+// own image deadline (180 s); the clients heartbeat far more often than this while they poll.
+export const IMAGE_WAIT_STALL_MS = 240 * 1000;
 
 // Bound on each provider's `listModels()` inside COMPARE_STATUS. The package caps its own ChatGPT
 // round trip at the same value; this one is the SW's, so the status probe never waits on a client's
@@ -296,6 +312,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // before the session (`col`, `n`). Emitted since #1525 but never added here, so the SW dropped
   // all three silently (#1525 후속 3).
   'column_add', 'column_remove', 'column_change',
+  // In-session ✕ (2026-09-26): a column closed for the current conversation (`col`, `participated` 0/1).
+  'column_close',
   // Feedback / report link (topbar): the user left for the inquiry form. Shapes only — whether the
   // page was framed and how many rounds they had run, never the prefill (it carries their email).
   'feedback_open',
@@ -335,6 +353,10 @@ const COMPARE_EVENT_KEY_RE = /^[a-z_]{1,40}$/;
 // could never end it and every later send would answer `busy`); past this it counts as "no
 // baseline" — the send proceeds on what it was told, nothing is written (see loadSelectedModels).
 export const SELECTED_MODELS_READ_TIMEOUT_MS = 2000;
+// chrome.storage.sync key of the extension-wide language setting ('auto' | 'ko' | 'en', options page).
+export const COMPARE_LANG_KEY = 'lang';
+// The settings that are a user CHOICE and ride to the site shell as `?lang=` ('auto' is not one).
+export const COMPARE_EXPLICIT_LANGS = Object.freeze(['ko', 'en']);
 
 // Dark-launch flag — same static CDN file and 1h TTL cache as the folders feature
 // (claude-folders.js FLAGS_URL / FOLDERS_FLAG_TTL_MS), read here once for every surface that asks.
@@ -695,7 +717,7 @@ function catalogPending(provider, source) {
 export const PORT_MSG = Object.freeze({
   SEND: 'SEND', FOLLOWUP: 'FOLLOWUP', ABORT: 'ABORT', READ_LINK: 'READ_LINK', LINK_OK: 'LINK_OK', LINK_FAIL: 'LINK_FAIL',
   CONSUME_OK: 'CONSUME_OK', CONSUME_FAIL: 'CONSUME_FAIL',
-  MODEL: 'MODEL', CHUNK: 'CHUNK', DONE: 'DONE', ERROR: 'ERROR', ALL_DONE: 'ALL_DONE', DIAG: 'DIAG', MODELS: 'MODELS', ACTIVITY: 'ACTIVITY',
+  MODEL: 'MODEL', CHUNK: 'CHUNK', DONE: 'DONE', ERROR: 'ERROR', ALL_DONE: 'ALL_DONE', DIAG: 'DIAG', MODELS: 'MODELS', ACTIVITY: 'ACTIVITY', IMAGE: 'IMAGE',
 });
 // Activity (package v0.5.0, 2026-09-18): the provider's PROCESS while it works — thinking text,
 // tool calls (web search + query), tool results, status sentences — forwarded to the page as
@@ -1186,6 +1208,43 @@ function activityForPage(ev) {
   return out;
 }
 
+// ── Output images (#1684) ─────────────────────────────────────────────────────────────────────
+// The package's `{type:'image'}` event in the shape the page receives: `{mime, data, width, height,
+// alt}` for an image whose bytes arrived, `{error, width, height, alt}` for one the provider made
+// but that could not be carried. null only for something that is not an image event at all.
+//
+// 🔴 VALIDATED ON THE DECLARED LENGTH BEFORE ANY SCAN, like the attachments (normalizeSendAttachments):
+// the cap is decided from the base64 length and padding, and the charset regex only ever walks a
+// string already known to be inside it. The bytes are never decoded here — the page decodes them
+// into a Blob and the browser's image decoder is the one that says whether they are a picture.
+// A refused image becomes an ERROR PLACEHOLDER rather than silence: the provider did answer with
+// a picture, and the column says so instead of showing nothing (the package's own contract).
+// Never a URL: a field the client adds (a provider link, say) does not survive this projection.
+export const OUTPUT_IMAGE_ALT_MAX = 300;
+export const OUTPUT_IMAGE_DIM_MAX = 16384;
+const OUTPUT_IMAGE_ERROR_SET = new Set(Object.values(OUTPUT_IMAGE_ERRORS));
+export function imageForPage(ev) {
+  if (!ev || typeof ev !== 'object' || ev.type !== 'image') return null;
+  const dim = (n) => (Number.isInteger(n) && n > 0 && n <= OUTPUT_IMAGE_DIM_MAX ? n : null);
+  const meta = { width: dim(ev.width), height: dim(ev.height), alt: typeof ev.alt === 'string' ? ev.alt.slice(0, OUTPUT_IMAGE_ALT_MAX) : '' };
+  const fail = (code) => ({ error: code, ...meta });
+  if (ev.error !== undefined) return fail(OUTPUT_IMAGE_ERROR_SET.has(ev.error) ? ev.error : OUTPUT_IMAGE_ERRORS.FETCH_FAILED);
+  const mime = typeof ev.mime === 'string' ? ev.mime.trim().toLowerCase() : '';
+  if (!OUTPUT_IMAGE_MIMES.includes(mime)) return fail(OUTPUT_IMAGE_ERRORS.BAD_TYPE);
+  const data = typeof ev.data === 'string' ? ev.data : '';
+  if (!data || data.length % 4 !== 0) return fail(OUTPUT_IMAGE_ERRORS.FETCH_FAILED);
+  const bytes = base64Bytes(data);
+  if (bytes > MAX_OUTPUT_IMAGE_BYTES) return fail(OUTPUT_IMAGE_ERRORS.TOO_LARGE);
+  if (bytes <= 0 || !SEND_ATTACHMENT_B64_RE.test(data)) return fail(OUTPUT_IMAGE_ERRORS.FETCH_FAILED);
+  return { mime, data, ...meta };
+}
+// The client knows an image is coming (#1684): a `diag` of this stage stretches the send's stall
+// watchdog to IMAGE_WAIT_STALL_MS for the rest of the send (see there). Generating a
+// picture is a long silence after the text — ChatGPT's image_gen routinely runs past
+// STREAM_STALL_MS — and the plain watchdog would cut the column into DONE{stalled} just before the
+// image it was waiting for. Repeats are harmless; `detail.at` is not read.
+export const STAGE_IMAGE_PENDING = 'image_pending';
+
 // The `model` object a client reports, in the shape the page renders: `{ id, label, source }`.
 function modelForPage(m) {
   if (!m || typeof m !== 'object') return null;
@@ -1328,6 +1387,7 @@ function fetchWithDeadline(fetchImpl, url, ms, handle) {
  * @param {Function} [deps.now] — defaults to Date.now
  * @param {number} [deps.sendTimeoutMs] — defaults to PROVIDER_SEND_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.streamStallMs] — defaults to STREAM_STALL_MS (tests shorten it)
+ * @param {number} [deps.imageWaitStallMs] — defaults to IMAGE_WAIT_STALL_MS (tests shorten it)
  * @param {number} [deps.probeDisposeTimeoutMs] — defaults to PROBE_DISPOSE_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.listModelsTimeoutMs] — defaults to LIST_MODELS_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.examplesTimeoutMs] — defaults to COMPARE_EXAMPLES_TIMEOUT_MS (tests shorten it)
@@ -1360,6 +1420,7 @@ export function createCompareController({
   drainDelayMs = DRAIN_STARTUP_DELAY_MS,
   sendTimeoutMs = PROVIDER_SEND_TIMEOUT_MS,
   streamStallMs = STREAM_STALL_MS,
+  imageWaitStallMs = IMAGE_WAIT_STALL_MS,
   linkReadTimeoutMs = LINK_READ_TIMEOUT_MS,
   probeDisposeTimeoutMs = PROBE_DISPOSE_TIMEOUT_MS,
   listModelsTimeoutMs = LIST_MODELS_TIMEOUT_MS,
@@ -1906,9 +1967,16 @@ export function createCompareController({
     const q = src && typeof message.q === 'string' ? message.q : '';
     const id = typeof runtime.id === 'string' ? runtime.id : '';
     const dev = id && id !== PUBLISHED_EXT_ID ? `&ext=${id}` : '';
+    // The extension's language, when the user CHOSE one (ko|en; 'auto' adds nothing and the shell
+    // resolves as before): the shell otherwise follows the site toggle / browser language, so an
+    // English extension on a Korean browser opened a Korean page (2026-09-26 i18n audit).
+    let extLang = null;
+    // Best effort: a missing / throwing / hanging storage read opens the page exactly as before.
+    try { extLang = await withTimeout(Promise.resolve(storageSync.get(COMPARE_LANG_KEY)).then((r) => r?.[COMPARE_LANG_KEY], () => null), SELECTED_MODELS_READ_TIMEOUT_MS, null); } catch { extLang = null; }
+    const langQ = COMPARE_EXPLICIT_LANGS.includes(extLang) ? `&lang=${extLang}` : '';
     const url = srcless
-      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}`
-      : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}#src=${src}&q=${encodeURIComponent(q)}`;
+      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
+      : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}${langQ}#src=${src}&q=${encodeURIComponent(q)}`;
     emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
     await tabs.create({ url, active: true });
     return { ok: true };
@@ -2427,6 +2495,13 @@ export function createCompareController({
       let lastInbound = null;
       let streamed = '';
       let lastModel = null;
+      // Output images (#1684): how many this send has posted (MAX_OUTPUT_IMAGES — the package's cap,
+      // enforced again here), and whether the client said one is on its way (STAGE_IMAGE_PENDING),
+      // which stretches the stall watchdog (IMAGE_WAIT_STALL_MS) for the rest of the send. `settled`: the send is over — an event a
+      // client emits after it resolved must not reach the page after this column's DONE/ERROR.
+      let imagesPosted = 0;
+      let imageWait = false;
+      let settled = false;
       const onStall = () => {
         stalled = true;
         logInfo(provider, 'stall', { col: colId, ms: lastInbound === null ? null : now() - lastInbound, chars: streamed.length });
@@ -2435,7 +2510,8 @@ export function createCompareController({
       const touch = () => {
         lastInbound = now();
         clearTimeout(stallTimer);
-        stallTimer = setTimeout(onStall, streamStallMs);
+        // Waiting on a picture: a longer silence is the provider drawing — but still a bounded one.
+        stallTimer = setTimeout(onStall, imageWait ? imageWaitStallMs : streamStallMs);
       };
       // Re-arm only once text has started: an event before the first chunk is the thinking/readiness
       // phase, which has no stall clock.
@@ -2462,8 +2538,24 @@ export function createCompareController({
             // The served model, as soon as the client knows it (before the first chunk where the
             // provider reports it). The page swaps its "waiting" badge for the name.
             onEvent: (ev) => {
-              touchIfStreaming(); // anything the client surfaces proves the stream is alive
+              if (settled) return;
+              // Before the re-arm below, so the watchdog it arms already knows (see touch). 🔴 It ARMS
+              // the watchdog even before any text (Codex host batch R1): an answer that is only a
+              // picture announces it before its first chunk, and a picture that never comes would
+              // otherwise leave no watchdog at all — only the 10-minute budget.
+              if (ev?.type === 'diag' && ev.stage === STAGE_IMAGE_PENDING) { imageWait = true; touch(); } else touchIfStreaming(); // anything the client surfaces proves the stream is alive
               if (ev?.type === 'diag') { onDiag(provider, colId)(ev); onStage(ev); return; }
+              if (ev?.type === 'image') {
+                if (imagesPosted >= MAX_OUTPUT_IMAGES) return;
+                const img = imageForPage(ev);
+                if (!img) return;
+                imagesPosted += 1;
+                // Sizes and verdicts only — the bytes and the alt text never reach a log line.
+                logInfo(provider, 'image', { col: colId, ...(img.error ? { error: img.error } : { mime: img.mime, bytes: base64Bytes(img.data) }), width: img.width, height: img.height });
+                // Posted synchronously from inside the send, so it always precedes this column's DONE.
+                post({ type: PORT_MSG.IMAGE, provider, col: colId, ...img });
+                return;
+              }
               if (ev?.type === 'activity') { const a = activityForPage(ev); if (a) post({ type: PORT_MSG.ACTIVITY, provider, col: colId, ...a }); return; }
               if (ev?.type !== 'model') return;
               const m = modelForPage(ev.model);
@@ -2521,6 +2613,7 @@ export function createCompareController({
         // leaves a stale number in a string).
         postError(col, code, String(e?.message || e), e, timedOut ? { budgetMs: sendTimeoutMs } : null);
       } finally {
+        settled = true;
         clearTimeout(timer);
         clearTimeout(stallTimer);
         sendSignal.removeEventListener('abort', onSendAbort);

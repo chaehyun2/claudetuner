@@ -126,7 +126,7 @@ export function idbBackend(idb = globalThis.indexedDB) {
 /**
  * The store the page uses. `backend` null → nothing is persisted (previews live for the page only).
  */
-export function createImageStore({ backend = null, makePreview = makePreviewBlob, urls = globalThis.URL, now = () => Date.now() } = {}) {
+export function createImageStore({ backend = null, makePreview = makePreviewBlob, urls = globalThis.URL, now = () => Date.now(), delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   // id → Promise<Blob|null> — the previews this page made (add) or read back (url).
   const mem = new Map();
   // id → Blob, once a preview EXISTS. 🔴 persist() writes only these, never waits and never comes
@@ -137,6 +137,8 @@ export function createImageStore({ backend = null, makePreview = makePreviewBlob
   // preview when the file is ATTACHED, so it is ready long before the round's history write; one
   // that is not is simply not kept (the next write of that session keeps it, if there is one).
   const ready = new Map();
+  // ids whose preview attempt has finished (made or not) — what whenReady() no longer waits for.
+  const settled = new Set();
   // id → object URL, for the page's lifetime. 🔴 Never revoked early (Codex 1R): a URL handed to an
   // <img> that has not loaded yet would break it — a bounded cache revoked URLs its own callers were
   // still about to use. The page holds only the images its sessions carried.
@@ -154,7 +156,19 @@ export function createImageStore({ backend = null, makePreview = makePreviewBlob
       if (!isImageId(id) || !source || mem.has(id)) return;
       const made = Promise.resolve().then(() => makePreview(source)).catch(() => null);
       mem.set(id, made);
-      made.then((blob) => { if (blob) ready.set(id, blob); });
+      made.then((blob) => { settled.add(id); if (blob) ready.set(id, blob); });
+    },
+
+    /**
+     * A promise that settles once the previews of `ids` this page is still making are done, or after
+     * `ms` — or null when none of them is pending. #1684: an answer's image lands right before its
+     * DONE, so the round's write can miss its preview; the history writes it on its own once this
+     * settles (history.js persistLateImages). Never awaited inside the history lock — see `ready`.
+     */
+    whenReady(ids, ms) {
+      const waits = (ids || []).filter((id) => mem.has(id) && !settled.has(id)).map((id) => mem.get(id));
+      if (!waits.length) return null;
+      return Promise.race([Promise.all(waits), delay(ms)]).then(() => undefined, () => undefined);
     },
 
     /** An object URL for the preview, or null when there is none (never made, or gone). */

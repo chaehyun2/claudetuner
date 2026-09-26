@@ -412,6 +412,19 @@ export const IMAGE_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 // old: a session that has not reached its first history write yet (this tab's, or another compare
 // tab's) owns previews no entry names so far.
 export const IMAGE_ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+// Images IN THE ANSWER (#1684 — ChatGPT's image_gen, Gemini's Imagen): kept exactly like the
+// question's images above (ids on the turn, previews in the same store, persisted only with the
+// history write). Two things are theirs alone:
+// – the ORIGINAL bytes are held for this page's lifetime so 「저장」 hands over the picture the
+//   provider made, not the re-encoded preview — bounded by OUT_IMAGE_ORIGINALS_MAX_BYTES, oldest
+//   dropped first (its download falls back to the preview, and says so);
+// – a preview still decoding at the round's history write (an image lands right before its DONE;
+//   persist() only writes previews that exist and never waits inside the lock) is written on its
+//   own once it exists — for as long as OUT_IMAGE_PERSIST_WAIT_MS; the write itself never waits.
+export const OUT_IMAGE_ORIGINALS_MAX_BYTES = 64 * 1024 * 1024;
+export const OUT_IMAGE_PERSIST_WAIT_MS = 30 * 1000;
+// The download's file name: `<provider>-image-<n>.<ext>`.
+export const OUT_IMAGE_EXT = Object.freeze({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' });
 // The file name a TURN keeps (#1616 ④ history marker), clipped. 🔴 A MARKER, NEVER THE IMAGE:
 // a history entry is capped at HISTORY_ENTRY_MAX_BYTES and shrunk by evicting whole rounds, and
 // `fitEntry` has no idea how to shrink a picture — a few data-URL thumbnails would push real

@@ -82,6 +82,8 @@ export function installColumnThread(ctx) {
       // md-render is bounded, but a renderer failure must never blank the answer: fall back to text.
       turn.node.appendChild(doc.createTextNode(turn.text));
     }
+    // Images in the answer (#1684): the turn's cached strip, moved back under the text — never rebuilt.
+    if (ctx.outImageCount(turn)) turn.node.appendChild(ctx.outImageStrip(col, turn));
     if (followUps.length) turn.node.appendChild(renderFollowUps(col, followUps));
     if (turn.errorText) {
       const line = el('p', 'cmp-col-error', ctx.errorLineText(turn));
@@ -271,6 +273,9 @@ export function installColumnThread(ctx) {
     const busy = errored && PROVIDER_BUSY_CODES.has(code);
     col.loginLink.hidden = !(gated && code === CODE_AUTH_REQUIRED);
     col.permBtn.hidden = !(gated && code === CODE_PERMISSION_REFUSED);
+    // The click asks for every visible column still lacking access (column-gate.js), so the label
+    // names them when there is more than one — the same words the column gate uses.
+    if (!col.permBtn.hidden) col.permBtn.textContent = ctx.permissionButtonLabel(col.provider, 'action_allow_access');
     col.checkBtn.hidden = !gated;
     // The reason above the buttons: only while the column is showing a readiness failure.
     col.readinessLine.hidden = !(show && col.readiness);
@@ -478,6 +483,7 @@ export function installColumnThread(ctx) {
     col.gateCleared = false;
     col.gateErrorSeq = 0;
     col.autoRetried = false;
+    if (col.closed) { col.closed = false; col.node.hidden = false; } // closed for the conversation being left (closeColumn); renderColumns re-applies the src exclusion
     col.copyColBtn.hidden = true;
     col.ask.hidden = true;
     col.askColBtn.hidden = true;

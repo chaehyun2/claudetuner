@@ -207,6 +207,21 @@ export function installPort(ctx) {
         if (!hadText && turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); } // the first text on the page enables 「전체 복사」; the process folds under the answer
         return;
       }
+      case 'IMAGE': {
+        // An image in the answer (#1684) — only for the column's live round, like a CHUNK. The SW
+        // posts every one before that column's DONE.
+        const col = columnForMsg(msg);
+        if (!col || col.status !== 'streaming') return;
+        const turn = col.turns[col.turns.length - 1];
+        if (!turn || turn.role !== 'assistant') return;
+        const first = !ctx.outImageCount(turn);
+        if (!ctx.addOutputImage(col, turn, msg)) return;
+        ctx.setBadge(col, 'col_streaming', 'is-streaming');
+        ctx.scheduleRender(col);
+        // An answer that is only a picture is still an answer: 「전체 복사」 and the folded process follow it like the first text.
+        if (first && !turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); }
+        return;
+      }
       case 'MODEL': {
         // Served model, as soon as the client knows it (addendum). Only for the column's live round.
         const col = columnForMsg(msg);
@@ -243,7 +258,7 @@ export function installPort(ctx) {
         if (state.sessionSaveHistory === true && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
         {
           const ttft = ctx.ttftSeconds(col);
-          track('column_done', { provider: col.provider, col: ctx.gaCol(col), ttft_ms: ttft ? Math.round(Number(ttft.first) * MS_PER_SECOND) : -1, total_ms: ttft && ttft.total != null ? Math.round(Number(ttft.total) * MS_PER_SECOND) : -1, chars: turn.text.length, model: ctx.servedModelId(col) });
+          track('column_done', { provider: col.provider, col: ctx.gaCol(col), ttft_ms: ttft ? Math.round(Number(ttft.first) * MS_PER_SECOND) : -1, total_ms: ttft && ttft.total != null ? Math.round(Number(ttft.total) * MS_PER_SECOND) : -1, chars: turn.text.length, images: ctx.outImageCount(turn), model: ctx.servedModelId(col) });
         }
         return;
       }
@@ -326,7 +341,7 @@ export function installPort(ctx) {
         }
         if (msg.stage === STAGE_TOOL_USE) {
           const turn = col.turns[col.turns.length - 1];
-          if (col.status === 'streaming' && turn && turn.role === 'assistant' && !turn.text) ctx.setBadge(col, BADGE_SEARCHING, 'is-streaming');
+          if (col.status === 'streaming' && turn && turn.role === 'assistant' && !turn.text && !ctx.outImageCount(turn)) ctx.setBadge(col, BADGE_SEARCHING, 'is-streaming');
           return;
         }
         // Readiness stages from the SW (package v0.2.3) are logged there; the page keeps only the

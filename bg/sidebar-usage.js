@@ -1,6 +1,6 @@
 // Builds the usage payload the in-page sidebar renders, and pushes it.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
-import { diurnalProject7dAdaptive } from '../ui/diurnal.js';
+import { calcPredictedAtReset } from '../ui/prediction-core.js';
 import { hasProviderPermission } from './providers.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
@@ -83,8 +83,12 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   const euLimit = eu?.monthly_limit ?? null;
 
   // Prediction calculation (reuse popup logic)
-  const pred5h = calcSidebarPrediction(history, 'h5', h5, r5, reqOrgId || orgData?.uuid, wantProvider);
-  const pred7d = calcSidebarPrediction(history, 'd7', d7, r7, reqOrgId || orgData?.uuid, wantProvider);
+  // Legacy org-less points belong to the Claude PRIMARY org only — the same rule as the popup's
+  // _filteredHistory (ui/state.js). A secondary org must not inherit them: the 7d model reads prior
+  // cycles from this history, so another org's past weeks would become this org's "usual final".
+  const legacyIsThisOrg = wantProvider === 'claude' && (!orgData || !!orgData.isPrimary);
+  const pred5h = calcSidebarPrediction(history, 'h5', h5, r5, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider);
+  const pred7d = calcSidebarPrediction(history, 'd7', d7, r7, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider, orgData?.w7s ?? null);
 
   // Language detection
   const lang = local.sidebarLang || (snapshot?.user_lang) || 'en';
@@ -201,35 +205,36 @@ async function noDataReason(provider) {
 }
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)
-function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, provider) {
+// `windowSeconds` is the provider-reported 7d-slot span (org `w7s`), used by the 7d forecast only.
+function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, includeLegacy, provider, windowSeconds) {
   if (!resetsAt || currentUtil == null || !history || history.length < 3) return null;
 
   const now = Date.now();
   const hoursToReset = (new Date(resetsAt).getTime() - now) / 3600000;
   if (hoursToReset <= 0) return null;
 
-  // Filter history for matching org. The legacy unscoped (no `org`) points are
-  // pre-multi-org Claude samples — only fold them into Claude predictions, never
-  // into a non-Claude provider's (which would skew ChatGPT/Gemini estimates).
-  const allowUnscoped = (provider || 'claude') === 'claude';
+  // Filter history for matching org. The legacy unscoped (no `org`) points are pre-multi-org
+  // samples of the Claude PRIMARY org — the caller decides (includeLegacy), mirroring the popup.
   const orgHistory = orgUuid
-    ? history.filter(p => p.org === orgUuid || (allowUnscoped && !p.org))
+    ? history.filter(p => p.org === orgUuid || (includeLegacy && !p.org))
     : history;
 
   let rate = null;
   let hoursDiff = 0;
 
   if (key === 'd7') {
-    // 7d: activity-normalized adaptive projection. Mirrors ui/prediction.js calcPredictedAtReset —
-    // keep the CORE and this sidebar duplicate in sync (docs/DESIGN-rate-estimator.md).
-    // EWMA burn rate over ~48h of activity time, projected through the user's personal
-    // diurnal + weekly curve (global fallback when data is thin). Pass the org-scoped history
-    // so the personal curve is built from this org's own samples.
-    const samples = orgHistory
-      .filter(p => p.d7 != null && p.r7)
-      .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
-    const dp = diurnalProject7dAdaptive({ samples, currentUtil, resetMs: new Date(resetsAt).getTime(), nowMs: now });
-    if (!dp || dp.rate <= 0 || dp.predicted - currentUtil < 3) return null;
+    // 7d: THE shared forecast (ui/prediction-core.js calcPredictedAtReset -> pace-how, #1681) —
+    // this used to call the diurnal projector directly, a second copy of the core's sample mapping
+    // that drifts the moment the core gains an input. Pass the org-scoped history so prior cycles
+    // come from this org's own samples. The viewer's timezone is read here, at the edge.
+    const dp = calcPredictedAtReset(orgHistory, 'd7', currentUtil, resetsAt, {
+      windowSeconds, tzOffsetMin: -new Date().getTimezoneOffset(), provider: provider || 'claude',
+    });
+    if (!dp || !(dp.rate > 0)) return null;
+    // A forecast that says "you will hit the limit" is shown however little it adds — 98% -> 100
+    // grows by 2pt and would otherwise be hidden by the "< 3pt" rule below (Codex R1, #1681).
+    const hitsCap = dp.willHit === true || (dp.predicted >= 100 && currentUtil < 100);
+    if (!hitsCap && dp.predicted - currentUtil < 3) return null;
     return Math.round(dp.predicted);
   } else {
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
