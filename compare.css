@@ -220,6 +220,17 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    padding and a few lines even when the grid wraps to two rows on a short window — the page then
    scrolls (Codex 1.31.1 #3). */
 .cmp-col { position: relative; display: flex; flex-direction: column; min-height: 240px; overflow: hidden; animation: cmp-fade-in .25s ease-out both; }
+/* Each column is a size container (#1711, 2026-09-26): its head compacts by ITS width, not the window's —
+   at ~810px a column is ~370px wide and the head took 163px of a 240px card (answer body 77px).
+   Under 560px: 「대화 복사」 is its icon, the head's 「이 열에만 묻기」 steps back to the ⌃ tab (shown
+   without hover, so the entry point stays visible) — the head is two rows instead of three. */
+.cmp-col { container-type: inline-size; container-name: cmp-col; }
+@container cmp-col (max-width: 559px) {
+  .cmp-copy-col .cmp-copy-label { display: none; }
+  .cmp-copy-col { width: 30px; padding: 0; justify-content: center; }
+  .cmp-ask-col { display: none; }
+  .cmp-col-ask-tab { opacity: 1; }
+}
 /* 「↓ 새 내용」 (streaming scroll, dowoo-style): outside the scrolling body, pinned to the column's bottom edge,
    shown only while the reader is away from the end of a column that holds content (compare.js syncJumpButton). */
 .cmp-jump { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 2; height: 28px; padding: 0 12px; border-radius: var(--radius-pill); box-shadow: var(--shadow-card); font-size: 12px; }
@@ -470,6 +481,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-assistant .md-table-wrap { overflow-x: auto; margin: 0 0 10px; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
 .cmp-turn-assistant table { border-collapse: collapse; font-size: 13px; line-height: 1.45; min-width: 100%; }
 .cmp-turn-assistant th, .cmp-turn-assistant td { border-bottom: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+/* A floor per cell: in a ~340px column the last column (요약 표의 합의/상충/누락) was squeezed until 「)」 wrapped alone (#1714 ③); the wrapper scrolls sideways instead. */
+.cmp-turn-assistant td { min-width: 5.5em; }
 .cmp-turn-assistant th + th, .cmp-turn-assistant td + td { border-left: 1px solid var(--border); }
 .cmp-turn-assistant tr:last-child td { border-bottom: 0; }
 .cmp-turn-assistant th { background: var(--bg-subtle); font-weight: 600; white-space: nowrap; position: sticky; top: 0; }
@@ -624,6 +637,14 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    the rest with its reading width capped at 860px and centred. Scoped to ≥ 721px — below that the
    ── narrow ── block already stacks the columns, so a focus that is still set when the window
    shrinks changes nothing (the rules simply stop applying), and the ⤢ / 「넓게 보기」 controls hide. */
+/* One row from the first send (#1711): a grid that wraps put 3 columns into a 2×2 at ~810px — each
+   answer body 77px tall, the second row under the docked composer, one cell empty. In a session the
+   columns keep ONE row and the row scrolls sideways (snap to a column edge) when they do not fit;
+   the hero (before the send: short strips to configure) still wraps so every column is in view. */
+@media (min-width: 721px) {
+  #compare-root:not(.is-hero) .cmp-columns { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(340px, 1fr); grid-template-rows: minmax(0, 1fr); grid-auto-rows: minmax(0, 1fr); overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; }
+  #compare-root:not(.is-hero) .cmp-col { scroll-snap-align: start; min-height: 0; }
+}
 @media (min-width: 721px) {
   #compare-root.is-focus .cmp-columns { display: flex; align-items: stretch; }
   #compare-root.is-focus .cmp-col.is-focused { flex: 1 1 auto; min-width: 0; }
@@ -653,6 +674,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 
 /* ── motion ── */
 @keyframes cmp-fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+/* The judge column of a 「요약·비교」 just sent (summary.js): one accent ring pulse, so the eye finds where the result lands (#1714 ①). */
+@keyframes cmp-summary-target { 0%, 60% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: var(--shadow-card); } }
+.cmp-col.is-summary-target { animation: cmp-summary-target 1.8s ease-out 1; }
 @keyframes cmp-blink { to { opacity: 0; } }
 @keyframes cmp-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.7); } }
 @media (prefers-reduced-motion: reduce) {
@@ -665,13 +689,15 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
      and each is capped at 72vh (its body still scrolls inside); the bottom composer stays docked. */
   #compare-root { height: auto; min-height: 100vh; padding: 12px 12px 0; gap: 12px; }
   .cmp-title { font-size: 18px; }
-  .cmp-topbar-side { width: 100%; margin-left: 0; justify-content: space-between; }
+  /* Wraps instead of running off the right edge — at 420px 「중지」·「새 대화」 were cut off (#1713); 「중지」 must stay reachable mid-stream. */
+  .cmp-topbar-side { width: 100%; margin-left: 0; justify-content: flex-start; flex-wrap: wrap; row-gap: 8px; }
   /* One column, and one that can shrink: minmax(340px, 1fr) would overflow a viewport under ~364px (Codex 1R #4). */
   .cmp-columns { flex: none; min-height: 0; grid-auto-rows: auto; grid-template-columns: minmax(0, 1fr); }
   .cmp-col { height: auto; max-height: 72vh; min-height: 280px; }
   .cmp-col-badge { max-width: 100%; }
   .cmp-composer-hint { display: none; }
-  .cmp-composer-target { max-width: 120px; }
+  /* The caption repeats the routing boxes right below it and was cut to 「전..」 at 420px (#1713) — the boxes say it. */
+  .cmp-composer-target { display: none; }
   .cmp-col-name .cmp-ext-arrow { opacity: .7; }
   /* One column already — nothing to widen (focus mode is a ≥ 721px rule, see ── focus ──). */
   .cmp-col-focus, .cmp-summary-widen { display: none; }

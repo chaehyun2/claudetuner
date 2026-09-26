@@ -120,6 +120,10 @@
     @media (min-width: 380px) {
       body { width: 100%; max-width: 560px; }
     }
+    /* #1719 ②: Korean wraps between words, not mid-word (「로/그인」, 「한 번/에」). i18n.js keeps
+       <html lang> on the active language; a long unbroken run still breaks rather than overflow.
+       Same rule as compare.css. */
+    html[lang="ko"] body { word-break: keep-all; overflow-wrap: break-word; }
     /* The cap is the point where growth stops paying: .info-row is `justify-content:
        space-between`, so past ~560px its 10px label and its value drift to opposite edges and
        pairing them costs a horizontal saccade. The column deliberately stops before the panel does.
@@ -144,7 +148,9 @@
     .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
     .header h1 { font-size: 14px; font-weight: 600; color: var(--text-primary); }
     .header-actions { display: flex; align-items: center; gap: 2px; }
-    .hdr-btn { flex: none; padding: 4px 6px; border: none; border-radius: 5px; font-size: 11px; cursor: pointer; font-weight: 500; line-height: 1.2; }
+    /* #1717: every header/status/chart control is at least a 24×24 hit area (WCAG 2.2 SC 2.5.8) —
+       min sizes only, so the glyphs and their spacing look the same. */
+    .hdr-btn { flex: none; min-height: 24px; padding: 4px 6px; border: none; border-radius: 5px; font-size: 11px; cursor: pointer; font-weight: 500; line-height: 1.2; }
     .hdr-btn-primary { background: var(--accent); color: white; }
     .hdr-btn-primary:hover { background: var(--accent-hover); }
     .hdr-btn-primary:disabled { background: #a5b4fc; cursor: not-allowed; font-size: 10px; }
@@ -161,7 +167,7 @@
     button.btn-primary.spinning::after { border-color: rgba(255,255,255,.4); border-top-color: #fff; }
     .hdr-btn-link { text-decoration: none; color: var(--accent); background: var(--accent-light); font-weight: 600; display: inline-flex; align-items: center; gap: 3px; border: 1px solid transparent; }
     .hdr-btn-link:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .hdr-btn-icon { flex: none; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
+    .hdr-btn-icon { flex: none; min-width: 24px; min-height: 24px; background: none; border: none; padding: 3px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 5px; }
     .hdr-btn-icon:hover { color: var(--text-primary); background: var(--bg-hover); }
 
     /* 상태 표시 */
@@ -174,8 +180,9 @@
     .status-dot.amber { background: #f59e0b; }
     .runner-track { position: relative; flex: 1 1 120px; height: 22px; overflow: visible; }
     .runner-char { position: absolute; top: 2px; font-size: 13px; white-space: nowrap; line-height: 18px; }
-    .runner-pause { background: none; border: none; cursor: pointer; font-size: 11px; color: #d1d5db; padding: 0 2px; flex: none; line-height: 1; }
+    .runner-pause { background: none; border: none; cursor: pointer; font-size: 11px; color: #d1d5db; padding: 0 2px; flex: none; line-height: 1; min-width: 24px; min-height: 24px; margin: -1px -4px -1px 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; }
     .runner-pause:hover { color: #9ca3af; }
+    .footer-icon-link { font-size: 11px; color: var(--text-muted); text-decoration: none; display: flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; margin: -5px -7px; }
     .status-text { font-size: 11px; color: var(--text-secondary); flex: 1; min-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* 사용률 게이지 카드 */
@@ -345,7 +352,7 @@
 
     /* 차트 탭 */
     .chart-tabs { display: flex; gap: 0; }
-    .chart-tab { background: none; border: none; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
+    .chart-tab { background: none; border: none; min-height: 24px; padding: 2px 10px; font-size: 11px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
     .chart-tab.active { border-bottom-color: currentColor; }
     .chart-tab:not(.active) { opacity: 0.5; }
     /* Y-axis toggle: a bordered chip (not a faded tab) so it reads as a clickable control */

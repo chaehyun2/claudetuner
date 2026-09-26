@@ -223,6 +223,13 @@ export const PROVIDER_RATE_LIMIT_KEY = 'err_rate_limited_provider';
 // whatever the `reason` (a no_tab that timed out loading or was still settling is cured by the
 // resend just the same; the copy differs, the routing does not).
 export const TAB_LOST_CODES = new Set(['bridge_disconnected', 'no_tab']);
+// A column whose last turn is an error restored from history (history.js loadSession): the stored
+// line is the past, not a live condition — reopening the conversation is the user asking to go on.
+export const CODE_RESTORED = 'restored';
+// Error codes a 「전체」 follow-up still sends to (#1746): the tab losses above, the user's own Stop
+// (the conversation goes on from where it was cut) and a restored error. Leaving the stopped
+// columns out made a Stop-ended round's target set empty — the follow-up send stayed disabled.
+export const FOLLOWUP_RESEND_CODES = new Set([...TAB_LOST_CODES, CODE_ABORTED, CODE_RESTORED]);
 // A column that ended in no_tab (whatever the reason) offers to open the provider's site next to
 // the retry — the SW re-opens a tab on FOLLOWUP anyway, but a user-opened, signed-in tab is the
 // surer fix (batch 2).

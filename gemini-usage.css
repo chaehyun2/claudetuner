@@ -119,7 +119,7 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 .ct-gm-label-left { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; }
 .ct-gm-name { color: var(--ct-gm-text-muted); }
 .ct-gm-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
-.ct-gm-arrow { font-size: 10px; color: var(--ct-gm-text-muted); }
+.ct-gm-arrow { font-size: 11px; color: var(--ct-gm-text-muted); }
 .ct-gm-pred { font-weight: 600; font-variant-numeric: tabular-nums; }
 .ct-gm-reset {
   display: flex;
@@ -134,9 +134,9 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 /* Reset-cell inner lines — prefix-free classes shared by all three sidebars
    (emitted by CORE.buildResetCellInner in usage-shared.js). Keep these rules
    byte-identical across sidebar-usage.css / chatgpt-usage.css / gemini-usage.css. */
-.ct-reset-count { font-size: 10px; opacity: 0.7; white-space: nowrap; }
-.ct-reset-abs { font-size: 9px; opacity: 0.5; white-space: nowrap; }
-.ct-reset-idle { font-size: 10px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-count { font-size: 11px; opacity: 0.7; white-space: nowrap; }
+.ct-reset-abs { font-size: 11px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-idle { font-size: 11px; opacity: 0.5; white-space: nowrap; }
 
 .ct-gm-bar { position: relative; height: 6px; }
 .ct-gm-bar-track {
@@ -196,11 +196,11 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 .ct-gm-actions svg { width: 14px !important; height: 14px !important; flex: none; }
 .ct-gm-bell-badge {
   position: absolute; top: 0; right: 0;
-  min-width: 13px; height: 13px; padding: 0 3px;
+  min-width: 16px; height: 16px; padding: 0 3px;
   box-sizing: border-box;
-  border-radius: 7px;
+  border-radius: 8px;
   background: #ef4444; color: #fff;
-  font-size: 9px; line-height: 13px; font-weight: 700;
+  font-size: 11px; line-height: 16px; font-weight: 700;
   text-align: center;
 }
 
@@ -263,7 +263,7 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 .ct-gm-tip-brand {
   display: block;
   margin-top: 4px;
-  font-size: 9px;
+  font-size: 11px;
   opacity: 0.55;
   text-align: right;
   font-weight: 500;

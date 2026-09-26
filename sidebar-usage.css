@@ -144,7 +144,7 @@
 
 .ct-sb-arrow {
   opacity: 0.6;
-  font-size: 10px;
+  font-size: 11px;
   margin: 0 1px;
 }
 
@@ -168,11 +168,11 @@
    (emitted by CORE.buildResetCellInner in usage-shared.js). Keep these rules
    byte-identical across sidebar-usage.css / chatgpt-sidebar.css / gemini-sidebar.css. */
 /* Line 1: relative countdown. */
-.ct-reset-count { font-size: 10px; opacity: 0.7; white-space: nowrap; }
+.ct-reset-count { font-size: 11px; opacity: 0.7; white-space: nowrap; }
 /* Line 2: absolute reset time — quieter than the countdown. */
-.ct-reset-abs { font-size: 9px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-abs { font-size: 11px; opacity: 0.5; white-space: nowrap; }
 /* Idle window (a value but no reset — Claude 5h at 0%). */
-.ct-reset-idle { font-size: 10px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-idle { font-size: 11px; opacity: 0.5; white-space: nowrap; }
 
 /* Progress bar */
 .ct-sb-bar {
@@ -255,7 +255,7 @@
 .ct-sb-peak {
   color: #ef4444;
   font-weight: 700;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.05em;
 }
 
@@ -290,7 +290,7 @@
 .ct-sb-tip-brand {
   display: block;
   margin-top: 4px;
-  font-size: 9px;
+  font-size: 11px;
   opacity: 0.6;
   text-align: right;
   font-weight: 500;
@@ -311,12 +311,12 @@
   position: absolute;
   top: -2px;
   right: -2px;
-  min-width: 14px;
-  height: 14px;
-  border-radius: 7px;
-  font-size: 9px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  font-size: 11px;
   font-weight: 700;
-  line-height: 14px;
+  line-height: 16px;
   text-align: center;
   padding: 0 3px;
   pointer-events: none;

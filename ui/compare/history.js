@@ -19,7 +19,7 @@
 
 import { imageIdsOf } from './image-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, OUT_IMAGE_PERSIST_WAIT_MS } from './constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
 import { autoGrow } from './helpers.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
@@ -658,7 +658,7 @@ export function installHistory(ctx) {
       ctx.renderQuestionBubbles(); // this column's thread is restored: its bubble (from entry.question) goes on top
       const last = col.turns[col.turns.length - 1];
       col.status = last && last.role === 'assistant' && last.errorText ? 'error' : 'done';
-      col.errorCode = col.status === 'error' ? 'restored' : null;
+      col.errorCode = col.status === 'error' ? CODE_RESTORED : null;
       ctx.setBadge(col, col.status === 'error' ? 'col_error' : 'col_done', col.status === 'error' ? 'is-error' : 'is-done');
       ctx.renderColumnActions(col);
       targets.push(colId);

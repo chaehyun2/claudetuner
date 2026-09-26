@@ -33,11 +33,16 @@ export function installColumnThread(ctx) {
   function scrollColumnToEnd(col) {
     raf(() => { col.body.scrollTop = col.body.scrollHeight; syncJumpButton(col); });
   }
-  /** The 「↓ 새 내용」 pill: shown when the reader is away from the end of a column that holds content. */
+  /**
+   * The 「↓ 새 내용」 pill: shown while an answer is STILL ARRIVING in a column the reader is away from
+   * the end of. Once the stream settles there is nothing new below — a finished answer is read by
+   * scrolling, and a pill left on it sat over tables, headings, code and the column's own input
+   * (#1712, 2026-09-26); an open per-column composer hides it too (it would cover the textarea).
+   */
   function syncJumpButton(col) {
     const m = scrollMetrics(col.body);
     const away = !!m && m.overflow > FOLLOW_AT_BOTTOM_PX && m.fromEnd > FOLLOW_AT_BOTTOM_PX;
-    col.jumpBtn.hidden = !(away && col.turns.length > 0);
+    col.jumpBtn.hidden = !(away && col.turns.length > 0 && col.status === 'streaming' && !col.askOpen);
   }
   /**
    * After a paint of the live answer: follow while it fits, anchor its start once it overflows,
@@ -75,7 +80,8 @@ export function installColumnThread(ctx) {
     // composer with the question.
     let followUps = [];
     try {
-      const rendered = renderAnswer(turn.text, doc);
+      // A cut answer (stopped / errored / stalled) completes a dangling table header it ended on (#1714 ④).
+      const rendered = renderAnswer(turn.text, doc, { cut: !!(turn.errorText || turn.stalled) });
       turn.node.appendChild(rendered.fragment);
       followUps = rendered.followUps;
     } catch {
@@ -340,6 +346,7 @@ export function installColumnThread(ctx) {
     col.ask.classList.toggle('is-open', open);
     col.askTab.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open) autoGrow(col.askInput);
+    syncJumpButton(col); // the pill never sits over the open composer (#1712)
   }
   /** Open / close a column's composer (the tab, Esc); opening focuses its textarea. `open` = force. */
   function toggleColumnAsk(provider, open = null) {

@@ -1504,8 +1504,9 @@ export function createCompareController({
     return true;
   }
 
-  // ChatGPT has no temporary mode: the client hides each conversation it created at cleanup, and
-  // keeps the ids it could not hide (or a terminated worker never got to) in `storage`. The
+  // Since package v0.14.0 an incognito ChatGPT conversation is a TEMPORARY chat and records nothing
+  // to hide. The drain stays for the backlog an earlier (pre-0.14) worker life left: that client hid
+  // each conversation it created at cleanup and kept the ids it could not hide in `storage`. The
   // package sweeps that backlog only when the host asks, once per worker life; it never opens or
   // reloads a tab (v0.2.5: a discarded tab is skipped). Delayed by DRAIN_STARTUP_DELAY_MS (see
   // above) and skipped under DRAIN_DISABLED_KEY. Fire-and-forget — a failed sweep waits for the

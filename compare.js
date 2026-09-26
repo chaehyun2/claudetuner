@@ -59,7 +59,7 @@
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, TAB_LOST_CODES, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, FOLLOWUP_RESEND_CODES, CODE_ABORTED, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_TYPES, ATTACH_ERR_READ } from './ui/compare/constants.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
 import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
@@ -472,6 +472,14 @@ export function mountComparePage(deps) {
   copyAllBtn.type = 'button';
   copyAllBtn.disabled = true;
   topbarSide.appendChild(copyAllBtn);
+  // Reopen (#1749 ①): the columns ✕ closed in this conversation come back — shown only while there
+  // are some (updateControls), with their count; otherwise a closed column was gone until 새 대화.
+  const reopenBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-reopen');
+  reopenBtn.id = 'cmp-reopen-closed';
+  reopenBtn.type = 'button';
+  reopenBtn.hidden = true;
+  reopenBtn.title = t('reopen_closed_title');
+  topbarSide.appendChild(reopenBtn);
   const stopBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-stop', t('stop'));
   stopBtn.id = 'cmp-stop';
   stopBtn.type = 'button';
@@ -486,7 +494,7 @@ export function mountComparePage(deps) {
   topbarSide.appendChild(newChatBtn);
   topbar.appendChild(topbarSide);
   root.appendChild(topbar);
-  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, copyAllBtn, stopBtn, newChatBtn });
+  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, copyAllBtn, reopenBtn, stopBtn, newChatBtn });
 
   // ── copy to clipboard: ui/compare/export.js (installExport, installed above) ──
   attachCopy(copyAllBtn, () => compareMarkdown(), (copied) => { copyAllBtn.textContent = t(copied ? 'copied' : 'copy_all'); }, COPY_KIND_ALL, null);
@@ -678,6 +686,12 @@ export function mountComparePage(deps) {
   attachChips.id = 'cmp-attach-chips';
   attachChips.hidden = true;
   attachBox.appendChild(attachChips);
+  // Why the send is off with files and no words (#1749 ②): a round needs a question — the images
+  // alone are not sent (no default prompt is made up for them).
+  const attachNeedText = el('p', 'cmp-attach-note', t('attach_need_text'));
+  attachNeedText.id = 'cmp-attach-need-text';
+  attachNeedText.hidden = true;
+  attachBox.appendChild(attachNeedText);
   const attachNote = el('p', 'cmp-attach-note');
   attachNote.id = 'cmp-attach-note';
   attachNote.hidden = true;
@@ -909,6 +923,7 @@ export function mountComparePage(deps) {
         ? t('attach_unsupported_none')
         : t('attach_unsupported', left.map((p) => PROVIDER_META[p].label).join(' · '));
     }
+    syncAttachNeedText();
     attachErr.hidden = !state.attachError;
     if (state.attachError) attachErr.textContent = state.attachError.arg == null ? t(state.attachError.key) : t(state.attachError.key, state.attachError.arg);
     renderLink();
@@ -920,6 +935,11 @@ export function mountComparePage(deps) {
       b.disabled = attachLocked() || state.attachItems.length >= ATTACH_MAX_FILES;
       b.classList.toggle('is-on', any);
     }
+  }
+  /** The 「질문을 입력해 주세요」 line: files in the tray, nothing typed in the composer face that is showing. */
+  function syncAttachNeedText() {
+    const draft = state.sessionStarted ? String(followup.input.value || '').trim() : currentQuestion();
+    attachNeedText.hidden = !state.attachItems.length || draft.length > 0;
   }
   /**
    * The link row (#1651): at most one of offer / reading / receipt / refusal, because at most one
@@ -2154,10 +2174,30 @@ export function mountComparePage(deps) {
       setColumnAsk(col, false);
     }
     col.closed = true;
+    // Whether the routing set held it, so a reopen gives back exactly the user's choice (Codex cmp-fix 1R).
+    col.closedTargeted = state.followupTargets.has(colId);
     col.node.hidden = true;
     state.followupTargets.delete(colId);
     updateControls();
     track('column_close', { col: gaCol(col), participated: col.participated ? 1 : 0 });
+  }
+  /** Columns ✕ closed in this conversation that were asked in it — the ones worth bringing back (a never-asked one would be an empty card). */
+  const reopenableColumns = () => allColumns().filter((c) => c.closed && c.participated);
+  /**
+   * 「닫은 열 다시 열기」 (#1749 ①): every reopenable column is shown again, and back in the routing
+   * set only if it was ticked when it was closed (closedTargeted) — a column the user had unticked
+   * stays unticked. Judging by the set as it stands now read the remaining columns as 「전체」 and
+   * re-ticked it (Codex cmp-fix 1R).
+   */
+  function reopenClosedColumns() {
+    if (!state.sessionStarted || state.sending) return;
+    const back = reopenableColumns();
+    if (!back.length) return;
+    for (const col of back) col.closed = false;
+    renderColumns();
+    for (const col of back) if (col.closedTargeted) state.followupTargets.add(col.id);
+    updateControls();
+    track('column_reopen', { n: back.length });
   }
   /** ✕: before the session, never the last column. */
   function removeColumnByUser(colId) {
@@ -2365,10 +2405,23 @@ export function mountComparePage(deps) {
    * checked (「전체」) keeps today's rule: columns whose error a resend cannot cure (sign-in,
    * provider limits, timeouts) are skipped — but a lost TAB is cured by the resend itself (the SW
    * prepares FOLLOWUP with mayOpenTab:true and re-opens it), so those stay in; their error copy
-   * tells the user exactly that. A partial set sends to exactly the checked columns (an errored
+   * tells the user exactly that. A column the user STOPPED, or one restored from history with an
+   * error line, stays in too (FOLLOWUP_RESEND_CODES, #1746). A partial set sends to exactly the checked columns (an errored
    * one is retried). On a lost-but-resumable session (D3) only columns holding a continuation can
    * be sent to; the other checked ones are skipped with 「건너뜀」. Zero checked → no targets.
    */
+  /**
+   * 🔴 A ChatGPT column STOPPED during its first answer has no conversation to continue: the client
+   * records `conversation_id` only when a stream completes (vendor-ai chatgpt-client), so a
+   * follow-up would open a new, context-less conversation — shown as this thread's next turn and
+   * charged (1.37.0 batch review; #1757 made stopped columns resendable). It is skipped with
+   * 「건너뜀」 instead. Claude creates its conversation before streaming and Gemini records its ids
+   * mid-stream, so theirs continue; a ChatGPT column with an earlier completed answer continues too.
+   */
+  function threadless(c) {
+    return c.provider === 'chatgpt' && c.status === 'error' && c.errorCode === CODE_ABORTED
+      && !c.turns.some((turn) => turn.role === 'assistant' && !turn.errorText);
+  }
   function followupPlan() {
     if (!canFollowUp()) return { targets: [], skipped: [] };
     const live = liveColumns();
@@ -2379,12 +2432,12 @@ export function mountComparePage(deps) {
     // 「전체」 = every routable column checked; the AC21 sweep still runs over every live column, so
     // a gated one is skipped with 「건너뜀」 like any other non-retriable error (3R #6).
     if (checked.length === routable.length) {
-      const retriable = (c) => c.status !== 'error' || TAB_LOST_CODES.has(c.errorCode);
+      const retriable = (c) => (c.status !== 'error' || FOLLOWUP_RESEND_CODES.has(c.errorCode)) && !threadless(c);
       targets = live.filter(retriable);
       skipped = live.filter((c) => !retriable(c));
     } else {
-      targets = checked;
-      skipped = [];
+      targets = checked.filter((c) => !threadless(c));
+      skipped = checked.filter(threadless);
     }
     // Lost-but-resumable, or already resumed: a column without a continuation has no client
     // behind it any more (batch-3 Codex #1) — skipped, never sent to as a fresh conversation.
@@ -2487,6 +2540,10 @@ export function mountComparePage(deps) {
     for (const col of state.columns.values()) { col.modelSelect.disabled = state.sending; syncModelHint(col); }
     // A session to leave is what makes 새 대화 meaningful (also the way out of a dead session).
     newChatBtn.disabled = !state.sessionStarted;
+    const reopenable = state.sessionStarted ? reopenableColumns().length : 0;
+    reopenBtn.hidden = reopenable === 0;
+    reopenBtn.disabled = state.sending;
+    if (reopenable) reopenBtn.textContent = t('reopen_closed', reopenable);
     for (const col of state.columns.values()) {
       renderColumnActions(col);
       col.pickerBtn.hidden = state.sessionStarted && !col.modelKnown;
@@ -2969,6 +3026,7 @@ export function mountComparePage(deps) {
     track('stop', { round: state.rounds + 1 });
   });
   newChatBtn.addEventListener('click', resetSession);
+  reopenBtn.addEventListener('click', reopenClosedColumns);
   /** A follow-up from `from`: its text goes out, every instance is emptied (they held the same draft). */
   function sendFollowup(from) {
     noteActivity();
@@ -2987,6 +3045,7 @@ export function mountComparePage(deps) {
       c.input.value = from.input.value;
       autoGrow(c.input);
     }
+    syncAttachNeedText();
   }
   for (const c of composers) {
     // The boxes bubble `change` up to the group. 「전체」 checks / unchecks every column at once;
@@ -2998,6 +3057,8 @@ export function mountComparePage(deps) {
       const target = e && e.target && typeof e.target.value === 'string' ? e.target : null;
       if (target && target.value === FOLLOWUP_ALL) {
         for (const i of inputs) { if (i.value !== FOLLOWUP_ALL) i.checked = !!target.checked; }
+        // 「전체」 means every column — a closed one too, once it is reopened (Codex cmp-fix 2R).
+        for (const col of reopenableColumns()) col.closedTargeted = !!target.checked;
       }
       state.followupTargets = new Set(inputs.filter((i) => i.value !== FOLLOWUP_ALL && i.checked).map((i) => i.value));
       updateControls();

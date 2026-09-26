@@ -9,6 +9,10 @@ let _lastInteractedCard = null;
 // fail-safe CORS fetch (same URL, same shape) in addition to reading the
 // cache claude-folders.js writes, and stays live via storage.onChanged.
 const FOLDERS_FLAGS_URL = 'https://cdn.claudetuner.com/flags.json';
+// Deep-link scroll: first attempt after the initial render, then wait this long at most for a
+// target that is still hidden (a flag-gated card becomes visible once flags.json answers).
+const DEEP_LINK_START_DELAY_MS = 300;
+const DEEP_LINK_WAIT_MS = 3000;
 // Each dark-launch-gated row: CDN flag field → row element id + the storage.local
 // cache key the matching content script (claude-folders.js / chatgpt-folders.js)
 // writes. Feature-agnostic so adding a gated feature is one row — the compare
@@ -22,9 +26,22 @@ const FOLDER_FLAG_ROWS = [
   // a toggle for a button that cannot show would be a dead control (pre-deploy Codex #2).
   { flag: 'compare', alsoFlag: 'compare_cta', rowId: 'compare-enabled-row', cacheKey: 'compareAvailable' },
 ];
+// The in-page usage table's folders column (header + cells) shows only while a folders row is
+// revealed, so a dark-launched feature does not leave an empty column behind.
+const FOLDER_COLUMN_ROW_IDS = ['folders-enabled-row', 'chatgpt-folders-enabled-row'];
+function _syncFoldersColumn() {
+  const table = document.getElementById('page-usage-table');
+  if (!table) return;
+  const anyShown = FOLDER_COLUMN_ROW_IDS.some((id) => {
+    const row = document.getElementById(id);
+    return row && row.style.display !== 'none';
+  });
+  table.classList.toggle('show-folders', anyShown);
+}
 function _setRowVisible(rowId, available) {
   const row = document.getElementById(rowId);
   if (row) row.style.display = available === true ? '' : 'none';
+  if (FOLDER_COLUMN_ROW_IDS.includes(rowId)) _syncFoldersColumn();
 }
 function _hideAllFolderRows() {
   for (const { rowId } of FOLDER_FLAG_ROWS) _setRowVisible(rowId, false);
@@ -286,6 +303,11 @@ function doSave() {
 
 // === Initialization ===
 document.addEventListener('DOMContentLoaded', async () => {
+  // Deep link (e.g. #notifications, #page-usage): FIRST, before any await, so the user-input
+  // listeners exist while the rest of this handler is still loading storage (Codex 2R/3R).
+  if (location.hash) {
+    _scrollToDeepLink(location.hash, DEEP_LINK_START_DELAY_MS, DEEP_LINK_WAIT_MS);
+  }
   initOptionsTheme();
   const manifest = chrome.runtime.getManifest();
   document.getElementById('version').textContent = `v${manifest.version}`;
@@ -521,18 +543,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Scroll to section and highlight if hash is present (e.g. #notifications, #page-usage)
-  if (location.hash) {
-    setTimeout(() => {
-      const el = document.querySelector(location.hash);
-      if (el) {
-        const card = el.closest('.card') || el;
-        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        card.classList.add('card--highlight');
-      }
-    }, 300);
-  }
 });
+
+// Deep link (options.html#<id>): scroll the target's card into view and highlight it; a TOC group
+// anchor (#grp-*) is not inside a card and only scrolls. The target can be missing or inside a
+// hidden card at first — the cross-check card (#compare-enabled-row) stays display:none until
+// flags.json answers — so keep watching the DOM until it can be shown, for at most `waitMs`.
+// Anyone who scrolls, clicks, touches or types in the meantime — including before the first
+// attempt at `startDelayMs` — is not dragged away afterwards (Codex 2R).
+// test/options-deep-link-guard.mjs [5] runs this function against a stub DOM.
+function _scrollToDeepLink(hash, startDelayMs, waitMs) {
+  const USER_EVENTS = ['wheel', 'touchstart', 'mousedown', 'keydown'];
+  let done = false;
+  let observer = null;
+  let timer = null;
+  const stop = () => {
+    if (done) return;
+    done = true;
+    if (observer) observer.disconnect();
+    clearTimeout(timer);
+    for (const type of USER_EVENTS) window.removeEventListener(type, stop, true);
+  };
+  const attempt = () => {
+    let el = null;
+    try { el = document.querySelector(hash); } catch { stop(); return true; } // not a valid selector
+    if (!el) return false;
+    const card = el.closest('.card');
+    const target = card || el;
+    if (target.getClientRects().length === 0) return false; // display:none on it or an ancestor
+    target.scrollIntoView({ behavior: 'smooth', block: card ? 'center' : 'start' });
+    if (card) card.classList.add('card--highlight');
+    stop();
+    return true;
+  };
+  for (const type of USER_EVENTS) window.addEventListener(type, stop, true);
+  timer = setTimeout(() => {
+    if (done || attempt()) return;
+    observer = new MutationObserver(() => { if (!done) attempt(); });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
+    timer = setTimeout(stop, waitMs);
+  }, startDelayMs);
+}
 
 async function sendReviewNudgeAction(action) {
   try {
@@ -551,16 +602,52 @@ async function sendReviewNudgeAction(action) {
   } catch (e) { /* silent */ }
 }
 
+// 「현재 상태」 rows: plan + last collection per provider. Claude reads lastStatus (GET_STATUS, the
+// Claude collector's status); ChatGPT/Gemini read what the popup reads — their collectedOrgs entry
+// (plan) and providerCollectionState (bg/provider-state.js, lastSuccessAt). A provider row shows
+// only when it has data; with none, the Claude row stays with "-".
+const STATUS_ROWS = {
+  claude: { row: 'status-row-claude', plan: 'current-plan', at: 'last-collected' },
+  chatgpt: { row: 'status-row-chatgpt', plan: 'chatgpt-plan', at: 'chatgpt-last-collected' },
+  gemini: { row: 'status-row-gemini', plan: 'gemini-plan', at: 'gemini-last-collected' },
+};
+
+function _otherProviderStatus(provider, orgs, state) {
+  const mine = orgs.filter((o) => o && o.provider === provider);
+  const org = mine.find((o) => o.isPrimary) || mine[0];
+  const at = state?.[provider]?.lastSuccessAt;
+  if (!org && typeof at !== 'number') return null;
+  return { plan: org?.plan || null, at: typeof at === 'number' ? at : null };
+}
+
+function renderProviderStatus(claude, orgs, state) {
+  const data = {
+    claude: claude && (claude.plan || claude.at) ? claude : null,
+    chatgpt: _otherProviderStatus('chatgpt', orgs, state),
+    gemini: _otherProviderStatus('gemini', orgs, state),
+  };
+  const anyData = Object.values(data).some(Boolean);
+  for (const [provider, ids] of Object.entries(STATUS_ROWS)) {
+    const d = data[provider];
+    const row = document.getElementById(ids.row);
+    if (!row) continue;
+    row.style.display = d || (provider === 'claude' && !anyData) ? '' : 'none';
+    document.getElementById(ids.plan).textContent = d?.plan || '-';
+    document.getElementById(ids.at).textContent = d?.at ? formatTimeAgo(d.at) : '-';
+  }
+}
+
 function loadStatus() {
   chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (status) => {
-    if (chrome.runtime.lastError || !status) return;
-    if (status.timestamp) {
-      document.getElementById('last-collected').textContent = formatTimeAgo(status.timestamp);
-    }
-    if (status.snapshot) {
+    const ok = !chrome.runtime.lastError && !!status;
+    if (ok && status.snapshot) {
       document.getElementById('account-email').textContent = status.snapshot.user_email || '-';
-      document.getElementById('current-plan').textContent = status.snapshot.plan || '-';
     }
+    const claude = ok ? { plan: status.snapshot?.plan || null, at: status.timestamp || null } : null;
+    chrome.storage.local.get({ collectedOrgs: [], providerCollectionState: null }, (r) => {
+      const orgs = Array.isArray(r.collectedOrgs) ? r.collectedOrgs : [];
+      renderProviderStatus(claude, orgs, r.providerCollectionState);
+    });
   });
 
   chrome.runtime.sendMessage({ type: 'GET_USAGE_HISTORY' }, (history) => {

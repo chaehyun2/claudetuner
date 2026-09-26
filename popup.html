@@ -148,16 +148,18 @@
     <button class="runner-pause" id="runner-pause" style="display:none"></button>
   </div>
 
-  <!-- Overview ("모아 보기") master screen — one card per collected org/provider.
-       Shown only for multi-org/multi-provider users; populated by ui/overview.js. -->
-  <div id="overview-section" class="overview-section hidden"></div>
-
   <!-- Top tab switcher between Overview ("모아 보기") and detail ("자세히").
-       Always visible for multi-org/multi-provider users (shown via popup.js). -->
+       Always visible for multi-org/multi-provider users (shown via popup.js). It sits ABOVE
+       #overview-section so it stays in the same spot in both views (#1719 ①) — below it, the
+       tab the user just pressed jumped from under the cards to the top. -->
   <div id="view-tabs" class="view-tabs hidden">
     <button id="tab-overview" class="view-tab" data-i18n="ov_title"></button>
     <button id="tab-detail" class="view-tab" data-i18n="ov_detail"></button>
   </div>
+
+  <!-- Overview ("모아 보기") master screen — one card per collected org/provider.
+       Shown only for multi-org/multi-provider users; populated by ui/overview.js. -->
+  <div id="overview-section" class="overview-section hidden"></div>
 
   <!-- 조직 선택 (복수 조직 시) -->
   <div id="org-selector" class="org-selector hidden"></div>
@@ -417,7 +419,7 @@
       <div class="chart-tabs">
         <button class="chart-tab active" data-tab="5h" style="color:#06b6d4">5h</button>
         <button class="chart-tab" data-tab="7d" style="color:#7c3aed">7d</button>
-        <button class="chart-tab chart-autoroll-btn" id="chart-autoroll-btn" title="Auto-rotate" style="font-size:9px;min-width:auto;padding:1px 5px">🔄</button>
+        <button class="chart-tab chart-autoroll-btn" id="chart-autoroll-btn" title="Auto-rotate" style="font-size:9px;min-width:24px;padding:1px 5px">🔄</button>
         <button class="chart-tab chart-yaxis-btn" id="chart-yaxis-btn" title="Y-axis: auto / 100%" style="font-size:9px;min-width:auto;padding:1px 6px">Y: auto</button>
       </div>
       <span class="chart-meta" id="chart-active-info"></span>
@@ -529,7 +531,7 @@
 
   <div style="display:flex;justify-content:center;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
     <div id="user-info" class="user-info" style="margin-top:0"></div>
-    <a href="https://claudetuner.com/dashboard/settings/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none;display:flex;align-items:center" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
+    <a href="https://claudetuner.com/dashboard/settings/" target="_blank" class="footer-icon-link" data-i18n-title="footer_settings" title="Settings">&#9881;</a>
     <a href="https://claudetuner.com/welcome/" target="_blank" style="font-size:11px;color:var(--text-muted);text-decoration:none" data-i18n="footer_help"></a>
     <!-- Independent (email) accounts: the account-switch control lives in the footer next to the
          account email. It no longer carries a "Sign out" role — see #sync-pause-panel below. -->

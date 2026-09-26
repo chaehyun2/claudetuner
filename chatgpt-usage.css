@@ -44,10 +44,12 @@ html.dark, html.dark-oled, html[data-theme="dark"] {
   color: var(--ct-cg-text);
 }
 
-/* Header reuses ChatGPT's __menu-item layout; just size our bits + disable hover cursor. */
-.ct-cg-head { cursor: default; }
+/* Header: our own one-row layout (no borrowed site class — #1715). The padding matches a native
+   menu row's inset so the logo lines up with ChatGPT's own icons above it. */
+.ct-cg-head { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; cursor: default; }
+.ct-cg-icon { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex-shrink: 0; }
 .ct-cg-logo { width: 18px; height: 18px; border-radius: 4px; display: block; }
-.ct-cg-title { font-size: 14px; }
+.ct-cg-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--ct-cg-text); }
 
 /* Content aligns under the menu rows (icon column → right edge). */
 .ct-cg-content {
@@ -120,7 +122,7 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 }
 .ct-cg-label-left { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; }
 .ct-cg-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
-.ct-cg-arrow { font-size: 10px; }
+.ct-cg-arrow { font-size: 11px; }
 .ct-cg-pred { font-weight: 600; font-variant-numeric: tabular-nums; }
 .ct-cg-reset {
   display: flex;
@@ -134,9 +136,9 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 /* Reset-cell inner lines — prefix-free classes shared by all three sidebars
    (emitted by CORE.buildResetCellInner in usage-shared.js). Keep these rules
    byte-identical across sidebar-usage.css / chatgpt-usage.css / gemini-usage.css. */
-.ct-reset-count { font-size: 10px; opacity: 0.7; white-space: nowrap; }
-.ct-reset-abs { font-size: 9px; opacity: 0.5; white-space: nowrap; }
-.ct-reset-idle { font-size: 10px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-count { font-size: 11px; opacity: 0.7; white-space: nowrap; }
+.ct-reset-abs { font-size: 11px; opacity: 0.5; white-space: nowrap; }
+.ct-reset-idle { font-size: 11px; opacity: 0.5; white-space: nowrap; }
 
 .ct-cg-bar { position: relative; height: 6px; }
 .ct-cg-bar-track {
@@ -193,11 +195,11 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 .ct-cg-actions svg { width: 14px !important; height: 14px !important; flex: none; }
 .ct-cg-bell-badge {
   position: absolute; top: 0; right: 0;
-  min-width: 13px; height: 13px; padding: 0 3px;
+  min-width: 16px; height: 16px; padding: 0 3px;
   box-sizing: border-box;
-  border-radius: 7px;
+  border-radius: 8px;
   background: #ef4444; color: #fff;
-  font-size: 9px; line-height: 13px; font-weight: 700;
+  font-size: 11px; line-height: 16px; font-weight: 700;
   text-align: center;
 }
 
@@ -253,7 +255,7 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 .ct-cg-tip-brand {
   display: block;
   margin-top: 4px;
-  font-size: 9px;
+  font-size: 11px;
   opacity: 0.55;
   text-align: right;
   font-weight: 500;

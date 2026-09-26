@@ -7,6 +7,9 @@
 import { MAX_COLUMNS, colIdOf, PROVIDER_META, SUMMARY_PROMPT_MAX, SUMMARY_PER_COLUMN_MAX, SUMMARY_MIN_SHARE, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_FENCE_OPEN, SUMMARY_FENCE_CLOSE, SUMMARY_MODEL_LABEL_MAX, TURN_KIND_SUMMARY } from './constants.js';
 
 /** Installs the summary slice onto `ctx` (ctx contract: ui/compare/history.js header). */
+// On the judge column while its summary is starting (compare.css: a one-shot accent ring).
+const SUMMARY_FLASH_CLASS = 'is-summary-target';
+
 export function installSummary(ctx) {
   const { t, state, track, el, clear } = ctx;
   // ── 「요약·비교」 (chathub batch 1, C5) ──
@@ -248,6 +251,19 @@ export function installSummary(ctx) {
     state.summaryPending = judge;
     track('summarize', { judge, columns_n: cands.length });
     ctx.beginSend(text, [judge], 'FOLLOWUP', [], TURN_KIND_SUMMARY, summary);
+    // The result is written INTO the judge's column — say where (#1714 ①: it arrived there silently
+    // and users looked for it): that column is scrolled into view and flashes once.
+    const judgeCol = state.columns.get(judge);
+    if (judgeCol && judgeCol.node) {
+      // In focus mode a judge that is a 48px rail shows no body at all: the focus moves to it (Codex 1R).
+      if (state.focusedCol && state.focusedCol !== judge) ctx.setColumnFocus(judge);
+      ctx.revealNode(judgeCol.node);
+      if (judgeCol.node.classList) {
+        judgeCol.node.classList.remove(SUMMARY_FLASH_CLASS);
+        void judgeCol.node.offsetWidth; // restart the animation on a second summary
+        judgeCol.node.classList.add(SUMMARY_FLASH_CLASS);
+      }
+    }
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {

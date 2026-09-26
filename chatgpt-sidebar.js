@@ -241,14 +241,16 @@
     panel.id = PANEL_ID;
     panel.className = 'ct-cg-panel';
 
-    // Header mirrors ChatGPT's own menu rows (icon + label via __menu-item) so it
-    // reads as a native sidebar entry.
+    // Header: logo + title on one row, laid out by OUR stylesheet (chatgpt-usage.css .ct-cg-head).
+    // It used to borrow ChatGPT's `__menu-item` class for that layout; the 2026-09-26 UI computes
+    // that class as display:block · padding 0, so the logo sat alone on a centred line and the
+    // title hit the edge (#1715). A site class can change under us at any redesign — none is used.
     const logoUrl = chrome.runtime.getURL('icons/icon16.png');
     const header = document.createElement('div');
-    header.className = 'ct-cg-head __menu-item gap-1.5';
+    header.className = 'ct-cg-head';
     header.innerHTML = `
-      <div class="flex items-center justify-center icon"><img src="${logoUrl}" class="ct-cg-logo" alt=""></div>
-      <div class="flex min-w-0 grow items-center gap-2.5"><div class="truncate ct-cg-title text-token-text-primary">${CORE.escapeHtml(t('title'))}</div></div>
+      <span class="ct-cg-icon"><img src="${logoUrl}" class="ct-cg-logo" alt=""></span>
+      <span class="ct-cg-title">${CORE.escapeHtml(t('title'))}</span>
     `;
     panel.appendChild(header);
 

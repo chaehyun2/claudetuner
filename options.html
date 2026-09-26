@@ -17,15 +17,40 @@
     [data-theme="dark"] .badge-arrow { color: #4a5568; }
     [data-theme="dark"] #threshold-error { background: #2a0a0a; border-color: #991b1b; color: #f87171; }
     [data-theme="dark"] #notify-blocked-banner { background: #2a0a0a; border-color: #991b1b; color: #fca5a5; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; color: var(--text-primary); background: var(--bg-body); }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0 16px; color: var(--text-primary); background: var(--bg-body); }
+    /* #1719 ②: Korean wraps between words, not mid-word — same rule as popup.css / compare.css. */
+    html[lang="ko"] body { word-break: keep-all; overflow-wrap: break-word; }
 
-    .header { margin-bottom: 24px; }
+    /* Layout (#1719 ⑤): table of contents + one column of grouped cards. Narrow windows get the
+       TOC as a sticky row of chips above the content; wide ones a sticky left column. */
+    .layout { max-width: 480px; margin: 0 auto; padding-bottom: 40px; }
+    .toc { position: sticky; top: 0; z-index: 10; display: flex; gap: 6px; padding: 10px 0; margin-bottom: 8px; background: var(--bg-body); overflow-x: auto; scrollbar-width: none; }
+    .toc::-webkit-scrollbar { display: none; }
+    .toc a { flex-shrink: 0; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-card); color: var(--text-secondary); font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap; transition: all .15s; }
+    .toc a:hover { border-color: var(--accent); color: var(--accent); }
+    /* The sticky chip row must not cover a card scrolled to by a deep link or a TOC click. */
+    .group, .card { scroll-margin-top: 64px; }
+    @media (min-width: 760px) {
+      .layout { max-width: 704px; display: grid; grid-template-columns: 160px minmax(0, 480px); gap: 0 24px; align-items: start; padding-top: 40px; }
+      .toc { top: 40px; flex-direction: column; gap: 2px; padding: 0; margin: 0; background: none; overflow: visible; }
+      .toc a { border: none; border-radius: 6px; background: none; padding: 7px 10px; font-size: 13px; }
+      .toc a:hover { background: var(--bg-hover); }
+      .group, .card { scroll-margin-top: 24px; }
+    }
+    @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+
+    .header { margin: 8px 0 8px; }
     .header h1 { font-size: 18px; font-weight: 700; color: var(--text-primary); }
     .header .sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+    /* 그룹 */
+    .group-title { font-size: 12px; font-weight: 700; color: var(--text-secondary); letter-spacing: .2px; margin: 24px 0 8px 2px; }
 
     /* 섹션 카드 */
     .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; transition: box-shadow .4s ease; }
     .card-title { font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+    .card--danger { border-color: #fca5a5; }
+    [data-theme="dark"] .card--danger { border-color: #991b1b; }
     .card--highlight { animation: card-glow 3s ease-out forwards; background: #f5f3ff; }
     @keyframes card-glow { 0%,40% { box-shadow: 0 0 0 3px rgba(79,70,229,.45); } 100% { box-shadow: none; } }
 
@@ -34,6 +59,7 @@
     .form-group:last-child { margin-bottom: 0; }
     .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
     .form-hint { font-size: 11px; color: var(--text-secondary); margin-top: 4px; padding: 6px 8px; background: var(--bg-hover); border-radius: 6px; line-height: 1.4; }
+    .form-hint a { color: var(--accent); }
     .check-label { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; cursor: pointer; }
     .check-label input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
     .check-label span { font-size: 12px; color: var(--text-primary); }
@@ -54,9 +80,27 @@
     .radio-item input[type="radio"] { width: auto; margin: 0; accent-color: var(--accent); flex-shrink: 0; }
     .radio-item .radio-label { font-size: 12px; font-weight: 600; color: var(--text-primary); flex: 1; }
     .radio-item .radio-desc { font-size: 11px; color: var(--text-secondary); }
-    /* 인라인 라디오 (2~3개 가로 배치) */
-    .radio-group.inline { flex-direction: row; gap: 6px; }
-    .radio-group.inline .radio-item { flex: 1; justify-content: center; padding: 8px 6px; }
+    /* Segmented control — one look for every 2~3-way choice (theme buttons and the language /
+       display-mode / badge radios alike). Radio options keep `.radio-item` for initRadioGroup. */
+    .seg { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-hover); }
+    .seg .seg-opt { flex: 1; display: flex; align-items: center; justify-content: center; gap: 0; padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s; }
+    .seg .seg-opt:hover { border-color: transparent; background: transparent; color: var(--accent); }
+    .seg .seg-opt.active { background: var(--bg-card); color: var(--accent); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+    .seg .seg-opt:focus-visible, .seg .seg-opt:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .seg .seg-opt input[type="radio"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    .seg .seg-opt .radio-label { flex: none; font-size: 12px; color: inherit; }
+
+    /* Per-site toggle table (사이트 안 표시) */
+    .usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .usage-table th { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-align: center; padding: 0 4px 6px; }
+    .usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+    .usage-table td { padding: 8px 4px; border-top: 1px solid var(--bg-hover); text-align: center; }
+    .usage-table td:first-child { font-weight: 600; color: var(--text-primary); }
+    .usage-table input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+    .usage-table .cell-na { color: var(--text-muted); }
+    /* The folders column exists only while at least one folders row is revealed (options.js). */
+    .usage-table:not(.show-folders) .col-folders { display: none; }
+    .usage-hints div + div { margin-top: 3px; }
 
     /* 새로고침 버튼 */
     .btn-refresh { padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text-secondary); font-size: 11px; cursor: pointer; transition: all .15s; }
@@ -86,6 +130,13 @@
     .status-row:last-child { border-bottom: none; }
     .status-label { color: var(--text-secondary); }
     .status-value { font-weight: 600; color: var(--text-primary); }
+    /* Per-provider plan + last collection (Claude · ChatGPT · Gemini) */
+    .status-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 2px 0; }
+    .status-table th { font-size: 11px; font-weight: 400; color: var(--text-secondary); text-align: left; padding: 6px 0 4px; }
+    .status-table td { padding: 6px 0; border-top: 1px solid var(--bg-hover); font-weight: 600; color: var(--text-primary); }
+    .status-table td:first-child { color: var(--text-secondary); font-weight: 400; }
+    .status-table th:last-child, .status-table td:last-child { text-align: right; }
+    .dash-link { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--bg-hover); text-decoration: none; color: var(--accent); font-size: 13px; font-weight: 600; }
 
     /* 배지 미리보기 */
     .badge-preview-row { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 14px 0 4px; }
@@ -118,12 +169,23 @@
     .notify-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
     .notify-desc { font-size: 11px; color: var(--text-secondary); margin-top: 3px; padding-left: 22px; }
     .notify-example { font-size: 10px; color: var(--text-muted); margin-top: 2px; padding-left: 22px; font-style: italic; }
-    .theme-opt { padding: 6px 16px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; background: var(--bg-card); color: var(--text-secondary); transition: all .15s; }
-    .theme-opt:hover { border-color: var(--accent); color: var(--accent); }
-    .theme-opt.active { background: var(--accent); color: white; border-color: var(--accent); }
   </style>
 </head>
 <body>
+  <div class="layout">
+  <!-- Table of contents (#1719 ⑤). Anchors use their own grp-* ids: the ids other parts of the
+       extension deep-link to (options.html#page-usage, #collect-settings, #notifications,
+       #notify-*, #compare-enabled-row) stay on their original elements — test/options-deep-link-guard.mjs. -->
+  <nav class="toc" id="toc">
+    <a href="#grp-account" data-i18n="grp_account"></a>
+    <a href="#grp-collect" data-i18n="grp_collect"></a>
+    <a href="#grp-display" data-i18n="grp_display"></a>
+    <a href="#grp-sites" data-i18n="grp_sites"></a>
+    <a href="#grp-notify" data-i18n="grp_notify"></a>
+    <a href="#grp-advanced" data-i18n="grp_advanced"></a>
+  </nav>
+
+  <main>
   <div class="header">
     <h1>Claude Tuner</h1>
     <div class="sub" id="version"></div>
@@ -138,369 +200,381 @@
     </span>
   </div>
 
-  <!-- 현재 상태 (최상단) -->
-  <div class="card">
-    <div class="card-title" data-i18n="current_status"></div>
-    <div class="status-row">
-      <span class="status-label" data-i18n="status_account"></span>
-      <span class="status-value" id="account-email">-</span>
-    </div>
-    <div class="status-row">
-      <span class="status-label" data-i18n="current_plan"></span>
-      <span class="status-value" id="current-plan">-</span>
-    </div>
-    <div class="status-row">
-      <span class="status-label" data-i18n="status_last_collect"></span>
-      <span class="status-value" id="last-collected">-</span>
-    </div>
-    <div class="status-row">
-      <span class="status-label" data-i18n="status_history"></span>
-      <span class="status-value" id="history-count">-</span>
-    </div>
-  </div>
-
-  <!-- 테마 -->
-  <div class="card" style="margin-bottom:16px">
-    <div class="card-header">
-      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
-      <span data-i18n="opt_theme">테마</span>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <button class="theme-opt" id="opt-theme-light"><span data-i18n="theme_light">라이트</span></button>
-      <button class="theme-opt" id="opt-theme-dark"><span data-i18n="theme_dark">다크</span></button>
-      <button class="theme-opt" id="opt-theme-system"><span data-i18n="theme_system">시스템</span></button>
-    </div>
-  </div>
-
-  <!-- 언어 -->
-  <div class="card">
-    <div class="card-title" data-i18n="language"></div>
-    <div class="form-group">
-      <div class="radio-group inline" id="lang-group">
-        <label class="radio-item" data-val="auto"><input type="radio" name="lang" value="auto"><span class="radio-label" data-i18n="lang_auto"></span></label>
-        <label class="radio-item" data-val="ko"><input type="radio" name="lang" value="ko"><span class="radio-label" data-i18n="lang_ko"></span></label>
-        <label class="radio-item" data-val="en"><input type="radio" name="lang" value="en"><span class="radio-label" data-i18n="lang_en"></span></label>
-      </div>
-    </div>
-  </div>
-
-  <!-- 표시 방식 -->
-  <div class="card" id="display-mode-card">
-    <div class="card-title" data-i18n="display_mode"></div>
-    <div class="form-group">
-      <div class="radio-group inline" id="display-mode-group">
-        <label class="radio-item" data-val="sidepanel"><input type="radio" name="display-mode" value="sidepanel"><span class="radio-label" data-i18n="display_mode_sidepanel"></span></label>
-        <label class="radio-item" data-val="popup"><input type="radio" name="display-mode" value="popup"><span class="radio-label" data-i18n="display_mode_popup"></span></label>
-      </div>
-    </div>
-  </div>
-
   <input type="hidden" id="server-url" value="" />
   <input type="hidden" id="api-key" />
 
-  <!-- In-page usage (Claude + ChatGPT, configured separately) -->
-  <div class="card" id="page-usage">
-    <div class="card-title" data-i18n="page_usage_title"></div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="page_usage_claude"></label>
-      <label class="check-label">
-        <input type="checkbox" id="sidebar-usage-enabled" checked>
-        <span data-i18n="sidebar_usage_desc"></span>
-      </label>
-      <label class="check-label">
-        <input type="checkbox" id="input-usage-enabled" checked>
-        <span data-i18n="input_usage_desc"></span>
-      </label>
-      <label class="check-label" id="folders-enabled-row" style="display:none">
-        <input type="checkbox" id="folders-enabled" checked>
-        <span data-i18n="folders_enabled_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="claude_usage_hint"></div>
-    </div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="page_usage_chatgpt"></label>
-      <label class="check-label">
-        <input type="checkbox" id="chatgpt-sidebar-usage-enabled" checked>
-        <span data-i18n="chatgpt_sidebar_usage_desc"></span>
-      </label>
-      <label class="check-label">
-        <input type="checkbox" id="chatgpt-input-usage-enabled" checked>
-        <span data-i18n="chatgpt_input_usage_desc"></span>
-      </label>
-      <label class="check-label" id="chatgpt-folders-enabled-row" style="display:none">
-        <input type="checkbox" id="chatgpt-folders-enabled" checked>
-        <span data-i18n="folders_chatgpt_enabled_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="chatgpt_usage_hint"></div>
-    </div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="page_usage_gemini"></label>
-      <label class="check-label">
-        <input type="checkbox" id="gemini-sidebar-usage-enabled" checked>
-        <span data-i18n="gemini_sidebar_usage_desc"></span>
-      </label>
-      <label class="check-label">
-        <input type="checkbox" id="gemini-input-usage-enabled" checked>
-        <span data-i18n="gemini_input_usage_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="gemini_usage_hint"></div>
-    </div>
-  </div>
-
-  <!-- AI Cross-Check (#1452; formerly Multi-AI compare, renamed 2026-09-17). Dark-launched: hidden until flags.json.compare === true (options.js FLAG_ROWS). -->
-  <div class="card" id="compare-enabled-row" style="display:none">
-    <div class="card-title" data-i18n="compare_title"></div>
-    <div class="form-group">
-      <label class="check-label">
-        <input type="checkbox" id="compare-enabled" checked>
-        <span data-i18n="compare_enabled_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="compare_enabled_hint"></div>
-      <!-- Direct way in (2026-09-22): the SW opens the site shell (src-less OPEN_COMPARE, placement `options`). -->
-      <div class="form-hint"><a id="compare-open-link" href="#" data-i18n="compare_entry_open_page"></a></div>
-    </div>
-    <!-- Per-question rows under claude.ai bubbles (input-usage.js syncMessageButtons). Follows the
-         master toggle above: disabled (value kept) while #compare-enabled is off. -->
-    <div class="form-group" style="padding-left: 22px">
-      <label class="check-label">
-        <input type="checkbox" id="compare-msg-button-enabled" checked>
-        <span data-i18n="compare_msg_btn_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="compare_msg_btn_hint"></div>
-    </div>
-  </div>
-
-  <!-- 팝업 표시 -->
-  <div class="card" id="popup-display">
-    <div class="card-title" data-i18n="popup_display_title"></div>
-    <div class="form-group">
-      <label class="check-label">
-        <input type="checkbox" id="show-extra-usage" checked>
-        <span data-i18n="show_extra_usage_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="show_extra_usage_hint"></div>
-    </div>
-    <div class="form-group">
-      <label class="check-label">
-        <input type="checkbox" id="show-runner" checked>
-        <span data-i18n="show_runner_desc"></span>
-      </label>
-      <div class="form-hint" data-i18n="show_runner_hint"></div>
-    </div>
-  </div>
-
-  <!-- 수집 설정 -->
-  <div class="card" id="collect-settings">
-    <div class="card-title" data-i18n="collect_settings"></div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="collect_provider_label"></label>
-      <label class="check-label">
-        <input type="checkbox" id="collect-claude" checked>
-        <span data-i18n="collect_claude"></span>
-      </label>
-      <label class="check-label">
-        <input type="checkbox" id="collect-chatgpt" checked>
-        <span data-i18n="collect_chatgpt"></span> <span class="badge-beta">Beta</span>
-        <span class="perm-hint" style="display:none;font-size:11px;color:#b45309;margin-left:4px" data-i18n="perm_required_hint"></span>
-      </label>
-      <label class="check-label">
-        <input type="checkbox" id="collect-gemini" checked>
-        <span data-i18n="collect_gemini"></span> <span class="badge-beta">Beta</span>
-        <span class="perm-hint" style="display:none;font-size:11px;color:#b45309;margin-left:4px" data-i18n="perm_required_hint"></span>
-        <span style="font-size:11px;color:#9ca3af;margin-left:4px" data-i18n="collect_gemini_hint"></span>
-      </label>
-    </div>
-    <div class="form-group">
-      <label class="form-label" data-i18n="org_select"></label>
-      <div class="form-hint" data-i18n-html="org_managed_in_dashboard">
-        Active organizations are now managed in the
-        <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">dashboard settings</a>.
+  <!-- ① 계정·상태 -->
+  <section class="group" id="grp-account">
+    <h2 class="group-title" data-i18n="grp_account"></h2>
+    <div class="card">
+      <div class="card-title" data-i18n="current_status"></div>
+      <div class="status-row">
+        <span class="status-label" data-i18n="status_account"></span>
+        <span class="status-value" id="account-email">-</span>
       </div>
+      <!-- One row per provider that has data (options.js renderProviderStatus); with none, the
+           Claude row stays with "-". -->
+      <table class="status-table">
+        <thead><tr><th data-i18n="status_service"></th><th data-i18n="current_plan"></th><th data-i18n="status_last_collect"></th></tr></thead>
+        <tbody>
+          <tr id="status-row-claude"><td>Claude</td><td id="current-plan">-</td><td id="last-collected">-</td></tr>
+          <tr id="status-row-chatgpt" style="display:none"><td>ChatGPT</td><td id="chatgpt-plan">-</td><td id="chatgpt-last-collected">-</td></tr>
+          <tr id="status-row-gemini" style="display:none"><td>Gemini</td><td id="gemini-plan">-</td><td id="gemini-last-collected">-</td></tr>
+        </tbody>
+      </table>
+      <div class="status-row">
+        <span class="status-label" data-i18n="status_history"></span>
+        <span class="status-value" id="history-count">-</span>
+      </div>
+      <a class="dash-link" href="https://claudetuner.com/dashboard" target="_blank">
+        <span data-i18n="btn_dashboard_link"></span>
+        <span style="font-size:11px;color:var(--text-muted)">&rarr;</span>
+      </a>
     </div>
-    <!-- Collection interval is no longer user-configurable: it is managed
-         automatically (activity-adaptive locally + server-tunable cadence). -->
-  </div>
+  </section>
 
-  <!-- 툴바 배지 -->
-  <div class="card">
-    <div class="card-title" data-i18n="usage_display"></div>
-    <div class="form-group">
-      <div class="radio-group inline" id="usage-display-group">
-        <label class="radio-item" data-val="7d"><input type="radio" name="usage-display" value="7d"><span class="radio-label" data-i18n="display_7d"></span></label>
-        <label class="radio-item" data-val="5h"><input type="radio" name="usage-display" value="5h"><span class="radio-label" data-i18n="display_5h"></span></label>
-        <label class="radio-item" data-val="both"><input type="radio" name="usage-display" value="both"><span class="radio-label" data-i18n="display_both"></span></label>
+  <!-- ② 수집 -->
+  <section class="group" id="grp-collect">
+    <h2 class="group-title" data-i18n="grp_collect"></h2>
+    <!-- 수집 설정 -->
+    <div class="card" id="collect-settings">
+      <div class="card-title" data-i18n="collect_settings"></div>
+      <div class="form-group">
+        <label class="form-label" data-i18n="collect_provider_label"></label>
+        <label class="check-label">
+          <input type="checkbox" id="collect-claude" checked>
+          <span data-i18n="collect_claude"></span>
+        </label>
+        <label class="check-label">
+          <input type="checkbox" id="collect-chatgpt" checked>
+          <span data-i18n="collect_chatgpt"></span> <span class="badge-beta">Beta</span>
+          <span class="perm-hint" style="display:none;font-size:11px;color:#b45309;margin-left:4px" data-i18n="perm_required_hint"></span>
+        </label>
+        <label class="check-label">
+          <input type="checkbox" id="collect-gemini" checked>
+          <span data-i18n="collect_gemini"></span> <span class="badge-beta">Beta</span>
+          <span class="perm-hint" style="display:none;font-size:11px;color:#b45309;margin-left:4px" data-i18n="perm_required_hint"></span>
+          <span style="font-size:11px;color:#9ca3af;margin-left:4px" data-i18n="collect_gemini_hint"></span>
+        </label>
+      </div>
+      <div class="form-group">
+        <label class="form-label" data-i18n="org_select"></label>
+        <div class="form-hint" data-i18n-html="org_managed_in_dashboard">
+          Active organizations are now managed in the
+          <a href="https://claudetuner.com/dashboard/settings/" target="_blank" rel="noopener">dashboard settings</a>.
+        </div>
+      </div>
+      <!-- Collection interval is no longer user-configurable: it is managed
+           automatically (activity-adaptive locally + server-tunable cadence). -->
+    </div>
+  </section>
+
+  <!-- ③ 화면 -->
+  <section class="group" id="grp-display">
+    <h2 class="group-title" data-i18n="grp_display"></h2>
+    <!-- 테마 · 언어 · 표시 방식 -->
+    <div class="card">
+      <div class="card-title" data-i18n="appearance_title"></div>
+      <div class="form-group">
+        <label class="form-label" data-i18n="opt_theme"></label>
+        <div class="seg">
+          <button class="seg-opt" id="opt-theme-light"><span data-i18n="theme_light">라이트</span></button>
+          <button class="seg-opt" id="opt-theme-dark"><span data-i18n="theme_dark">다크</span></button>
+          <button class="seg-opt" id="opt-theme-system"><span data-i18n="theme_system">시스템</span></button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" data-i18n="language"></label>
+        <div class="seg" id="lang-group">
+          <label class="radio-item seg-opt" data-val="auto"><input type="radio" name="lang" value="auto"><span class="radio-label" data-i18n="lang_auto"></span></label>
+          <label class="radio-item seg-opt" data-val="ko"><input type="radio" name="lang" value="ko"><span class="radio-label" data-i18n="lang_ko"></span></label>
+          <label class="radio-item seg-opt" data-val="en"><input type="radio" name="lang" value="en"><span class="radio-label" data-i18n="lang_en"></span></label>
+        </div>
+      </div>
+      <!-- Hidden by options.js when the sidePanel API is missing. -->
+      <div class="form-group" id="display-mode-card">
+        <label class="form-label" data-i18n="display_mode"></label>
+        <div class="seg" id="display-mode-group">
+          <label class="radio-item seg-opt" data-val="sidepanel"><input type="radio" name="display-mode" value="sidepanel"><span class="radio-label" data-i18n="display_mode_sidepanel"></span></label>
+          <label class="radio-item seg-opt" data-val="popup"><input type="radio" name="display-mode" value="popup"><span class="radio-label" data-i18n="display_mode_popup"></span></label>
+        </div>
       </div>
     </div>
 
-    <!-- 배지 미리보기 -->
-    <div class="form-group">
-      <label class="form-label" data-i18n="badge_preview"></label>
-      <div id="badge-preview" class="badge-preview-row">
-        <!-- JS에서 동적 생성 -->
+    <!-- 팝업 표시 -->
+    <div class="card" id="popup-display">
+      <div class="card-title" data-i18n="popup_display_title"></div>
+      <div class="form-group">
+        <label class="check-label">
+          <input type="checkbox" id="show-extra-usage" checked>
+          <span data-i18n="show_extra_usage_desc"></span>
+        </label>
+        <div class="form-hint" data-i18n="show_extra_usage_hint"></div>
+      </div>
+      <div class="form-group">
+        <label class="check-label">
+          <input type="checkbox" id="show-runner" checked>
+          <span data-i18n="show_runner_desc"></span>
+        </label>
+        <div class="form-hint" data-i18n="show_runner_hint"></div>
       </div>
     </div>
 
-    <!-- 임계값 프리셋 -->
-    <div class="form-group">
-      <label class="form-label" data-i18n="badge_thresholds"></label>
-      <div style="display:flex;gap:8px;">
-        <div style="flex:1;">
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
-            <span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;"></span>
-            <span style="font-size:11px;font-weight:600;color:var(--text-primary);" data-i18n="threshold_warn"></span>
+    <!-- 툴바 배지 -->
+    <div class="card">
+      <div class="card-title" data-i18n="usage_display"></div>
+      <div class="form-group">
+        <div class="seg" id="usage-display-group">
+          <label class="radio-item seg-opt" data-val="7d"><input type="radio" name="usage-display" value="7d"><span class="radio-label" data-i18n="display_7d"></span></label>
+          <label class="radio-item seg-opt" data-val="5h"><input type="radio" name="usage-display" value="5h"><span class="radio-label" data-i18n="display_5h"></span></label>
+          <label class="radio-item seg-opt" data-val="both"><input type="radio" name="usage-display" value="both"><span class="radio-label" data-i18n="display_both"></span></label>
+        </div>
+      </div>
+
+      <!-- 배지 미리보기 -->
+      <div class="form-group">
+        <label class="form-label" data-i18n="badge_preview"></label>
+        <div id="badge-preview" class="badge-preview-row">
+          <!-- JS에서 동적 생성 -->
+        </div>
+      </div>
+
+      <!-- 임계값 프리셋 -->
+      <div class="form-group">
+        <label class="form-label" data-i18n="badge_thresholds"></label>
+        <div style="display:flex;gap:8px;">
+          <div style="flex:1;">
+            <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
+              <span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;"></span>
+              <span style="font-size:11px;font-weight:600;color:var(--text-primary);" data-i18n="threshold_warn"></span>
+            </div>
+            <select id="threshold-warn">
+              <option value="50">50%</option>
+              <option value="55">55%</option>
+              <option value="60">60%</option>
+              <option value="65">65%</option>
+              <option value="70">70%</option>
+              <option value="75">75%</option>
+              <option value="80">80%</option>
+              <option value="85">85%</option>
+              <option value="90">90%</option>
+            </select>
           </div>
-          <select id="threshold-warn">
-            <option value="50">50%</option>
-            <option value="55">55%</option>
-            <option value="60">60%</option>
-            <option value="65">65%</option>
-            <option value="70">70%</option>
-            <option value="75">75%</option>
-            <option value="80">80%</option>
-            <option value="85">85%</option>
-            <option value="90">90%</option>
-          </select>
-        </div>
-        <div style="flex:1;">
-          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
-            <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;"></span>
-            <span style="font-size:11px;font-weight:600;color:var(--text-primary);" data-i18n="threshold_danger"></span>
+          <div style="flex:1;">
+            <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;">
+              <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;"></span>
+              <span style="font-size:11px;font-weight:600;color:var(--text-primary);" data-i18n="threshold_danger"></span>
+            </div>
+            <select id="threshold-danger">
+              <option value="60">60%</option>
+              <option value="65">65%</option>
+              <option value="70">70%</option>
+              <option value="75">75%</option>
+              <option value="80">80%</option>
+              <option value="85">85%</option>
+              <option value="90">90%</option>
+              <option value="95">95%</option>
+              <option value="100">100%</option>
+            </select>
           </div>
-          <select id="threshold-danger">
-            <option value="60">60%</option>
-            <option value="65">65%</option>
-            <option value="70">70%</option>
-            <option value="75">75%</option>
-            <option value="80">80%</option>
-            <option value="85">85%</option>
-            <option value="90">90%</option>
-            <option value="95">95%</option>
-            <option value="100">100%</option>
-          </select>
+        </div>
+        <div id="threshold-error" style="display:none;font-size:11px;color:#dc2626;margin-top:6px;padding:6px 8px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 사이트 안 표시 -->
+  <section class="group" id="grp-sites">
+    <h2 class="group-title" data-i18n="grp_sites"></h2>
+    <!-- In-page usage: one row per site, one column per surface. Each checkbox keeps its id and
+         storage key; the folders cells keep their *-folders-enabled-row ids (dark-launch rows,
+         options.js FOLDER_FLAG_ROWS) and the column shows only while one of them is revealed. -->
+    <div class="card" id="page-usage">
+      <div class="card-title" data-i18n="page_usage_title"></div>
+      <div class="form-group">
+        <table class="usage-table" id="page-usage-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th data-i18n="page_usage_col_sidebar"></th>
+              <th data-i18n="page_usage_col_input"></th>
+              <th class="col-folders" data-i18n="page_usage_col_folders"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-i18n="page_usage_claude"></td>
+              <td><input type="checkbox" id="sidebar-usage-enabled" data-i18n-title="sidebar_usage_desc" checked></td>
+              <td><input type="checkbox" id="input-usage-enabled" data-i18n-title="input_usage_desc" checked></td>
+              <td class="col-folders"><span id="folders-enabled-row" style="display:none"><input type="checkbox" id="folders-enabled" data-i18n-title="folders_enabled_desc" checked></span></td>
+            </tr>
+            <tr>
+              <td data-i18n="page_usage_chatgpt"></td>
+              <td><input type="checkbox" id="chatgpt-sidebar-usage-enabled" data-i18n-title="chatgpt_sidebar_usage_desc" checked></td>
+              <td><input type="checkbox" id="chatgpt-input-usage-enabled" data-i18n-title="chatgpt_input_usage_desc" checked></td>
+              <td class="col-folders"><span id="chatgpt-folders-enabled-row" style="display:none"><input type="checkbox" id="chatgpt-folders-enabled" data-i18n-title="folders_chatgpt_enabled_desc" checked></span></td>
+            </tr>
+            <tr>
+              <td data-i18n="page_usage_gemini"></td>
+              <td><input type="checkbox" id="gemini-sidebar-usage-enabled" data-i18n-title="gemini_sidebar_usage_desc" checked></td>
+              <td><input type="checkbox" id="gemini-input-usage-enabled" data-i18n-title="gemini_input_usage_desc" checked></td>
+              <td class="col-folders cell-na">&ndash;</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="form-hint usage-hints">
+          <div><b data-i18n="page_usage_claude"></b> · <span data-i18n="claude_usage_hint"></span></div>
+          <div><b data-i18n="page_usage_chatgpt"></b> · <span data-i18n="chatgpt_usage_hint"></span></div>
+          <div><b data-i18n="page_usage_gemini"></b> · <span data-i18n="gemini_usage_hint"></span></div>
         </div>
       </div>
-      <div id="threshold-error" style="display:none;font-size:11px;color:#dc2626;margin-top:6px;padding:6px 8px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;"></div>
     </div>
-  </div>
 
-  <!-- 플랜 최적화 -->
-  <div class="card">
-    <div class="card-title" data-i18n="plan_optimization"></div>
-    <div class="form-group">
-      <div class="radio-group" id="optimization-group">
-        <label class="radio-item" data-val="notify_only">
-          <input type="radio" name="optimization" value="notify_only">
-          <div style="flex:1"><span class="radio-label" data-i18n="opt_notify_only"></span><div class="radio-desc" data-i18n="opt_desc_notify"></div></div>
+    <!-- AI Cross-Check (#1452; formerly Multi-AI compare, renamed 2026-09-17). Dark-launched: hidden until flags.json.compare === true (options.js FLAG_ROWS). -->
+    <div class="card" id="compare-enabled-row" style="display:none">
+      <div class="card-title" data-i18n="compare_title"></div>
+      <div class="form-group">
+        <label class="check-label">
+          <input type="checkbox" id="compare-enabled" checked>
+          <span data-i18n="compare_enabled_desc"></span>
         </label>
-        <label class="radio-item" data-val="approval">
-          <input type="radio" name="optimization" value="approval">
-          <div style="flex:1"><span class="radio-label" data-i18n="opt_approval"></span><div class="radio-desc" data-i18n="opt_desc_approval"></div></div>
+        <div class="form-hint" data-i18n="compare_enabled_hint"></div>
+        <!-- Direct way in (2026-09-22): the SW opens the site shell (src-less OPEN_COMPARE, placement `options`). -->
+        <div class="form-hint"><a id="compare-open-link" href="#" data-i18n="compare_entry_open_page"></a></div>
+      </div>
+      <!-- Per-question rows under claude.ai bubbles (input-usage.js syncMessageButtons). Follows the
+           master toggle above: disabled (value kept) while #compare-enabled is off. -->
+      <div class="form-group" style="padding-left: 22px">
+        <label class="check-label">
+          <input type="checkbox" id="compare-msg-button-enabled" checked>
+          <span data-i18n="compare_msg_btn_desc"></span>
         </label>
-        <label class="radio-item" data-val="auto">
-          <input type="radio" name="optimization" value="auto">
-          <div style="flex:1"><span class="radio-label" data-i18n="opt_auto"></span><div class="radio-desc" data-i18n="opt_desc_auto"></div></div>
+        <div class="form-hint" data-i18n="compare_msg_btn_hint"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑤ 알림 -->
+  <section class="group" id="grp-notify">
+    <h2 class="group-title" data-i18n="grp_notify"></h2>
+    <!-- 알림 설정 -->
+    <div class="card" id="notifications">
+      <div class="card-title" data-i18n="notify_settings"></div>
+      <div id="notify-blocked-banner" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:12px;color:#991b1b;">
+        <span data-i18n="notify_blocked"></span>
+      </div>
+      <div class="notify-list" id="notify-list">
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-reset-soon" checked>
+            <span class="notify-name" data-i18n="notify_reset_soon"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_reset_soon_desc"></div>
+          <div class="notify-example" data-i18n="notify_reset_soon_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-reset-done" checked>
+            <span class="notify-name" data-i18n="notify_reset_done"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_reset_done_desc"></div>
+          <div class="notify-example" data-i18n="notify_reset_done_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-usage-warn">
+            <span class="notify-name" data-i18n="notify_usage_warn"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_usage_warn_desc"></div>
+          <div class="notify-example" data-i18n="notify_usage_warn_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-usage-danger" checked>
+            <span class="notify-name" data-i18n="notify_usage_danger"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_usage_danger_desc"></div>
+          <div class="notify-example" data-i18n="notify_usage_danger_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-weekly-report" checked>
+            <span class="notify-name" data-i18n="notify_weekly_report"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_weekly_report_desc"></div>
+          <div class="notify-example" data-i18n="notify_weekly_report_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-plan-change" checked>
+            <span class="notify-name" data-i18n="notify_plan_change"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_plan_change_desc"></div>
+          <div class="notify-example" data-i18n="notify_plan_change_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-collect-fail" checked>
+            <span class="notify-name" data-i18n="notify_collect_fail"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_collect_fail_desc"></div>
+          <div class="notify-example" data-i18n="notify_collect_fail_ex"></div>
+        </label>
+        <!-- 🔴 This toggle is the ONLY opt-out its audience can reach. The dashboard's notification
+             switches all sit behind a login, and this notification exists precisely because the user
+             is not logged in — "turn it off by doing the thing it is nagging you to do" is the worst
+             shape this feature could take. Do not move it to the dashboard. -->
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-authblock-followup" checked>
+            <span class="notify-name" data-i18n="notify_authblock_followup"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_authblock_followup_desc"></div>
+          <div class="notify-example" data-i18n="notify_authblock_followup_ex"></div>
         </label>
       </div>
-      <div class="form-hint" style="margin-top:4px;color:var(--accent)" data-i18n="opt_sync_note"></div>
     </div>
-  </div>
+  </section>
 
-  <!-- 알림 설정 -->
-  <div class="card" id="notifications">
-    <div class="card-title" data-i18n="notify_settings"></div>
-    <div id="notify-blocked-banner" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:12px;color:#991b1b;">
-      <span data-i18n="notify_blocked"></span>
+  <!-- ⑥ 고급 -->
+  <section class="group" id="grp-advanced">
+    <h2 class="group-title" data-i18n="grp_advanced"></h2>
+    <!-- 플랜 최적화 -->
+    <div class="card">
+      <div class="card-title" data-i18n="plan_optimization"></div>
+      <div class="form-group">
+        <div class="radio-group" id="optimization-group">
+          <label class="radio-item" data-val="notify_only">
+            <input type="radio" name="optimization" value="notify_only">
+            <div style="flex:1"><span class="radio-label" data-i18n="opt_notify_only"></span><div class="radio-desc" data-i18n="opt_desc_notify"></div></div>
+          </label>
+          <label class="radio-item" data-val="approval">
+            <input type="radio" name="optimization" value="approval">
+            <div style="flex:1"><span class="radio-label" data-i18n="opt_approval"></span><div class="radio-desc" data-i18n="opt_desc_approval"></div></div>
+          </label>
+          <label class="radio-item" data-val="auto">
+            <input type="radio" name="optimization" value="auto">
+            <div style="flex:1"><span class="radio-label" data-i18n="opt_auto"></span><div class="radio-desc" data-i18n="opt_desc_auto"></div></div>
+          </label>
+        </div>
+        <div class="form-hint" style="margin-top:4px;color:var(--accent)" data-i18n="opt_sync_note"></div>
+      </div>
     </div>
-    <div class="notify-list" id="notify-list">
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-reset-soon" checked>
-          <span class="notify-name" data-i18n="notify_reset_soon"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_reset_soon_desc"></div>
-        <div class="notify-example" data-i18n="notify_reset_soon_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-reset-done" checked>
-          <span class="notify-name" data-i18n="notify_reset_done"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_reset_done_desc"></div>
-        <div class="notify-example" data-i18n="notify_reset_done_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-usage-warn">
-          <span class="notify-name" data-i18n="notify_usage_warn"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_usage_warn_desc"></div>
-        <div class="notify-example" data-i18n="notify_usage_warn_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-usage-danger" checked>
-          <span class="notify-name" data-i18n="notify_usage_danger"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_usage_danger_desc"></div>
-        <div class="notify-example" data-i18n="notify_usage_danger_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-weekly-report" checked>
-          <span class="notify-name" data-i18n="notify_weekly_report"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_weekly_report_desc"></div>
-        <div class="notify-example" data-i18n="notify_weekly_report_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-plan-change" checked>
-          <span class="notify-name" data-i18n="notify_plan_change"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_plan_change_desc"></div>
-        <div class="notify-example" data-i18n="notify_plan_change_ex"></div>
-      </label>
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-collect-fail" checked>
-          <span class="notify-name" data-i18n="notify_collect_fail"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_collect_fail_desc"></div>
-        <div class="notify-example" data-i18n="notify_collect_fail_ex"></div>
-      </label>
-      <!-- 🔴 This toggle is the ONLY opt-out its audience can reach. The dashboard's notification
-           switches all sit behind a login, and this notification exists precisely because the user
-           is not logged in — "turn it off by doing the thing it is nagging you to do" is the worst
-           shape this feature could take. Do not move it to the dashboard. -->
-      <label class="notify-item">
-        <div class="notify-toggle">
-          <input type="checkbox" id="notify-authblock-followup" checked>
-          <span class="notify-name" data-i18n="notify_authblock_followup"></span>
-        </div>
-        <div class="notify-desc" data-i18n="notify_authblock_followup_desc"></div>
-        <div class="notify-example" data-i18n="notify_authblock_followup_ex"></div>
-      </label>
-    </div>
-  </div>
 
-  <!-- Dashboard 바로가기 -->
-  <div class="card">
-    <a href="https://claudetuner.com/dashboard" target="_blank" style="display:flex;align-items:center;gap:8px;text-decoration:none;color:var(--accent);font-size:13px;font-weight:600;">
-      <span data-i18n="btn_dashboard_link"></span>
-      <span style="font-size:11px;color:var(--text-muted)">&rarr;</span>
-    </a>
+    <!-- 데이터 초기화 — danger zone, always last -->
+    <div class="card card--danger">
+      <div class="card-title" data-i18n="data_reset_title"></div>
+      <div class="reset-area">
+        <span class="reset-desc" data-i18n="data_reset_desc"></span>
+        <button class="btn-reset-sm" id="reset-btn" data-i18n="btn_reset"></button>
+      </div>
+    </div>
+  </section>
+  </main>
   </div>
 
   <!-- 자동 저장 토스트 (하단 고정) -->
   <div id="toast" class="toast"></div>
-
-  <!-- 데이터 초기화 (하단 분리) -->
-  <div class="card" style="margin-top: 16px;">
-    <div class="reset-area">
-      <span class="reset-desc" data-i18n="data_reset_desc"></span>
-      <button class="btn-reset-sm" id="reset-btn" data-i18n="btn_reset"></button>
-    </div>
-  </div>
 
   <script src="config.js"></script>
   <script src="analytics.js"></script>

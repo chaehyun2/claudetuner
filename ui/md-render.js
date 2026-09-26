@@ -37,7 +37,11 @@
 //      flip to a table. When the last non-blank line is a separator PREFIX (`|-`, `|---|:-`) under
 //      a complete row, it is completed to a full separator of the header's width — the header is
 //      a <th> row from its first frame and never flips (md-lite's tail rule, Codex 1R #4).
+//   2b. A LONE header row as the last block of a CUT answer (renderAnswer `{cut: true}`) is
+//      completed into a one-row table — after a 중지 it would otherwise stay as raw `| 연도 |` (#1714).
 //   3. Claude-family `<cite index="38-2">…</cite>` tags go, their inner text stays (preClean).
+//   3b. Gemini's inline citation tokens `[cite: 1]` / `[cite: 1, 3]` / `[cite_start]` go (#1747) —
+//      an inline rule (geminiCiteRule), so a code span or a fence holding one keeps it verbatim.
 // A typed `<br>` / `<BR/>` / `<br />` is rendered as a real <br> element: GFM cells cannot hold a
 // newline, so Gemini/ChatGPT write `<br>` inside them (2026-09-18). The RAW tag is swapped for a
 // private-use mark before tokenizing (markBreaks) and the emitter maps the mark to
@@ -94,6 +98,10 @@ const CITE_TAIL_RE = /^<\/?cite\b[^<>\n]{0,200}$/i;
 const FOLLOWUP_TAG_RE = /<FollowUp\b((?:"[^"\n]{0,1000}"|[^<>"\n]){0,2000})\/?>/iy;
 const FOLLOWUP_TAIL_RE = /^<FollowUp\b(?:"[^"\n]{0,1000}"|[^<>"\n]){0,2000}(?:"[^"\n]{0,1000})?$/i;
 const FOLLOWUP_NAME = '<FollowUp';
+// Gemini's inline citation markers (#1747): `[cite: 3]`, `[cite: 1, 3]` after a sentence and the
+// `[cite_start]` opener before it — source pointers into its own grounding (the attached images,
+// search), not answer text. Sticky, anchored at `[`, the number list bounded.
+const GEMINI_CITE_RE = /\[(?:cite:[ \t]*\d{1,6}(?:[ \t]*,[ \t]*\d{1,6}){0,50}|cite_start)\]/y;
 const FOLLOWUP_ATTR_RE = /\b(label|query)\s*=\s*"([^"]{0,1000})"/gi;
 export const FOLLOWUP_MAX = 8;
 // A break tag in any spelling ON ONE LINE (`<br\n>` is not one: the newline must stay a line
@@ -188,6 +196,21 @@ function followUpRule(state, silent) {
   return false;
 }
 
+/**
+ * Gemini's `[cite: N]` / `[cite_start]` (#1747) are dropped as an INLINE rule, not in preClean: the
+ * backticks rule and the block parser own a code span / fence first, so a snippet that really
+ * contains `[cite: 1]` stays as written (preClean is text-level and would cut it there too).
+ */
+function geminiCiteRule(state) {
+  const pos = state.pos;
+  if (state.src.charCodeAt(pos) !== 0x5B /* [ */) return false;
+  GEMINI_CITE_RE.lastIndex = pos;
+  const m = GEMINI_CITE_RE.exec(state.src);
+  if (!m || pos + m[0].length > state.posMax) return false;
+  state.pos = pos + m[0].length;
+  return true;
+}
+
 /** True when the `|` at `row[at]` is escaped: preceded by an ODD run of backslashes (`\|` yes, `\\|` no). */
 function pipeEscapedAt(row, at) {
   let n = 0;
@@ -239,7 +262,7 @@ export function markBreaks(src) {
  * itself (indented fences in list items vs. indented backticks in prose), and markdown-it already
  * answered it. Returns the edited text, or null when no edit applies (then the first parse stands).
  */
-export function normalizeTables(src, tokens) {
+export function normalizeTables(src, tokens, opts = {}) {
   if (src.indexOf('|') < 0) return null;
   const lines = src.split('\n');
   const edits = []; // { from, to, text }: lines[from..to] (inclusive) → one line `text`
@@ -283,6 +306,14 @@ export function normalizeTables(src, tokens) {
       if (headIsFirstRow && TABLE_SEP_PREFIX_RE.test(tail) && (!looksLikeRow(tail) || rowWidth(tail) < rowWidth(head))) {
         edits.push({ from: last, to: last, text: '|' + '---|'.repeat(rowWidth(head)) });
       }
+    } else if (opts.cut && looksLikeRow(lines[last].trim()) && !isSeparatorRow(lines[last].trim())) {
+      // Quirk 2b (#1714 ④), CUT answers only (`opts.cut`: stopped / errored / stalled): the last
+      // block is ONE complete-looking row on its own — a table header whose separator never came —
+      // and it stayed on screen as raw 「| 연도 |」. It is COMPLETED into a one-row table (its cells
+      // kept: the row may hold real values, 「| 주문번호 | 17 |」 — Codex 1R), never dropped. A
+      // streaming or finished answer keeps it as text: mid-stream it becomes a table a frame later.
+      const row = lines[last];
+      edits.push({ from: last, to: last, text: row + '\n' + /^[ \t]*/.exec(row)[0] + '|' + '---|'.repeat(rowWidth(row.trim())) });
     }
   }
   if (!edits.length) return null;
@@ -414,6 +445,7 @@ function texRule(state, silent) {
 }
 md.inline.ruler.before('escape', 'tex', texRule);
 md.inline.ruler.before('escape', 'followup', followUpRule);
+md.inline.ruler.before('escape', 'gemini_cite', geminiCiteRule);
 
 // ── CJK-friendly emphasis (#1577) ────────────────────────────────────────────────────────────
 // CommonMark's closing `**` must be RIGHT-FLANKING: not after whitespace, and — when it follows
@@ -602,7 +634,7 @@ function emitBlocks(tokens, root, d) {
  * follow-up suggestions the inline rule collected (`[{label, query}]`, source order, ≤ FOLLOWUP_MAX).
  * Never throws on odd input.
  */
-export function renderAnswer(text, doc) {
+export function renderAnswer(text, doc, opts = {}) {
   const d = doc || document;
   const frag = d.createDocumentFragment();
   let src = cutFollowUpTail(preClean(String(text == null ? '' : text).replace(/\r\n?/g, '\n')));
@@ -615,7 +647,7 @@ export function renderAnswer(text, doc) {
     let tokens = md.parse(src, env);
     // The quirks are planned from this parse's block map and, when one applies, the edited text is
     // parsed once more (only an answer with a multi-line cell or a streaming table start pays).
-    const edited = normalizeTables(src, tokens);
+    const edited = normalizeTables(src, tokens, opts);
     if (edited !== null) { env = { followUps: [] }; tokens = md.parse(edited, env); }
     const body = d.createDocumentFragment();
     emitBlocks(tokens, body, d);

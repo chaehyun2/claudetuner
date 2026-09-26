@@ -230,6 +230,7 @@
   border-radius: 1px; transition: left 0.4s ease;
 }
 
+.ct-grp { display: flex; align-items: center; flex-shrink: 0; }
 .ct-extra-bar {
   width: 40px; min-width: 20px; height: 4px; border-radius: 2px;
   position: relative; margin-left: 6px; flex-shrink: 1; background: var(--track);
@@ -412,6 +413,14 @@
   const themeObserver = new MutationObserver(() => { if (!teardownIfDead()) syncTheme(); });
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-mode'] });
   _observers.push(themeObserver);
+  // #1718: with no host theme attribute, isDarkTheme() falls back to the OS scheme — re-sync the
+  // strip when that flips while the tab is open (the attribute observer above never fires for it).
+  if (window.matchMedia) {
+    const schemeMq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onScheme = () => { if (!teardownIfDead()) syncTheme(); };
+    schemeMq.addEventListener('change', onScheme);
+    _observers.push({ disconnect: () => schemeMq.removeEventListener('change', onScheme) });
+  }
 
   // Gear glyph (Feather "settings") for the strip's `.ct-settings` button (HTML string in
   // renderStripInner). Canonical copy = ui/cmp-msg-rows.js GEAR_ICON_PATH (the per-question row's
@@ -665,8 +674,10 @@
       const uc = _data.eu || 0, lc = _data.el || 0;
       const ep = lc > 0 ? Math.min((uc / lc) * 100, 100) : 0;
       const ec = ep >= 80 ? '#ef4444' : '#f59e0b';
-      html += `<span class="ct-dot">\u00b7</span><div class="ct-seg"><span class="ct-seg-label">${escapeHtml(t('extra_label'))}</span><span class="ct-seg-value" style="${ep >= 80 ? 'color:#ef4444' : 'opacity:0.7'}">$${(uc / 100).toFixed(2)}/$${(lc / 100).toFixed(0)}</span></div>`;
-      html += `<div class="ct-extra-bar"><div class="ct-extra-bar-fill" style="width:${ep}%;background:${ec}"></div></div>`;
+      // #1716: label + bar are one flex item, so a narrow strip wraps them together instead of
+      // dropping the bar alone onto the next line, away from its label.
+      html += `<span class="ct-dot">\u00b7</span><div class="ct-grp"><div class="ct-seg"><span class="ct-seg-label">${escapeHtml(t('extra_label'))}</span><span class="ct-seg-value" style="${ep >= 80 ? 'color:#ef4444' : 'opacity:0.7'}">$${(uc / 100).toFixed(2)}/$${(lc / 100).toFixed(0)}</span></div>`;
+      html += `<div class="ct-extra-bar"><div class="ct-extra-bar-fill" style="width:${ep}%;background:${ec}"></div></div></div>`;
     }
 
     html += `<div class="ct-right">`;

@@ -10,8 +10,8 @@
   // warm cache — and flip the frame to a theme the page around it is not wearing. Unset (popup,
   // options, a top-level compare tab) → unchanged behaviour.
   if (window.__ctEmbedHost) return;
-  // Apply stored preference as soon as possible
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
+  function applyStoredTheme() {
     chrome.storage.local.get({'ct-theme': 'system'}, function(r) {
       var pref = r['ct-theme'] || 'system';
       var resolved = pref === 'system'
@@ -20,4 +20,11 @@
       document.documentElement.setAttribute('data-theme', resolved);
     });
   }
+  // Apply stored preference as soon as possible
+  applyStoredTheme();
+  // #1718: 'system' follows a live OS light<->dark switch, not only the scheme at load. The stored
+  // preference is re-read on every change, so an explicit light/dark choice is never overridden.
+  // This file is the first script on the popup/side panel, options and compare pages, so this one
+  // listener covers every extension page.
+  mq.addEventListener('change', applyStoredTheme);
 })();
