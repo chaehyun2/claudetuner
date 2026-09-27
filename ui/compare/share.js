@@ -11,27 +11,59 @@
 // The server is the truth for everything about a share (who it shows as, whether it still exists):
 // the dialog settles on what the SW relays back, and the local map (SHARE_MAP_KEY) only remembers
 // which conversation has which link.
+//
+// ONE-CLICK (SHARE_ONE_CLICK, the default — user request 2026-09-27): 「공유」 makes the link (or
+// updates this conversation's link with what is on screen now) and copies it, in one click; a small
+// non-modal popover by the button then offers the optional adjustments — a password (set / change /
+// remove on the EXISTING link), who it shows as, delete. The snapshot is built once, at the click,
+// and is exactly what goes up (the rule above, without a preview step). The dialog below stays for
+// 「내 공유 링크」 and as the classic flow behind the constant.
 
-import { buildShareSnapshot } from './share-snapshot.js';
+import { buildShareSnapshot, shareModelLabel } from './share-snapshot.js';
 import { renderAnswer } from '../md-render.js';
 import {
-  PROVIDER_META, COPY_FEEDBACK_MS, SHARE_MSG_TYPE, SHARE_OP_CREATE, SHARE_OP_UPDATE, SHARE_OP_DELETE, SHARE_OP_LIST,
+  PROVIDER_META, COPY_FEEDBACK_MS, SHARE_MSG_TYPE, SHARE_OP_CREATE, SHARE_OP_UPDATE, SHARE_OP_DELETE, SHARE_OP_LIST, SHARE_OP_PASSWORD,
   SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO, SHARE_AUTHOR_MODES, SHARE_AUTHOR_PREF_KEY, SHARE_MAP_KEY, SHARE_MAP_MAX,
-  SHARE_ID_RE, SHARE_TITLE_INPUT_MAX, SHARE_NAME_INPUT_MAX, SHARE_LOCK_NAME, SHARE_LOCK_WAIT_MS, shareUrlOf,
+  SHARE_ID_RE, SHARE_TITLE_INPUT_MAX, SHARE_NAME_INPUT_MAX, SHARE_VIS_PUBLIC, SHARE_VIS_PRIVATE, SHARE_PASSWORD_MIN, SHARE_PASSWORD_INPUT_MAX, SHARE_LOCK_NAME, SHARE_LOCK_WAIT_MS, shareUrlOf,
 } from './constants.js';
 import { sendMessage } from './helpers.js';
+import { bytesToBase64 } from './attachments.js';
 
 /** Server / SW codes the dialog has its own sentence for; anything else reads share_err_generic. */
 /** On the page root while it may share: the per-bubble buttons show (compare.css). */
 const SHARE_CAN_CLASS = 'cmp-can-share';
 /** Server / SW codes the dialog has its own sentence for — see SHARE_ERR_CODES below. */
-const SHARE_ERR_CODES = ['generic', 'exists', 'empty', 'too_many_columns', 'share_off', 'share_disabled', 'share_daily_limit', 'rate_limited', 'payload_too_large', 'account_deleted', 'scope_insufficient', 'ext_token_required', 'share_deleted', 'not_found', 'network_error'];
+const SHARE_ERR_CODES = ['stale', 'share_busy', 'bad_password', 'share_fixed', 'generic', 'exists', 'empty', 'too_many_columns', 'share_off', 'share_disabled', 'share_daily_limit', 'rate_limited', 'payload_too_large', 'account_deleted', 'scope_insufficient', 'ext_token_required', 'share_deleted', 'not_found', 'network_error'];
+
+/**
+ * The link-preview card of a PUBLIC share (#1784 U6, bg/compare.js shareRequest op 'image'). Drawn
+ * and uploaded while the share lock is still held — so a later update of the same link cannot land
+ * between and be followed by a card of the older content — but within this budget, so a hung
+ * render / request never keeps every other tab's share write waiting.
+ */
+const SHARE_OP_IMAGE = 'image';
+const SHARE_CARD_BUDGET_MS = 20000;
+
+/**
+ * One click = link made (or updated) + copied; the classic dialog (title · visibility · preview) is
+ * kept behind this constant. A preview page can ask for the classic flow (`window.__ctShareClassic`,
+ * test/compare-preview) so its tests keep covering it.
+ */
+export const SHARE_ONE_CLICK = true;
+/** writeShare's `asked` meaning 「whatever link this conversation has when the lock is held」 (one-click). */
+const SHARE_ASK_LATEST = Symbol('share-ask-latest');
+/** The popover's geometry: its width, the gutter it keeps to the window edges, its gap to the button. */
+const POP_WIDTH_PX = 360;
+const POP_GUTTER_PX = 16;
+const POP_GAP_PX = 8;
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** Installs the share slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installShare(ctx) {
   const { chrome, doc, state, t, el, clear, track, clock } = ctx;
   const shareOn = () => !!(state.status && state.status.shareOn === true);
   const storage = () => ctx.historyStorage || null;
+  const oneClick = SHARE_ONE_CLICK && !(ctx.win && ctx.win.__ctShareClassic === true);
   state.shares = {}; // SHARE_MAP_KEY as last read: sessionId → {id, title, updatedAt, kind}
 
   // ── the local map ──
@@ -57,7 +89,7 @@ export function installShare(ctx) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
     for (const [sid, v] of Object.entries(raw)) {
       if (v && typeof v === 'object' && typeof v.id === 'string' && SHARE_ID_RE.test(v.id)) {
-        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '' };
+        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '', ...(typeof v.label === 'string' && v.label ? { label: v.label.slice(0, SHARE_TITLE_INPUT_MAX) } : {}), ...(v.vis === 'private' ? { vis: 'private' } : {}) };
       }
     }
     return out;
@@ -97,15 +129,13 @@ export function installShare(ctx) {
     const snap = ctx.snapshotSession();
     return snap ? ctx.normalizeEntry(snap) : null;
   }
-  /** Served model label, else the catalog label of the column's own model, else '' (provider only). */
-  function modelLabel(_id, stored) {
-    if (stored && stored.model && stored.model.label) return stored.model.label;
-    return stored ? ctx.modelLabelOf(stored.provider, stored.colModel) : '';
-  }
+  /** The column's model in display words (share-snapshot.js shareModelLabel — never an internal id). */
+  const modelLabel = (_id, stored) => shareModelLabel(stored, ctx.modelLabelOf);
   function build(entry, title, focus) {
     return buildShareSnapshot(entry, {
       lang: ctx.lang, title, focus, modelLabel,
       aliasOf: (id) => (ctx.debateNameOf ? ctx.debateNameOf(id) : ''),
+      avatarOf: (id) => (ctx.debateEmojiOf ? ctx.debateEmojiOf(id) : ''),
       summaryQuestion: t('summary_md_q'),
     });
   }
@@ -152,7 +182,9 @@ export function installShare(ctx) {
    * (SHARE_CAN_CLASS, CSS) and the caller's own `hidden` allows (an answer: once it has text).
    */
   function shareTurnButton(getFocus) {
-    const btn = el('button', 'cmp-turn-share', t('share_turn'));
+    const btn = el('button', 'cmp-turn-share');
+    btn.appendChild(ctx.linkIcon());
+    btn.appendChild(el('span', null, t('share_turn')));
     btn.type = 'button';
     btn.title = t('share_turn_title');
     btn.setAttribute('aria-haspopup', 'dialog');
@@ -211,6 +243,31 @@ export function installShare(ctx) {
     titleLabel.setAttribute('for', titleInput.id);
     form.appendChild(titleLabel);
     form.appendChild(titleInput);
+
+    // Who may open it (#1784 U5): anyone with the link, or only with a password (the server checks it).
+    const visSet = el('fieldset', 'cmp-share-author cmp-share-vis');
+    visSet.appendChild(el('legend', 'cmp-share-label', t('share_vis_label')));
+    const vis = {};
+    for (const v of [SHARE_VIS_PUBLIC, SHARE_VIS_PRIVATE]) {
+      const lab = el('label', 'cmp-share-radio');
+      const r = el('input');
+      r.type = 'radio';
+      r.name = 'cmp-share-vis';
+      r.value = v;
+      lab.appendChild(r);
+      lab.appendChild(el('span', null, t(`share_vis_${v}`)));
+      visSet.appendChild(lab);
+      vis[v] = r;
+    }
+    const passwordInput = el('input', 'cmp-share-input cmp-share-name cmp-share-password');
+    passwordInput.type = 'password';
+    passwordInput.autocomplete = 'new-password';
+    // No maxLength: it counts UTF-16 units and would silently cut a password the server accepts
+    // (Codex U5c 1R) — the length is checked in code points at the click instead.
+    passwordInput.placeholder = t('share_password_placeholder');
+    passwordInput.setAttribute('aria-label', t('share_password_label'));
+    visSet.appendChild(passwordInput);
+    form.appendChild(visSet);
 
     const authorSet = el('fieldset', 'cmp-share-author');
     authorSet.appendChild(el('legend', 'cmp-share-label', t('share_author_label')));
@@ -297,10 +354,27 @@ export function installShare(ctx) {
     confirmYes.addEventListener('click', () => removeShare(dlg.share && dlg.share.id, 'dialog'));
     mineBtn.addEventListener('click', toggleMine);
     ctx.root.appendChild(node);
-    return { snapshot: null, node, box, heading, form, warn, previewLabel, close, linkRow, linkUrl, copyBtn, openSlot, linkNote, titleInput, radios, nameInput, preview, error, actions, mineBtn, deleteBtn, submitBtn, confirmRow, mine, kind: 'compare', entry: null, focus: null, share: null, sessionId: null };
+    for (const r of Object.values(vis)) r.addEventListener('change', () => { syncVisibility(); repaintPreview(); });
+    return { snapshot: null, node, box, heading, form, warn, previewLabel, close, linkRow, linkUrl, copyBtn, openSlot, linkNote, titleInput, radios, nameInput, vis, visSet, passwordInput, authorSet, preview, error, actions, mineBtn, deleteBtn, submitBtn, confirmRow, mine, kind: 'compare', entry: null, focus: null, share: null, sessionId: null };
   }
   const authorMode = () => SHARE_AUTHOR_MODES.find((m) => dlg.radios[m].checked) || SHARE_AUTHOR_ANON;
   function syncNameInput() { dlg.nameInput.hidden = authorMode() === SHARE_AUTHOR_ANON; }
+  const privateChosen = () => dlg.vis[SHARE_VIS_PRIVATE].checked;
+  /**
+   * Public / password (#1784 U5). A private share is anonymous (a name would show before the
+   * password), so the author choice goes; the password field shows. A share that EXISTS keeps its
+   * visibility (the server never changes it) — the choice is locked to it.
+   */
+  function syncVisibility() {
+    const existing = dlg.share;
+    const priv = existing ? existing.vis === 'private' : privateChosen();
+    dlg.vis[SHARE_VIS_PRIVATE].checked = priv;
+    dlg.vis[SHARE_VIS_PUBLIC].checked = !priv;
+    for (const r of Object.values(dlg.vis)) r.disabled = !!existing;
+    dlg.passwordInput.hidden = !priv || !!existing;
+    dlg.authorSet.hidden = priv;
+    dlg.warn.textContent = t(priv ? 'share_warn_private' : 'share_warn');
+  }
   function setError(code) {
     dlg.error.textContent = code ? t(SHARE_ERR_CODES.includes(code) ? `share_err_${code}` : 'share_err_generic') : '';
     dlg.error.hidden = !code;
@@ -325,6 +399,10 @@ export function installShare(ctx) {
     dlg.titleInput.disabled = on;
     dlg.nameInput.disabled = on;
     for (const r of Object.values(dlg.radios)) r.disabled = on;
+    // The visibility and password too (#1784 U5) — and on release, the visibility stays locked to an
+    // EXISTING share's (syncVisibility's rule), never re-opened by the unlock.
+    dlg.passwordInput.disabled = on;
+    for (const r of Object.values(dlg.vis)) r.disabled = on || !!dlg.share;
   }
   async function openMyShares(from = null) {
     if (!dlg) dlg = buildDialog();
@@ -355,7 +433,10 @@ export function installShare(ctx) {
    * Open for the conversation on screen. `focus` = the bubble the share starts from (compare
    * {round, col?} in the entry's rounds, debate {seq} / {topic: true}), null for the whole thing.
    */
-  async function openShareDialog(focus = null, from = null) {
+  function openShareDialog(focus = null, from = null) {
+    return oneClick ? shareNow(focus, from) : openClassicDialog(focus, from);
+  }
+  async function openClassicDialog(focus, from) {
     if (!shareable()) return;
     if (!dlg) dlg = buildDialog();
     const my = ++gen;
@@ -376,6 +457,11 @@ export function installShare(ctx) {
     for (const m of SHARE_AUTHOR_MODES) dlg.radios[m].checked = m === mode;
     dlg.nameInput.value = '';
     syncNameInput();
+    // Public unless the user picks the password each time — a password is never remembered.
+    dlg.vis[SHARE_VIS_PUBLIC].checked = true;
+    dlg.vis[SHARE_VIS_PRIVATE].checked = false;
+    dlg.passwordInput.value = '';
+    syncVisibility();
     setError(null);
     setManageMode(false);
     lockInputs(busy);
@@ -391,7 +477,9 @@ export function installShare(ctx) {
   }
   function closeShareDialog() {
     gen++; // an open still reading storage is void too
+    closePop(false);
     if (!dlg || dlg.node.hidden) return;
+    dlg.passwordInput.value = ''; // a password typed and abandoned must not stay in the page (Codex U5c 1R)
     dlg.node.hidden = true;
     dlg.entry = null;
     dlg.sessionId = null;
@@ -405,12 +493,14 @@ export function installShare(ctx) {
     dlg.linkNote.hidden = !shareHref;
     dlg.deleteBtn.hidden = !shareHref;
     dlg.submitBtn.textContent = t(shareHref ? 'share_update' : 'share_create');
+    // A private share is never edited (the server answers 409): delete it and make a new one.
+    dlg.submitBtn.hidden = !!shareHref && s.vis === 'private';
     clear(dlg.openSlot);
     if (!shareHref) return;
     dlg.linkUrl.value = shareHref;
     dlg.openSlot.appendChild(ctx.link(shareHref, t('share_open'), 'cmp-btn cmp-btn-sm'));
     // The page is a copy taken when it was shared — the conversation may have gone on since.
-    dlg.linkNote.textContent = dlg.snapshot && s.sig && snapshotSig(dlg.snapshot) !== s.sig ? t('share_behind') : t('share_current');
+    dlg.linkNote.textContent = s.vis === 'private' ? t('share_private_fixed') : dlg.snapshot && s.sig && snapshotSig(dlg.snapshot) !== s.sig ? t('share_behind') : t('share_current');
   }
 
   // ── the preview: the snapshot, drawn ──
@@ -425,7 +515,8 @@ export function installShare(ctx) {
     const snap = built.snapshot;
     dlg.kind = snap.kind;
     dlg.titleInput.placeholder = firstQuestion(snap).split('\n')[0].slice(0, SHARE_TITLE_INPUT_MAX);
-    const who = authorMode() === SHARE_AUTHOR_ANON ? t('share_preview_anon') : (dlg.nameInput.value.trim() || t('share_preview_named'));
+    const priv = dlg.share ? dlg.share.vis === 'private' : privateChosen();
+    const who = priv || authorMode() === SHARE_AUTHOR_ANON ? t('share_preview_anon') : (dlg.nameInput.value.trim() || t('share_preview_named'));
     const card = el('div', 'cmp-share-card');
     card.appendChild(el('span', 'cmp-share-card-host', 'claudetuner.com'));
     card.appendChild(el('span', 'cmp-share-card-title', snap.title || firstQuestion(snap)));
@@ -502,30 +593,91 @@ export function installShare(ctx) {
    * request goes out, and its link is recorded before the lock is let go — so no other tab can
    * decide from a map that does not have it yet.
    */
-  async function writeShare(sessionId, asked, snapshot, mode, authorName) {
+  async function writeShare(sessionId, asked, snapshot, mode, authorName, password) {
     await loadShares();
     const current = shareFor(sessionId);
+    // One-click: the link the map holds NOW (under the lock) is the one to update — another tab's included.
+    const latest = asked === SHARE_ASK_LATEST;
+    if (latest) asked = current;
     if (!asked && current) return { exists: current };
+    // `password` (#1784 U5): a NEW private share — handed to the SW once, kept nowhere here.
     const res = await sendMessage(chrome, {
       type: SHARE_MSG_TYPE, op: asked ? SHARE_OP_UPDATE : SHARE_OP_CREATE, ...(asked ? { id: asked.id } : {}),
-      snapshot, author: mode, ...(authorName ? { authorName } : {}),
+      snapshot, ...(password ? { visibility: SHARE_VIS_PRIVATE, password } : { author: mode, ...(authorName ? { authorName } : {}) }),
     });
     if (!res || res.ok !== true) {
       const code = res && typeof res.code === 'string' ? res.code : 'network_error';
       // The link was deleted elsewhere (「내 공유 링크」, another browser): forget it here too.
       const gone = !!asked && (code === 'share_deleted' || code === 'not_found');
       if (gone) await forgetShareId(asked.id);
+      // One click on a link deleted elsewhere makes a fresh one: the user asked for 「a link」, not that one.
+      if (gone && latest) return writeShare(sessionId, null, snapshot, mode, authorName, password);
       return { error: code, gone };
     }
     // 🔴 Recorded whatever became of the dialog: the link EXISTS on the server now, and closing the
     // dialog mid-request must not leave it unreachable from this conversation (「업데이트 / 삭제」).
-    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot) };
-    await updateShares((map) => { map[sessionId] = record; });
-    await writeKey(SHARE_AUTHOR_PREF_KEY, mode);
+    // The visibility the server answered wins (a password set from another browser); else what was asked.
+    const priv = res.visibility ? res.visibility === SHARE_VIS_PRIVATE : !!password || (!!asked && asked.vis === SHARE_VIS_PRIVATE);
+    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot), ...(priv ? { vis: SHARE_VIS_PRIVATE } : {}) };
+    // A display name for 「내 공유 링크」 (a private share has no title on the server): the first question.
+    const label = (snapshot.title || firstQuestion(snapshot)).split('\n')[0].slice(0, SHARE_TITLE_INPUT_MAX);
+    await updateShares((map) => { map[sessionId] = label ? { ...record, label } : record; });
+    if (!priv) await writeKey(SHARE_AUTHOR_PREF_KEY, mode);
     const settled = res.author && SHARE_AUTHOR_MODES.includes(res.author.mode) ? res.author.mode : SHARE_AUTHOR_ANON;
-    track(asked ? 'share_update' : 'share_create', { kind: snapshot.kind, author: mode, settled, focus: snapshot.focus ? 1 : 0 });
-    return { record, settled };
+    track(asked ? 'share_update' : 'share_create', { kind: snapshot.kind, author: priv ? SHARE_AUTHOR_ANON : mode, settled, focus: snapshot.focus ? 1 : 0, private: priv ? 1 : 0 });
+    // A private share never gets a card (its link preview stays the fixed lock image).
+    return { record, settled, author: res.author || { mode: SHARE_AUTHOR_ANON }, updated: !!asked, card: priv || !res.rev ? null : { id: res.id, rev: res.rev, snapshot, author: res.author || { mode: SHARE_AUTHOR_ANON } } };
   }
+  /**
+   * Best effort, never seen by the user: the share already exists, and without a card its link
+   * preview is the fixed image. Drawn from the snapshot that was SENT and the author the server
+   * CONFIRMED (never the ask). The renderer is imported lazily, so it failing to load cannot break
+   * the dialog.
+   */
+  async function uploadCard({ id, rev, snapshot, author }) {
+    let timer = null;
+    const budget = new Promise((resolve) => { timer = clock.setTimeout(resolve, SHARE_CARD_BUDGET_MS); });
+    const run = (async () => {
+      const { renderShareCard } = await import('./share-card.js');
+      const url = shareUrlOf(id);
+      const avatarUrl = author.mode === SHARE_AUTHOR_NAME_PHOTO && url ? `${url}/avatar` : null;
+      const blob = await renderShareCard(snapshot, { author, avatarUrl, lang: ctx.lang, focus: snapshot.focus });
+      if (!blob) return;
+      const png = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+      await sendMessage(chrome, { type: SHARE_MSG_TYPE, op: SHARE_OP_IMAGE, id, rev, png });
+    })().catch((e) => {
+      const con = ctx.con;
+      if (con && typeof con.debug === 'function') { try { con.debug('[compare] share card skipped', e); } catch { /* logging is not the share */ } }
+    });
+    try { await Promise.race([run, budget]); } finally { clock.clearTimeout(timer); }
+  }
+  /**
+   * `write` (a content / password write) under the share lock, the card upload it asks for right
+   * after it in the same lock callback. Resolves on the WRITE — the caller settles on that and never
+   * waits for the card.
+   */
+  function writeUnderLock(write) {
+    let settle;
+    const written = new Promise((resolve) => { settle = resolve; });
+    const locked = underShareLock(async () => {
+      const w = await write();
+      settle(w);
+      if (w.card) await uploadCard(w.card);
+      return w;
+    });
+    locked.catch(() => {});
+    return Promise.race([written, locked]);
+  }
+  /** A delete under the share lock (see removeShare); 404 = not ours / already gone — forgotten either way. */
+  function deleteLocked(id) {
+    return underShareLock(async () => {
+      const r = await sendMessage(chrome, { type: SHARE_MSG_TYPE, op: SHARE_OP_DELETE, id });
+      if (r && (r.ok === true || r.code === 'not_found')) await forgetShareId(id);
+      return r;
+    });
+  }
+  const deleted = (res) => !!res && (res.ok === true || res.code === 'not_found');
+  const errCodeOf = (res) => (res && typeof res.code === 'string' ? res.code : res && res.error ? res.error : 'network_error');
   async function submit() {
     // 🔴 The snapshot the preview drew, as it is — see the header.
     const snapshot = dlg.snapshot;
@@ -534,8 +686,15 @@ export function installShare(ctx) {
     if (state.sessionId !== entry.id) { closeShareDialog(); return; } // the page moved to another conversation
     const my = gen;
     const here = () => my === gen; // still this dialog (not closed / reopened)
-    const mode = authorMode();
-    const authorName = mode !== SHARE_AUTHOR_ANON ? dlg.nameInput.value.trim() : '';
+    // A private share is never edited (the server answers 409) — not only a hidden button.
+    if (dlg.share && dlg.share.vis === 'private') { setError('share_fixed'); return; }
+    // A new private share needs a password of SHARE_PASSWORD_MIN..SHARE_PASSWORD_INPUT_MAX code points
+    // after NFC — the server's own rule; outside it nothing is sent (never cut to fit).
+    const password = !dlg.share && privateChosen() ? dlg.passwordInput.value : '';
+    const pwLen = Array.from(password.normalize('NFC')).length;
+    if (!dlg.share && privateChosen() && (pwLen < SHARE_PASSWORD_MIN || pwLen > SHARE_PASSWORD_INPUT_MAX)) { setError('bad_password'); dlg.passwordInput.focus(); return; }
+    const mode = password ? SHARE_AUTHOR_ANON : authorMode();
+    const authorName = !password && mode !== SHARE_AUTHOR_ANON ? dlg.nameInput.value.trim() : '';
     // 🔴 Every input of the write is taken NOW, at the click — never read inside the lock callback,
     // which may run seconds later over ANOTHER conversation's dialog (Codex U3b 3R: A's content went
     // up as an update of B's link).
@@ -546,7 +705,8 @@ export function installShare(ctx) {
     setError(null);
     let out;
     try {
-      out = await underShareLock(() => writeShare(entry.id, asked, snapshot, mode, authorName));
+      // The dialog settles on the content write; the card follows inside the same lock callback.
+      out = await writeUnderLock(() => writeShare(entry.id, asked, snapshot, mode, authorName, password));
     } catch {
       out = { error: 'generic' };
     } finally {
@@ -558,7 +718,9 @@ export function installShare(ctx) {
     }
     syncShareButton();
     if (!here()) return;
-    if (out.exists) { dlg.share = out.exists; paintLink(); setError('exists'); return; }
+    // Another tab's link is THE link — shown with ITS visibility (a public link must never look locked,
+    // Codex U5c 1R), and the password typed for a share that will not be made goes.
+    if (out.exists) { dlg.share = out.exists; dlg.passwordInput.value = ''; syncVisibility(); repaintPreview(); paintLink(); setError('exists'); return; }
     if (out.error) {
       if (out.gone) { dlg.share = null; paintLink(); }
       setError(out.error);
@@ -568,8 +730,11 @@ export function installShare(ctx) {
     // The author the SERVER published (no usable name → anonymous): the dialog shows that, not the ask.
     for (const m of SHARE_AUTHOR_MODES) dlg.radios[m].checked = m === out.settled;
     syncNameInput();
+    dlg.passwordInput.value = ''; // gone from the page the moment the share exists
+    syncVisibility();
     paintLink();
-    if (out.settled !== mode) dlg.linkNote.textContent = t('share_author_fallback');
+    // The 「no name → anonymous」 note is about a PUBLIC share's author; a private one is anonymous by design.
+    if (!password && out.settled !== mode) dlg.linkNote.textContent = t('share_author_fallback');
     repaintPreview();
     dlg.copyBtn.focus();
   }
@@ -582,11 +747,7 @@ export function installShare(ctx) {
     // 404 = not ours / already gone: either way nothing is left to delete.
     let res;
     try {
-      res = await underShareLock(async () => {
-        const r = await sendMessage(chrome, { type: SHARE_MSG_TYPE, op: SHARE_OP_DELETE, id });
-        if (r && (r.ok === true || r.code === 'not_found')) await forgetShareId(id);
-        return r;
-      });
+      res = await deleteLocked(id);
     } catch {
       res = null;
     } finally {
@@ -595,8 +756,8 @@ export function installShare(ctx) {
       // review 2R): give its inputs and button back, as submit's own finally does.
       if (dlg && !dlg.node.hidden && dlg.entry) { lockInputs(false); dlg.submitBtn.disabled = !dlg.snapshot; }
     }
-    if (!res || (res.ok !== true && res.code !== 'not_found')) {
-      setError(res && typeof res.code === 'string' ? res.code : res && res.error ? res.error : 'network_error');
+    if (!deleted(res)) {
+      setError(errCodeOf(res));
       dlg.confirmRow.hidden = true;
       dlg.actions.hidden = false;
       return;
@@ -608,6 +769,486 @@ export function installShare(ctx) {
     if (from === 'dialog') dlg.submitBtn.focus();
     if (from === 'mine') renderMine();
     syncShareButton();
+  }
+
+  // ── one-click share (SHARE_ONE_CLICK): the click makes / updates the link and copies it; the
+  //    popover by the button is only the optional rest (password · author · delete) ──
+  let pop = null;
+  let popOpener = null; // the element (or {focus, anchor}) the popover belongs to
+  function svgIcon(cls, paths) {
+    const svg = doc.createElementNS(SVG_NS, 'svg');
+    for (const [k, v] of Object.entries({ viewBox: '0 0 16 16', width: '14', height: '14', 'aria-hidden': 'true', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', class: cls })) svg.setAttribute(k, v);
+    for (const d of paths) {
+      const path = doc.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+  const lockIcon = () => svgIcon('cmp-sharepop-lock', ['M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z', 'M5.8 7.5V5.3a2.2 2.2 0 0 1 4.4 0v2.2']);
+  function popButton(cls, label) {
+    const b = el('button', cls, label);
+    b.type = 'button';
+    return b;
+  }
+  function buildPopover() {
+    const node = el('div', 'cmp-sharepop');
+    node.id = 'cmp-sharepop';
+    node.hidden = true;
+    node.tabIndex = -1;
+    // Non-modal: the page stays usable around it (Esc / a click outside closes it).
+    node.setAttribute('role', 'dialog');
+    node.setAttribute('aria-modal', 'false');
+    node.setAttribute('aria-labelledby', 'cmp-sharepop-status');
+
+    const head = el('div', 'cmp-sharepop-head');
+    const mark = el('span', 'cmp-sharepop-mark');
+    mark.setAttribute('aria-hidden', 'true');
+    const status = el('p', 'cmp-sharepop-status');
+    status.id = 'cmp-sharepop-status';
+    status.setAttribute('role', 'status');
+    const close = popButton('cmp-sharepop-close', '×');
+    close.setAttribute('aria-label', t('share_close'));
+    close.title = t('share_close');
+    head.appendChild(mark);
+    head.appendChild(status);
+    head.appendChild(close);
+    node.appendChild(head);
+    const sub = el('p', 'cmp-sharepop-sub');
+    node.appendChild(sub);
+
+    const linkRow = el('div', 'cmp-sharepop-link');
+    const url = el('input', 'cmp-sharepop-url');
+    url.type = 'text';
+    url.readOnly = true;
+    url.setAttribute('aria-label', t('share_link_label'));
+    const copyBtn = popButton('cmp-btn cmp-btn-sm cmp-btn-primary cmp-sharepop-copy', t('share_copy'));
+    const openSlot = el('span', 'cmp-sharepop-open-slot');
+    linkRow.appendChild(url);
+    linkRow.appendChild(copyBtn);
+    linkRow.appendChild(openSlot);
+    node.appendChild(linkRow);
+
+    // 🔒 The password of THIS link: add (public) · change / remove (private).
+    const pw = el('div', 'cmp-sharepop-sec cmp-sharepop-pw');
+    const pwAdd = popButton('cmp-sharepop-pw-add', '');
+    pwAdd.appendChild(lockIcon());
+    pwAdd.appendChild(el('span', null, t('share_pw_set')));
+    pwAdd.setAttribute('aria-expanded', 'false');
+    const pwOn = el('div', 'cmp-sharepop-pw-on');
+    const pwOnText = el('span', 'cmp-sharepop-pw-on-text');
+    pwOnText.appendChild(lockIcon());
+    pwOnText.appendChild(el('span', null, t('share_pw_on')));
+    const pwChange = popButton('cmp-btn cmp-btn-sm', t('share_pw_change'));
+    pwChange.setAttribute('aria-expanded', 'false');
+    const pwRemove = popButton('cmp-btn cmp-btn-sm', t('share_pw_remove'));
+    pwOn.appendChild(pwOnText);
+    pwOn.appendChild(pwChange);
+    pwOn.appendChild(pwRemove);
+    const pwForm = el('form', 'cmp-sharepop-pw-form');
+    pwForm.noValidate = true;
+    const pwRow = el('div', 'cmp-sharepop-pw-row');
+    const pwInput = el('input', 'cmp-share-input cmp-sharepop-pw-input');
+    pwInput.type = 'password';
+    pwInput.autocomplete = 'new-password';
+    // No maxLength (it counts UTF-16 units — Codex U5c 1R): the length is checked in code points at save.
+    pwInput.placeholder = t('share_password_placeholder');
+    pwInput.setAttribute('aria-label', t('share_password_label'));
+    const pwSave = el('button', 'cmp-btn cmp-btn-sm cmp-btn-primary', t('share_pw_save'));
+    pwSave.type = 'submit';
+    const pwCancel = popButton('cmp-btn cmp-btn-sm', t('share_delete_no'));
+    pwRow.appendChild(pwInput);
+    pwRow.appendChild(pwSave);
+    pwRow.appendChild(pwCancel);
+    pwForm.appendChild(pwRow);
+    pwForm.appendChild(el('p', 'cmp-sharepop-hint', t('share_pw_hint')));
+    pw.appendChild(pwAdd);
+    pw.appendChild(pwOn);
+    pw.appendChild(pwForm);
+    node.appendChild(pw);
+
+    // Who it shows as — a public link only (a private one is anonymous by design).
+    const author = el('fieldset', 'cmp-sharepop-sec cmp-sharepop-author');
+    author.appendChild(el('legend', 'cmp-sharepop-label', t('share_author_label')));
+    const seg = el('div', 'cmp-sharepop-seg');
+    const radios = {};
+    const segLabel = { [SHARE_AUTHOR_ANON]: 'share_author_anon', [SHARE_AUTHOR_NAME]: 'share_author_short_name', [SHARE_AUTHOR_NAME_PHOTO]: 'share_author_short_name_photo' };
+    for (const mode of SHARE_AUTHOR_MODES) {
+      const lab = el('label', 'cmp-sharepop-seg-opt');
+      const r = el('input');
+      r.type = 'radio';
+      r.name = 'cmp-sharepop-author';
+      r.value = mode;
+      lab.appendChild(r);
+      lab.appendChild(el('span', null, t(segLabel[mode])));
+      seg.appendChild(lab);
+      radios[mode] = r;
+    }
+    author.appendChild(seg);
+    const who = el('p', 'cmp-sharepop-note');
+    author.appendChild(who);
+    node.appendChild(author);
+
+    const error = el('p', 'cmp-sharepop-error');
+    error.setAttribute('role', 'alert');
+    node.appendChild(error);
+
+    const foot = el('div', 'cmp-sharepop-foot');
+    const scope = el('p', 'cmp-sharepop-scope');
+    const actions = el('div', 'cmp-sharepop-actions');
+    const deleteBtn = popButton('cmp-sharepop-textbtn cmp-sharepop-delete', t('share_delete_link'));
+    const mineBtn = popButton('cmp-sharepop-textbtn cmp-sharepop-mine', t('share_mine'));
+    actions.appendChild(deleteBtn);
+    actions.appendChild(mineBtn);
+    const confirm = el('div', 'cmp-sharepop-confirm');
+    confirm.appendChild(el('p', 'cmp-sharepop-confirm-text', t('share_delete_confirm_short')));
+    const confirmNo = popButton('cmp-btn cmp-btn-sm', t('share_delete_no'));
+    const confirmYes = popButton('cmp-btn cmp-btn-sm cmp-share-delete cmp-sharepop-delete-yes', t('share_delete_yes'));
+    confirm.appendChild(confirmNo);
+    confirm.appendChild(confirmYes);
+    foot.appendChild(scope);
+    foot.appendChild(actions);
+    foot.appendChild(confirm);
+    node.appendChild(foot);
+
+    close.addEventListener('click', () => closePop(true));
+    copyBtn.addEventListener('click', async () => {
+      if (!url.value) return;
+      const copied = await ctx.copyText(url.value);
+      if (!copied) return;
+      track('share_copy', { kind: pop.snapshot ? pop.snapshot.kind : 'compare', from: 'popover' });
+      pop.statusKey = 'share_pop_copied';
+      copyBtn.textContent = t('copied');
+      clock.setTimeout(() => { copyBtn.textContent = t('share_copy'); }, COPY_FEEDBACK_MS);
+      paintPop();
+    });
+    const editPassword = (on) => {
+      pop.pwEditing = on;
+      pwInput.value = '';
+      setPopError(null);
+      paintPop();
+      if (on) pwInput.focus();
+      else (pop.share && pop.share.vis === SHARE_VIS_PRIVATE ? pwChange : pwAdd).focus();
+    };
+    pwAdd.addEventListener('click', () => editPassword(true));
+    pwChange.addEventListener('click', () => editPassword(true));
+    pwCancel.addEventListener('click', () => editPassword(false));
+    pwForm.addEventListener('submit', (e) => { e.preventDefault(); savePassword(pwInput.value); });
+    pwRemove.addEventListener('click', () => savePassword(null));
+    for (const r of Object.values(radios)) r.addEventListener('change', () => { if (r.checked) changeAuthor(r.value); });
+    deleteBtn.addEventListener('click', () => { pop.confirming = true; paintPop(); confirmNo.focus(); });
+    confirmNo.addEventListener('click', () => { pop.confirming = false; paintPop(); deleteBtn.focus(); });
+    confirmYes.addEventListener('click', deletePop);
+    mineBtn.addEventListener('click', () => { const from = popOpener; closePop(false); openMyShares(from); });
+    // Esc backs out of an inline step first (password entry, delete confirm), then closes.
+    doc.addEventListener('keydown', (e) => {
+      if (!e || e.key !== 'Escape' || node.hidden) return;
+      e.preventDefault();
+      if (pop.confirming) { pop.confirming = false; paintPop(); deleteBtn.focus(); return; }
+      if (pop.pwEditing) { editPassword(false); return; }
+      closePop(true);
+    });
+    // A click outside closes it — except on its own 「공유」 button, whose click shares again.
+    doc.addEventListener('pointerdown', (e) => {
+      if (node.hidden || !e.target || node.contains(e.target)) return;
+      const own = openerEl();
+      if (own && own.contains(e.target)) return;
+      closePop(false);
+    });
+    if (ctx.win && typeof ctx.win.addEventListener === 'function') ctx.win.addEventListener('resize', () => placePop());
+    doc.addEventListener('scroll', () => placePop(), true);
+    ctx.root.appendChild(node);
+    return {
+      node, mark, status, close, sub, linkRow, url, copyBtn, openSlot, pw, pwAdd, pwOn, pwChange, pwRemove, pwForm, pwInput, pwSave,
+      author, radios, who, error, foot, scope, actions, deleteBtn, mineBtn, confirm, confirmYes,
+      phase: 'working', statusKey: '', subKey: '', askedAuthor: null, share: null, sessionId: null, snapshot: null, settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false, pwEditing: false, confirming: false,
+    };
+  }
+  /** The element the popover hangs from: 「⋯」 while the bar is folded (shareOpener.anchor), else the button. */
+  function anchorEl() {
+    const a = popOpener && typeof popOpener.anchor === 'function' ? popOpener.anchor() : popOpener;
+    return a && typeof a.getBoundingClientRect === 'function' ? a : null;
+  }
+  /** The 「공유」 button that opened it (a bubble's, or the topbar's). */
+  const openerEl = () => (popOpener && typeof popOpener.getBoundingClientRect === 'function' ? popOpener : ctx.shareBtn || null);
+  function setPopError(code) {
+    pop.error.textContent = code ? t(SHARE_ERR_CODES.includes(code) ? `share_err_${code}` : 'share_err_generic') : '';
+    pop.error.hidden = !code;
+  }
+  function paintPop() {
+    if (!pop) return;
+    const s = pop.phase === 'ready' ? pop.share : null;
+    const href = s ? shareUrlOf(s.id) : null;
+    const priv = !!s && s.vis === SHARE_VIS_PRIVATE;
+    pop.node.dataset.phase = pop.phase;
+    pop.node.setAttribute('aria-busy', String(busy));
+    pop.status.textContent = pop.statusKey ? t(pop.statusKey) : '';
+    pop.sub.textContent = pop.subKey ? t(pop.subKey) : '';
+    pop.sub.hidden = !pop.subKey;
+    pop.linkRow.hidden = !href;
+    pop.url.value = href || '';
+    clear(pop.openSlot);
+    if (href) pop.openSlot.appendChild(ctx.link(href, t('share_open'), 'cmp-btn cmp-btn-sm'));
+    pop.pw.hidden = !href;
+    pop.pwAdd.hidden = priv || pop.pwEditing;
+    pop.pwOn.hidden = !priv || pop.pwEditing;
+    pop.pwForm.hidden = !pop.pwEditing;
+    pop.pwAdd.setAttribute('aria-expanded', String(pop.pwEditing));
+    pop.pwChange.setAttribute('aria-expanded', String(pop.pwEditing));
+    pop.author.hidden = !href || priv;
+    // While an author change is on the wire the choice shows what was picked; then what the server settled.
+    const shownAuthor = busy && pop.askedAuthor ? pop.askedAuthor : pop.settled;
+    for (const m of SHARE_AUTHOR_MODES) pop.radios[m].checked = m === shownAuthor;
+    const whoText = pop.fallback ? t('share_author_fallback_pop') : pop.settled !== SHARE_AUTHOR_ANON && pop.authorName ? t('share_author_shown_as', pop.authorName) : '';
+    pop.who.textContent = whoText;
+    pop.who.hidden = !whoText;
+    pop.foot.hidden = !href;
+    pop.scope.textContent = t(priv ? 'share_scope_private' : 'share_scope_public');
+    pop.actions.hidden = pop.confirming;
+    pop.confirm.hidden = !pop.confirming;
+    // Nothing is pressed twice while a write runs; the inputs of that write are already taken.
+    for (const b of [pop.copyBtn, pop.pwAdd, pop.pwChange, pop.pwRemove, pop.pwSave, pop.pwInput, pop.deleteBtn, pop.confirmYes, ...Object.values(pop.radios)]) b.disabled = busy;
+    placePop();
+  }
+  /** Fixed, under (or, without room, above) its button; clamped inside the window with a gutter. */
+  function placePop() {
+    const win = ctx.win;
+    if (!pop || pop.node.hidden || !win) return;
+    const vw = win.innerWidth;
+    const vh = win.innerHeight;
+    const width = Math.max(0, Math.min(POP_WIDTH_PX, vw - 2 * POP_GUTTER_PX));
+    pop.node.style.width = `${width}px`;
+    pop.node.style.maxHeight = `${Math.max(0, vh - 2 * POP_GUTTER_PX)}px`;
+    const a = anchorEl();
+    let r = a ? a.getBoundingClientRect() : null;
+    // The button is off screen (a folded bar, a scrolled-away bubble): the top-right corner.
+    if (!r || (!r.width && !r.height)) r = { top: POP_GUTTER_PX, bottom: POP_GUTTER_PX, right: vw - POP_GUTTER_PX };
+    const h = pop.node.offsetHeight;
+    const left = Math.min(Math.max(r.right - width, POP_GUTTER_PX), vw - width - POP_GUTTER_PX);
+    let top = r.bottom + POP_GAP_PX;
+    if (top + h > vh - POP_GUTTER_PX && r.top - POP_GAP_PX - h >= POP_GUTTER_PX) top = r.top - POP_GAP_PX - h;
+    // Always inside the window — the button may be scrolled partly or wholly out of it.
+    top = Math.min(Math.max(top, POP_GUTTER_PX), Math.max(POP_GUTTER_PX, vh - POP_GUTTER_PX - h));
+    pop.node.style.left = `${Math.round(Math.max(POP_GUTTER_PX, left))}px`;
+    pop.node.style.top = `${Math.round(top)}px`;
+    pop.node.classList.toggle('is-above', top < r.top);
+  }
+  function showPop(from) {
+    if (popOpener && popOpener !== from && typeof popOpener.setAttribute === 'function') popOpener.setAttribute('aria-expanded', 'false');
+    popOpener = from || ctx.shareBtn || null;
+    const own = openerEl();
+    if (own) own.setAttribute('aria-expanded', 'true');
+    const wasOpen = !pop.node.hidden;
+    pop.node.hidden = false;
+    if (!wasOpen) {
+      // Replay the entrance each time it opens (CSS; prefers-reduced-motion turns it off).
+      pop.node.classList.remove('is-in');
+      void pop.node.offsetWidth;
+      pop.node.classList.add('is-in');
+    }
+    paintPop();
+    try { pop.node.focus({ preventScroll: true }); } catch { /* focus is a nicety */ }
+  }
+  function closePop(returnFocus) {
+    if (!pop || pop.node.hidden) return;
+    gen++; // a click still in flight settles into the map, never into a closed popover
+    pop.pwInput.value = ''; // a password typed and abandoned must not stay in the page (Codex U5c 1R)
+    pop.pwEditing = false;
+    pop.confirming = false;
+    pop.node.hidden = true;
+    const own = openerEl();
+    if (own) own.setAttribute('aria-expanded', 'false');
+    if (returnFocus && popOpener && typeof popOpener.focus === 'function') { try { popOpener.focus(); } catch { /* gone */ } }
+    popOpener = null;
+  }
+  /**
+   * The click. 🔴 U3 invariants: every input of the write (conversation, focus, author) is taken
+   * HERE; the create-or-update decision and the write run under the share lock (writeShare with
+   * SHARE_ASK_LATEST reads the map there); the link is recorded in the map whatever became of the
+   * popover.
+   */
+  async function shareNow(focus, from) {
+    if (!shareable() || busy) return;
+    if (!pop) pop = buildPopover();
+    if (dlg && !dlg.node.hidden) closeShareDialog();
+    const my = ++gen;
+    const entry = currentEntry();
+    if (!entry) return;
+    const stillHere = () => gen === my && state.sessionId === entry.id; // not closed, not clicked again, same conversation
+    // Both reads start at the click (the author preference another tab may change meanwhile — Codex ui 1R).
+    const [, pref] = await Promise.all([loadShares(), readKey(SHARE_AUTHOR_PREF_KEY)]);
+    if (!stillHere()) return;
+    const known = shareFor(entry.id);
+    const mode = SHARE_AUTHOR_MODES.includes(pref) ? pref : SHARE_AUTHOR_ANON; // anonymous until the user picks otherwise (§10.2)
+    const built = build(entry, known ? known.title : '', focus);
+    Object.assign(pop, { sessionId: entry.id, share: null, snapshot: built.error ? null : built.snapshot, settled: mode, authorName: '', fallback: false, pwEditing: false, confirming: false, subKey: '' });
+    setPopError(null);
+    if (built.error) {
+      Object.assign(pop, { phase: 'error', statusKey: 'share_pop_failed' });
+      showPop(from);
+      setPopError(built.error);
+      return;
+    }
+    const snapshot = built.snapshot;
+    Object.assign(pop, { phase: 'working', statusKey: known ? 'share_pop_updating' : 'share_pop_working' });
+    busy = true;
+    showPop(from);
+    track('share_open', { kind: snapshot.kind, focus: focus ? 1 : 0, existing: known ? 1 : 0, one_click: 1 });
+    let out;
+    try {
+      out = await writeUnderLock(() => writeShare(entry.id, SHARE_ASK_LATEST, snapshot, mode, '', ''));
+    } catch {
+      out = { error: 'generic' };
+    } finally {
+      busy = false;
+    }
+    syncShareButton();
+    if (gen !== my) return;
+    if (out.error) {
+      Object.assign(pop, { phase: 'error', statusKey: 'share_pop_failed' });
+      paintPop();
+      setPopError(out.error);
+      return;
+    }
+    Object.assign(pop, { phase: 'ready', share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: mode !== SHARE_AUTHOR_ANON && out.settled !== mode });
+    const copied = await ctx.copyText(shareUrlOf(out.record.id));
+    if (gen !== my) return;
+    if (copied) track('share_copy', { kind: snapshot.kind, from: 'one_click' });
+    Object.assign(pop, { statusKey: copied ? 'share_pop_copied' : 'share_pop_made', subKey: out.updated ? 'share_pop_updated' : '' });
+    const focusWasOnPop = doc.activeElement === pop.node;
+    paintPop();
+    // Copy failed (no clipboard access): the copy button is the next thing to press.
+    if (focusWasOnPop && !copied) pop.copyBtn.focus();
+  }
+  /**
+   * 🔒 Set / change (a string) or remove (null) the password of the popover's link. The typed
+   * password is read once, handed to the SW, and cleared from the field before the request.
+   */
+  async function savePassword(password) {
+    if (busy || !pop || !pop.share) return;
+    if (password !== null) {
+      const n = Array.from(String(password).normalize('NFC')).length;
+      if (n < SHARE_PASSWORD_MIN || n > SHARE_PASSWORD_INPUT_MAX) { setPopError('bad_password'); pop.pwInput.focus(); return; }
+    }
+    pop.pwInput.value = '';
+    const my = gen;
+    // Taken at the click, never read inside the lock callback (U3).
+    const { sessionId, share: base, snapshot } = pop;
+    const wasPrivate = base.vis === SHARE_VIS_PRIVATE;
+    busy = true;
+    setPopError(null);
+    paintPop();
+    let out;
+    try {
+      out = await writeUnderLock(() => writePassword(sessionId, base, password, snapshot));
+    } catch {
+      out = { error: 'generic' };
+    } finally {
+      busy = false;
+    }
+    syncShareButton();
+    if (gen !== my) return;
+    if (out.error) {
+      if (out.gone) Object.assign(pop, { phase: 'deleted', share: null, statusKey: 'share_pop_deleted', subKey: '', pwEditing: false });
+      paintPop();
+      setPopError(out.error);
+      return;
+    }
+    const priv = out.vis === SHARE_VIS_PRIVATE;
+    Object.assign(pop, {
+      share: out.record, pwEditing: false, subKey: password === null ? 'share_pw_done_remove' : wasPrivate ? 'share_pw_done_change' : 'share_pw_done_set',
+      // Either way the link is anonymous now (a private share always; a reopened one stays so until picked).
+      settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false,
+    });
+    paintPop();
+    if (pop.node.contains(doc.activeElement) || doc.activeElement === doc.body) (priv ? pop.pwChange : pop.pwAdd).focus();
+  }
+  /**
+   * Under the lock: has this conversation's link been written since `base` (the popover's record)?
+   * Another tab's click — or the link gone / replaced. Read fresh from the map.
+   */
+  async function linkMovedOn(sessionId, base) {
+    await loadShares();
+    const cur = shareFor(sessionId);
+    return !cur || !base || cur.id !== base.id || cur.updatedAt !== base.updatedAt;
+  }
+  /** Under the lock: the request, then the map. `base` = the popover's record at the click. */
+  async function writePassword(sessionId, base, password, snapshot) {
+    const { id } = base;
+    // Only a snapshot that is still the link's content may become its card (see linkMovedOn).
+    const cardSnapshot = snapshot && !(await linkMovedOn(sessionId, base)) ? snapshot : null;
+    const r = await sendMessage(chrome, { type: SHARE_MSG_TYPE, op: SHARE_OP_PASSWORD, id, password });
+    if (!r || r.ok !== true) {
+      const code = errCodeOf(r);
+      const gone = code === 'share_deleted' || code === 'not_found';
+      if (gone) await forgetShareId(id);
+      return { error: code, gone };
+    }
+    const vis = r.visibility === SHARE_VIS_PRIVATE ? SHARE_VIS_PRIVATE : SHARE_VIS_PUBLIC;
+    const withVis = (rec) => {
+      const next = { ...rec };
+      if (vis === SHARE_VIS_PRIVATE) next.vis = vis;
+      else delete next.vis;
+      return next;
+    };
+    let record = null;
+    await updateShares((map) => {
+      for (const k of Object.keys(map)) if (map[k].id === id) record = map[k] = withVis(map[k]);
+    });
+    track('share_password', { action: password === null ? 'remove' : 'set', private: vis === SHARE_VIS_PRIVATE ? 1 : 0 });
+    // Public again: the server dropped every card with the password, so this revision gets a fresh one.
+    const card = vis === SHARE_VIS_PUBLIC && r.rev && cardSnapshot ? { id, rev: r.rev, snapshot: cardSnapshot, author: { mode: SHARE_AUTHOR_ANON } } : null;
+    return { vis, card, record: record || withVis(base) };
+  }
+  /** Who the link shows as: the same link, updated with the snapshot of the click — the server settles the author. */
+  async function changeAuthor(mode) {
+    if (busy || !pop || !pop.share || !pop.snapshot || mode === pop.settled || !SHARE_AUTHOR_MODES.includes(mode)) return;
+    const my = gen;
+    const { sessionId, snapshot, share: base } = pop;
+    busy = true;
+    pop.askedAuthor = mode;
+    setPopError(null);
+    paintPop();
+    let out;
+    try {
+      // The snapshot re-sent is the popover's — never over a newer write of the same link (another
+      // tab's 「공유」 after a follow-up): its content would be rolled back (Codex ui 1R).
+      out = await writeUnderLock(async () => (await linkMovedOn(sessionId, base)) ? { error: 'stale' } : writeShare(sessionId, SHARE_ASK_LATEST, snapshot, mode, '', ''));
+    } catch {
+      out = { error: 'generic' };
+    } finally {
+      busy = false;
+      pop.askedAuthor = null;
+    }
+    syncShareButton();
+    if (gen !== my) return;
+    if (out.error) { paintPop(); setPopError(out.error); return; }
+    Object.assign(pop, { share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: mode !== SHARE_AUTHOR_ANON && out.settled !== mode, subKey: '' });
+    paintPop();
+  }
+  async function deletePop() {
+    const id = pop && pop.share ? pop.share.id : null;
+    if (busy || !id) return;
+    const my = gen;
+    busy = true;
+    setPopError(null);
+    paintPop();
+    let res;
+    try {
+      res = await deleteLocked(id);
+    } catch {
+      res = null;
+    } finally {
+      busy = false;
+    }
+    syncShareButton();
+    if (gen !== my) return;
+    pop.confirming = false;
+    if (!deleted(res)) { paintPop(); setPopError(errCodeOf(res)); return; }
+    track('share_delete', { from: 'popover' });
+    Object.assign(pop, { phase: 'deleted', share: null, statusKey: 'share_pop_deleted', subKey: '', pwEditing: false });
+    paintPop();
+    try { pop.node.focus({ preventScroll: true }); } catch { /* focus is a nicety */ }
   }
 
   // ── 「내 공유 링크」: the server's list (a share outlives the history entry it came from) ──
@@ -628,12 +1269,16 @@ export function installShare(ctx) {
     clear(dlg.mine);
     if (!res || res.ok !== true) { dlg.mine.appendChild(el('p', 'cmp-share-error', t('share_err_generic'))); return; }
     if (!res.shares.length) { dlg.mine.appendChild(el('p', 'cmp-share-note', t('share_mine_empty'))); return; }
+    // A private share has no title on the server (it would show before the password): this browser's record names it.
+    await loadShares();
+    if (my !== mineSeq || dlg.node.hidden || dlg.mine.hidden) return;
+    const localTitle = (id) => { const v = Object.values(state.shares).find((r) => r.id === id); return v ? v.title || v.label || '' : ''; };
     for (const s of res.shares) {
       // The link is spelled here from the id (the SW's `url` is not trusted as an href).
       const shareHref = shareUrlOf(s.id);
       if (!shareHref) continue;
       const row = el('div', 'cmp-share-mine-row');
-      row.appendChild(ctx.link(shareHref, s.title || t(s.kind === 'debate' ? 'share_kind_debate' : 'share_kind_compare'), 'cmp-share-mine-title'));
+      row.appendChild(ctx.link(shareHref, s.title || localTitle(s.id) || t(s.kind === 'debate' ? 'share_kind_debate' : 'share_kind_compare'), 'cmp-share-mine-title'));
       const date = new Date(s.createdAt);
       row.appendChild(el('span', 'cmp-share-mine-meta', [Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(), t('share_views', s.views)].filter(Boolean).join(' · ')));
       const del = el('button', 'cmp-btn cmp-btn-sm cmp-share-delete', t('share_delete'));

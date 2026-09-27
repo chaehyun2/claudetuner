@@ -69,6 +69,29 @@ export function installExport(ctx) {
     return svg;
   }
   /**
+   * The link glyph (two chain links) in the same line style as copyIcon — the share affordances
+   * use it instead of the 🔗 emoji, which rendered as a loud colour picture next to the copy icon.
+   */
+  function linkIcon() {
+    const svg = doc.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.5');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('class', 'cmp-link-icon');
+    for (const d of ['M6.8 9.2a2.8 2.8 0 0 0 4 0l2.2-2.2a2.8 2.8 0 0 0-4-4l-.9.9', 'M9.2 6.8a2.8 2.8 0 0 0-4 0L3 9a2.8 2.8 0 0 0 4 4l.9-.9']) {
+      const p = doc.createElementNS(SVG_NS, 'path');
+      p.setAttribute('d', d);
+      svg.appendChild(p);
+    }
+    return svg;
+  }
+  /**
    * A ghost icon button that copies whatever `getText()` returns at click time — the RAW text of a
    * turn (`turn.text`, markdown source), never the rendered DOM. Success shows 「복사됨」 for
    * COPY_FEEDBACK_MS; a failed copy leaves the button as it was (nothing to undo, nothing to say).
@@ -213,7 +236,7 @@ export function installExport(ctx) {
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
-    copyText, focusQuietly, copyIcon, clearCopyFeedback, attachCopy, copyButton, quoteLines, markdownFor,
+    copyText, focusQuietly, copyIcon, linkIcon, clearCopyFeedback, attachCopy, copyButton, quoteLines, markdownFor,
     participatingColumns, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, columnHasAnswer,
     syncCopyAll, copyFeedback,
   });

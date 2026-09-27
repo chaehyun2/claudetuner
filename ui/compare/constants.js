@@ -103,6 +103,8 @@ export const SHARE_OP_CREATE = 'create';
 export const SHARE_OP_UPDATE = 'update';
 export const SHARE_OP_DELETE = 'delete';
 export const SHARE_OP_LIST = 'list';
+/** Set / change (a string) or remove (null) the password of an existing share — bg/compare.js shareRequest. */
+export const SHARE_OP_PASSWORD = 'password';
 export const SHARE_AUTHOR_ANON = 'anon';
 export const SHARE_AUTHOR_NAME = 'name';
 export const SHARE_AUTHOR_NAME_PHOTO = 'name_photo';
@@ -135,6 +137,12 @@ export function shareUrlOf(id) {
 /** Server caps the dialog mirrors (worker/src/utils/compare-share.ts TITLE_MAX / AUTHOR_NAME_MAX). */
 export const SHARE_TITLE_INPUT_MAX = 120;
 export const SHARE_NAME_INPUT_MAX = 40;
+/** Who may open a share (#1784 U5): anyone with the link, or only with the password the server checks. */
+export const SHARE_VIS_PUBLIC = 'public';
+export const SHARE_VIS_PRIVATE = 'private';
+/** The server's password bounds (worker validPassword, code points after NFC). */
+export const SHARE_PASSWORD_MIN = 6;
+export const SHARE_PASSWORD_INPUT_MAX = 128;
 // Analytics `send.models`: a target with no model choice (no catalog / the provider default) reads as this.
 export const MODELS_CSV_AUTO = 'auto';
 // …and each id is cut to its last path segment and this many chars, so three `provider:id` pairs
@@ -172,6 +180,11 @@ export const COMPOSER_MAX_HEIGHT = 200;
 // pill sits at the bottom of that column and jumps to the end. Distances in px.
 export const FOLLOW_AT_BOTTOM_PX = 50;   // this close to the end counts as "at the bottom"
 export const FOLLOW_ANCHOR_TOP_PX = 16;  // where the overflowing answer's start is anchored (below the body top)
+// Narrow layout: at or under this viewport width the page stacks into one column, the topbar folds its
+// secondary controls into 「⋯」 and the debate's pick chips scroll on one line (#1713, #1819).
+// compare.css's `@media (max-width: 720px)` blocks are the same number (pinned by test:compare-share-dialog-probe).
+export const NARROW_MAX_PX = 720;
+export const NARROW_MEDIA = `(max-width: ${NARROW_MAX_PX}px)`;
 // Usage gauge window labels (windowText): a span under a day reads in hours, else in days.
 export const SECONDS_PER_HOUR = 3600;
 export const SECONDS_PER_DAY = 86400;
@@ -396,7 +409,7 @@ export const TURN_KIND_DEBATE = 'debate';
 // and one request on the user's own AI account; 「▶ 계속」 buys another budget), and a pause before the
 // next send once the tab has been hidden for DEBATE_HIDDEN_PAUSE_MS. An AI moderator may only END
 // after DEBATE_MIN_TURNS_TO_END debater turns.
-export const DEBATE_SEND_BUDGET = 40;
+export const DEBATE_SEND_BUDGET = 50;
 export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
 // chrome.storage.local keys: the setup choices (toggle, moderator, stance) and the aliases (colId → name).

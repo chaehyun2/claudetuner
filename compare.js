@@ -72,6 +72,7 @@ const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl } from './ui/compare/helpers.js';
+import { NARROW_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
 import { installColumnGate } from './ui/compare/column-gate.js';
@@ -451,8 +452,9 @@ export function mountComparePage(deps) {
   feedbackLink.appendChild(feedbackGlyph);
   feedbackLink.appendChild(el('span', null, t('feedback')));
   topbar.appendChild(feedbackLink);
+  let srcChip = null;
   if (src) {
-    const chip = el('span', 'cmp-src-chip');
+    const chip = srcChip = el('span', 'cmp-src-chip');
     chip.appendChild(dot(src));
     chip.appendChild(el('span', null, t('question_from', PROVIDER_META[src].label)));
     topbar.appendChild(chip);
@@ -506,6 +508,8 @@ export function mountComparePage(deps) {
   shareBtn.hidden = true;
   shareBtn.disabled = true;
   shareBtn.setAttribute('aria-haspopup', 'dialog');
+  // Shown only once this conversation has a link (share.js toggles .is-shared) — CSS.
+  shareBtn.prepend(ctx.linkIcon());
   topbarSide.appendChild(shareBtn);
   const copyAllBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-copy-all', t('copy_all'));
   copyAllBtn.id = 'cmp-copy-all';
@@ -533,12 +537,76 @@ export function mountComparePage(deps) {
   newChatBtn.disabled = true;
   topbarSide.appendChild(newChatBtn);
   topbar.appendChild(topbarSide);
+  // 「⋯」 (#1819): at narrow widths the secondary controls — 공유 · 전체 복사 · the session's history
+  // mode · the source chip · 의견 보내기 — fold into one disclosure menu, so the bar keeps two lines
+  // (at 420px it was four). The nodes themselves move (a comment marks each one's home), so every
+  // hidden / disabled / label update elsewhere keeps working on them unchanged.
+  const moreWrap = el('div', 'cmp-more');
+  moreWrap.hidden = true;
+  const moreBtn = el('button', 'cmp-btn cmp-btn-sm cmp-more-btn', '⋯');
+  moreBtn.id = 'cmp-more';
+  moreBtn.type = 'button';
+  moreBtn.title = t('more_actions');
+  moreBtn.setAttribute('aria-label', t('more_actions'));
+  moreBtn.setAttribute('aria-expanded', 'false');
+  moreBtn.setAttribute('aria-controls', 'cmp-more-panel');
+  const morePanel = el('div', 'cmp-more-panel');
+  morePanel.id = 'cmp-more-panel';
+  morePanel.hidden = true;
+  morePanel.setAttribute('role', 'group');
+  morePanel.setAttribute('aria-label', t('more_actions'));
+  moreWrap.appendChild(moreBtn);
+  moreWrap.appendChild(morePanel);
+  topbar.insertBefore(moreWrap, topbarSide);
+  const foldable = [shareBtn, copyAllBtn, modeChip, srcChip, feedbackLink].filter(Boolean).map((node) => {
+    const home = doc.createComment('');
+    node.before(home);
+    return { node, home };
+  });
+  let topbarFolded = false;
+  function setMoreOpen(open) {
+    morePanel.hidden = !open;
+    moreBtn.setAttribute('aria-expanded', String(open));
+  }
+  function setTopbarFolded(fold) {
+    if (fold === topbarFolded) return;
+    topbarFolded = fold;
+    setMoreOpen(false);
+    for (const { node, home } of foldable) { if (fold) morePanel.appendChild(node); else home.after(node); }
+    moreWrap.hidden = !fold;
+    topbar.classList.toggle('is-folded', fold);
+  }
+  moreBtn.addEventListener('click', () => {
+    const open = morePanel.hidden;
+    setMoreOpen(open);
+    if (!open) return;
+    const first = Array.from(morePanel.children).find((n) => !n.hidden && !n.disabled && (n.tagName === 'BUTTON' || n.tagName === 'A'));
+    if (first) first.focus();
+  });
+  // An action taken from the menu closes it — except 전체 복사, whose 「복사됨」 is the only sign it worked.
+  morePanel.addEventListener('click', (e) => {
+    const hit = e.target && e.target.closest ? e.target.closest('button, a') : null;
+    if (hit && hit !== copyAllBtn) setMoreOpen(false);
+  });
+  doc.addEventListener('pointerdown', (e) => { if (!morePanel.hidden && !(e.target && moreWrap.contains(e.target))) setMoreOpen(false); });
+  moreWrap.addEventListener('focusout', (e) => { if (!morePanel.hidden && e.relatedTarget && !moreWrap.contains(e.relatedTarget)) setMoreOpen(false); });
+  doc.addEventListener('keydown', (e) => {
+    if (!e || e.key !== 'Escape' || morePanel.hidden) return;
+    e.preventDefault();
+    setMoreOpen(false);
+    focusQuietly(moreBtn);
+  });
   root.appendChild(topbar);
-  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, shareBtn, copyAllBtn, reopenBtn, stopBtn, newChatBtn });
+  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, shareBtn, copyAllBtn, reopenBtn, stopBtn, newChatBtn, moreBtn });
 
   // ── copy to clipboard: ui/compare/export.js (installExport, installed above) ──
   attachCopy(copyAllBtn, () => compareMarkdown(), (copied) => { copyAllBtn.textContent = t(copied ? 'copied' : 'copy_all'); }, COPY_KIND_ALL, null);
-  shareBtn.addEventListener('click', () => ctx.openShareDialog(null, shareBtn));
+  // The dialog hands focus back to whichever of 공유 / 「⋯」 is on screen WHEN IT CLOSES — the width
+  // may cross the fold while it is open, and 공유 sits in the closed menu while folded. The one-click
+  // popover hangs from the same one (`anchor`).
+  const shareHome = () => (topbarFolded ? moreBtn : shareBtn);
+  const shareOpener = { focus: () => focusQuietly(shareHome()), anchor: shareHome };
+  shareBtn.addEventListener('click', () => ctx.openShareDialog(null, shareOpener));
 
   // ── feedback / report: the prefilled inquiry link (topbar) ──
   // The href is rebuilt the moment the user REACHES for the link — pointerdown covers mouse and
@@ -1497,6 +1565,8 @@ export function mountComparePage(deps) {
     modeChip.classList.toggle('is-incognito', !modeChip.hidden && !state.sessionSaveHistory);
     modeGlyph.hidden = modeChip.hidden || !!state.sessionSaveHistory;
     if (!modeChip.hidden) modeText.textContent = t(state.sessionSaveHistory ? 'mode_saved' : 'mode_incognito');
+    // A state, not a button (#1818 ⑤): the tooltip says what it means.
+    if (!modeChip.hidden) modeChip.title = t(state.sessionSaveHistory ? 'mode_saved_tip' : 'mode_incognito_tip');
   }
 
   // ── notices ──
@@ -2675,6 +2745,16 @@ export function mountComparePage(deps) {
     return checked.map((c) => colLabel(c)).join(' + ');
   }
 
+  /** The composers' placeholder: the debate's shorter one while the bar is folded (#1819 — one line at 420px). */
+  function syncComposerPlaceholders() {
+    const debating = ctx.debateActive();
+    // The short wording is for the eye at a narrow width only; the accessible name keeps the full one.
+    const full = t(debating ? 'debate_followup_placeholder' : 'followup_placeholder');
+    for (const c of composers) {
+      c.input.placeholder = t(debating ? (topbarFolded ? 'debate_followup_placeholder_short' : 'debate_followup_placeholder') : 'followup_placeholder');
+      c.input.setAttribute('aria-label', full);
+    }
+  }
   function updateControls() {
     // A counted quota at 0 disables every send (the dock, the follow-up composers, the per-column
     // inputs) through the ONE predicate the retry / Auto rows and the 「요약·비교」 button already read
@@ -2788,10 +2868,13 @@ export function mountComparePage(deps) {
     // enabled while an AI speaks (the words are queued for after its turn).
     ctx.renderDebateSetup();
     const debating = ctx.debateActive();
+    syncComposerPlaceholders();
     for (const c of composers) {
       c.meta.hidden = debating;
       c.attachBtn.hidden = debating;
-      c.input.placeholder = t(debating ? 'debate_followup_placeholder' : 'followup_placeholder');
+      // A debate has no 「follow-up question」: the button says what it does there (#1818 ①).
+      const sendText = t(debating ? 'send' : 'followup_send');
+      if (c.btn.textContent !== sendText) c.btn.textContent = sendText;
       if (debating && state.sessionStarted) {
         c.btn.disabled = exhausted || !canFollowUp();
         if (c.caption) c.caption.textContent = '';
@@ -2929,7 +3012,9 @@ export function mountComparePage(deps) {
   // 「내 공유 링크」 (share-ON batch review 1R ①): the always-reachable door to the public links this
   // account made — list and delete — independent of the conversation on screen. share.js decides
   // when it shows (syncMySharesEntry) and opens the dialog in manage mode.
-  const historySharesBtn = el('button', 'cmp-btn cmp-btn-sm cmp-history-shares', `\u{1F517} ${t('share_mine')}`);
+  const historySharesBtn = el('button', 'cmp-btn cmp-btn-sm cmp-history-shares');
+  historySharesBtn.appendChild(ctx.linkIcon());
+  historySharesBtn.appendChild(el('span', null, t('share_mine')));
   historySharesBtn.type = 'button';
   historySharesBtn.id = 'cmp-history-shares';
   historySharesBtn.hidden = true;
@@ -2958,8 +3043,10 @@ export function mountComparePage(deps) {
     // single-column range the mode ends rather than lingering as a stale class whose only effect
     // would be a `col_focus` event on every click in another column (substitute review 후속 2).
     try {
-      const narrow = win && typeof win.matchMedia === 'function' ? win.matchMedia('(max-width: 720px)') : null;
-      if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', (e) => { if (e.matches) setColumnFocus(null); });
+      // The same query folds the topbar into 「⋯」 and shortens the debate composer's placeholder (#1819).
+      const narrow = win && typeof win.matchMedia === 'function' ? win.matchMedia(NARROW_MEDIA) : null;
+      if (narrow) { setTopbarFolded(!!narrow.matches); syncComposerPlaceholders(); }
+      if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', (e) => { if (e.matches) setColumnFocus(null); setTopbarFolded(!!e.matches); syncComposerPlaceholders(); });
     } catch { /* no matchMedia (tests) */ }
     doc.addEventListener('click', (e) => {
       if (historyPanel.hidden || !e || !e.target) return;

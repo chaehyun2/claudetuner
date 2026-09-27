@@ -635,7 +635,9 @@ export function installPort(ctx) {
   // retry) — its wire `kind` is 'retry' whatever the turn kind; `round` is then always the
   // repeated round (retryPair offers nothing for a turn without one).
   // `via` (chat layout): SEND_VIA_COLUMN when the text came from a column's own composer — analytics only.
-  function beginSend(text, targets, type, skipped = [], kind = null, summary = null, round = null, retry = false, via = null) {
+  // `texts` (#1815): a SEND's per-column text, colId → string (the debate opening names each debater
+  // and its position); a column it does not name gets `text`.
+  function beginSend(text, targets, type, skipped = [], kind = null, summary = null, round = null, retry = false, via = null, texts = null) {
     ctx.clearNotice();
     state.sending = true;
     state.roundTargets = targets.slice();
@@ -708,6 +710,7 @@ export function installPort(ctx) {
     let msg;
     if (type === 'SEND') {
       msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: !!state.saveHistory };
+      if (texts) msg.texts = texts;
       // The pasted conversation this round continues (#1651). The worker holds both halves — the
       // continuation for the link's own column and the transcript for the others — so the page says
       // only WHETHER to use them, and in which language the frame should be written.

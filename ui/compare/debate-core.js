@@ -296,6 +296,51 @@ export function metaLine({ label, tierKey, secs }, t) {
   const lab = cleanMeta(label).slice(0, Math.max(0, room)).trim();
   return [lab, ...rest].filter(Boolean).join(SEP).slice(0, DEBATE_META_MAX);
 }
+/**
+ * The words for a model the SITE reported serving (#1818 ⑨): the catalog's display text when the id
+ * is a catalog row (`gpt-6-sol-wm` → 「GPT-6 Sol · 작업 모드」), else the reported label — never a bare
+ * id the catalog does not know (a label that only repeats its id says nothing a reader can use). ''
+ * when nothing readable is known. `catalogText(id)` = the catalog's text for an id, '' when absent.
+ */
+export function servedModelText(served, catalogText) {
+  if (!served || typeof served !== 'object') return '';
+  const id = served.id == null ? '' : String(served.id);
+  const label = served.label == null ? '' : String(served.label).trim();
+  const cat = id && typeof catalogText === 'function' ? String(catalogText(id) || '') : '';
+  if (cat) return cat;
+  return label && label !== id ? label : '';
+}
+
+// ── Korean particles ──
+const HANGUL_FIRST = 0xac00;
+const HANGUL_LAST = 0xd7a3;
+const HANGUL_FINALS = 28; // final-consonant slots per syllable (0 = none)
+// A Latin letter / digit read aloud in Korean that ends in a consonant (엘 엠 엔 알 · 영 일 삼 육 칠 팔).
+const LATIN_BATCHIM = new Set(['l', 'm', 'n', 'r', '0', '1', '3', '6', '7', '8']);
+// Grammar, not UI copy (the ko strings carry the sentence): escaped so the page's source stays Hangul-free.
+const SUBJECT_AFTER_BATCHIM = '\uC774'; // 이
+const SUBJECT_AFTER_VOWEL = '\uAC00'; // 가
+/**
+ * Whether `word` ends in a final consonant as read in Korean — true / false, or null when its last
+ * character says nothing (an emoji, a symbol). Closing brackets, quotes and spaces are skipped.
+ */
+export function endsInBatchim(word) {
+  const chars = [...String(word == null ? '' : word).replace(/[\s)\]}」』"'”’.,!?…·]+$/u, '')];
+  const last = chars[chars.length - 1];
+  if (!last) return null;
+  const code = last.codePointAt(0);
+  if (code >= HANGUL_FIRST && code <= HANGUL_LAST) return (code - HANGUL_FIRST) % HANGUL_FINALS !== 0;
+  if (/^[a-z0-9]$/i.test(last)) return LATIN_BATCHIM.has(last.toLowerCase());
+  return null;
+}
+/**
+ * The subject particle for `word` (#1818 ②): 「이」 after a final consonant, 「가」 otherwise, '' when
+ * the word's end cannot tell — the sentence then reads without one rather than with 「이(가)」.
+ */
+export function subjectParticle(word) {
+  const b = endsInBatchim(word);
+  return b === null ? '' : b ? SUBJECT_AFTER_BATCHIM : SUBJECT_AFTER_VOWEL;
+}
 
 /** Every line quoted, the first one carrying `first` — a line break cannot leave the quote (export.js's rule). */
 const quoteMd = (text, first = '') => String(text).split('\n').map((line, i) => `> ${i === 0 ? first : ''}${line}`).join('\n');
@@ -303,8 +348,9 @@ const quoteMd = (text, first = '') => String(text).split('\n').map((line, i) => 
  * A debate session as ONE markdown document (「전체 복사」, #1769 §0.4 ⑤): the topic, then what the
  * timeline SHOWS, in its order — never the composed prompts the columns' user turns carry (they
  * would read as the user's questions) nor a moderator's control line (`text` is the shown body).
- *   entries: { role, name, text, meta?, note?, opening? } — `note` is the line a failed / cut turn
- *            shows under whatever it wrote; an entry with neither text nor note is left out.
+ *   entries: { role, name, text, meta?, note?, opening?, conclusion? } — `note` is the line a failed /
+ *            cut turn shows under whatever it wrote; an entry with neither text nor note is left out;
+ *            `conclusion` = the moderator's closing message, under the same label the timeline shows.
  */
 export function debateMarkdown({ topic, entries }, t) {
   const qLines = String(topic || '').split('\n');
@@ -318,6 +364,7 @@ export function debateMarkdown({ topic, entries }, t) {
     if (e.opening && !openingShown) { blocks.push(`_${t('debate_opening_divider')}_`); openingShown = true; }
     if (e.role === ROLE_USER) { blocks.push(quoteMd(text, `**${e.name}:** `)); continue; }
     const name = e.role === ROLE_MODERATOR ? t('debate_name_moderator', e.name) : e.name;
+    if (e.conclusion) blocks.push('---', `## ${t('debate_conclusion')}`);
     blocks.push(`**${name}**${e.meta ? ` \u00B7 ${e.meta}` : ''}`);
     if (text.trim()) blocks.push(text);
     if (note) blocks.push(`_${note}_`);
@@ -509,13 +556,17 @@ export function stancesOf(ids, stance) {
 // (쌍둥이 제미, 교수 GPT), and a model reads the trait as a title and calls the speaker by the tail
 // alone — 「제미 님」「GPT 님」 — which names nobody once two of a service take part.
 /**
- * The opening: the same text to every debater (the first SEND carries ONE text), so it names the
- * cast but not the reader — each AI learns its own name on its first reply turn. Everyone answers
- * blind (nobody has seen anyone else yet), which is the point of opening simultaneously.
+ * The opening. Everyone answers blind (nobody has seen anyone else yet), which is the point of
+ * opening simultaneously. `self` = `{ name, stanceKey }` of the debater this copy goes to (the SEND
+ * carries one text per column — #1815): its own name and position on a line of their own, right
+ * before the task. The cast list alone was not enough — two columns of one service (GPT-6 Sol and
+ * GPT-6 Astra) cannot tell which list line is theirs, and one argued the other's side. Without
+ * `self` the text names the cast but not the reader (the generic copy the wire's `text` keeps).
  */
-export function openingPrompt({ t, names, moderatorName, stanceLines, topic, tone }) {
+export function openingPrompt({ t, names, moderatorName, stanceLines, topic, tone, self = null }) {
   const lines = [t('debate_open_head', names.join(', ')), t('debate_call_full_name'), moderatorName ? t('debate_open_moderator', moderatorName) : t('debate_open_user_moderates')];
   if (stanceLines && stanceLines.length) lines.push(t('debate_open_stances'), ...stanceLines);
+  if (self && self.name) lines.push(t('debate_turn_you_are', self.name) + (self.stanceKey ? ` ${t('debate_turn_stance', t(self.stanceKey))}` : ''));
   lines.push(t(friendly(tone) ? 'debate_open_task_friends' : 'debate_open_task'));
   const style = styleLine(tone, t, false);
   if (style) lines.push(style);
@@ -545,7 +596,7 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
  * its reply ends with a control line (MODERATOR_CONTROL_RE) the page parses and hides.
  * `first` = its first call (it has not seen the topic yet, so it gets it here).
  */
-export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false }) {
+export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false }) {
   const lines = [];
   if (first) lines.push(t(friendly(tone) ? 'debate_mod_intro_friends' : 'debate_mod_intro'), t('debate_topic_label'), neutraliseQuoted(String(topic || '').slice(0, DEBATE_TOPIC_MAX)));
   // Numbered (plan §14.2): the moderator names the next speaker by NUMBER — free-text names were
@@ -555,8 +606,17 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   if (delta.items.length) lines.push(renderItems(delta.items, t));
   if (delta.omitted) lines.push(t('debate_omitted', delta.omitted));
   // Right after the opening nobody spoke last — the 「you may not pick X」 clause is left out then.
+  // Which call is a CONCLUSION call is decided here, not guessed from the reply: `wrapUp` (the budget's
+  // last send — the page sends it only to close) MUST end, so its task is the conclusion task and
+  // the short 「one or two sentences」 one is left out (#1817 follow-up). Any other call with `canEnd`
+  // only MAY end — the moderator decides — so it keeps the short task, and the END branch of the
+  // control line (debate_mod_control) carries the conclusion format for that case.
   const taskKey = friendly(tone) ? 'debate_mod_task_friends' : 'debate_mod_task';
-  lines.push(lastName ? t(taskKey, lastName) : t(`${taskKey}_open`));
+  if (wrapUp) lines.push(t('debate_mod_task_conclude'));
+  else lines.push(lastName ? t(taskKey, lastName) : t(`${taskKey}_open`));
+  // A free debate whose openings all land on one side is a dull one (#1817 ④): on its first call —
+  // the one that reads the openings — the moderator may hand one debater the other side.
+  if (first && freeStance) lines.push(t('debate_mod_same_side'));
   lines.push(t('debate_call_full_name'));
   const style = styleLine(tone, t, true);
   if (style) lines.push(style);
@@ -686,6 +746,16 @@ export function moderatorMayEnd({ turnsUsed, minTurns, queued }) {
 }
 
 /**
+ * Who is still owed the floor once the user's pick (`forced`) has spoken (#1817 ③): the debater the
+ * moderator had just picked (`pendingNext`) keeps its turn — its question sits in the transcript,
+ * and a user interjecting must not make it vanish unanswered. null when there is none, or the user
+ * picked that same debater.
+ */
+export function owedAfterForced(pendingNext, forced) {
+  return pendingNext && pendingNext !== forced ? pendingNext : null;
+}
+
+/**
  * What the budget allows next (plan §15.1 ①③): 'stop' when nothing is left, 'wrapup' when ONE send
  * is left and an AI moderator can use it to close the debate (not when the user just named someone —
  * their pick is honoured), 'go' otherwise.
@@ -779,11 +849,12 @@ export function readDebateRecord(raw, colIds, textMax) {
       continue;
     }
     if (!inCast(e.c) || !Number.isInteger(e.r)) return undefined;
-    for (const k of ['mod', 'o']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
+    for (const k of ['mod', 'o', 'end']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
+    if (e.end && !e.mod) return undefined; // only a moderator ends a debate
     if ((e.tk !== undefined && !TIER_KEYS.includes(e.tk)) || (e.s !== undefined && !(Number.isFinite(e.s) && e.s >= 0))) return undefined;
     // A moderator line is the moderator column's; a debater's is a debater's (the flag decides how the text is read).
     if ((e.mod === true) !== (e.c === modCol)) return undefined;
-    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
+    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.end ? { end: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
   }
   const prev = raw.prev == null ? null : (isDebater(raw.prev) ? raw.prev : undefined);
   const fr = idList(raw.fr === undefined ? [] : raw.fr, isDebater);
@@ -880,7 +951,7 @@ export function transcriptFromRecord(record, lookup) {
     if (e.u !== undefined) { transcript.push({ seq: e.q, speaker: SPEAKER_USER, role: ROLE_USER, text: e.u }); continue; }
     const raw = lookup(e.c, e.r);
     const text = raw ? (e.mod ? splitControl(raw).body : String(raw)) : '';
-    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
+    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.end ? { conclusion: true } : {}), ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
     if (!e.mod && text.trim()) lastSpoke.set(e.c, e.q);
   }
   return { transcript, lastSpoke };

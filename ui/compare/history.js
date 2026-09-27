@@ -426,7 +426,8 @@ export function installHistory(ctx) {
       }
       // A conversation shared from this browser (#1784 U3, the share map beside the history).
       if (ctx.shareFor && ctx.shareFor(entry.id)) {
-        const shared = el('span', 'cmp-history-shared', '\u{1F517}');
+        const shared = el('span', 'cmp-history-shared');
+        shared.appendChild(ctx.linkIcon());
         shared.title = t('history_shared');
         shared.setAttribute('aria-label', t('history_shared'));
         meta.appendChild(shared);

@@ -24,7 +24,7 @@
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
 //                         saveHistory}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
-//                         COMPARE_SHARE{op: create|update|delete|list, …} → {ok, …} | {ok:false, status, code} (compare page only — see shareRequest)
+//                         COMPARE_SHARE{op: create|update|delete|list|image|password, …} → {ok, …} | {ok:false, status, code} (compare page only — see shareRequest)
 //   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryOnce? (the boolean is this session's only — not stored as the preference), resume?, kind?, round?, src?, session?, attachments?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
 //                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
@@ -331,6 +331,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'share_mine_open',
   // Share links (#1784 U3): kind / author mode / 0-1 flags only — never a title, a link or an id.
   'share_open', 'share_create', 'share_update', 'share_delete', 'share_copy',
+  // One-click share's popover: a password set / removed on an existing link (action + 0-1 flag, never the password).
+  'share_password',
   // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
   'share_import',
 ]);
@@ -400,12 +402,20 @@ export const COMPARE_DEBATE_FLAG_FIELD = 'compare_debate';
 export const COMPARE_SHARE_FLAG_FIELD = 'compare_share';
 // Share links (#1784 U3) — the wire of runtime message COMPARE_SHARE (see shareRequest). The limits
 // mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
-export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list']);
+export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list', 'image', 'password']);
+export const SHARE_VISIBILITIES = Object.freeze(['public', 'private']);
 export const SHARE_AUTHOR_MODES = Object.freeze(['anon', 'name', 'name_photo']);
 export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
+/** A public share's content revision (worker CONTENT_REV_RE): create/update answer it, the card upload carries it back. */
+export const SHARE_REV_RE = /^[A-Za-z0-9]{12}$/;
 export const SHARE_REQUEST_MAX_BYTES = 640 * 1024;
+/** A share card PNG as standard base64 (#1784 U6): the server's own request cap (it decodes ≤ 500 KB). */
+export const SHARE_IMAGE_B64_MAX = 700 * 1024;
 export const SHARE_AUTHOR_NAME_MAX = 40;
 export const SHARE_TITLE_MAX = 120;
+/** A private share's password (#1784 U5): the server's own bounds (worker validPassword). */
+export const SHARE_PASSWORD_MIN = 6;
+export const SHARE_PASSWORD_MAX = 128;
 export const SHARE_LIST_MAX = 200;
 export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
 /** The one extension page that may create, edit, list or delete shares. */
@@ -585,9 +595,8 @@ export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
 /** A share page's JSON is at most the stored snapshot (512 KB) — the read is capped a little above. */
 export const SHARE_CONTENT_MAX_BYTES = 640 * 1024;
 /**
- * What a pasted link is: `{kind:'vendor', provider}` | `{kind:'share', id, private}` | null.
- * `private` = the link carries a fragment (a private share's key, U5) — its page cannot be read
- * without the password, so the read refuses it with its own code instead of a generic failure.
+ * What a pasted link is: `{kind:'vendor', provider}` | `{kind:'share', id}` | null. (A fragment is
+ * ignored: whether a share is private is the page's answer, not the link's — readShareLink.)
  */
 export function linkTarget(url) {
   const provider = providerForLink(url);
@@ -596,7 +605,7 @@ export function linkTarget(url) {
   try { u = new URL(String(url).trim()); } catch { return null; }
   if (u.origin !== SHARE_SITE_ORIGIN) return null;
   const m = SHARE_LINK_PATH_RE.exec(u.pathname);
-  return m ? { kind: 'share', id: m[1], private: u.hash.length > 1 } : null;
+  return m ? { kind: 'share', id: m[1] } : null;
 }
 /** A column's name the way the share page writes it (the provider, then the model — not twice). */
 function shareColumnName(col) {
@@ -858,7 +867,7 @@ function logInfo(...args) {
 /** READ_LINK of a share page (#1784 U4): its own refusals, each with its own sentence on the page. */
 export const SHARE_LINK_CODES = Object.freeze({
   DELETED: 'share_deleted',   // 410 — the sharer (or an operator) deleted it
-  PRIVATE: 'share_private',   // a private share (U5) — not readable here yet
+  PRIVATE: 'share_private',   // a password-gated share (U5) — continuing one is not offered yet
   NOT_FOUND: 'not_found',     // no such share — the vendored clients' own code, so the page's sentence is reused
 });
 /** COMPARE_SHARE failures the SW decides itself (the server's own codes pass through as they are). */
@@ -866,6 +875,7 @@ export const SHARE_CODES = Object.freeze({
   OFF: 'share_off',              // the `compare_share` flag is off: no create / edit from the page
   TOO_LARGE: 'payload_too_large', // the same code the server answers 413 with
   BAD_RESPONSE: 'bad_response',  // a 2xx without a usable id
+  BAD_PASSWORD: 'bad_password',  // a private share's password outside SHARE_PASSWORD_MIN..MAX (the server's code too)
 });
 export const SW_CODES = Object.freeze({
   AUTH_REQUIRED: 'auth_required',   // readiness: no provider session (or no host permission to see one)
@@ -941,6 +951,19 @@ function sanitizeModelMap(raw) {
     const v = raw[p];
     if (v === null) out[p] = null;
     else if (typeof v === 'string' && v.trim()) out[p] = v.trim();
+  }
+  return out;
+}
+
+// A SEND's `texts` map (#1815 — the debate opening names each debater and its position): colId →
+// the text THAT column is asked instead of `text`. Own string entries for the round's columns only,
+// blank ones dropped; anything else is ignored (the column gets `text`). Never throws.
+export function sanitizeColumnTexts(raw, colIds) {
+  const out = new Map();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const id of colIds) {
+    const v = Object.hasOwn(raw, id) ? raw[id] : undefined;
+    if (typeof v === 'string' && v.trim()) out.set(id, v);
   }
   return out;
 }
@@ -2100,9 +2123,19 @@ export function createCompareController({
   // ── Share links (#1784 U3, docs/plans/compare-share.md §0.5) ─────────────────────────────
   // runtime message COMPARE_SHARE{op, …} → the ext_token routes `/api/compare/shares*`:
   //   create {snapshot, author, authorName?}      → {ok, id, url, author{mode, name?}, createdAt}
-  //   update {id, snapshot, author, authorName?}  → {ok, id, url, author{mode, name?}, updatedAt}
+  //   create {snapshot, visibility:'private', password} → the same — a PRIVATE share (U5): anonymous,
+  //          behind the password on the server (its content updates stay private and anonymous; the
+  //          password itself changes only through op password). 🔴 The password is passed through to
+  //          the server once and kept nowhere (not logged, not stored, not in the reply)
+  //   update {id, snapshot, author, authorName?}  → {ok, id, url, author{mode, name?}, updatedAt, visibility?}
   //   delete {id}                                 → {ok}
   //   list                                        → {ok, shares[{id, url, kind, author, title, createdAt, updatedAt, views}]}
+  //   password {id, password: string | null}     → {ok, id, url, visibility, rev?} — set / change (string) or
+  //          remove (null) the password of an EXISTING share (one-click share). Same 🔴 as create: the
+  //          password goes to the server once and is kept nowhere. `rev` only when it turned public (the
+  //          page uploads a fresh card for it)
+  //   image {id, png}                             → {ok, image} — the link-preview card of a PUBLIC share (U6),
+  //          `png` = standard base64; best effort on the page. The server refuses a private share's card
   //   failure                                     → {ok:false, status, code} (the server's `code`, or ours)
   // The snapshot is built by the page (ui/compare/share-snapshot.js) and REBUILT by the server from
   // its whitelist, so this hop only bounds and forwards it. 🔴 Only the compare page may ask
@@ -2115,6 +2148,11 @@ export function createCompareController({
       return u.protocol === 'chrome-extension:' && u.host === runtime.id && u.pathname === SHARE_PAGE_PATH;
     } catch { return false; }
   };
+  const passwordOk = (pw) => {
+    if (typeof pw !== 'string') return false;
+    const n = Array.from(pw.normalize('NFC')).length;
+    return n >= SHARE_PASSWORD_MIN && n <= SHARE_PASSWORD_MAX;
+  };
   const shareRow = (r) => (r && typeof r.id === 'string' && SHARE_ID_RE.test(r.id) ? {
     id: r.id, url: `${SHARE_SITE_ORIGIN}/c/${r.id}`, kind: r.kind === 'debate' ? 'debate' : 'compare',
     author: SHARE_AUTHOR_MODES.includes(r.author) ? r.author : 'anon',
@@ -2126,14 +2164,30 @@ export function createCompareController({
     const op = message.op;
     if (!fromSharePage(sender) || !SHARE_OPS.includes(op)) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
     const id = message.id;
-    if ((op === 'update' || op === 'delete') && !(typeof id === 'string' && SHARE_ID_RE.test(id))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+    if ((op === 'update' || op === 'delete' || op === 'image' || op === 'password') && !(typeof id === 'string' && SHARE_ID_RE.test(id))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
     let init = { method: 'GET' };
     let mode = 'anon';
-    if (op === 'create' || op === 'update') {
-      if (!(await fetchCompareFlags()).share) return { ok: false, status: 0, code: SHARE_CODES.OFF };
-      mode = SHARE_AUTHOR_MODES.includes(message.author) ? message.author : 'anon';
-      const name = typeof message.authorName === 'string' ? message.authorName.slice(0, SHARE_AUTHOR_NAME_MAX) : '';
-      const body = JSON.stringify({ snapshot: message.snapshot, author: mode, ...(name ? { authorName: name } : {}) });
+    const writes = op === 'create' || op === 'update' || op === 'image' || op === 'password';
+    if (writes && !(await fetchCompareFlags()).share) return { ok: false, status: 0, code: SHARE_CODES.OFF };
+    if (op === 'image') {
+      const png = message.png;
+      if (typeof png !== 'string' || !png || !SEND_ATTACHMENT_B64_RE.test(png)) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+      if (png.length > SHARE_IMAGE_B64_MAX) return { ok: false, status: 413, code: SHARE_CODES.TOO_LARGE };
+      // The revision the card was drawn from: the server refuses (409) a card of content that has since changed.
+      if (typeof message.rev !== 'string' || !SHARE_REV_RE.test(message.rev)) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+      init = { method: 'PUT', headers: { ...JSON_HEADERS }, body: JSON.stringify({ png, rev: message.rev }) };
+    } else if (op === 'password') {
+      // null = remove the password (public again); anything else must be a password the server takes.
+      if (message.password !== null && !passwordOk(message.password)) return { ok: false, status: 0, code: SHARE_CODES.BAD_PASSWORD };
+      init = { method: 'PUT', headers: { ...JSON_HEADERS }, body: JSON.stringify({ password: message.password }) };
+    } else if (op === 'create' || op === 'update') {
+      const priv = op === 'create' && message.visibility === 'private';
+      if (priv && !passwordOk(message.password)) return { ok: false, status: 0, code: SHARE_CODES.BAD_PASSWORD };
+      mode = priv ? 'anon' : SHARE_AUTHOR_MODES.includes(message.author) ? message.author : 'anon';
+      const name = !priv && typeof message.authorName === 'string' ? message.authorName.slice(0, SHARE_AUTHOR_NAME_MAX) : '';
+      const body = JSON.stringify(priv
+        ? { snapshot: message.snapshot, visibility: 'private', password: message.password }
+        : { snapshot: message.snapshot, author: mode, ...(name ? { authorName: name } : {}) });
       // Measured here too: the server refuses a larger request anyway, but only after it is uploaded.
       if (new TextEncoder().encode(body).byteLength > SHARE_REQUEST_MAX_BYTES) return { ok: false, status: 413, code: SHARE_CODES.TOO_LARGE };
       init = { method: op === 'create' ? 'POST' : 'PUT', headers: { ...JSON_HEADERS }, body };
@@ -2141,7 +2195,7 @@ export function createCompareController({
     let resp;
     try {
       const config = await getConfig();
-      const path = op === 'create' || op === 'list' ? '' : `/${id}`;
+      const path = op === 'create' || op === 'list' ? '' : op === 'image' ? `/${id}/image` : op === 'password' ? `/${id}/password` : `/${id}`;
       resp = await authedFetch(config, `${config.serverUrl}/api/compare/shares${path}`, init);
     } catch {
       return { ok: false, status: 0, code: SW_CODES.NETWORK_ERROR };
@@ -2149,11 +2203,25 @@ export function createCompareController({
     const body = op === 'delete' ? null : await readJson(resp);
     if (!resp.ok) {
       const err = op === 'delete' ? await readJson(resp) : body;
-      return { ok: false, status: resp.status, code: typeof err?.code === 'string' ? err.code.slice(0, OUTCOME_CODE_MAX) : 'http_error' };
+      // A 404 / 410 without a body code still means 「not there」 / 「deleted」 — the page forgets the link on those.
+      const bare = resp.status === 410 ? 'share_deleted' : resp.status === 404 ? 'not_found' : 'http_error';
+      return { ok: false, status: resp.status, code: typeof err?.code === 'string' ? err.code.slice(0, OUTCOME_CODE_MAX) : bare };
     }
     if (op === 'delete') return { ok: true };
+    if (op === 'image') {
+      // Only our own page's URL is passed on (the page does not show it; it is for the record).
+      const image = typeof body?.image === 'string' && body.image.startsWith(`${SHARE_SITE_ORIGIN}/c/${id}/image`) ? body.image : '';
+      return image ? { ok: true, image } : { ok: false, status: resp.status, code: SHARE_CODES.BAD_RESPONSE };
+    }
     if (op === 'list') return { ok: true, shares: (Array.isArray(body?.shares) ? body.shares : []).slice(0, SHARE_LIST_MAX).map(shareRow).filter(Boolean) };
-    if (!body || typeof body.id !== 'string' || !SHARE_ID_RE.test(body.id) || (op === 'update' && body.id !== id)) return { ok: false, status: resp.status, code: SHARE_CODES.BAD_RESPONSE };
+    if (!body || typeof body.id !== 'string' || !SHARE_ID_RE.test(body.id) || ((op === 'update' || op === 'password') && body.id !== id)) return { ok: false, status: resp.status, code: SHARE_CODES.BAD_RESPONSE };
+    const visibility = SHARE_VISIBILITIES.includes(body.visibility) ? body.visibility : null;
+    const rev = typeof body.rev === 'string' && SHARE_REV_RE.test(body.rev) ? body.rev : null;
+    if (op === 'password') {
+      // The visibility the server SETTLED is what the page shows — an answer without one is not a result.
+      if (!visibility) return { ok: false, status: resp.status, code: SHARE_CODES.BAD_RESPONSE };
+      return { ok: true, id: body.id, url: `${SHARE_SITE_ORIGIN}/c/${body.id}`, visibility, ...(visibility === 'public' && rev ? { rev } : {}) };
+    }
     // The author the server PUBLISHED (it falls back to anonymous when there is no usable name):
     // what the page shows as settled, never what it asked for.
     const a = body.author && SHARE_AUTHOR_MODES.includes(body.author.mode) ? body.author : { mode: 'anon' };
@@ -2162,6 +2230,8 @@ export function createCompareController({
       author: { mode: a.mode, ...(a.mode !== 'anon' && typeof a.name === 'string' ? { name: a.name.slice(0, SHARE_AUTHOR_NAME_MAX) } : {}) },
       ...(typeof body.createdAt === 'string' ? { createdAt: body.createdAt } : {}),
       ...(typeof body.updatedAt === 'string' ? { updatedAt: body.updatedAt } : {}),
+      ...(rev ? { rev } : {}),
+      ...(visibility ? { visibility } : {}),
     };
   }
 
@@ -3046,7 +3116,9 @@ export function createCompareController({
          * holding that conversation and `resume` puts it back on the thread, so repeating the
          * transcript would only pay twice for what it already knows.
          */
-        const textFor = (col) => (linkPrompt && col.id !== linkCol?.id ? linkPrompt : text);
+        // A SEND may ask each column its own text (`texts`); never beside a link, whose frame is the question.
+        const perCol = !followup && !linkPrompt ? sanitizeColumnTexts(message.texts, columns.map((col) => col.id)) : new Map();
+        const textFor = (col) => (linkPrompt && col.id !== linkCol?.id ? linkPrompt : perCol.get(col.id) || text);
         // What this round IS, for the usage row (cmp-beta contract): the page's `kind` when it is
         // one of COMPARE_KINDS, else derived from the message shape. Read here — before readiness
         // consumes the resume seeds — so a SEND{resume} without a kind still says 'resume'.
@@ -3219,11 +3291,11 @@ export function createCompareController({
     /**
      * A share page as a transcript (#1784 U4): its public JSON, read without credentials (the page
      * is public; the user's cookies have no business on the request). A deleted share answers 410
-     * → `share_deleted` (the chip says 「공유한 분이 삭제했어요」); a private one (U5) → `share_private`.
+     * → `share_deleted` (the chip says 「공유한 분이 삭제했어요」); a password-gated one (U5) answers
+     * `{private:true}` → `share_private` (continuing one is not offered yet).
      */
     async function readShareLink(target, signal) {
       const fail = (code) => Object.assign(new Error(code), { code });
-      if (target.private) throw fail(SHARE_LINK_CODES.PRIVATE);
       const res = await fetchImpl(`${SHARE_SITE_ORIGIN}/c/${target.id}/content`, { signal, credentials: 'omit', cache: 'no-store' });
       if (res.status === 410) throw fail(SHARE_LINK_CODES.DELETED);
       if (res.status === 404) throw fail(SHARE_LINK_CODES.NOT_FOUND);

@@ -15,14 +15,15 @@
 // • A speaker is told only what it has not received (`delivered` = the last transcript seq that was
 //   in a prompt it ANSWERED — a failed turn is re-sent next time rather than lost).
 // • A user message while an AI streams is QUEUED and applied after the turn; the latest `@name`
-//   wins; Stop aborts the stream and pauses, the queue survives.
+//   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
+//   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
 import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import {
   MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCES, STANCE_NONE, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
   DEBATE_DELTA_MAX, DEBATE_TOPIC_MAX, DEBATE_ALIAS_MAX, cleanAlias, aliasProblem, resolveNames, deltaFor, fitDelta, stancesOf,
-  openingPrompt, turnPrompt, moderatorPrompt, splitControl, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, tierOf, secondsBetween, metaLine, budgetStep, hiddenTooLong,
+  openingPrompt, turnPrompt, moderatorPrompt, splitControl, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
   SETTING_MODERATOR, SETTING_STANCE, SETTING_TONE, changedSettings, problemInSettings, defaultModerator, tierSlug,
@@ -49,6 +50,8 @@ const SUMMARY_TONE_CHARS = 20;
 // Where the focus goes when the ⚙ body opens from a line that hides (setSettingsOpen).
 const FOCUS_FIRST = 'first';
 const FOCUS_CAUSE = 'cause';
+// The ⚙ budget note per moderation (#1818 ③): an AI moderator's calls count, 「내가 진행」 waits for a pick.
+const BUDGET_HINT = { [MOD_AI]: 'debate_budget_hint', [MOD_AUTO]: 'debate_budget_hint_auto', [MOD_USER]: 'debate_budget_hint_user' };
 
 /** Installs the debate slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installDebate(ctx) {
@@ -67,6 +70,8 @@ export function installDebate(ctx) {
   const debateActive = () => !!state.debate;
   /** The name the page shows for a cast column in the debate on screen ('' outside one) — what a share carries (#1784). */
   const debateNameOf = (id) => (state.debate && state.debate.names.get(id) ? state.debate.names.get(id).name || '' : '');
+  /** The avatar emoji the page shows for a cast column ('' outside a debate) — a share carries it too (never a photo). */
+  const debateEmojiOf = (id) => (state.debate && state.debate.names.get(id) ? state.debate.names.get(id).emoji || '' : '');
   /** The pre-session choice: debate mode toggled on (and offered by the flag). */
   const debateChosen = () => debateOn() && state.debatePrefs.on === true;
 
@@ -130,12 +135,25 @@ export function installDebate(ctx) {
   function castNames(cast, aliasOf) {
     return resolveNames(cast.map((id) => personOf(id, aliasOf(id))), t);
   }
+  /**
+   * The cast in naming order: the debaters in page order, then the moderator. Default names are
+   * given in this order (resolveNames numbers shared families by it), so the moderator chips name
+   * each candidate with the cast it WOULD make (Codex §19 plan 1R) — the name on a chip is the name
+   * it keeps once picked.
+   */
+  function castOrder(targets, modCol) {
+    const debaters = targets.filter((id) => id !== modCol);
+    return { debaters, cast: [...debaters, ...(modCol ? [modCol] : [])] };
+  }
+  /** Each debater's side (i18n key or null) — the ONE assignment the cards preview and start() uses. */
+  const castStances = (plan) => stancesOf(plan.debaters, state.debatePrefs.stance);
+  /** The short badge of a side (the devil's prompt line is a sentence, not a badge). */
+  const stanceBadge = (key) => t(key === 'debate_stance_devil' ? 'debate_stance_badge_devil' : key);
   /** `{ debaters, modCol, names, conflicts, problem }` for the current setup (problem = i18n key or null). */
   function planCast() {
     const targets = reachable();
     const modCol = moderatorCol(targets);
-    const debaters = targets.filter((id) => id !== modCol);
-    const cast = [...debaters, ...(modCol ? [modCol] : [])];
+    const { debaters, cast } = castOrder(targets, modCol);
     const { names, conflicts } = castNames(cast, (id) => state.aliases[id]);
     let problem = null;
     if (modChoice(targets).moderator === MOD_AI && !modCol) problem = targets.length >= 3 ? 'debate_pick_moderator' : 'debate_need_three_ai';
@@ -330,28 +348,92 @@ export function installDebate(ctx) {
   const setupBody = el('div', 'cmp-debate-setup-body');
   setupBody.id = 'cmp-debate-setup-body';
   setup.appendChild(setupBody);
+  // Each setting is a radio group of option cards — a title and what it does (plan §19): a bare
+  // select made people pick before knowing what a choice meant. The cards are built once and only
+  // their state changes on render, so a keystroke-driven renderSetup never drops their focus.
   const setupRow = el('div', 'cmp-debate-setup-row');
-  const modLabel = el('label', 'cmp-debate-field');
-  modLabel.appendChild(el('span', 'cmp-debate-field-name', t('debate_mod_label')));
-  const modSelect = el('select', 'cmp-debate-select');
-  modSelect.id = 'cmp-debate-moderator';
-  modLabel.appendChild(modSelect);
-  setupRow.appendChild(modLabel);
-  const stanceLabel = el('label', 'cmp-debate-field');
-  stanceLabel.appendChild(el('span', 'cmp-debate-field-name', t('debate_stance_label')));
-  const stanceSelect = el('select', 'cmp-debate-select');
-  stanceSelect.id = 'cmp-debate-stance';
-  for (const s of STANCES) { const o = el('option', null, t(`debate_stance_opt_${s}`)); o.value = s; stanceSelect.appendChild(o); }
-  stanceLabel.appendChild(stanceSelect);
-  setupRow.appendChild(stanceLabel);
-  // 말투 (§12): friends (default) / calm / custom — the custom line is a one-line input beside it.
-  const toneLabel = el('label', 'cmp-debate-field');
-  toneLabel.appendChild(el('span', 'cmp-debate-field-name', t('debate_tone_label')));
-  const toneSelect = el('select', 'cmp-debate-select');
-  toneSelect.id = 'cmp-debate-tone';
-  for (const k of TONES) { const o = el('option', null, t(`debate_tone_opt_${k}`)); o.value = k; toneSelect.appendChild(o); }
-  toneLabel.appendChild(toneSelect);
-  setupRow.appendChild(toneLabel);
+  /** A labelled radio group of option cards; `onPick(value)` writes the preference. */
+  function optGroup(id, labelKey, options, onPick) {
+    const field = el('div', 'cmp-debate-field');
+    const name = el('span', 'cmp-debate-field-name', t(labelKey));
+    name.id = `${id}-label`;
+    const group = el('div', 'cmp-debate-opts');
+    group.id = id;
+    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('aria-labelledby', name.id);
+    const cards = new Map();
+    for (const [value, titleKey, glyph] of options) {
+      const card = el('button', 'cmp-debate-opt');
+      card.type = 'button';
+      card.setAttribute('role', 'radio');
+      card.setAttribute('data-value', value);
+      const title = el('span', 'cmp-debate-opt-title');
+      title.appendChild(el('span', 'cmp-debate-opt-glyph', glyph));
+      title.appendChild(el('span', null, t(titleKey)));
+      card.appendChild(title);
+      const desc = el('span', 'cmp-debate-opt-desc');
+      card.appendChild(desc);
+      card.addEventListener('click', () => { if (card.getAttribute('aria-disabled') !== 'true') onPick(value); });
+      cards.set(value, { card, desc });
+      group.appendChild(card);
+    }
+    // Arrow keys move AND pick, like native radios; a disabled card is skipped — stepping from the
+    // card in focus in the whole order, so ← from a disabled card goes left (Codex §19 1R 후속).
+    group.addEventListener('keydown', (e) => {
+      const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1, Home: 1, End: -1 };
+      if (!(e.key in keys)) return;
+      const all = [...cards.values()].map((c) => c.card);
+      const live = (c) => !c.disabled && c.getAttribute('aria-disabled') !== 'true';
+      if (!all.some(live)) return;
+      e.preventDefault();
+      const step = keys[e.key];
+      let i = e.key === 'Home' ? -1 : e.key === 'End' ? all.length : all.indexOf(doc_active());
+      if (i === -1 && step < 0 && e.key !== 'Home') i = 0;
+      do i = (i + step + all.length) % all.length; while (!live(all[i]));
+      const next = all[i];
+      onPick(next.getAttribute('data-value'));
+      // The pick may have sent the focus on (「직접 입력」 → its input): leave it there (Codex §19 1R 후속).
+      const now = doc_active();
+      if (!now || group.contains(now) || now === ctx.doc.body) { try { next.focus(); } catch { /* focus is a nicety */ } }
+    });
+    field.appendChild(name);
+    field.appendChild(group);
+    return { field, group, cards };
+  }
+  /** Checked / disabled / descriptions of one group; exactly one card is in the tab order. */
+  function paintGroup(g, checked, descOf, disabledOf = () => false) {
+    let tabbed = null;
+    for (const [value, { card, desc }] of g.cards) {
+      const on = value === checked;
+      card.setAttribute('aria-checked', on ? 'true' : 'false');
+      card.classList.toggle('is-checked', on);
+      card.disabled = state.sending;
+      const off = disabledOf(value); // a stored choice stays shown as chosen (plan §18.7 ①) — and says it cannot be used
+      if (off) card.setAttribute('aria-disabled', 'true'); else card.removeAttribute('aria-disabled');
+      const d = descOf(value);
+      if (desc.textContent !== d) desc.textContent = d;
+      card.tabIndex = -1;
+      if (on) tabbed = card;
+    }
+    (tabbed || [...g.cards.values()][0].card).tabIndex = 0;
+  }
+  const modGroup = optGroup('cmp-debate-moderator', 'debate_mod_label', [
+    [MOD_AUTO, 'debate_mod_auto', '\u{1F501}'], [MOD_AI, 'debate_mod_ai_card', '\u{1F399}\u{FE0F}'], [MOD_USER, 'debate_mod_user', '\u{1F64B}'],
+  ], (v) => setModerator(v));
+  // Who moderates (AI moderator only): one chip per reachable AI, named as the debate will name it.
+  const modPicks = el('div', 'cmp-debate-modpicks');
+  modPicks.id = 'cmp-debate-modpicks';
+  modPicks.hidden = true;
+  modGroup.field.appendChild(modPicks);
+  setupRow.appendChild(modGroup.field);
+  const stanceGroup = optGroup('cmp-debate-stance', 'debate_stance_label', [
+    [STANCES[0], `debate_stance_opt_${STANCES[0]}`, '\u{1F4AC}'], [STANCES[1], `debate_stance_opt_${STANCES[1]}`, '\u{2696}\u{FE0F}'], [STANCES[2], `debate_stance_opt_${STANCES[2]}`, '\u{1F608}'],
+  ], (v) => setStance(v));
+  setupRow.appendChild(stanceGroup.field);
+  // 말투 (§12): friends (default) / calm / custom — the custom line is a one-line input under the cards.
+  const toneGroup = optGroup('cmp-debate-tone', 'debate_tone_label', [
+    [TONES[0], `debate_tone_opt_${TONES[0]}`, '\u{1F604}'], [TONES[1], `debate_tone_opt_${TONES[1]}`, '\u{1F393}'], [TONES[2], `debate_tone_opt_${TONES[2]}`, '\u{270F}\u{FE0F}'],
+  ], (v) => setTone(v));
   const toneInput = el('input', 'cmp-debate-tone-input');
   toneInput.id = 'cmp-debate-tone-custom';
   toneInput.type = 'text';
@@ -359,12 +441,16 @@ export function installDebate(ctx) {
   toneInput.placeholder = t('debate_tone_placeholder');
   toneInput.setAttribute('aria-label', t('debate_tone_input_label', DEBATE_TONE_MAX));
   toneInput.hidden = true;
-  setupRow.appendChild(toneInput);
+  toneGroup.field.appendChild(toneInput);
+  setupRow.appendChild(toneGroup.field);
   setupBody.appendChild(setupRow);
   // The cast is not listed here any more (plan §17.5): each participant's avatar and alias sit on
   // its own column head — the debate tab draws the pre-session columns as participant cards.
   // The run's safeguards, said before it starts (plan §15.1 ①).
-  setupBody.appendChild(el('p', 'cmp-debate-hint', t('debate_budget_hint', DEBATE_SEND_BUDGET)));
+  // Worded per moderation (#1818 ③) — renderSetup sets it.
+  const budgetHint = el('p', 'cmp-debate-hint');
+  budgetHint.id = 'cmp-debate-hint';
+  setupBody.appendChild(budgetHint);
   const summaryBtn = el('button', 'cmp-debate-summary');
   summaryBtn.type = 'button';
   summaryBtn.id = 'cmp-debate-summary';
@@ -398,34 +484,54 @@ export function installDebate(ctx) {
   // chip and, worse, destroy an alias input mid-typing.
   let setupSig = '';
 
-  modSelect.addEventListener('change', () => {
-    const v = String(modSelect.value || '');
-    if (v.startsWith(`${MOD_AI}:`)) { state.debatePrefs.moderator = MOD_AI; state.debatePrefs.modCol = v.slice(MOD_AI.length + 1); }
-    else { state.debatePrefs.moderator = MODERATOR_KINDS.includes(v) ? v : MOD_AUTO; }
-    state.debatePrefs.modChosen = true; // from now on the user's, not the plan-picked default
+  /** 진행: the rule, or the AI moderator (keeps a reachable pick, else takes this page's seat, else none yet). */
+  function setModerator(kind) {
+    const p = state.debatePrefs;
+    const targets = reachable();
+    if (kind === MOD_AI) {
+      const cur = modChoice(targets);
+      const seat = defaultModerator(state.debateSeat, targets);
+      p.modCol = cur.modCol && targets.includes(cur.modCol) ? cur.modCol : seat.moderator === MOD_AI ? seat.modCol : null;
+      p.moderator = MOD_AI;
+    } else {
+      p.moderator = MODERATOR_KINDS.includes(kind) ? kind : MOD_AUTO;
+    }
+    p.modChosen = true; // from now on the user's, not the plan-picked default
     savePrefs();
     renderSetup();
     ctx.updateControls();
-  });
-  toneSelect.addEventListener('change', () => {
-    state.debatePrefs.tone = TONES.includes(toneSelect.value) ? toneSelect.value : TONE_FRIENDS;
+  }
+  /** 진행자: this column moderates (the chip row under 「AI 진행자」). */
+  function setModCol(id) {
+    const p = state.debatePrefs;
+    p.moderator = MOD_AI;
+    p.modCol = id;
+    p.modChosen = true;
+    savePrefs();
+    renderSetup();
+    ctx.updateControls();
+    const chip = [...modPicks.children].find((c) => c.getAttribute('data-col') === id);
+    if (chip) { try { chip.focus(); } catch { /* focus is a nicety */ } } // the row was rebuilt under the click
+  }
+  function setTone(kind) {
+    state.debatePrefs.tone = TONES.includes(kind) ? kind : TONE_FRIENDS;
     savePrefs();
     track('debate_tone', { tone: state.debatePrefs.tone });
     renderSetup();
     ctx.updateControls();
     if (state.debatePrefs.tone === TONE_CUSTOM) { try { toneInput.focus(); } catch { /* focus is a nicety */ } }
-  });
+  }
   toneInput.addEventListener('input', () => {
     state.debatePrefs.toneCustom = toneInput.value; // folded on use (cleanTone); the input keeps what was typed
     savePrefs();
     ctx.updateControls();
   });
-  stanceSelect.addEventListener('change', () => {
-    state.debatePrefs.stance = STANCES.includes(stanceSelect.value) ? stanceSelect.value : STANCE_NONE;
+  function setStance(stance) {
+    state.debatePrefs.stance = STANCES.includes(stance) ? stance : STANCE_NONE;
     savePrefs();
-    renderSetup(); // the ⚙ dot and the summary line say it at once (plan §18.7 ③)
+    renderSetup(); // the ⚙ dot, the summary line and the cards' side badges say it at once (plan §18.7 ③, §19)
     ctx.updateControls();
-  });
+  }
   /**
    * Opens / closes the ⚙ body. Remembered (a user who opened it once sees it open next time).
    * Closing moves a focus left inside the body to the ⚙, never onto a hidden control. Opening from
@@ -443,7 +549,9 @@ export function installDebate(ctx) {
     if (focusInside) { try { gearBtn.focus(); } catch { /* focus is a nicety */ } }
     if (open && focus) {
       const p = focus === FOCUS_CAUSE ? planCast().problem : null;
-      const target = p && p.startsWith('debate_tone_err_') ? toneInput : modSelect;
+      const firstPick = modPicks.hidden ? null : modPicks.querySelector('button');
+      const checked = modGroup.group.querySelector('[aria-checked="true"]') || modGroup.group.querySelector('button');
+      const target = p && p.startsWith('debate_tone_err_') ? toneInput : p === 'debate_pick_moderator' && firstPick ? firstPick : checked;
       try { target.focus(); } catch { /* focus is a nicety */ }
     }
   }
@@ -485,7 +593,7 @@ export function installDebate(ctx) {
    * that opens the alias input in place) + 🎙 진행자 for the moderator. The service and model are the
    * head's own controls right under it.
    */
-  function castChip(id, info, isMod) {
+  function castChip(id, info, isMod, stance = null) {
     const col = colOf(id);
     const chip = el('span', 'cmp-debate-chip' + (isMod ? ' is-moderator' : ''));
     chip.setAttribute('data-col', id);
@@ -535,7 +643,33 @@ export function installDebate(ctx) {
       chip.appendChild(nameBtn);
     }
     if (isMod) chip.appendChild(el('span', 'cmp-debate-badge is-moderator', `\u{1F399}\u{FE0F} ${t('debate_role_moderator')}`));
+    else if (stance) chip.appendChild(el('span', 'cmp-debate-badge is-stance', stanceBadge(stance))); // the side it will take (plan §19)
     return chip;
+  }
+  /**
+   * 「AI 진행자」's chip row: one chip per reachable AI, avatar + the name it will have as the
+   * moderator (castOrder), the chosen one checked. Hidden for the other rules and below 3 AIs.
+   */
+  function renderModPicks(targets, mod, need3) {
+    clear(modPicks);
+    modPicks.hidden = mod.moderator !== MOD_AI || need3;
+    if (modPicks.hidden) return;
+    modPicks.appendChild(el('span', 'cmp-debate-modpicks-label', t('debate_mod_pick_label')));
+    for (const id of targets) {
+      const info = castNames(castOrder(targets, id).cast, (x) => state.aliases[x]).names.get(id);
+      const on = mod.modCol === id;
+      const b = el('button', 'cmp-debate-modpick' + (on ? ' is-checked' : ''));
+      b.type = 'button';
+      b.setAttribute('data-col', id);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.title = ctx.colLabel(colOf(id));
+      b.disabled = state.sending;
+      b.appendChild(avatar(colOf(id).provider, info, 'cmp-debate-ava')); // no service badge: the chip is too small for it (the title names the service)
+      b.appendChild(el('span', null, info.name));
+      b.addEventListener('click', () => setModCol(id));
+      modPicks.appendChild(b);
+    }
+    modPicks.appendChild(el('span', 'cmp-debate-modpicks-note', t(mod.modCol && targets.includes(mod.modCol) ? 'debate_mod_pick_note' : 'debate_mod_pick_none')));
   }
 
   /** The setup block from the current choice: moderator options, the cast, the reason it cannot start. */
@@ -555,6 +689,8 @@ export function installDebate(ctx) {
     const problem = [aliasError ? t(aliasError.key, aliasError.arg) : '', plan.problem ? t(plan.problem, problemArg(plan)) : ''].filter(Boolean).join(' · ');
     const changed = changedNow(targets);
     const mod = modChoice(targets);
+    const hint = t(BUDGET_HINT[mod.moderator] || BUDGET_HINT[MOD_AI], DEBATE_SEND_BUDGET);
+    if (budgetHint.textContent !== hint) budgetHint.textContent = hint;
     setupBody.hidden = !open;
     summaryBtn.hidden = open || !changed.length;
     summaryBtn.disabled = state.sending; // locked with the ⚙ (its target controls are disabled then — Codex U1 2R)
@@ -573,30 +709,19 @@ export function installDebate(ctx) {
     const slotsDrawn = targets.every((id) => colOf(id) && colOf(id).debateSlot && colOf(id).debateSlot.firstChild);
     if (sig === setupSig && slotsDrawn) return;
     setupSig = sig;
-    // Moderator options: the two rules, then one 「AI 진행」 per reachable column (only with ≥ 3 — two
-    // debaters plus the moderator; with fewer the choice is not offered at all).
-    const opts = [[MOD_AUTO, t('debate_mod_auto')], [MOD_USER, t('debate_mod_user')]];
-    if (targets.length >= 3) for (const id of targets) opts.push([`${MOD_AI}:${id}`, t('debate_mod_ai', ctx.colLabel(colOf(id)))]);
-    const want = mod.moderator === MOD_AI ? `${MOD_AI}:${mod.modCol}` : mod.moderator;
-    // An AI moderator chosen but not on the page (its column closed, or fewer than 3 AIs): the
-    // select SAYS so rather than showing 「자동 순서」 over a stored AI choice that blocks the start
-    // (plan §18.7 ①). `ai:` = no moderator picked; choosing another option is the way out.
-    if (mod.moderator === MOD_AI && !opts.some(([v]) => v === want)) {
-      opts.push([`${MOD_AI}:`, t(targets.length >= 3 ? 'debate_mod_ai_pick' : 'debate_mod_ai_need3')]);
-    }
-    clear(modSelect);
-    for (const [v, label] of opts) { const o = el('option', null, label); o.value = v; modSelect.appendChild(o); }
-    modSelect.value = opts.some(([v]) => v === want) ? want : mod.moderator === MOD_AI ? `${MOD_AI}:` : MOD_AUTO;
-    modSelect.disabled = state.sending;
-    stanceSelect.value = state.debatePrefs.stance;
-    stanceSelect.disabled = state.sending;
-    toneSelect.value = state.debatePrefs.tone;
-    toneSelect.disabled = state.sending;
+    // 진행: the AI card needs 3+ reachable AIs (two debaters plus the moderator) — except that a
+    // stored AI choice is shown as chosen even then, with why it cannot start (plan §18.7 ①).
+    const need3 = targets.length < 3;
+    paintGroup(modGroup, mod.moderator, (v) => t(v === MOD_AI && need3 ? 'debate_mod_desc_need3' : `debate_mod_desc_${v}`), (v) => v === MOD_AI && need3);
+    paintGroup(stanceGroup, state.debatePrefs.stance, (v) => t(`debate_stance_desc_${v}`));
+    paintGroup(toneGroup, state.debatePrefs.tone, (v) => t(`debate_tone_desc_${v}`));
+    renderModPicks(targets, mod, need3);
     toneInput.hidden = state.debatePrefs.tone !== TONE_CUSTOM;
     toneInput.disabled = state.sending;
     if (toneInput.value !== state.debatePrefs.toneCustom && doc_active() !== toneInput) toneInput.value = state.debatePrefs.toneCustom;
+    const stances = castStances(plan);
     clearSlots();
-    for (const id of plan.debaters) fillSlot(id, castChip(id, plan.names.get(id), false), false);
+    for (const id of plan.debaters) fillSlot(id, castChip(id, plan.names.get(id), false, stances.get(id)), false);
     if (plan.modCol) fillSlot(plan.modCol, castChip(plan.modCol, plan.names.get(plan.modCol), true), true);
   }
   /** The closed ⚙'s line: each setting that differs from the defaults, as the panel names it. */
@@ -644,6 +769,8 @@ export function installDebate(ctx) {
 
   // ── the timeline + the in-session bar ──
   const timeline = el('div', 'cmp-debate-timeline');
+  /** A rendered Conclusion card (markConclusion adds the class to the turn's root). */
+  const CONCLUSION_CARD_SEL = '.cmp-debate-msg.is-conclusion';
   timeline.id = 'cmp-debate-timeline';
   timeline.hidden = true;
   timeline.setAttribute('aria-live', 'polite');
@@ -659,19 +786,25 @@ export function installDebate(ctx) {
   barStatus.setAttribute('aria-live', 'polite');
   const barChips = el('div', 'cmp-debate-picks');
   barChips.id = 'cmp-debate-picks';
+  barChips.setAttribute('role', 'group');
+  barChips.setAttribute('aria-labelledby', 'cmp-debate-picks-label');
   const pauseBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-pause', t('debate_pause'));
   pauseBtn.id = 'cmp-debate-pause';
   pauseBtn.type = 'button';
   bar.appendChild(barChips);
   bar.appendChild(barStatus);
   bar.appendChild(pauseBtn);
-  pauseBtn.addEventListener('click', () => { if (!state.debate) return; if (isRunning()) pause(); else resume(); });
+  pauseBtn.addEventListener('click', () => { if (!state.debate) return; if (isRunning() && !state.debate.pauseAfter) pause(true); else resume(); });
 
   let userFollow = true; // the reader is at (or near) the end of the timeline
   timeline.addEventListener('scroll', () => {
     const { scrollTop, clientHeight, scrollHeight } = timeline;
     if ([scrollTop, clientHeight, scrollHeight].every(Number.isFinite)) userFollow = scrollHeight - (scrollTop + clientHeight) <= DEBATE_FOLLOW_PX;
   });
+  // A resize fires no scroll: a narrower window re-wraps every bubble below a scrollTop that stays
+  // put, so a reader who was at the end was left mid-conversation (#1819). Keep them at the end.
+  const RO = ctx.win && typeof ctx.win.ResizeObserver === 'function' ? ctx.win.ResizeObserver : null;
+  if (RO) new RO(() => { if (userFollow) timeline.scrollTop = timeline.scrollHeight; }).observe(timeline);
   /** Keep the newest words in view while the reader is at the end (`force`: a new turn started). */
   function follow(force = false) {
     if (!force && !userFollow) return;
@@ -703,10 +836,11 @@ export function installDebate(ctx) {
     const ava = avatar(col.provider, info, 'cmp-debate-ava', true);
     const head = el('div', 'cmp-debate-meta');
     head.appendChild(el('span', 'cmp-debate-name', info.name));
-    head.appendChild(el('span', 'cmp-debate-svc', ctx.colLabel(col)));
+    turn.debateSvc = el('span', 'cmp-debate-svc', ctx.colLabel(col));
+    head.appendChild(turn.debateSvc);
     if (isMod) head.appendChild(el('span', 'cmp-debate-badge is-moderator', t('debate_role_moderator')));
     const stance = d.stances.get(col.id);
-    if (stance) head.appendChild(el('span', 'cmp-debate-badge', t(stance)));
+    if (stance) head.appendChild(el('span', 'cmp-debate-badge', stanceBadge(stance)));
     turn.debateHead = head;
     turn.root.classList.add('cmp-debate-msg', 'is-typing');
     // 「입력이 끝나면 한 번에」 (plan §14 / §14.1 ①②): while the answer streams the row shows a typing
@@ -717,11 +851,10 @@ export function installDebate(ctx) {
     if (isMod) turn.root.classList.add('is-moderator');
     turn.root.insertBefore(head, turn.root.firstChild);
     turn.root.insertBefore(ava, head);
-    // A new speaker brings the reader along — once, when it starts; during the opening only its first
-    // bubble does (the others fill in at the same time, and yanking the view for each would fight a
-    // reader who scrolled up to read — plan §11.4 ⑤).
-    const openingLater = d.phase === PHASE_OPENING && d.openingGroup && d.openingGroup.querySelectorAll('.cmp-debate-msg').length > 1;
-    follow(!openingLater);
+    // A new speaker brings the reader along — once, when it starts. Not during the opening: start()
+    // shows the room from the top so the topic stays in view (#1818 ⑩), and the bubbles filling in
+    // at the same time must not yank the view (plan §11.4 ⑤) — a reader already at the end is followed.
+    follow(d.phase !== PHASE_OPENING);
   }
   /** 「오후 3:12」 / 「3:12 PM」 — the clock time a bubble shows beside it. */
   function clockNow() {
@@ -747,6 +880,17 @@ export function installDebate(ctx) {
     }
     if (d) d.typing.delete(turn);
     follow();
+  }
+  /**
+   * The moderator's closing message becomes the 「결론」 card (#1817 ②): a divider above it and the
+   * card's own emphasis. Screen and 「전체 복사」 only — the transcript, the prompts and the share
+   * snapshot keep it a plain moderator line.
+   */
+  function markConclusion(turn) {
+    if (!turn || !turn.root || turn.debateConclusion) return;
+    turn.debateConclusion = true;
+    turn.root.classList.add('is-conclusion');
+    if (turn.root.parentNode) turn.root.parentNode.insertBefore(el('div', 'cmp-debate-divider is-conclusion', t('debate_conclusion')), turn.root);
   }
   /** What a turn's text renders as: a moderator's reply without its control line. */
   function displayText(turn) {
@@ -831,6 +975,7 @@ export function installDebate(ctx) {
    * gets another DEBATE_SEND_BUDGET, the hidden-tab clock restarts. Dead / too-few stay stopped.
    */
   function reopen(d) {
+    d.pauseAfter = false; // moving again cancels a 「멈춤」 still waiting for the turn in flight
     if (!STOPPED.includes(d.phase) || d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) return;
     if (d.sendsUsed >= d.sendBudget) { d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET; d.wrapUpDone = false; }
     hiddenSince = docHidden() ? ctx.clock.now() : null;
@@ -849,7 +994,7 @@ export function installDebate(ctx) {
     if (plan.problem) { renderSetup(); return false; }
     if (topic.length > DEBATE_TOPIC_MAX) { ctx.showNotice('warn', [t('debate_topic_long', DEBATE_TOPIC_MAX)]); return false; }
     const { debaters, modCol, names } = plan;
-    const stances = stancesOf(debaters, state.debatePrefs.stance);
+    const stances = castStances(plan);
     const openingGroup = el('div', 'cmp-debate-opening');
     state.debate = {
       topic, debaters, modCol, names, stances, stance: state.debatePrefs.stance,
@@ -859,7 +1004,7 @@ export function installDebate(ctx) {
       eligible: new Set(debaters), firstReplied: new Set(), modStarted: false, modFails: 0,
       phase: PHASE_OPENING, turnsUsed: 0,
       sendsUsed: 1, sendBudget: DEBATE_SEND_BUDGET, wrapUpDone: false, // the opening is the first counted send
-      queue: [], forced: null, pendingNext: null, current: null,
+      queue: [], forced: null, pendingNext: null, current: null, pauseAfter: false,
       openingGroup, topicBubble: null,
       tone: normalizeTone(state.debatePrefs.tone, state.debatePrefs.toneCustom),
       typing: new Set(), // turns still showing the typing bubble (reveal() empties it)
@@ -871,6 +1016,10 @@ export function installDebate(ctx) {
     d.topicBubble = userBubble(topic);
     timeline.appendChild(el('div', 'cmp-debate-divider', t('debate_opening_divider')));
     timeline.appendChild(openingGroup);
+    // The room opens at its top — the cast line and the topic (#1818 ⑩); userBubble's pull to the end
+    // is undone (its frame runs first), and the opening's bubbles do not pull (decorateTurn).
+    userFollow = false;
+    ctx.raf(() => { timeline.scrollTop = 0; });
     // The opening's slots are reserved in the cast's order (Codex D-risk 2): who finishes first
     // must not decide the order the others read them in.
     const slots = new Map();
@@ -879,7 +1028,10 @@ export function installDebate(ctx) {
     // The cast as the opening names it: alias (service model · model group) — no time yet (§13).
     const roster = debaters.map((id) => { const c = colOf(id); const m = metaLine({ label: ctx.colLabel(c), tierKey: tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) }, t); return m ? `${nameOf(id)} (${m})` : nameOf(id); });
     const stanceLines = [...stances.entries()].filter(([, k]) => k).map(([id, k]) => `- ${nameOf(id)} (${ctx.colLabel(colOf(id))}): ${t(k)}`);
-    const text = openingPrompt({ t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone });
+    const opening = { t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone };
+    const text = openingPrompt(opening);
+    // Each debater's own copy names it and its position (#1815); `text` stays the generic one.
+    const texts = Object.fromEntries(debaters.map((id) => [id, openingPrompt({ ...opening, self: { name: nameOf(id), stanceKey: stances.get(id) } })]));
     ctx.root.classList.add(DEBATE_CLASS);
     timeline.hidden = false;
     // Which model moderates (plan §18.8 ⑥): its service, model id (`auto` = the service's Auto), model
@@ -888,7 +1040,7 @@ export function installDebate(ctx) {
     const modMeta = modC ? { mod_provider: modC.provider, mod_model: modC.model || 'auto', mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {};
     track('debate_start', { n: debaters.length, moderator: d.modKind, stance: state.debatePrefs.stance, tone: d.tone.kind, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
     state.question = topic;
-    ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE);
+    ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, texts);
     stampRound(d.transcript);
     renderBar();
     return true;
@@ -964,7 +1116,7 @@ export function installDebate(ctx) {
           // 🔴 Words the user sent while the moderator was answering outrank its END (Codex 1R
           // blocker): ending here would strand them in the queue, never delivered.
           const pick = chooseAfterModerator({ control, candidates: candidates(), order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke, numbered: cur.numbered, canEnd: moderatorMayEnd({ turnsUsed: cur.wrapUp ? Infinity : d.turnsUsed, minTurns: DEBATE_MIN_TURNS_TO_END, queued: d.queue.length }) });
-          if (pick.end) { d.phase = PHASE_DONE; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); return false; }
+          if (pick.end) { if (entry) entry.conclusion = true; markConclusion(turn); d.phase = PHASE_DONE; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); return false; }
           d.pendingNext = pick.id;
           if (pick.fallback && turn && turn.debateHead) turn.debateHead.appendChild(el('span', 'cmp-debate-badge is-auto', t('debate_auto_pick')));
         } else {
@@ -987,6 +1139,8 @@ export function installDebate(ctx) {
         }
       }
     }
+    // ⏸ 멈춤 pressed while this round was in flight (#1816): its answer is kept above, the loop stops here.
+    if (d.pauseAfter) { d.pauseAfter = false; d.phase = PHASE_PAUSED; }
     if (d.phase === PHASE_PAUSED) { renderBar(); return false; }
     return true;
   }
@@ -998,13 +1152,28 @@ export function installDebate(ctx) {
    */
   function turnMeta(col, turn, answered, isMod) {
     const served = col.servedModel && col.servedModel.source !== MODEL_SOURCE_REQUESTED && (col.servedModel.id || col.servedModel.label) ? col.servedModel : null;
-    const label = served && served.label ? `${PROVIDER_META[col.provider].label} ${served.label}` : ctx.colLabel(col);
+    const words = servedWords(col, served);
+    const label = metaLabel(col, words);
+    showServed(turn, col, words);
     if (isMod) return { meta: metaLine({ label }, t), tierKey: null, secs: null };
     const tierKey = tierOf(col.provider, col.model, ctx.modelLabelOf(col.provider, col.model), served);
     const clean = answered && turn && !turn.stalled && !turn.errorText && col.status === 'done';
     const st = col.stages || {};
     const secs = clean ? secondsBetween(st[STAGE_SEND_START], st[STAGE_STREAM_DONE], TTFT_MAX_MS) : null;
     return { meta: metaLine({ label, tierKey, secs }, t), tierKey, secs };
+  }
+  /** The catalog's display text of a model id, '' when the catalog has no such row (modelLabelOf echoes the id then). */
+  function catalogText(provider, id) {
+    const text = ctx.modelLabelOf(provider, id);
+    return text && text !== String(id) ? text : '';
+  }
+  /** A served model `{ id, label }` in words a reader knows (#1818 ⑨ — never a bare internal id), '' when none. */
+  const servedWords = (col, model) => servedModelText(model, (id) => catalogText(col.provider, id));
+  /** The meta line's model label: the served model when known, else the column's. */
+  const metaLabel = (col, words) => (words ? `${PROVIDER_META[col.provider].label} ${words}` : ctx.colLabel(col));
+  /** The name line names the served model too (#1818 ⑨ — 「Gemini」 alone under Auto), worded as colLabel words a model. */
+  function showServed(turn, col, words) {
+    if (turn && turn.debateSvc && words) turn.debateSvc.textContent = `${PROVIDER_META[col.provider].label} (${words})`;
   }
   /** The facts on a transcript entry — the meta line the others read, and its parts for the history. */
   function keepMeta(entry, info) {
@@ -1057,7 +1226,8 @@ export function installDebate(ctx) {
     if (step === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); renderBar(); return; }
     d.phase = PHASE_SPEAKING;
     if (step === 'wrapup') { d.forced = null; d.pendingNext = null; d.wrapUpDone = true; moderate(true); return; }
-    if (d.forced && d.eligible.has(d.forced)) { const id = d.forced; d.forced = null; d.pendingNext = null; speak(id); return; }
+    // The user's pick goes first; the debater the moderator had just asked stays owed the floor (#1817 ③).
+    if (d.forced && d.eligible.has(d.forced)) { const id = d.forced; d.forced = null; d.pendingNext = owedAfterForced(d.pendingNext, id); speak(id); return; }
     d.forced = null;
     if (d.pendingNext && d.eligible.has(d.pendingNext) && d.pendingNext !== d.prev) { const id = d.pendingNext; d.pendingNext = null; speak(id); return; }
     d.pendingNext = null;
@@ -1093,7 +1263,7 @@ export function installDebate(ctx) {
     const { delta, covered } = pendingFor(id);
     const order = d.debaters.filter((x) => d.eligible.has(x));
     const names = order.map(nameOf);
-    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: d.turnsUsed >= DEBATE_MIN_TURNS_TO_END, tone: d.tone, wrapUp });
+    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: d.turnsUsed >= DEBATE_MIN_TURNS_TO_END, tone: d.tone, wrapUp, freeStance: d.stance === STANCE_NONE });
     d.seq += 1;
     d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_MODERATOR, name: nameOf(id), text: '', pending: true });
     // The PHASE stays 「speaking」 (the debate is running); what is in flight is `current.kind` — a
@@ -1111,17 +1281,28 @@ export function installDebate(ctx) {
     for (const e of entries) if (e && e.speaker !== SPEAKER_USER && e.pending && !Number.isInteger(e.round)) e.round = r;
   }
 
-  function pause() {
+  /**
+   * Stop the loop. The top 「중지」 (ctx.debatePause(), no argument) aborts the turn in flight — its
+   * bubble ends as 「중지됐어요」. ⏸ 멈춤 (`afterTurn`, #1816) is a pause, not a cancel: a turn in
+   * flight is answered in full and the loop stops before the next one; with nothing in flight it
+   * stops now. The hidden-tab and send-budget stops are graceful the same way (advance() checks them
+   * before a send, never during one).
+   */
+  function pause(afterTurn = false) {
     const d = state.debate;
     if (!d) return;
+    track('debate_pause', { turns: d.turnsUsed, ...(afterTurn ? { after_turn: true } : {}) });
+    if (afterTurn && d.current) { d.pauseAfter = true; renderBar(); return; }
+    d.pauseAfter = false;
     d.phase = PHASE_PAUSED;
-    if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* the port is gone; the round settles on its own */ } }
-    track('debate_pause', { turns: d.turnsUsed });
+    if (!afterTurn && state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* the port is gone; the round settles on its own */ } }
     renderBar();
   }
   function resume() {
     const d = state.debate;
     if (!d) return;
+    // ▶ 계속 before the turn in flight settled: the pause is called off, the loop just goes on.
+    if (d.pauseAfter && d.current) { d.pauseAfter = false; track('debate_resume', { turns: d.turnsUsed }); renderBar(); return; }
     if (d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) { renderBar(); return; }
     reopen(d);
     track('debate_resume', { turns: d.turnsUsed });
@@ -1162,6 +1343,14 @@ export function installDebate(ctx) {
     bar.hidden = !d || !state.sessionStarted && !(d && d.phase === PHASE_OPENING);
     if (!d) return;
     clear(barChips);
+    // What the chips are for (#1818 ⑥): they look like a legend otherwise. Short and first in the row.
+    const picksLabel = el('span', 'cmp-debate-picks-label');
+    picksLabel.id = 'cmp-debate-picks-label';
+    const mic = el('span', 'cmp-debate-picks-glyph', '\u{1F3A4}');
+    mic.setAttribute('aria-hidden', 'true');
+    picksLabel.appendChild(mic);
+    picksLabel.appendChild(el('span', null, t('debate_picks_label')));
+    barChips.appendChild(picksLabel);
     for (const id of d.debaters) {
       const info = d.names.get(id);
       const chip = el('button', 'cmp-debate-pick' + (d.eligible.has(id) ? '' : ' is-out'));
@@ -1177,21 +1366,25 @@ export function installDebate(ctx) {
     const cur = d.current;
     let status;
     if (cur && cur.kind === PHASE_OPENING) status = t('debate_status_opening');
-    else if (cur && cur.kind === PHASE_MODERATING) status = t('debate_status_moderating', nameOf(cur.col));
+    else if (cur && cur.kind === PHASE_MODERATING) status = t('debate_status_moderating', nameOf(cur.col), subjectParticle(nameOf(cur.col)));
     else if (cur) status = t('debate_status_speaking', nameOf(cur.col));
     else if (d.phase === PHASE_AWAIT) status = t('debate_status_await');
     else if (d.phase === PHASE_BUDGET) status = t('debate_status_budget', d.sendsUsed, DEBATE_SEND_BUDGET);
     else if (d.phase === PHASE_HIDDEN) status = t('debate_status_hidden');
-    else if (d.phase === PHASE_DONE) status = t('debate_status_done');
+    // Point at the Conclusion card only when one is ON SCREEN — not when the log merely says so: a
+    // record finished before the card existed has no `end`, and a marked turn evicted by the history
+    // bound restores without its card (integration review 1R, 2R).
+    else if (d.phase === PHASE_DONE) status = t(timeline.querySelector(CONCLUSION_CARD_SEL) ? 'debate_status_done' : 'debate_status_done_plain');
     else if (d.phase === PHASE_TOO_FEW) status = t('debate_status_too_few');
     else if (d.phase === PHASE_DEAD) status = t('debate_status_dead');
     else if (d.phase === PHASE_PAUSED) status = t('debate_status_paused');
     else status = '';
+    if (cur && d.pauseAfter) status = [status, t('debate_status_pausing')].filter(Boolean).join(' \u00B7 ');
     const running = isRunning();
     // While it runs, how much of this run's send budget is used (plan §15 — the debate goes on by itself).
     if (running && d.sendsUsed) status = [status, t('debate_status_sends', d.sendsUsed, d.sendBudget)].filter(Boolean).join(' \u00B7 ');
     barStatus.textContent = status;
-    pauseBtn.textContent = running ? t('debate_pause') : t('debate_resume');
+    pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t('debate_resume');
     pauseBtn.disabled = d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
     pauseBtn.hidden = d.phase === PHASE_AWAIT;
   }
@@ -1210,7 +1403,7 @@ export function installDebate(ctx) {
     for (const e of d.transcript) {
       if (e.speaker === SPEAKER_USER) { log.push({ q: e.seq, u: clipText(e.text) }); continue; }
       if (!Number.isInteger(e.round)) continue; // never went out (a refused round is removed; this is a guard)
-      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
+      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.conclusion ? { end: true } : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
     }
     let q = d.seq;
     for (const item of d.queue) log.push({ q: ++q, u: clipText(item.text) });
@@ -1295,6 +1488,7 @@ export function installDebate(ctx) {
       if (!turn || placed.has(turn)) continue; // evicted by the history bound
       placed.add(turn);
       (e.opening ? d.openingGroup : timeline).appendChild(turn.root);
+      if (e.conclusion) markConclusion(turn);
       turn.debateInfo = { meta: e.meta }; // 「전체 복사」
       if (e.role !== ROLE_MODERATOR && e.text.trim()) showMeta(turn, { meta: e.meta, tierKey: e.tierKey || null, secs: e.secs });
     }
@@ -1340,6 +1534,7 @@ export function installDebate(ctx) {
         // The meta the others were told (turnMeta: a served model wins over the column's label); a
         // turn that never settled into one gets the column's label + what its name line shows.
         meta: info.meta || metaLine(turn.debateRole === ROLE_MODERATOR ? { label: ctx.colLabel(col) } : { label: ctx.colLabel(col), tierKey: info.tierKey || null, secs: info.secs }, t),
+        ...(turn.debateConclusion ? { conclusion: true } : {}),
         text: displayText(turn), note: turn.errorText || (turn.stalled ? ctx.cutNote(turn) : ''),
       });
     };
@@ -1364,7 +1559,7 @@ export function installDebate(ctx) {
 
   Object.assign(ctx, {
     debateReveal: reveal,
-    debateOn, debateActive, debateChosen, debateNameOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
+    debateOn, debateActive, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
     debateStart: start, debateRoundRefused: onRoundRefused, debateRoundSettled: onRoundSettled, debateUserMessage: userMessage,
     debatePause: pause, debateResume: resume, debatePick: pick, renderDebateBar: renderBar, debateReset: reset,
     debateSnapshot: snapshot, debateMarkdown: markdown, debateRestoreBegin: restoreBegin, debateRestoreFinish: restoreFinish,
