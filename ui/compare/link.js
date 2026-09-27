@@ -8,7 +8,7 @@
 // composes the send (bg/compare.js). The page holds a RECEIPT — provider, title, turn count —
 // which is what the chip is made of.
 
-import { LINK_ORIGINS, CODE_NOT_FOUND, CODE_PERMISSION_REFUSED, CODE_AUTH_REQUIRED, CODE_NO_TAB, CODE_UNSUPPORTED, CODE_BAD_REQUEST } from './constants.js';
+import { LINK_ORIGINS, SHARE_SITE_ORIGIN, SHARE_LINK_PATH_RE, CODE_SHARE_DELETED, CODE_SHARE_PRIVATE, CODE_NOT_FOUND, CODE_PERMISSION_REFUSED, CODE_AUTH_REQUIRED, CODE_NO_TAB, CODE_UNSUPPORTED, CODE_BAD_REQUEST } from './constants.js';
 
 /**
  * The conversation link in `text`, or null.
@@ -21,7 +21,11 @@ import { LINK_ORIGINS, CODE_NOT_FOUND, CODE_PERMISSION_REFUSED, CODE_AUTH_REQUIR
  * Only the path shapes that name a CONVERSATION count. `claude.ai/chats` is the list, not a chat;
  * offering to continue it would be an offer we cannot keep.
  *
- * @returns {{provider: string, url: string, start: number, end: number}|null}
+ * A Claude Tuner share page (`https://claudetuner.com/c/<22 base62>`, #1784 U4) is a link KIND of
+ * its own: `{kind:'share', provider:null, id}` — nobody holds it as a conversation, so every column
+ * is told it. The SW's `linkTarget` is the other half (the share probe pins the two).
+ *
+ * @returns {{kind: 'vendor'|'share', provider: string|null, id?: string, url: string, start: number, end: number}|null}
  */
 export function findLink(text) {
   if (typeof text !== 'string' || !text) return null;
@@ -32,9 +36,14 @@ export function findLink(text) {
     const raw = m[0].replace(/[.,;:)\]}]+$/, '');   // trailing punctuation is the sentence's, not the URL's
     let u;
     try { u = new URL(raw); } catch { continue; }
+    if (u.origin === SHARE_SITE_ORIGIN) {
+      const share = SHARE_LINK_PATH_RE.exec(u.pathname);
+      if (share) return { kind: 'share', provider: null, id: share[1], url: raw, start: m.index, end: m.index + raw.length };
+      continue;
+    }
     const provider = Object.hasOwn(LINK_ORIGINS, u.origin) ? LINK_ORIGINS[u.origin] : null;
     if (!provider || !isConversationPath(provider, u.pathname)) continue;
-    return { provider, url: raw, start: m.index, end: m.index + raw.length };
+    return { kind: 'vendor', provider, url: raw, start: m.index, end: m.index + raw.length };
   }
   return null;
 }
@@ -88,6 +97,9 @@ export function linkErrorText(code, provider) {
     case CODE_AUTH_REQUIRED: return { key: 'link_err_auth', arg: site };
     case CODE_NO_TAB: return { key: 'link_err_no_tab', arg: site };
     case CODE_UNSUPPORTED: case CODE_BAD_REQUEST: return { key: 'link_err_unsupported' };
+    // A share page (#1784 U4): deleted by the sharer / an operator, or a private one (U5).
+    case CODE_SHARE_DELETED: return { key: 'link_err_share_deleted' };
+    case CODE_SHARE_PRIVATE: return { key: 'link_err_share_private' };
     default: return { key: 'link_err_generic' };
   }
 }
@@ -98,7 +110,15 @@ export function linkErrorText(code, provider) {
  * A cut conversation says so HERE too, not only in the prompt: the user is the one who can decide
  * whether the missing beginning matters, and they can only decide it if they are told.
  */
+/** A share title in the chip — the chip is one line under the composer. */
+const LINK_CHIP_TITLE_MAX = 40;
 export function linkChipText(link) {
+  // A share page: its title (the page names the conversation; a provider name would be wrong).
+  if (link.kind === 'share') {
+    const full = typeof link.title === 'string' ? link.title.trim() : '';
+    const title = full.length > LINK_CHIP_TITLE_MAX ? `${full.slice(0, LINK_CHIP_TITLE_MAX - 1)}…` : full;
+    return link.truncated ? { key: 'link_ready_share_cut', args: [title, link.turns] } : { key: 'link_ready_share', args: [title, link.turns] };
+  }
   const name = link.provider === 'claude' ? 'Claude' : link.provider === 'chatgpt' ? 'ChatGPT' : 'Gemini';
   return link.truncated
     ? { key: 'link_ready_cut', args: [name, link.turns] }

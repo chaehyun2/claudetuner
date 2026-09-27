@@ -5,6 +5,15 @@
 
 import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK, FEEDBACK_CONTEXT_FIELD, FEEDBACK_CONTEXT_MAX, FEEDBACK_MODEL_UNKNOWN, FEEDBACK_COLUMN_RE, FEEDBACK_UA_RE, FEEDBACK_VERSION_RE, MODEL_ID_RE } from './constants.js';
 
+/**
+ * Quoted model text is EVIDENCE, not instructions (Codex C5 2R #6): a line that could pass for a
+ * fence or a heading (starts with `<<<` or `#`) is set off by one leading space — it still reads,
+ * it no longer parses as structure. Used by 「요약·비교」 (summary.js) and the debate prompts (debate-core.js).
+ */
+export function neutraliseQuoted(text) {
+  return String(text).split('\n').map((line) => (/^(<<<|#)/.test(line) ? ` ${line}` : line)).join('\n');
+}
+
 /** sendMessage as a promise, whether the fake/real runtime answers via callback or promise. */
 export function sendMessage(chrome, msg) {
   return new Promise((resolve) => {

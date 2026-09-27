@@ -19,8 +19,9 @@
 
 import { imageIdsOf } from './image-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
 import { autoGrow } from './helpers.js';
+import { readDebateRecord, legacyDebateRecord } from './debate-core.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
 export function installHistory(ctx) {
@@ -178,7 +179,9 @@ export function installHistory(ctx) {
       };
     }
     if (!Object.keys(columns).length) return null;
-    return { id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), ...(state.questionImg ? { questionImg: storedImg(state.questionImg) } : {}), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
+    // A debate session's record (#1769 후속) — what reopens it as the debate, not as columns.
+    const debate = ctx.debateSnapshot ? ctx.debateSnapshot(clipText) : null;
+    return { ...(debate ? { debate } : {}), id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), ...(state.questionImg ? { questionImg: storedImg(state.questionImg) } : {}), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
   }
   /**
    * A turn as stored. `kind` / `round` / `model` only when set (an entry written before a field,
@@ -238,6 +241,8 @@ export function installHistory(ctx) {
     for (let i = 0; i < 12 && over(); i++) {
       cap = Math.max(200, Math.floor(cap / 2));
       for (const c of Object.values(entry.columns)) for (const turn of c.turns) if (turn.role === 'user' && !turn.summary && turn.text.length > cap) turn.text = `${turn.text.slice(0, cap)}${mark}`;
+      // A debate's record carries the user's own words (they exist nowhere else) — cut with them.
+      if (entry.debate) for (const e of entry.debate.log) if (e.u !== undefined && e.u.length > cap) e.u = `${e.u.slice(0, cap)}…`;
     }
     // Round-group eviction. A turn without a round (an entry from before provenance) belongs to
     // the oldest group. The protected round is the active one, else the latest comparison round
@@ -306,7 +311,16 @@ export function installHistory(ctx) {
           if (evicted.length) await ctx.imageStore.forget(evicted);
         },
       };
-    }).then((r) => syncHistoryButton(r.ok ? r.list : null));
+    }).then((r) => {
+      // This session has an entry to come back to — what the mode tabs ask before leaving it
+      // (debate.js requestMode, plan §17.7). Only once the entry is READ BACK from the store (Codex
+      // tabs U1 2R: marking at the request let a failed write leave the session unasked). Never for
+      // an incognito session (no snapshot); a pending write counts as not saved yet (it asks).
+      // Still THIS session (Codex tabs U1 3R): a late write of the session that was left must not
+      // overwrite the mark of the one on screen now (a loaded entry is marked by loadSession).
+      if (r.ok && state.sessionId === snap.id && r.list.some((e) => e && e.id === snap.id)) state.persistedId = snap.id;
+      syncHistoryButton(r.ok ? r.list : null);
+    });
   }
   /**
    * The previews of `ids` for the stored entry `entryId`, once they exist (#1684). 🔴 Decided INSIDE
@@ -346,6 +360,9 @@ export function installHistory(ctx) {
     for (const c of Object.values(entry.columns || {})) {
       for (const turn of c && Array.isArray(c.turns) ? c.turns : []) if (String(turn.text || '').toLowerCase().includes(term)) return true;
     }
+    // A debate's own words of the user live only in its record (#1769 후속).
+    const log = entry.debate && Array.isArray(entry.debate.log) ? entry.debate.log : [];
+    for (const e of log) if (typeof e.u === 'string' && e.u.toLowerCase().includes(term)) return true;
     return false;
   }
   function syncHistoryButton(list) {
@@ -374,6 +391,13 @@ export function installHistory(ctx) {
     state.historyCache = Array.isArray(list) ? list : [];
     paintHistoryList();
   }
+  /** A stored debate: its record, or (written before records) a debate turn in any column. */
+  function isDebateEntry(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    if (entry.debate) return true;
+    const cols = entry.columns && typeof entry.columns === 'object' ? Object.values(entry.columns) : [];
+    return cols.some((c) => c && Array.isArray(c.turns) && c.turns.some((turn) => turn && turn.kind === TURN_KIND_DEBATE));
+  }
   function paintHistoryList() {
     const all = state.historyCache;
     clear(ctx.historyList);
@@ -391,8 +415,25 @@ export function installHistory(ctx) {
       const q = String(entry.question || '').split('\n')[0];
       open.appendChild(el('span', 'cmp-history-q', q.length > HISTORY_QUESTION_PREVIEW ? `${q.slice(0, HISTORY_QUESTION_PREVIEW)}…` : q));
       const meta = el('span', 'cmp-history-meta');
+      // A debate says so (plan §17.7) — opening it switches the page to the 토론 tab.
+      if (isDebateEntry(entry) && ctx.debateOn && ctx.debateOn()) { // flag off: it opens as columns — no 토론 label
+        const badge = el('span', 'cmp-history-debate');
+        const glyph = el('span', null, '\u{1F5E3}\u{FE0F}');
+        glyph.setAttribute('aria-hidden', 'true');
+        badge.appendChild(glyph);
+        badge.appendChild(el('span', null, t('history_debate_badge')));
+        meta.appendChild(badge);
+      }
+      // A conversation shared from this browser (#1784 U3, the share map beside the history).
+      if (ctx.shareFor && ctx.shareFor(entry.id)) {
+        const shared = el('span', 'cmp-history-shared', '\u{1F517}');
+        shared.title = t('history_shared');
+        shared.setAttribute('aria-label', t('history_shared'));
+        meta.appendChild(shared);
+      }
       for (const key of Object.keys(entry.columns || {})) { const parsed = parseColId(key); if (parsed) meta.appendChild(dot(parsed.provider)); }
-      const resumable = !!(entry.columns && Object.values(entry.columns).some((c) => c && c.continuation));
+      // A debate entry opens frozen (read-only) while the debate is not offered — say so, not 「이어서」.
+      const resumable = !!(entry.columns && Object.values(entry.columns).some((c) => c && c.continuation)) && !(isDebateEntry(entry) && !(ctx.debateOn && ctx.debateOn()));
       meta.appendChild(el('span', null, [relativeTime(entry.updatedAt), resumable ? t('history_resumable') : t('history_readonly')].filter(Boolean).join(' · ')));
       open.appendChild(meta);
       open.setAttribute('aria-label', t('history_open_aria', q));
@@ -422,6 +463,7 @@ export function installHistory(ctx) {
     ctx.historyPanel.hidden = false;
     ctx.historyBtn.setAttribute('aria-expanded', 'true');
     track('history_open');
+    if (ctx.syncMySharesEntry) ctx.syncMySharesEntry();
     ctx.historySearch.value = ''; // every open starts unfiltered — a stale term would hide the list behind 「검색 결과 없음」
     historyUpdate(null).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); });
   }
@@ -550,16 +592,18 @@ export function installHistory(ctx) {
         const img = turn.img === undefined ? null : readImg(turn.img); // absent on every pre-#1616 turn
         const images = turn.images === undefined ? null : readOutImagesMarker(turn.images); // #1684, absent on every older turn
         if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined || images === undefined) return null;
-        const kind = turn.kind === TURN_KIND_SUMMARY ? TURN_KIND_SUMMARY : null;
+        // A debate turn (#1769) keeps its kind on both roles: its request is the page's composed
+        // prompt (it folds when the session is reloaded), its answer a speaker's turn.
+        const kind = turn.kind === TURN_KIND_SUMMARY ? TURN_KIND_SUMMARY : turn.kind === TURN_KIND_DEBATE && turn.role !== 'skipped' ? TURN_KIND_DEBATE : null;
         let summary = null;
-        if (kind && turn.role === 'user') {
+        if (kind === TURN_KIND_SUMMARY && turn.role === 'user') {
           if (turn.summary !== undefined) { summary = storedSummary(turn.summary); if (!summary) return null; } // present (null included) but malformed = the entry is
           // else: a bare-text request from before structures — a plain user turn
         }
         if (round !== null) seenRounds.add(round);
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
-        const k = kind && (turn.role === 'assistant' || summary) ? kind : null;
+        const k = kind === TURN_KIND_DEBATE ? kind : kind && (turn.role === 'assistant' || summary) ? kind : null;
         turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
@@ -571,18 +615,24 @@ export function installHistory(ctx) {
     const activeRound = activeRoundRaw !== null && seenRounds.has(activeRoundRaw) ? activeRoundRaw : null;
     const lowest = seenRounds.size ? Math.min(...seenRounds) : null;
     const firstRound = firstRoundRaw !== null ? firstRoundRaw : lowest;
-    return { id: entry.id, question, ...(questionImg ? { questionImg } : {}), rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src };
+    // The debate record (#1769 후속): typed like every other field — present but malformed drops the
+    // entry; absent on a debate entry written before records = derived from its turns.
+    const debate = entry.debate === undefined ? legacyDebateRecord(columns, firstRound) : readDebateRecord(entry.debate, Object.keys(columns), HISTORY_TEXT_MAX);
+    if (debate === undefined) return null;
+    return { ...(debate ? { debate } : {}), id: entry.id, question, ...(questionImg ? { questionImg } : {}), rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src };
   }
   function loadSession(raw) {
     if (state.disabled) return;
     const entry = normalizeEntry(raw);
     if (!entry) return; // not an entry: the session on screen is left as it is
     ctx.closeViewer(); // an image of the session being replaced must not stay on top of the loaded one
+    ctx.closeShareDialog(); // the share dialog was about the session being replaced
     if (!state.columns.size) { ctx.pendingLoad = raw; closeHistoryPanel(); return; } // applied by readStatus once the columns exist
     // Leave whatever is on screen — accepted or not: a first SEND still waiting for its CONSUME_OK
     // keeps a port whose late answer must never land in the loaded session (Codex hist 1R #1).
     if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* gone */ } }
     ctx.closePort();
+    if (ctx.debateReset) ctx.debateReset(); // the debate on screen (if any) is left; a debate entry reopens as one below
     // The exclusion checkbox is a first-send choice; a stored session shows every column it holds.
     state.excludeSrc = false; ctx.excludeInput.checked = false;
     for (const col of state.columns.values()) col.node.hidden = false;
@@ -602,6 +652,7 @@ export function installHistory(ctx) {
     state.question = String(entry.question || '');
     state.questionImg = entry.questionImg || null; // the first round's marker rides the entry, not a turn
     state.sessionId = entry.id;
+    state.persistedId = entry.id; // opened FROM the history: it has an entry
     state.sessionStarted = true;
     state.sessionEnded = true;      // no port carries it: a follow-up resumes (canResume) or is refused
     state.sessionSaveHistory = true; // only kept sessions are stored
@@ -613,6 +664,7 @@ export function installHistory(ctx) {
     // left open they sat beside the thread as empty 「로그인됨 — 새 대화부터」 cards and, being first of
     // their service, carried its plan / gauges / 「같은 계정」 chip (2026-09-26 user feedback).
     ctx.ensureLayout(Object.keys(entry.columns));
+    state.layoutFromEntry = true; // the entry's columns and models are this session's only (applyLayout rebuilds on the way out)
     // An entry with no column (never written by snapshotSession — a damaged row) closes nothing: an empty page helps no one (Codex cmp-load 1R 후속).
     if (Object.keys(entry.columns).length) for (const col of ctx.allColumns()) {
       if (Object.prototype.hasOwnProperty.call(entry.columns, col.id)) continue;
@@ -620,6 +672,15 @@ export function installHistory(ctx) {
       col.node.hidden = true;
     }
     ctx.renderColumns(); // the provider-level UI moves to the first VISIBLE column of each service
+    // A debate opens as the debate (#1769 후속): the timeline exists before the turns are drawn, so
+    // each one is decorated as it is pushed; restoreFinish lays them out in the debate's order.
+    const debating = !!(entry.debate && ctx.debateRestoreBegin && ctx.debateRestoreBegin(entry.debate));
+    // FROZEN (1.38 batch review 2R·3R): a debate entry that did not open as the debate (the flag is
+    // off — the rollback — or its cast is not on the page) is shown as columns but is not THIS page's
+    // conversation to change: nothing may re-save it (it would lose its `debate` record — the user's
+    // words, the aliases) and nothing may publish it (a share would post the composed prompts as a
+    // plain question). One state, read by every writer: continuation (below) and share.js shareable().
+    state.frozenDebate = !!entry.debate && !debating;
     const targets = [];
     for (const colId of Object.keys(entry.columns)) {
       const stored = entry.columns[colId];
@@ -651,7 +712,11 @@ export function installHistory(ctx) {
         else restoreAssistantTurn(col, turn, kind, { round, model: turn.model || stored.model });
       }
       if (stored.model && typeof stored.model === 'object') col.servedModel = { id: stored.model.id == null ? null : String(stored.model.id), label: stored.model.label == null ? '' : String(stored.model.label), source: 'reported' };
-      col.continuation = stored.continuation && typeof stored.continuation === 'object' ? stored.continuation : null;
+      // A debate entry that did not open as the debate (the flag is off — the rollback — or its cast
+      // is not on the page) is READ-ONLY here: continuing it as columns would re-save the entry
+      // without its `debate` record (snapshotSession finds no live debate) and lose the user's words
+      // and the aliases for good (1.38 batch review 2R). Kept as is, it reopens whole once it can.
+      col.continuation = !state.frozenDebate && stored.continuation && typeof stored.continuation === 'object' ? stored.continuation : null;
       // Now that the turns are back, the thread's mode is known: the model chosen above (before
       // them) is put back in it (1.35.0 batch review).
       ctx.reconcileMode(col);
@@ -665,12 +730,15 @@ export function installHistory(ctx) {
     }
     state.followupTargets = new Set(targets);
     state.pendingFollowupCol = null;
+    if (debating) ctx.debateRestoreFinish();
     ctx.stopBtn.disabled = true;
     ctx.syncWaitTimer();
     closeHistoryPanel();
+    // The tab follows what the entry opened AS — the debate room or the columns (plan §17.7).
+    if (ctx.debateFollowEntry) ctx.debateFollowEntry(debating);
     ctx.updateControls();
     ctx.showNotice(ctx.canResume() ? 'info' : 'warn', [t(ctx.canResume() ? 'history_loaded_resumable' : 'history_loaded_readonly')]);
-    track('history_load', { resumable: ctx.canResume(), columns: targets.length });
+    track('history_load', { resumable: ctx.canResume(), columns: targets.length, debate: debating });
     if (ctx.canResume()) ctx.focusQuietly(ctx.followup.input);
   }
   /** A stored assistant turn: painted settled (no stream), with its error line when it had one. */

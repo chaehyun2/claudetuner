@@ -20,10 +20,11 @@
 //
 // Wire contract (see .omc/handoffs/phase3-contract.md — the SoT shared with the page; ux3 addendum
 // at its end):
-//   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
+//   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, debateOn, shareOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
 //                         saveHistory}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
+//                         COMPARE_SHARE{op: create|update|delete|list, …} → {ok, …} | {ok:false, status, code} (compare page only — see shareRequest)
 //   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryOnce? (the boolean is this session's only — not stored as the preference), resume?, kind?, round?, src?, session?, attachments?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
 //                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
@@ -189,6 +190,7 @@
 // The output-image contract (#1684) — the package's own numbers, so the host never refuses an image
 // the client accepted. A pure module (no browser global), safe for the Node guard.
 import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
+import { PROVIDER_LABELS } from './constants.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
@@ -233,7 +235,7 @@ export const PUBLISHED_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
 export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
 // Columns (cmp-columns contract): the most columns one round may have, and the id of the
 // provider's default-model column.
-export const MAX_COLUMNS = 5;
+export const MAX_COLUMNS = 6;
 export const COLUMN_AUTO = 'auto';
 /** `${provider}:${modelId || 'auto'}` — a column's id. */
 export const columnId = (provider, model) => `${provider}:${model || COLUMN_AUTO}`;
@@ -317,12 +319,28 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // Feedback / report link (topbar): the user left for the inquiry form. Shapes only — whether the
   // page was framed and how many rounds they had run, never the prefill (it carries their email).
   'feedback_open',
+  // 「닫은 열 다시 열기」 (the count of columns brought back). Emitted since 2026-09-26, dropped here until now.
+  'column_reopen',
+  // Mode tabs (#1769 plan §17): which tab (`mode`) and how (`via`: click / history).
+  'mode_tab',
+  // 「토론」 (#1769): counts, kinds and flags only — never a topic, an alias or a message. Emitted
+  // since 2026-09-26 but never listed here, so the SW dropped every one (found with plan §17 U1).
+  'debate_settings', 'debate_start', 'debate_end', 'debate_pause', 'debate_resume', 'debate_pick', 'debate_user', 'debate_restore',
+  'debate_budget', 'debate_hidden_pause', 'debate_mod_fallback', 'debate_tone', 'debate_alias',
+  // 「내 공유 링크」 opened from the history panel (manage mode, no params).
+  'share_mine_open',
+  // Share links (#1784 U3): kind / author mode / 0-1 flags only — never a title, a link or an id.
+  'share_open', 'share_create', 'share_update', 'share_delete', 'share_copy',
+  // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
+  'share_import',
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
 
 // Usage stats (cmp-beta contract §1/§2): what a consume says it is. The page decides; anything
 // outside this list — or an older page that says nothing — is derived in runSend.
-export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume']);
+export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume', 'debate', 'debate_turn', 'debate_mod']);
+// Kinds whose text the PAGE composed (a summary request, a debate's prompts): no question signals.
+const COMPOSED_KINDS = Object.freeze(['summary', 'debate', 'debate_turn', 'debate_mod']);
 // Bounds on what the consume / outcome bodies carry (the server validates the same caps; a body
 // that exceeds them would be refused, and a refused consume is a send that never happens).
 export const ROUND_MAX = 9999;
@@ -372,6 +390,29 @@ export const COMPARE_CTA_FLAG_FIELD = 'compare_cta';
 // the feature ships dark and is switched on — or killed — by editing flags.json, no release.
 // Answered as COMPARE_FLAG.summary and COMPARE_STATUS.summaryOn.
 export const COMPARE_SUMMARY_FLAG_FIELD = 'compare_summary';
+// Fourth field: the 「토론 모드」 toggle on compare.html (#1769) — same contract as `summary` (needs
+// `compare`, missing / non-boolean = false). Answered as COMPARE_STATUS.debateOn.
+export const COMPARE_DEBATE_FLAG_FIELD = 'compare_debate';
+// Fifth field: 「공유」 on compare.html (#1784 U3) — same contract (needs `compare`, missing /
+// non-boolean = false). Answered as COMPARE_STATUS.shareOn. It gates CREATING and EDITING a share
+// from the page only: deleting one and the 「내 공유 링크」 list always work (the server keeps them
+// open whatever its own kill switch says — a sharer must always be able to take a page down).
+export const COMPARE_SHARE_FLAG_FIELD = 'compare_share';
+// Share links (#1784 U3) — the wire of runtime message COMPARE_SHARE (see shareRequest). The limits
+// mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
+export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list']);
+export const SHARE_AUTHOR_MODES = Object.freeze(['anon', 'name', 'name_photo']);
+export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
+export const SHARE_REQUEST_MAX_BYTES = 640 * 1024;
+export const SHARE_AUTHOR_NAME_MAX = 40;
+export const SHARE_TITLE_MAX = 120;
+export const SHARE_LIST_MAX = 200;
+export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
+/** The one extension page that may create, edit, list or delete shares. */
+export const SHARE_PAGE_PATH = '/compare.html';
+/** OPEN_COMPARE_SHARE opens the shell with this `utm_content` and on this tab (a debate cannot continue a link). */
+export const SHARE_CONTINUE_PLACEMENT = 'share_continue';
+export const SHARE_CONTINUE_MODE = 'crosscheck';
 export const COMPARE_FLAG_CACHE_KEY = 'ct_compare_flag';
 export const COMPARE_FLAG_TTL_MS = 60 * 60 * 1000;
 // A cache row stamped in the future is not ours: `at` comes from Date.now() at write time, so
@@ -508,6 +549,8 @@ export const LINK_MAX_CHARS = 24000;
 export const LINK_MAX_TURN_CHARS = 4000;
 /** The title is a RECEIPT the page shows back, not content — bounded like every other label. */
 export const LINK_TITLE_MAX = 120;
+/** A speaker label a share page's turn carries (the model / debate name) — one line, bounded. */
+export const LINK_LABEL_MAX = 60;
 /**
  * The bound on ONE read (#1651, Codex 1R follow-up 1). Generous — a conversation is fetched in one
  * GET but a cold tab has to load first — and it is a BACKSTOP, not the wait the user experiences:
@@ -532,6 +575,72 @@ export function providerForLink(url) {
   return null;
 }
 
+// ── Share links as a conversation to continue (#1784 U4, docs/plans/compare-share.md §9.3) ──
+// A Claude Tuner share page (`https://claudetuner.com/c/<22 base62>`) is a link KIND of its own —
+// not a provider: nobody holds it as a conversation, so there is no continuation and EVERY column
+// is handed the transcript (pendingLink.provider = null → no link column). Matched by origin and
+// exact path, like the vendor links; the page's findLink (ui/compare/link.js) is the other half
+// and the share probe pins the two together.
+export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
+/** A share page's JSON is at most the stored snapshot (512 KB) — the read is capped a little above. */
+export const SHARE_CONTENT_MAX_BYTES = 640 * 1024;
+/**
+ * What a pasted link is: `{kind:'vendor', provider}` | `{kind:'share', id, private}` | null.
+ * `private` = the link carries a fragment (a private share's key, U5) — its page cannot be read
+ * without the password, so the read refuses it with its own code instead of a generic failure.
+ */
+export function linkTarget(url) {
+  const provider = providerForLink(url);
+  if (provider) return { kind: 'vendor', provider };
+  let u;
+  try { u = new URL(String(url).trim()); } catch { return null; }
+  if (u.origin !== SHARE_SITE_ORIGIN) return null;
+  const m = SHARE_LINK_PATH_RE.exec(u.pathname);
+  return m ? { kind: 'share', id: m[1], private: u.hash.length > 1 } : null;
+}
+/** A column's name the way the share page writes it (the provider, then the model — not twice). */
+function shareColumnName(col) {
+  const prov = PROVIDER_LABELS[col && col.provider] || 'AI';
+  const model = typeof col?.model === 'string' ? col.model.trim() : '';
+  if (!model) return prov;
+  return model.toLowerCase().startsWith(prov.toLowerCase()) ? model : `${prov} ${model}`;
+}
+/**
+ * A share page's snapshot (worker/src/utils/compare-share.ts) → `{title, turns[{role, text, label?}]}`
+ * in the order the page shows it. Every AI turn is LABELLED with who said it (the model, or the
+ * debate name): a shared conversation holds several AIs, and "AI" alone would merge them into one
+ * voice (§9.3 화자 보존). A failed or empty answer is skipped — there is nothing it said. null when
+ * the object is not a readable public snapshot.
+ */
+export function shareTranscript(snap) {
+  if (!snap || typeof snap !== 'object' || snap.v !== 1 || !Array.isArray(snap.columns)) return null;
+  const byKey = new Map(snap.columns.filter((c) => c && typeof c.key === 'string').map((c) => [c.key, c]));
+  const said = (a) => a && a.state !== 'error' && typeof a.text === 'string' && a.text.trim();
+  const turns = [];
+  if (snap.kind === 'compare' && Array.isArray(snap.rounds)) {
+    for (const r of snap.rounds) {
+      if (!r || typeof r !== 'object') continue;
+      if (typeof r.q === 'string' && r.q.trim()) turns.push({ role: 'user', text: r.q });
+      const answers = r.answers && typeof r.answers === 'object' ? r.answers : {};
+      for (const c of snap.columns) {
+        const a = answers[c.key];
+        if (said(a)) turns.push({ role: 'assistant', text: a.text, label: shareColumnName(c) });
+      }
+    }
+  } else if (snap.kind === 'debate' && snap.debate && Array.isArray(snap.debate.timeline)) {
+    const aliases = snap.debate.aliases && typeof snap.debate.aliases === 'object' ? snap.debate.aliases : {};
+    for (const it of snap.debate.timeline) {
+      if (!it || typeof it !== 'object') continue;
+      if (it.who === 'user') { if (typeof it.text === 'string' && it.text.trim()) turns.push({ role: 'user', text: it.text }); continue; }
+      const col = byKey.get(it.who);
+      if (!col || !said(it)) continue;
+      const name = typeof aliases[it.who] === 'string' && aliases[it.who].trim() ? `${aliases[it.who].trim()} (${shareColumnName(col)})` : shareColumnName(col);
+      turns.push({ role: 'assistant', text: it.text, label: it.role === 'mod' ? `${name} · moderator` : name });
+    }
+  } else return null;
+  return { title: typeof snap.title === 'string' ? snap.title : null, turns };
+}
+
 /**
  * A transcript → what the other columns will be told, bounded.
  *
@@ -546,7 +655,11 @@ export function boundTranscript(turns, { maxTurns = LINK_MAX_TURNS, maxChars = L
     const role = t?.role === 'user' || t?.role === 'assistant' ? t.role : null;
     const text = typeof t?.text === 'string' ? t.text.trim() : '';
     if (!role || !text) continue;
-    clean.push(text.length > maxTurnChars ? { role, text: text.slice(0, maxTurnChars), cut: true } : { role, text });
+    // Who said it (a share page's turns, §9.6-2) — one line, bounded; a vendor transcript has none,
+    // so its turns come out exactly as before.
+    const label = typeof t?.label === 'string' ? t.label.replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, LINK_LABEL_MAX) : '';
+    const turn = text.length > maxTurnChars ? { role, text: text.slice(0, maxTurnChars), cut: true } : { role, text };
+    clean.push(label ? { ...turn, label } : turn);
   }
   const kept = [];
   let chars = 0;
@@ -599,7 +712,9 @@ export function composeLinkPrompt(bounded, question, lang) {
   // 🔑 This is structure, not a security boundary: it removes the easy forgery, it does not make
   // the model obey us over the text. That is why the frame says "background, not instructions" on
   // BOTH sides of the transcript, and why an attack transcript still has to be evaluated.
-  for (const turn of bounded.turns) lines.push(JSON.stringify({ speaker: turn.role === 'user' ? t.user : t.assistant, text: turn.text }));
+  // A labelled turn (a share page's) names its speaker; a vendor transcript's never carries one,
+  // so its prompt is byte-identical to before.
+  for (const turn of bounded.turns) lines.push(JSON.stringify({ speaker: turn.role === 'user' ? t.user : (turn.label || t.assistant), text: turn.text }));
   lines.push('', t.tail, '', question);
   return lines.join('\n');
 }
@@ -740,6 +855,18 @@ function logInfo(...args) {
 }
 
 // Codes this module produces itself (the vendored ClientError codes pass through unchanged).
+/** READ_LINK of a share page (#1784 U4): its own refusals, each with its own sentence on the page. */
+export const SHARE_LINK_CODES = Object.freeze({
+  DELETED: 'share_deleted',   // 410 — the sharer (or an operator) deleted it
+  PRIVATE: 'share_private',   // a private share (U5) — not readable here yet
+  NOT_FOUND: 'not_found',     // no such share — the vendored clients' own code, so the page's sentence is reused
+});
+/** COMPARE_SHARE failures the SW decides itself (the server's own codes pass through as they are). */
+export const SHARE_CODES = Object.freeze({
+  OFF: 'share_off',              // the `compare_share` flag is off: no create / edit from the page
+  TOO_LARGE: 'payload_too_large', // the same code the server answers 413 with
+  BAD_RESPONSE: 'bad_response',  // a 2xx without a usable id
+});
 export const SW_CODES = Object.freeze({
   AUTH_REQUIRED: 'auth_required',   // readiness: no provider session (or no host permission to see one)
   NO_TAB: 'no_tab',                 // readiness: prepare() found no provider tab (and could not open one)
@@ -930,6 +1057,17 @@ export function resolveColumns(message, selectedModels = {}) {
 // A `models` event param (`provider:id,provider:id` — `provider:auto` / `provider:` for Auto, as the
 // page writes it) rebuilt from the pairs whose provider is known and whose id passes MODEL_ID_RE;
 // null when nothing survives or the input is not a string. Order kept, pairs never rewritten.
+/** The leading comma-separated pairs of `csv` that fit in `max` characters (whole pairs only). */
+export function wholePairsWithin(csv, max) {
+  let out = '';
+  for (const pair of String(csv).split(',')) {
+    const next = out ? `${out},${pair}` : pair;
+    if (next.length > max) break;
+    out = next;
+  }
+  return out;
+}
+
 export function gateModelsCsv(v) {
   if (typeof v !== 'string') return null;
   const kept = [];
@@ -969,7 +1107,9 @@ export function sanitizeCompareEvent(name, params) {
       // `col` (cmp-columns) is a colId — kept WHOLE (`provider:model`, never reduced to the
       // provider) when it has the shape; anything else is dropped.
       const gated = k === 'models' ? gateModelsCsv(v) : (k === 'col' ? (parseColumnId(v)?.id ?? null) : wireModelId(v));
-      if (gated !== null) clean[k] = gated.slice(0, COMPARE_EVENT_MAX_STRING);
+      // `models` keeps WHOLE pairs within the cap (six columns can exceed it — a mid-id cut would
+      // leave a model that never existed; Codex six-columns 후속).
+      if (gated !== null) clean[k] = k === 'models' ? wholePairsWithin(gated, COMPARE_EVENT_MAX_STRING) : gated.slice(0, COMPARE_EVENT_MAX_STRING);
       continue;
     }
     if (typeof v === 'string') clean[k] = v.slice(0, COMPARE_EVENT_MAX_STRING);
@@ -1114,7 +1254,7 @@ export function questionSignals(text) {
 // integer; `src` only when a known provider; `session_id` only when the page's `session` has the
 // SESSION_ID_RE shape (contract §5); `ext_version` only when readable; `q_*` the question's
 // content-free signals (questionSignals) for a round that carries a user question — omitted for
-// 'summary', whose text the page composes, so the statistics describe what USERS type. Plain
+// 'summary' and the debate kinds, whose text the page composes, so the statistics describe what USERS type. Plain
 // data — never an email, never the question text — and pure, so the guard can pin its shape.
 export function buildConsumeBody({ kind, followup, resumeAsked, src, session, ready, models, round, extVersion, text }) {
   const derived = followup ? 'followup' : (resumeAsked ? 'resume' : 'send');
@@ -1130,7 +1270,7 @@ export function buildConsumeBody({ kind, followup, resumeAsked, src, session, re
   if (COMPARE_PROVIDERS.includes(src)) body.src = src;
   if (typeof session === 'string' && SESSION_ID_RE.test(session)) body.session_id = session;
   if (typeof extVersion === 'string' && extVersion) body.ext_version = extVersion.slice(0, EXT_VERSION_MAX);
-  const signals = body.kind === 'summary' ? null : questionSignals(text);
+  const signals = COMPOSED_KINDS.includes(body.kind) ? null : questionSignals(text);
   if (signals) Object.assign(body, signals);
   return body;
 }
@@ -1532,20 +1672,20 @@ export function createCompareController({
       // {on:true, at:<+1y>} row hid the strip button and 「요약·비교」 for good).
       // `cta` / `summary` are read as conjunctions with `on` (Codex batch-1 #5): a row written as
       // {on:false, summary:true} must not answer a gate the page itself does not have.
-      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.at === 'number') {
+      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.at === 'number') {
         const age = now() - cached.at;
-        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true };
+        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true };
       }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
   async function writeFlagCache(flags) {
-    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, at: now() } }); } catch { /* best effort */ }
+    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, at: now() } }); } catch { /* best effort */ }
   }
   // FAIL-SAFE like fetchFolderAvailable: any fetch/parse error, non-2xx or a missing/invalid
   // `compare` field reads as dark. A network error does not poison the cache. Neither `cta` nor
   // `summary` can be true while `on` is false (both are buttons that need the page).
-  const DARK = Object.freeze({ on: false, cta: false, summary: false });
+  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false });
   async function fetchCompareFlags() {
     const cached = await readFlagCache();
     if (cached !== null) return cached;
@@ -1561,6 +1701,8 @@ export function createCompareController({
             on,
             cta: on && !!(json && json[COMPARE_CTA_FLAG_FIELD] === true),
             summary: on && !!(json && json[COMPARE_SUMMARY_FLAG_FIELD] === true),
+            debate: on && !!(json && json[COMPARE_DEBATE_FLAG_FIELD] === true),
+            share: on && !!(json && json[COMPARE_SHARE_FLAG_FIELD] === true),
           };
           await writeFlagCache(flags);
           return flags;
@@ -1856,6 +1998,8 @@ export function createCompareController({
     // The 「요약·비교」 gate (COMPARE_SUMMARY_FLAG_FIELD) rides the status the page already reads,
     // so the button needs no second round trip; false whenever the page itself is dark.
     const summaryOn = flagOn && flags.summary === true;
+    const debateOn = flagOn && flags.debate === true; // 「토론 모드」 toggle (#1769), same shape
+    const shareOn = flagOn && flags.share === true; // 「공유」 (#1784 U3), same shape
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
@@ -1892,7 +2036,7 @@ export function createCompareController({
     const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
     let examples = null;
     try { examples = await examplesPending; } catch { examples = null; }
-    return { ok: true, flagOn, summaryOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory };
+    return { ok: true, flagOn, summaryOn, debateOn, shareOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory };
   }
 
   // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders
@@ -1953,6 +2097,74 @@ export function createCompareController({
     return { ok: true, quota: fresh.quota };
   }
 
+  // ── Share links (#1784 U3, docs/plans/compare-share.md §0.5) ─────────────────────────────
+  // runtime message COMPARE_SHARE{op, …} → the ext_token routes `/api/compare/shares*`:
+  //   create {snapshot, author, authorName?}      → {ok, id, url, author{mode, name?}, createdAt}
+  //   update {id, snapshot, author, authorName?}  → {ok, id, url, author{mode, name?}, updatedAt}
+  //   delete {id}                                 → {ok}
+  //   list                                        → {ok, shares[{id, url, kind, author, title, createdAt, updatedAt, views}]}
+  //   failure                                     → {ok:false, status, code} (the server's `code`, or ours)
+  // The snapshot is built by the page (ui/compare/share-snapshot.js) and REBUILT by the server from
+  // its whitelist, so this hop only bounds and forwards it. 🔴 Only the compare page may ask
+  // (sender check): a content script on a provider site must never be a way to publish a page
+  // under the user's account. create / update also need the `compare_share` flag; delete and list
+  // never do (taking a page down must always work).
+  const fromSharePage = (sender) => {
+    try {
+      const u = new URL(String(sender && sender.url));
+      return u.protocol === 'chrome-extension:' && u.host === runtime.id && u.pathname === SHARE_PAGE_PATH;
+    } catch { return false; }
+  };
+  const shareRow = (r) => (r && typeof r.id === 'string' && SHARE_ID_RE.test(r.id) ? {
+    id: r.id, url: `${SHARE_SITE_ORIGIN}/c/${r.id}`, kind: r.kind === 'debate' ? 'debate' : 'compare',
+    author: SHARE_AUTHOR_MODES.includes(r.author) ? r.author : 'anon',
+    title: typeof r.title === 'string' ? r.title.slice(0, SHARE_TITLE_MAX) : '',
+    createdAt: typeof r.createdAt === 'string' ? r.createdAt : '', updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
+    views: Number.isFinite(r.views) ? r.views : 0,
+  } : null);
+  async function shareRequest(message, sender) {
+    const op = message.op;
+    if (!fromSharePage(sender) || !SHARE_OPS.includes(op)) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+    const id = message.id;
+    if ((op === 'update' || op === 'delete') && !(typeof id === 'string' && SHARE_ID_RE.test(id))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+    let init = { method: 'GET' };
+    let mode = 'anon';
+    if (op === 'create' || op === 'update') {
+      if (!(await fetchCompareFlags()).share) return { ok: false, status: 0, code: SHARE_CODES.OFF };
+      mode = SHARE_AUTHOR_MODES.includes(message.author) ? message.author : 'anon';
+      const name = typeof message.authorName === 'string' ? message.authorName.slice(0, SHARE_AUTHOR_NAME_MAX) : '';
+      const body = JSON.stringify({ snapshot: message.snapshot, author: mode, ...(name ? { authorName: name } : {}) });
+      // Measured here too: the server refuses a larger request anyway, but only after it is uploaded.
+      if (new TextEncoder().encode(body).byteLength > SHARE_REQUEST_MAX_BYTES) return { ok: false, status: 413, code: SHARE_CODES.TOO_LARGE };
+      init = { method: op === 'create' ? 'POST' : 'PUT', headers: { ...JSON_HEADERS }, body };
+    } else if (op === 'delete') init = { method: 'DELETE' };
+    let resp;
+    try {
+      const config = await getConfig();
+      const path = op === 'create' || op === 'list' ? '' : `/${id}`;
+      resp = await authedFetch(config, `${config.serverUrl}/api/compare/shares${path}`, init);
+    } catch {
+      return { ok: false, status: 0, code: SW_CODES.NETWORK_ERROR };
+    }
+    const body = op === 'delete' ? null : await readJson(resp);
+    if (!resp.ok) {
+      const err = op === 'delete' ? await readJson(resp) : body;
+      return { ok: false, status: resp.status, code: typeof err?.code === 'string' ? err.code.slice(0, OUTCOME_CODE_MAX) : 'http_error' };
+    }
+    if (op === 'delete') return { ok: true };
+    if (op === 'list') return { ok: true, shares: (Array.isArray(body?.shares) ? body.shares : []).slice(0, SHARE_LIST_MAX).map(shareRow).filter(Boolean) };
+    if (!body || typeof body.id !== 'string' || !SHARE_ID_RE.test(body.id) || (op === 'update' && body.id !== id)) return { ok: false, status: resp.status, code: SHARE_CODES.BAD_RESPONSE };
+    // The author the server PUBLISHED (it falls back to anonymous when there is no usable name):
+    // what the page shows as settled, never what it asked for.
+    const a = body.author && SHARE_AUTHOR_MODES.includes(body.author.mode) ? body.author : { mode: 'anon' };
+    return {
+      ok: true, id: body.id, url: `${SHARE_SITE_ORIGIN}/c/${body.id}`,
+      author: { mode: a.mode, ...(a.mode !== 'anon' && typeof a.name === 'string' ? { name: a.name.slice(0, SHARE_AUTHOR_NAME_MAX) } : {}) },
+      ...(typeof body.createdAt === 'string' ? { createdAt: body.createdAt } : {}),
+      ...(typeof body.updatedAt === 'string' ? { updatedAt: body.updatedAt } : {}),
+    };
+  }
+
   // ── Open the compare page from a provider tab (content script → SW) ───────────────────────
   // The ONE `tabs.create` outside the vendored clients, and it opens our own site shell only
   // (COMPARE_SITE_URL, which frames compare.html — see the constant).
@@ -1966,6 +2178,17 @@ export function createCompareController({
     const srcless = !src && COMPARE_SRCLESS_PLACEMENTS.includes(placement);
     if (!src && !srcless) return { ok: false, error: 'unknown src' };
     const q = src && typeof message.q === 'string' ? message.q : '';
+    const { dev, langQ } = await siteQueryExtras();
+    const url = srcless
+      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
+      : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}${langQ}#src=${src}&q=${encodeURIComponent(q)}`;
+    emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
+    await tabs.create({ url, active: true });
+    return { ok: true };
+  }
+
+  /** `&ext=<id>` for an unpacked build and `&lang=` when the user CHOSE a language — the shell's query extras. */
+  async function siteQueryExtras() {
     const id = typeof runtime.id === 'string' ? runtime.id : '';
     const dev = id && id !== PUBLISHED_EXT_ID ? `&ext=${id}` : '';
     // The extension's language, when the user CHOSE one (ko|en; 'auto' adds nothing and the shell
@@ -1974,13 +2197,35 @@ export function createCompareController({
     let extLang = null;
     // Best effort: a missing / throwing / hanging storage read opens the page exactly as before.
     try { extLang = await withTimeout(Promise.resolve(storageSync.get(COMPARE_LANG_KEY)).then((r) => r?.[COMPARE_LANG_KEY], () => null), SELECTED_MODELS_READ_TIMEOUT_MS, null); } catch { extLang = null; }
-    const langQ = COMPARE_EXPLICIT_LANGS.includes(extLang) ? `&lang=${extLang}` : '';
-    const url = srcless
-      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
-      : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}${langQ}#src=${src}&q=${encodeURIComponent(q)}`;
-    emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
+    return { dev, langQ: COMPARE_EXPLICIT_LANGS.includes(extLang) ? `&lang=${extLang}` : '' };
+  }
+
+  /**
+   * OPEN_COMPARE_SHARE (#1784 U4) — the share page's 「이어서 질문하기」 on claudetuner.com
+   * (site/shared/compare-share/viewer.js; it reads `{ok:true}` as done, anything else as 「update the
+   * extension」). Opens the cross-check with the share's link in the composer, where the page OFFERS
+   * it as a conversation to continue — the user still presses 「이어서」: opening a page is not
+   * consent to hand a stranger's conversation to their AIs.
+   * 🔴 Production origin only (§9.5-2): externally_connectable also admits every PR preview, and a
+   * message that opens a tab is not something a preview build should be able to do to a user.
+   */
+  async function openCompareShare(message, sender) {
+    if (!sender || sender.origin !== SHARE_SITE_ORIGIN) return { ok: false, error: 'origin_not_allowed' };
+    const id = typeof message.id === 'string' ? message.id : '';
+    if (!SHARE_ID_RE.test(id)) return { ok: false, error: 'bad_id' };
+    const { dev, langQ } = await siteQueryExtras();
+    const link = `${SHARE_SITE_ORIGIN}/c/${id}`;
+    const url = `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${SHARE_CONTINUE_PLACEMENT}${dev}${langQ}#q=${encodeURIComponent(link)}&mode=${SHARE_CONTINUE_MODE}`;
+    emitEvent('share_import', {});
     await tabs.create({ url, active: true });
     return { ok: true };
+  }
+
+  /** runtime.onMessageExternal adapter (claudetuner.com pages). Returns true when the message was ours. */
+  function handleExternalMessage(message, sender, sendResponse) {
+    if (!message || message.type !== 'OPEN_COMPARE_SHARE') return false;
+    openCompareShare(message, sender).then(sendResponse, () => sendResponse({ ok: false, error: 'unknown' }));
+    return true;
   }
 
   /** runtime.onMessage adapter. Returns true when the message was ours (async sendResponse). */
@@ -2012,6 +2257,11 @@ export function createCompareController({
     // port message, never a side effect of a send or a status probe.
     if (message.type === 'COMPARE_RESET') {
       resetQuota().then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
+      return true;
+    }
+    // Share links (#1784 U3): see shareRequest — the compare page only.
+    if (message.type === 'COMPARE_SHARE') {
+      shareRequest(message, _sender).then(sendResponse, () => sendResponse({ ok: false, status: 0, code: SW_CODES.UNKNOWN }));
       return true;
     }
     // Dev-only probe (unpacked builds): see probeUpload (#1613).
@@ -2772,7 +3022,9 @@ export function createCompareController({
           // looking at a chip that says their old one is being continued — the answer would even
           // look plausible, because the other columns still get the transcript. The page turns the
           // toggle on when the chip is accepted; this is the guard, not the flow.
-          if (sessionSaveHistory !== true) {
+          // A share page (#1784 U4) continues NOTHING in the user's history (no continuation, no
+          // link column) — incognito contradicts nothing there, so the refusal is the vendor links' only.
+          if (sessionSaveHistory !== true && link.kind !== 'share') {
             post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.LINK_NEEDS_HISTORY, provider: link.provider });
             return;
           }
@@ -2913,11 +3165,13 @@ export function createCompareController({
      */
     async function runReadLink(message) {
       const url = typeof message?.url === 'string' ? message.url.trim() : '';
-      const provider = providerForLink(url);
-      if (!provider) {
+      const target = linkTarget(url);
+      if (!target) {
         post({ type: PORT_MSG.LINK_FAIL, code: SW_CODES.BAD_REQUEST });
         return;
       }
+      // A share link belongs to no provider: no column continues it, every column is told it.
+      const provider = target.kind === 'vendor' ? target.provider : null;
       if (linkAc) { post({ type: PORT_MSG.LINK_FAIL, provider, code: SW_CODES.BUSY }); return; }
       const ac = new AbortController();
       linkAc = ac;
@@ -2928,16 +3182,20 @@ export function createCompareController({
       try {
         await leversReady;
         if (torndown || ac.signal.aborted) return;
-        client = createClient(provider, clientDeps, clientOptions(provider, false));
-        linkClient = client;
-        const read = await client.readConversation(url, { mayOpenTab: message?.mayOpenTab === true, signal: ac.signal });
+        let read;
+        if (target.kind === 'share') read = await readShareLink(target, ac.signal);
+        else {
+          client = createClient(provider, clientDeps, clientOptions(provider, false));
+          linkClient = client;
+          read = await client.readConversation(url, { mayOpenTab: message?.mayOpenTab === true, signal: ac.signal });
+        }
         if (torndown || ac.signal.aborted) return;
         const bounded = boundTranscript(read.transcript);
         // Held HERE, not handed back: see the note on LINK_MAX_CHARS.
-        pendingLink = { provider, continuation: read.continuation, turns: bounded.turns, dropped: bounded.dropped, title: read.title || null };
-        logInfo(provider, 'link', { turns: bounded.turns.length, chars: bounded.chars, dropped: bounded.dropped });
+        pendingLink = { kind: target.kind, provider, continuation: read.continuation || null, turns: bounded.turns, dropped: bounded.dropped, title: read.title || null };
+        logInfo(provider || 'share', 'link', { turns: bounded.turns.length, chars: bounded.chars, dropped: bounded.dropped });
         post({
-          type: PORT_MSG.LINK_OK, provider,
+          type: PORT_MSG.LINK_OK, kind: target.kind, provider,
           title: typeof read.title === 'string' ? read.title.slice(0, LINK_TITLE_MAX) : null,
           turns: bounded.turns.length, chars: bounded.chars, truncated: bounded.truncated,
         });
@@ -2956,6 +3214,26 @@ export function createCompareController({
         if (linkClient === client) linkClient = null;
         if (client) Promise.resolve().then(() => client.dispose()).catch(() => {});
       }
+    }
+
+    /**
+     * A share page as a transcript (#1784 U4): its public JSON, read without credentials (the page
+     * is public; the user's cookies have no business on the request). A deleted share answers 410
+     * → `share_deleted` (the chip says 「공유한 분이 삭제했어요」); a private one (U5) → `share_private`.
+     */
+    async function readShareLink(target, signal) {
+      const fail = (code) => Object.assign(new Error(code), { code });
+      if (target.private) throw fail(SHARE_LINK_CODES.PRIVATE);
+      const res = await fetchImpl(`${SHARE_SITE_ORIGIN}/c/${target.id}/content`, { signal, credentials: 'omit', cache: 'no-store' });
+      if (res.status === 410) throw fail(SHARE_LINK_CODES.DELETED);
+      if (res.status === 404) throw fail(SHARE_LINK_CODES.NOT_FOUND);
+      if (!res.ok) throw fail(SW_CODES.UNKNOWN);
+      const { json, oversized } = await readJsonBounded(res, SHARE_CONTENT_MAX_BYTES);
+      if (oversized || !json) throw fail(SW_CODES.UNKNOWN);
+      if (json.private === true) throw fail(SHARE_LINK_CODES.PRIVATE);
+      const tr = shareTranscript(json);
+      if (!tr || !tr.turns.length) throw fail(SW_CODES.UNKNOWN);
+      return { transcript: tr.turns, title: tr.title, continuation: null };
     }
 
     function onPortMessage(message) {
@@ -2988,6 +3266,7 @@ export function createCompareController({
 
   return {
     handleMessage,
+    handleExternalMessage,
     onConnect,
     fetchCompareFlag,
     /** Number of live streaming sessions (diagnostics / tests). */

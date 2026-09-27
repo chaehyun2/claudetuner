@@ -59,9 +59,16 @@
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, FOLLOWUP_RESEND_CODES, CODE_ABORTED, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, FOLLOWUP_RESEND_CODES, CODE_ABORTED, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_TYPES, ATTACH_ERR_READ } from './ui/compare/constants.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
+import { PROFILE_PHOTO_KEY, profilePhotoFor } from './bg/profile-photo.js';
+import { MODE_DEBATE, MODE_CROSSCHECK, pickModeratorSeat, defaultDebateLayout } from './ui/compare/debate-core.js';
+// storage.sync key of each tab's column layout (see syncStorage below).
+const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_DEBATE]: 'debateColumns' });
+// The debate layout's moderator seat (plan §18.8/§18.9 ①): a colId written WITH `debateColumns`, so a
+// stored layout keeps the column that moderates even when the plans read later would pick another.
+const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl } from './ui/compare/helpers.js';
@@ -74,6 +81,8 @@ import { installColumnThread } from './ui/compare/column-thread.js';
 import { installActivity } from './ui/compare/activity.js';
 import { installPort } from './ui/compare/port.js';
 import { installOutputImages } from './ui/compare/output-images.js';
+import { installDebate } from './ui/compare/debate.js';
+import { installShare } from './ui/compare/share.js';
 // The public surface stays on compare.js (test/compare-page-flow-guard.mjs imports it from here).
 export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, MODEL_AUTO_ID, colIdOf, parseColId, normalizeColId, PROVIDER_META, LOGIN_URL, PRO_URL, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS } from './ui/compare/constants.js';
 export { listenEmbedTheme, sendableTargets, localHHMM } from './ui/compare/helpers.js';
@@ -96,9 +105,11 @@ export function mountComparePage(deps) {
   const nav = deps.navigator || (win && win.navigator) || null;
   // Diagnostics only (the port-loss line): injectable so the flow guard can read it.
   const con = deps.console || (typeof globalThis !== 'undefined' ? globalThis.console : null) || null;
-  // The page layout (`compareColumns`, an array of colIds) lives in chrome.storage.sync like the
-  // model choices; injectable for the flow guard. Read once at mount, applied at the first status
-  // (ensureDefaultColumns), written on every layout change (saveLayout).
+  // The page layout (an array of colIds) lives in chrome.storage.sync like the model choices, ONE PER
+  // TAB (plan §17.6): `compareColumns` for the cross-check, `debateColumns` for the debate's cast —
+  // a six-column cross-check must not become a six-AI debate. Injectable for the flow guard. Read
+  // once at mount, applied at the first status (ensureDefaultColumns) and whenever the page returns
+  // to a pre-session state in a tab (applyLayout), written on every layout change (saveLayout).
   const syncStorage = deps.syncStorage || (chrome && chrome.storage && chrome.storage.sync) || null;
   // The signed-in account, for prefilling the feedback form (see syncFeedbackLink). chrome.storage
   // .local is where the popup and the composer strips keep it; injectable for the flow guard. Read
@@ -157,6 +168,7 @@ export function mountComparePage(deps) {
     // `linkReading` is the gap between the two. Only one at a time, and only before the first round.
     linkOffer: null,      // `{provider, url}` — the chip asking "continue this?"
     linkReading: false,
+    linkReadingKind: null, // `vendor` | `share` while a link is being read (#1784 U4) — the incognito toggle leaves a share alone
     link: null,           // `{provider, title, turns, truncated}` once LINK_OK arrives
     linkError: null,      // `{key, arg}` of the refusal line, or null
     linkHistoryForced: false, // the 「시크릿 대화」 toggle was turned off FOR the link, and we said so
@@ -169,7 +181,11 @@ export function mountComparePage(deps) {
     disabled: false,      // coming-soon rendered: every send path is inert (AC24), even via kept refs
     columns: new ColumnMap(), // colId → column record (see ColumnMap: a legacy provider key reads as the provider's first column)
     columnIds: [],        // the page's columns in DOM order (colIds)
-    storedColumns: null,  // `compareColumns` from storage.sync (validated colIds), null = none / not read yet
+    storedLayouts: { [MODE_CROSSCHECK]: null, [MODE_DEBATE]: null }, // per tab, from storage.sync (validated colIds); null = none / not read yet
+    storedSeat: null, // the stored debate layout's moderator seat (DEBATE_SEAT_KEY), a colId or null
+    debateSeat: null, // the seat of the debate layout ON THE PAGE (layoutIds) — ui/compare/debate.js reads it
+    debateDefault: null, // the default debate layout `{ ids, seat }` picked for this conversation (layoutIds; resetSession clears it)
+    layoutFromEntry: false, // a history entry shaped the columns (ids, models) — the next pre-session page rebuilds them (applyLayout)
     modelSelectSeq: 0,    // per-page monotonic suffix for a later column's model select id (never reused)
     pickerFor: null,      // colId whose picker popover is open (null = closed)
     pickerKind: null,     // which list the open popover holds: 'model' (the [Auto ▾] face) | 'service' (the ▾ after the name); null = closed
@@ -181,11 +197,16 @@ export function mountComparePage(deps) {
     roundTargets: [],     // colIds the in-flight / last round was sent to (col.round is the rollback snapshot and dies at CONSUME_OK)
     rounds: 0,            // rounds accepted (CONSUME_OK) in this session — analytics `send.round`
     sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
+    persistedId: null,    // the sessionId an entry was last written / loaded for — sessionId === persistedId ⇔ this session is in the history
+    frozenDebate: false,  // a loaded debate entry shown as columns (debate not offered): read-only, not shareable (history.js loadSession)
     historyCache: [],     // the last history list read for the panel — the search filters this, never storage (C2)
     // The signed-in account, read once at mount (readFeedbackAccount) and used for nothing but
-    // prefilling the feedback form. 🔴 Never put on the wire and never in analytics.
+    // prefilling the feedback form and drawing the debate room's own avatar (`mePhoto` = the
+    // Google photo bound to that email, bg/profile-photo.js). 🔴 Never put on the wire, never in
+    // analytics, never in a prompt or a history entry.
     feedbackName: '',
     feedbackEmail: '',
+    mePhoto: null,
     roundStartedAt: null, // clock.now() at the last beginSend — analytics `round_done.ms`
     checking: false,      // a COMPARE_STATUS read is in flight (gates show 「확인 중…」)
     notice: null,         // { kind, owner } of the notice on screen (see NOTICE_OWNER_*), null when none
@@ -379,7 +400,7 @@ export function mountComparePage(deps) {
     chooseColumn, saveLayout, readLayout, removeColumn, renderColumns, setColumnFocus, toggleColumnFocus, syncFocusButton, anyGate, syncZeroTargetsNotice, followupPlan,
     renderFollowupTargets, followupTargetText, updateControls, resetSession, refreshQuota, refreshStatus, setChecking, readStatus,
     autoRefresh, removeAutoRefreshListeners, sendInitial, sendFollowup, mirrorDraft, bumpStatusEpoch,
-    currentStatusReadSeq,
+    currentStatusReadSeq, threadless, modeChanged, debateTab,
   });
   // Install the slices (they only register functions on ctx; nothing runs here), then take the
   // names this file calls bare. Every slice function is also reachable as ctx.name(...).
@@ -392,6 +413,8 @@ export function mountComparePage(deps) {
   installColumnThread(ctx);
   installActivity(ctx);
   installPort(ctx);
+  installDebate(ctx);
+  installShare(ctx);
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
   const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
   const { closePicker, togglePicker, toggleServicePicker, syncServiceButton, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
@@ -402,7 +425,15 @@ export function mountComparePage(deps) {
   // ── skeleton ──
   clear(root);
   const topbar = el('header', 'cmp-topbar');
-  topbar.appendChild(el('h1', 'cmp-title', t('heading')));
+  // The heading names the page's mode; while the flag offers the debate the TABS take its place on
+  // screen (plan §17.2) and the h1 stays for assistive tech only (syncModeHeading).
+  const heading = el('h1', 'cmp-title', t('heading'));
+  topbar.appendChild(heading);
+  const modeWrap = el('div', 'cmp-mode-wrap');
+  modeWrap.appendChild(ctx.debateModeTabs);
+  modeWrap.appendChild(ctx.debateGear); // ⚙ 토론 설정, beside the tab it configures (plan §18.2)
+  modeWrap.appendChild(ctx.debateModeConfirm);
+  topbar.appendChild(modeWrap);
   // Beta pill (cmp-beta-contract §3): a small label next to the heading, for as long as the feature is in beta.
   const betaPill = el('span', 'cmp-beta-pill', t('beta_badge'));
   betaPill.id = 'cmp-beta';
@@ -467,6 +498,15 @@ export function mountComparePage(deps) {
   summaryBtn.setAttribute('aria-haspopup', 'dialog');
   summaryBtn.setAttribute('aria-expanded', 'false');
   topbarSide.appendChild(summaryBtn);
+  // 「공유」 (#1784 U3): hidden unless the SW's status says `shareOn` (flags.json `compare_share`);
+  // enabled for a KEPT conversation with an answer (share.js shareable). Opens the share dialog.
+  const shareBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-share', t('share_btn'));
+  shareBtn.id = 'cmp-share-btn';
+  shareBtn.type = 'button';
+  shareBtn.hidden = true;
+  shareBtn.disabled = true;
+  shareBtn.setAttribute('aria-haspopup', 'dialog');
+  topbarSide.appendChild(shareBtn);
   const copyAllBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-copy-all', t('copy_all'));
   copyAllBtn.id = 'cmp-copy-all';
   copyAllBtn.type = 'button';
@@ -494,10 +534,11 @@ export function mountComparePage(deps) {
   topbarSide.appendChild(newChatBtn);
   topbar.appendChild(topbarSide);
   root.appendChild(topbar);
-  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, copyAllBtn, reopenBtn, stopBtn, newChatBtn });
+  Object.assign(ctx, { topbar, betaPill, feedbackLink, modeChip, modeGlyph, modeText, topbarSide, quotaLine, historyBtn, summaryBtn, shareBtn, copyAllBtn, reopenBtn, stopBtn, newChatBtn });
 
   // ── copy to clipboard: ui/compare/export.js (installExport, installed above) ──
   attachCopy(copyAllBtn, () => compareMarkdown(), (copied) => { copyAllBtn.textContent = t(copied ? 'copied' : 'copy_all'); }, COPY_KIND_ALL, null);
+  shareBtn.addEventListener('click', () => ctx.openShareDialog(null, shareBtn));
 
   // ── feedback / report: the prefilled inquiry link (topbar) ──
   // The href is rebuilt the moment the user REACHES for the link — pointerdown covers mouse and
@@ -550,21 +591,37 @@ export function mountComparePage(deps) {
       context,
     }));
   }
-  /** The account the popup / the composer strips cached, read once. Absent = no prefill, not an error. */
+  /** The account the popup / the composer strips cached — at mount and on every change. Absent = no prefill, not an error. */
+  let accountReadSeq = 0;
   function readFeedbackAccount() {
     if (!accountStorage || typeof accountStorage.get !== 'function') return;
+    // Only the LATEST read may apply (Codex 2R blocker): the mount's read of account A can land
+    // after the change listener's read of B, and would put A's photo back.
+    const seq = ++accountReadSeq;
     const done = (r) => {
+      if (seq !== accountReadSeq) return;
       const a = (r && r.accountCache) || {};
       const ia = (r && r.independentAccount) || {};
       const pick = (key) => (typeof a[key] === 'string' && a[key] ? a[key] : (typeof ia[key] === 'string' ? ia[key] : ''));
       state.feedbackName = pick('name');
       state.feedbackEmail = pick('email');
+      state.mePhoto = profilePhotoFor(r && r[PROFILE_PHOTO_KEY], state.feedbackEmail, ia.email);
       syncFeedbackLink();
+      if (typeof ctx.debateMeChanged === 'function') ctx.debateMeChanged();
     };
     try {
-      const r = accountStorage.get(['accountCache', 'independentAccount'], (res) => { void (chrome && chrome.runtime && chrome.runtime.lastError); done(res); });
+      const r = accountStorage.get(ACCOUNT_KEYS, (res) => { void (chrome && chrome.runtime && chrome.runtime.lastError); done(res); });
       if (r && typeof r.then === 'function') r.then(done, () => done(null));
     } catch { done(null); }
+  }
+  // A sign-out / account switch in the popup while this page is open (Codex blocker): read again,
+  // so the debate avatars (drawn and future) stop showing the previous account.
+  const ACCOUNT_KEYS = ['accountCache', 'independentAccount', PROFILE_PHOTO_KEY];
+  const storageEvents = chrome && chrome.storage && chrome.storage.onChanged;
+  if (storageEvents && typeof storageEvents.addListener === 'function') {
+    storageEvents.addListener((changes, area) => {
+      if (area === 'local' && ACCOUNT_KEYS.some((k) => k in changes)) readFeedbackAccount();
+    });
   }
   feedbackLink.addEventListener('pointerdown', syncFeedbackLink);
   feedbackLink.addEventListener('focus', syncFeedbackLink);
@@ -667,6 +724,9 @@ export function mountComparePage(deps) {
   sendBtn.disabled = true;
   qRow.appendChild(sendBtn);
   qCard.appendChild(controls);
+  // 「토론」 tab (#1769, plan §17): its setup block (moderator, stances, tone, the cast and its
+  // aliases) under the row — always open on that tab — ui/compare/debate.js.
+  qCard.appendChild(ctx.debateSetup);
   // ── attachment tray (#1617) ────────────────────────────────────────────────────────────────
   // ONE tray for the page, in the dock directly above whichever composer face is showing (the
   // question card before the session, the follow-up card after) — the dock is a column, and only
@@ -747,7 +807,13 @@ export function mountComparePage(deps) {
    * is at zero, exactly as the text does (updateControls).
    */
   function attachLocked() {
-    return state.sending || state.disabled;
+    // The debate tab takes no files (its rounds never carry the tray — plan §17.4): a drop / paste
+    // there is refused like one mid-send, and the tray a cross-check left is kept, hidden.
+    return state.sending || state.disabled || debateTab();
+  }
+  /** The debate tab before its session: the opening is being set up (the tray, the link offer and 원본 제외 are not this room's). */
+  function debateTab() {
+    return !state.sessionStarted && ctx.debateChosen();
   }
   /**
    * ONE ORDERED LIST, and the order is the order the user CHOSE (#1634 1R #3).
@@ -911,12 +977,15 @@ export function mountComparePage(deps) {
     clear(attachChips);
     for (const a of state.attachItems) attachChips.appendChild(makeChip(a, a.reading));
     const any = state.attachItems.length > 0;
-    attachChips.hidden = !any;
+    // The debate tab keeps a cross-check's files but shows none of the tray (plan §17.11 ⑥) — only
+    // the link row, whose ✕ is how a held link (which blocks the opening) is let go.
+    const trayShown = !debateTab();
+    attachChips.hidden = !any || !trayShown;
     // Which columns this round would leave behind — computed from the targets as they stand, so
     // unticking a column in the follow-up boxes makes the line go away by itself.
     const left = any ? unsupportedProviders(roundTargetsNow(), (id) => state.columns.get(id)) : [];
     const none = any && roundTargetsNow().length > 0 && attachableTargets(roundTargetsNow()).length === 0;
-    attachNote.hidden = !left.length;
+    attachNote.hidden = !left.length || !trayShown;
     attachNote.classList.toggle('is-blocking', none); // outside the branch: a note that stops being blocking must lose the class even as it hides
     if (left.length) {
       attachNote.textContent = none
@@ -924,7 +993,7 @@ export function mountComparePage(deps) {
         : t('attach_unsupported', left.map((p) => PROVIDER_META[p].label).join(' · '));
     }
     syncAttachNeedText();
-    attachErr.hidden = !state.attachError;
+    attachErr.hidden = !state.attachError || !trayShown;
     if (state.attachError) attachErr.textContent = state.attachError.arg == null ? t(state.attachError.key) : t(state.attachError.key, state.attachError.arg);
     renderLink();
     attachBox.hidden = attachChips.hidden && attachNote.hidden && attachErr.hidden && linkBox.hidden;
@@ -939,7 +1008,7 @@ export function mountComparePage(deps) {
   /** The 「질문을 입력해 주세요」 line: files in the tray, nothing typed in the composer face that is showing. */
   function syncAttachNeedText() {
     const draft = state.sessionStarted ? String(followup.input.value || '').trim() : currentQuestion();
-    attachNeedText.hidden = !state.attachItems.length || draft.length > 0;
+    attachNeedText.hidden = !state.attachItems.length || draft.length > 0 || debateTab();
   }
   /**
    * The link row (#1651): at most one of offer / reading / receipt / refusal, because at most one
@@ -973,13 +1042,14 @@ export function mountComparePage(deps) {
       linkLine.textContent = t(key, ...args);
       linkLine.appendChild(makeLinkX('link_remove', clearLink));
       // 🔴 The consent sentence, and — when we changed a setting for them — what we changed.
-      linkNote.textContent = state.linkHistoryForced ? `${t('link_consent')} ${t('link_history_on')}` : t('link_consent');
+      const consent = t(state.link.kind === 'share' ? 'link_consent_share' : 'link_consent');
+      linkNote.textContent = state.linkHistoryForced ? `${consent} ${t('link_history_on')}` : consent;
       linkNote.hidden = false;
       linkBox.hidden = false;
       return;
     }
     if (state.linkOffer) {
-      linkLine.textContent = t('link_found', PROVIDER_META[state.linkOffer.provider].label);
+      linkLine.textContent = state.linkOffer.kind === 'share' ? t('link_found_share') : t('link_found', PROVIDER_META[state.linkOffer.provider].label);
       const use = el('button', 'cmp-btn cmp-link-use', t('link_use'));
       use.type = 'button';
       use.addEventListener('click', acceptLink);
@@ -1016,6 +1086,7 @@ export function mountComparePage(deps) {
     state.linkOffer = null;
     state.link = null;
     state.linkReading = false;
+    state.linkReadingKind = null;
     state.linkError = null;
     state.linkHistoryForced = false;
     renderAttachment();
@@ -1043,7 +1114,10 @@ export function mountComparePage(deps) {
     state.linkOffer = null;
     state.linkError = null;
     state.linkReading = true;
-    if (!state.saveHistory) {
+    state.linkReadingKind = offer.kind; // what is being read (the incognito toggle asks, #1784 U4)
+    // A share page is nobody's conversation in the user's history — nothing is appended to it, so
+    // 「시크릿 대화」 stays as the user set it (the SW skips LINK_NEEDS_HISTORY for a share, #1784 U4).
+    if (!state.saveHistory && offer.kind !== 'share') {
       state.linkPrevSave = { saveHistory: state.saveHistory, touched: state.saveTouched };
       state.saveHistory = true;
       state.saveTouched = true;
@@ -1058,7 +1132,7 @@ export function mountComparePage(deps) {
 
   /** A link in the composer's text → the offer chip, while a first round is still ahead. */
   function offerLinkFrom(text) {
-    if (!mayOfferLink(state)) return;
+    if (!mayOfferLink(state) || debateTab()) return; // a debate cannot continue a conversation link
     const found = findLink(text);
     if (!found) { if (state.linkOffer) { state.linkOffer = null; renderAttachment(); } return; }
     if (state.linkOffer && state.linkOffer.url === found.url) return;
@@ -1159,11 +1233,16 @@ export function mountComparePage(deps) {
     for (const it of arr) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; if (!picked.includes(it)) picked.push(it); }
     return picked;
   }
+  // The built-in chips (no usable server pool) — the cross-check's questions and the debate tab's topics.
+  const EXAMPLE_CHIP_KEYS = ['example_chip_1', 'example_chip_2', 'example_chip_3'];
+  const DEBATE_EXAMPLE_KEYS = ['debate_example_1', 'debate_example_2', 'debate_example_3'];
   /** (Re)draws the chips: the server pick when the status carries a usable pool for this language, else the built-in three. */
   function renderExampleChips() {
     clear(exampleChips);
-    const pool = examplePool();
-    const items = pool ? pickExamples(pool) : Array.from({ length: EXAMPLE_CHIP_COUNT }, (_, i) => ({ q: t(`example_chip_${i + 1}`), tag: '' }));
+    // The debate tab offers topics, not questions: its built-in three (a server pool is for later).
+    const debating = debateTab();
+    const pool = debating ? null : examplePool();
+    const items = pool ? pickExamples(pool) : (debating ? DEBATE_EXAMPLE_KEYS : EXAMPLE_CHIP_KEYS).slice(0, EXAMPLE_CHIP_COUNT).map((key) => ({ q: t(key), tag: '' }));
     for (const it of items) {
       const chip = el('button', 'cmp-chip cmp-example-chip');
       chip.type = 'button';
@@ -1186,6 +1265,7 @@ export function mountComparePage(deps) {
    * promise 「무료 하루 N회」: the beta line instead.
    */
   function renderExamplesIntro() {
+    if (debateTab()) { examplesIntro.textContent = t('debate_intro'); return; }
     if (betaReset()) { examplesIntro.textContent = t('examples_intro_beta'); return; }
     const quota = state.status && state.status.quota;
     const limit = quota && !quota.pro && quota.limit != null ? Number(quota.limit) : null;
@@ -1245,6 +1325,8 @@ export function mountComparePage(deps) {
       if (state.questionImg) qNode.appendChild(attachMark(state.questionImg));
       block.appendChild(qNode);
       if (col.provider === src) { qCopyBtn.hidden = false; block.appendChild(qCopyBtn); }
+      // 「공유」 from the first question (#1784 U3c): its round is the entry's firstRound.
+      if (Number.isFinite(state.firstRound)) { const first = state.firstRound; block.appendChild(ctx.shareTurnButton(() => ({ round: first }))); }
       col.qBubble = block;
       col.body.insertBefore(block, col.body.firstChild);
     }
@@ -1307,13 +1389,15 @@ export function mountComparePage(deps) {
     meta.appendChild(select);
     meta.appendChild(el('span', 'cmp-composer-hint', t('composer_hint')));
     section.appendChild(meta);
-    const composer = { section, input, btn, select, caption, attachBtn, radioName: select.id };
+    const composer = { section, input, btn, select, caption, attachBtn, meta, radioName: select.id };
     composers.push(composer);
     return composer;
   }
   const columnsBox = el('div', 'cmp-columns');
   columnsBox.id = 'cmp-columns';
   root.appendChild(columnsBox);
+  // A debate session draws into ONE timeline in the columns' place (`is-debate` on the root hides the grid).
+  root.appendChild(ctx.debateTimeline);
   // 「＋ 열 추가」 (cmp-columns §1): the last cell of the grid before the session; gone at MAX_COLUMNS.
   const addColBtn = el('button', 'cmp-card cmp-add-col', t('col_add'));
   addColBtn.id = 'cmp-add-col';
@@ -1367,6 +1451,7 @@ export function mountComparePage(deps) {
   dock.appendChild(examples); // the empty-state intro + chips ride the dock, right above the composer
   dock.appendChild(attachBox); // between the chips and BOTH composer faces — only one shows, so it is always directly above the active one
   dock.appendChild(qCard);
+  dock.appendChild(ctx.debateBar); // debate session only: pick chips · status · 멈춤/계속
   dock.appendChild(followup.section);
   root.insertBefore(dock, columnsBox);
   root.classList.add(HERO_CLASS);
@@ -1380,8 +1465,12 @@ export function mountComparePage(deps) {
   // The residue line follows the toggle (syncSaveHistory): temporary-chat wording, or "kept in history".
   const footResidue = el('span', 'cmp-footer-residue', t('notice_residue'));
   footLine.appendChild(footResidue);
-  footLine.appendChild(el('span', 'cmp-footer-sep', '·'));
-  footLine.appendChild(el('span', null, t('notice_no_refund')));
+  // The charge line is the cross-check's rule; the debate's (one debate = one) waits for the limits
+  // to be enforced again (plan §16.8), so the debate room does not show it (§18.4 ⑤).
+  const footChargeSep = el('span', 'cmp-footer-sep', '·');
+  const footCharge = el('span', null, t('notice_no_refund'));
+  footLine.appendChild(footChargeSep);
+  footLine.appendChild(footCharge);
   footer.appendChild(footLine);
   root.appendChild(footer);
   Object.assign(ctx, { footer, footLine, footResidue });
@@ -1397,7 +1486,11 @@ export function mountComparePage(deps) {
     // toggle — the two can only differ through a programmatic flip, but the promise must be the
     // session's (Codex wire 1R #1).
     const effective = state.sessionStarted && state.sessionSaveHistory != null ? state.sessionSaveHistory : !!state.saveHistory;
-    footResidue.textContent = t(effective ? 'notice_residue_saved' : 'notice_residue');
+    // The debate room has its own kept-in-history line (reopen from 「최근」); the incognito line is both rooms'.
+    const debateRoom = ctx.debateMode() === MODE_DEBATE;
+    footResidue.textContent = t(!effective ? 'notice_residue' : debateRoom ? 'debate_notice_residue_saved' : 'notice_residue_saved');
+    footChargeSep.hidden = debateRoom;
+    footCharge.hidden = debateRoom;
     if (effective) doc.documentElement.removeAttribute('data-incognito');
     else doc.documentElement.setAttribute('data-incognito', '1');
     modeChip.hidden = !state.sessionStarted || state.sessionSaveHistory == null;
@@ -1616,6 +1709,11 @@ export function mountComparePage(deps) {
     // Head = identity group (dot · name → site · model pill · plan) + tools group (badge · 대화 복사),
     // each a flex row of 30px controls so the head stays one line at a 340px column (item 12).
     const head = el('div', 'cmp-col-head');
+    // The debate tab's participant card (plan §17.5): avatar + alias (+ 🎙) on the head's first row,
+    // filled by ui/compare/debate.js renderSetup; empty and hidden everywhere else.
+    const debateSlot = el('div', 'cmp-col-cast');
+    debateSlot.hidden = true;
+    head.appendChild(debateSlot);
     const identity = el('div', 'cmp-col-id');
     identity.appendChild(dot(provider));
     // Item 1 (contract B): the provider name opens the site in a new tab; the arrow glyph says so.
@@ -1867,7 +1965,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false, closed: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, debateSlot, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false, closed: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -2041,7 +2139,15 @@ export function mountComparePage(deps) {
   }
 
   /** The wire `kind` of a send (see beginSend): retry > summary > resume > send / followup. */
-  function sendKindFor(type, turnKind, retry, resume) {
+  function sendKindFor(type, turnKind, retry, resume, targets = []) {
+    // A debate's sends say so first — its first 「계속」 after a history load is a resume in shape. A
+    // send whose only target is the AI moderator's column is the moderator's (§18.9 ④ — a debater's
+    // turn never goes to that column): its kind lets the server count which model moderates.
+    if (turnKind === TURN_KIND_DEBATE) {
+      if (type === 'SEND') return SEND_KIND_DEBATE;
+      const modCol = ctx.debateModCol();
+      return modCol && targets.length === 1 && targets[0] === modCol ? SEND_KIND_DEBATE_MOD : SEND_KIND_DEBATE_TURN;
+    }
     if (retry) return SEND_KIND_RETRY;
     if (turnKind === TURN_KIND_SUMMARY) return SEND_KIND_SUMMARY;
     if (resume) return SEND_KIND_RESUME;
@@ -2051,10 +2157,51 @@ export function mountComparePage(deps) {
   /** The page's columns exist once the first status arrived: one `auto` column per provider, catalog order (the default layout). */
   function ensureDefaultColumns() {
     if (state.columns.size) return;
-    // A stored layout (compareColumns) wins over the default; providers the store does not name
-    // are simply absent (the user removed them).
-    const ids = state.storedColumns && state.storedColumns.length ? state.storedColumns : COMPARE_PROVIDERS.map((p) => colIdOf(p, null));
-    for (const id of ids) columnFor(id);
+    for (const id of layoutIds()) columnFor(id);
+  }
+  /** The tab whose layout the pre-session page shows (the flag off = the cross-check). */
+  const layoutMode = () => (ctx.debateChosen() ? MODE_DEBATE : MODE_CROSSCHECK);
+  /**
+   * The columns a fresh page shows in the current tab: its stored layout (providers the store does
+   * not name are simply absent — the user removed them), else the default trio.
+   */
+  function layoutIds(mode = layoutMode()) {
+    const stored = state.storedLayouts[mode];
+    if (mode === MODE_DEBATE) {
+      // A stored debate layout keeps its stored seat (never re-picked — §18.9 ①); none stored =
+      // the default four, the seat picked from the plans now (a catalog without the model → three, §18.9 ⑥).
+      if (stored && stored.length) { state.debateSeat = state.storedSeat && stored.includes(state.storedSeat) ? state.storedSeat : null; return stored; }
+      // Picked once per conversation (Codex U2 1R): a tab round trip must not re-pick it from a
+      // catalog that arrived since — only 새 대화 (resetSession) picks again.
+      if (!state.debateDefault) {
+        const st = state.status || {};
+        state.debateDefault = defaultDebateLayout(pickModeratorSeat({ providers: st.providers, catalogs: st.models }));
+      }
+      state.debateSeat = state.debateDefault.seat;
+      return state.debateDefault.ids;
+    }
+    return stored && stored.length ? stored : COMPARE_PROVIDERS.map((p) => colIdOf(p, null));
+  }
+  /**
+   * Back to the current tab's own layout (plan §17.6/§17.11 ③④): a tab switch before the session,
+   * and every 새 대화 — so the columns a history entry brought (ensureLayout) never outlive its
+   * session, and a layout write can only ever be the user's own edit of their own layout. Nothing
+   * is rebuilt when the page already shows it (a column's gate / seed survive). Never while a send
+   * is on the wire or a session is on screen (a live port's columns must not go — §17.11 ①).
+   * True when the columns were rebuilt (the caller renders).
+   */
+  function applyLayout() {
+    if (state.sending || state.sessionStarted || !state.status || !state.columns.size) return false;
+    const want = layoutIds();
+    // Same ids are not enough after a history entry (Codex U2 1R ①): its columns carry the entry's
+    // models as the user's own (modelTouched), and the next render would re-key them and SAVE them
+    // as the tab's layout. Fresh columns carry nothing of it.
+    if (!state.layoutFromEntry && want.join('\n') === state.columnIds.join('\n')) return false;
+    state.layoutFromEntry = false;
+    closePicker(); // it sits inside a column about to go
+    for (const id of [...state.columnIds]) removeColumn(id);
+    for (const id of want) columnFor(id);
+    return true;
   }
   /**
    * The page shows at least these columns (a loaded history entry's) — created when missing, next
@@ -2244,18 +2391,40 @@ export function mountComparePage(deps) {
     track('column_change', { col: gaCol(state.columns.get(next)), n: state.columnIds.length });
     return true;
   }
-  /** Persists the layout (colIds in order) to storage.sync — best effort, never awaited. */
+  /**
+   * Persists the layout (colIds in order) as the CURRENT TAB's — best effort, never awaited. Only a
+   * pre-session edit calls it (add / remove / service or model pick, and the seed re-key of a
+   * touched column), and the pre-session page always shows the tab's own layout (applyLayout).
+   */
   function saveLayout() {
+    if (state.sessionStarted) return; // a session's columns are the session's, never a tab's layout
+    const mode = layoutMode();
+    state.storedLayouts[mode] = state.columnIds.slice();
+    const write = { [LAYOUT_KEYS[mode]]: state.columnIds.slice() };
+    if (mode === MODE_DEBATE) {
+      // The seat goes with its layout, in the same write; a removed seat column ends the default moderator.
+      if (state.debateSeat && !state.columnIds.includes(state.debateSeat)) state.debateSeat = null;
+      state.storedSeat = state.debateSeat;
+      write[DEBATE_SEAT_KEY] = state.debateSeat;
+    }
     if (!syncStorage || typeof syncStorage.set !== 'function') return;
-    try { const r = syncStorage.set({ compareColumns: state.columnIds.slice() }, () => { void (chrome && chrome.runtime && chrome.runtime.lastError); }); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch { /* storage gone */ }
+    try { const r = syncStorage.set(write, () => { void (chrome && chrome.runtime && chrome.runtime.lastError); }); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch { /* storage gone */ }
   }
-  /** Reads the stored layout once (before the first status); malformed → ignored. */
+  /** Reads both tabs' stored layouts once (before the first status); malformed → ignored. */
   function readLayout() {
     if (!syncStorage || typeof syncStorage.get !== 'function') return Promise.resolve();
+    const valid = (v) => { const ids = Array.isArray(v) ? v.map(normalizeColId).filter(Boolean).filter((id, i, a) => a.indexOf(id) === i).slice(0, MAX_COLUMNS) : []; return ids.length ? ids : null; };
     return new Promise((resolve) => {
       let settled = false;
-      const done = (v) => { if (settled) return; settled = true; void (chrome && chrome.runtime && chrome.runtime.lastError); const ids = v && Array.isArray(v.compareColumns) ? v.compareColumns.map(normalizeColId).filter(Boolean).filter((id, i, a) => a.indexOf(id) === i).slice(0, MAX_COLUMNS) : []; state.storedColumns = ids.length ? ids : null; resolve(); };
-      try { const r = syncStorage.get('compareColumns', done); if (r && typeof r.then === 'function') r.then(done, () => done(null)); } catch { done(null); }
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        void (chrome && chrome.runtime && chrome.runtime.lastError);
+        for (const [mode, key] of Object.entries(LAYOUT_KEYS)) state.storedLayouts[mode] = valid(v && v[key]);
+        state.storedSeat = v && typeof v[DEBATE_SEAT_KEY] === 'string' ? normalizeColId(v[DEBATE_SEAT_KEY]) : null;
+        resolve();
+      };
+      try { const r = syncStorage.get([...Object.values(LAYOUT_KEYS), DEBATE_SEAT_KEY], done); if (r && typeof r.then === 'function') r.then(done, () => done(null)); } catch { done(null); }
     });
   }
   /** Drops a column from the page (its node, its record, its routing box). */
@@ -2516,9 +2685,19 @@ export function mountComparePage(deps) {
     // still being read asked all three columns the question WITHOUT the context — the round that
     // the chip promised would continue a conversation was a plain one, and the late LINK_OK then
     // built a receipt for a session already under way.
-    const canSend = !state.sending && !state.sessionStarted && !exhausted && !attachBusy() && !state.linkReading && currentQuestion().length > 0 && attachableTargets(currentTargets()).length > 0;
+    // The debate tab's opening never carries the tray (SEND_VIA_DEBATE), so the tray's gates — a read
+    // in flight, a column that takes files — are not its (plan §17.11 ②); its own reasons are.
+    const inDebateTab = debateTab();
+    const debateHeld = inDebateTab && !!ctx.debateStartProblem();
+    const trayOk = inDebateTab ? currentTargets().length > 0 : !attachBusy() && attachableTargets(currentTargets()).length > 0;
+    const canSend = !state.sending && !state.sessionStarted && !exhausted && !state.linkReading && !debateHeld && currentQuestion().length > 0 && trayOk;
     sendBtn.disabled = !canSend;
-    sendBtn.textContent = state.sending ? t('sending') : t('send');
+    sendBtn.textContent = state.sending ? t('sending') : t(inDebateTab ? 'debate_start_btn' : 'send');
+    const addLabel = t(inDebateTab ? 'debate_add_participant' : 'col_add');
+    if (addColBtn.textContent !== addLabel) addColBtn.textContent = addLabel;
+    const qHolder = t(inDebateTab ? 'debate_topic_placeholder' : 'question_placeholder');
+    if (qInput.placeholder !== qHolder) { qInput.placeholder = qHolder; qInput.setAttribute('aria-label', qHolder); }
+    excludeLabel.hidden = !src || inDebateTab;
     qCard.classList.toggle('is-quota-exhausted', exhausted);
     for (const c of composers) c.section.classList.toggle('is-quota-exhausted', exhausted);
     // Once the session started the question composer leaves the dock (its whole section: the
@@ -2556,6 +2735,7 @@ export function mountComparePage(deps) {
     if (state.pickerFor && (state.sending || (state.sessionStarted && (state.pickerKind === 'service' || !state.columns.get(state.pickerFor).modelKnown)))) closePicker();
     syncCopyAll();
     syncSummaryButton();
+    ctx.syncShareButton();
     for (const c of composers) c.section.hidden = !state.sessionStarted;
     // The per-column input on every column that can take a follow-up of its own; a column that
     // stopped qualifying hides the whole thing — its open state and draft are kept, so a column
@@ -2602,9 +2782,57 @@ export function mountComparePage(deps) {
         if (c.caption) c.caption.textContent = targetText;
       }
     }
+    // 「토론 모드」 (#1769): the setup block before the session; in a debate session the dock is the
+    // debate's — no routing boxes (the orchestrator picks the column), no 📎 (a debate round never
+    // carries the tray), no 「요약·비교」 (it compares one round's answers), and the send stays
+    // enabled while an AI speaks (the words are queued for after its turn).
+    ctx.renderDebateSetup();
+    const debating = ctx.debateActive();
+    for (const c of composers) {
+      c.meta.hidden = debating;
+      c.attachBtn.hidden = debating;
+      c.input.placeholder = t(debating ? 'debate_followup_placeholder' : 'followup_placeholder');
+      if (debating && state.sessionStarted) {
+        c.btn.disabled = exhausted || !canFollowUp();
+        if (c.caption) c.caption.textContent = '';
+      }
+    }
+    if (debating || inDebateTab) summaryBtn.hidden = true;
+    qAttachBtn.hidden = inDebateTab; // the opening never carries the tray either
+    ctx.renderDebateBar();
+    ctx.renderModeTabs();
+    syncModeHeading();
     // Last: the tray reads the targets this pass just settled, so unticking the only column that
     // takes files repaints the note in the same frame that disables the button.
     renderAttachment();
+  }
+
+  /**
+   * The page's tab changed (debate.js applyMode / followEntry, plan §17): what differs between the
+   * rooms before a session — the empty state, 원본 제외 (a debate has no 「original」: a column it
+   * hid would silently leave the cast, so it is let go), a link OFFER (never consent) — then the
+   * controls. The tray itself is kept and only hidden (renderAttachment).
+   */
+  function modeChanged() {
+    if (debateTab()) {
+      if (state.excludeSrc) { state.excludeSrc = false; excludeInput.checked = false; }
+      if (state.linkOffer) state.linkOffer = null;
+    }
+    // Each tab has its own columns (plan §17.6) — rebuilt here only before a session with nothing
+    // on the wire (applyLayout refuses otherwise: a loaded entry keeps its columns, §17.11 ⑤).
+    if (applyLayout()) syncWaitTimer();
+    renderColumns();
+    if (!state.sessionStarted) { renderExampleChips(); renderExamplesIntro(); }
+    updateControls();
+  }
+  /** The heading and the document title follow the mode on screen; the h1 hides behind the tabs while they show. */
+  function syncModeHeading() {
+    const debating = !ctx.debateModeTabs.hidden && ctx.debateMode() === MODE_DEBATE;
+    const text = t(debating ? 'heading_debate' : 'heading');
+    if (heading.textContent !== text) heading.textContent = text;
+    heading.classList.toggle('cmp-sr-only', !ctx.debateModeTabs.hidden);
+    const title = t(debating ? 'page_title_debate' : 'page_title');
+    if (doc.title !== title) doc.title = title;
   }
 
   /**
@@ -2617,9 +2845,12 @@ export function mountComparePage(deps) {
     // tear down a first SEND that is still waiting for its CONSUME_OK.
     if (state.disabled || !state.sessionStarted) return;
     closeViewer(); // the image on show belongs to the session being left
+    ctx.closeShareDialog(); // so is the share dialog
     track('new_chat', { rounds: state.rounds, resumable: canResume() });
     if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* port already gone */ } }
     closePort();
+    ctx.debateReset(); // before anything re-renders: the page is the columns again
+    state.debateDefault = null; // the next conversation's default layout is picked afresh (plans / catalogs may have arrived)
     state.sending = false;
     state.sessionStarted = false;
     state.sessionEnded = false;
@@ -2637,6 +2868,7 @@ export function mountComparePage(deps) {
     state.firstRound = null;
     state.roundStartedAt = null;
     state.sessionId = null;
+    state.frozenDebate = false;
     state.followupTargets = new Set();
     state.pendingFollowupCol = null;
     state.summaryPending = null;
@@ -2647,6 +2879,7 @@ export function mountComparePage(deps) {
     syncHistoryButton(null); // count re-read from the last good list (Codex hist 1R #9)
     statusEpoch++; // a status answer asked before the reset describes the old session
     for (const col of state.columns.values()) resetColumn(col);
+    applyLayout(); // the tab's own layout — not the columns a loaded entry brought (plan §17.11 ③)
     renderColumns(); // a column closed in the session is back (resetColumn cleared `closed`)
     releasePrompt();
     clearCopyFeedback();
@@ -2693,8 +2926,17 @@ export function mountComparePage(deps) {
   // The note: incognito is never stored, and an answer is stored (so searchable) only up to its clip.
   const historyNote = el('p', 'cmp-history-note', `${t('history_incognito_note')} ${t('history_search_note', HISTORY_TEXT_MAX.toLocaleString())}`);
   historyPanel.appendChild(historyNote);
+  // 「내 공유 링크」 (share-ON batch review 1R ①): the always-reachable door to the public links this
+  // account made — list and delete — independent of the conversation on screen. share.js decides
+  // when it shows (syncMySharesEntry) and opens the dialog in manage mode.
+  const historySharesBtn = el('button', 'cmp-btn cmp-btn-sm cmp-history-shares', `\u{1F517} ${t('share_mine')}`);
+  historySharesBtn.type = 'button';
+  historySharesBtn.id = 'cmp-history-shares';
+  historySharesBtn.hidden = true;
+  historySharesBtn.addEventListener('click', () => { closeHistoryPanel(); ctx.openMyShares(historyBtn); });
+  historyPanel.appendChild(historySharesBtn);
   root.appendChild(historyPanel);
-  Object.assign(ctx, { historyPanel, historyHead, historySearch, historyClearBtn, historyList, historyNote });
+  Object.assign(ctx, { historyPanel, historyHead, historySearch, historyClearBtn, historyList, historyNote, historySharesBtn });
   let historySearchTimer = null;
   historySearch.addEventListener('input', () => {
     if (historySearchTimer != null) clock.clearTimeout(historySearchTimer);
@@ -2726,6 +2968,8 @@ export function mountComparePage(deps) {
     });
   }
   if (historyStorage) {
+    // The share map first (🔗 on the history rows, 「업데이트」 in the dialog); a failed read is an empty map.
+    ctx.loadShares().then(() => { if (!historyPanel.hidden) paintHistoryList(); });
     historyUpdate(null).then((r) => {
       syncHistoryButton(r.ok ? r.list : null);
       // Stored images no history entry names any more — a delete that did not finish, another tab's
@@ -2885,6 +3129,9 @@ export function mountComparePage(deps) {
     syncZeroTargetsNotice();
     updateControls();
     if (ctx.pendingLoad && state.columns.size) { const entry = ctx.pendingLoad; ctx.pendingLoad = null; loadSession(entry); }
+    // A link that arrived WITH the page (`q` — a share page's 「이어서 질문하기」, #1784 U4) is offered
+    // like a pasted one once the page can take it; the user still presses 「이어서」 (idempotent).
+    if (!state.sessionStarted) offerLinkFrom(qInput.value);
   }
 
   // ── auto-reconnect (login guidance) ──
@@ -2987,7 +3234,10 @@ export function mountComparePage(deps) {
     // that round (`link_needs_history`) and the page used to show a generic "try again", with the
     // chip still claiming a conversation was being continued. The toggle is the user's newer
     // choice, so it wins and the link goes — visibly, rather than as a refusal three steps later.
-    if (incognitoInput.checked && (state.link || state.linkReading || state.linkOffer)) {
+    // A SHARE link is not held against incognito (#1784 U4): it appends to no conversation in the
+    // user's history, so the SW does not refuse it and the toggle leaves it alone.
+    const shareLink = (state.link && state.link.kind === 'share') || (state.linkOffer && state.linkOffer.kind === 'share') || (state.linkReading && state.linkReadingKind === 'share');
+    if (incognitoInput.checked && !shareLink && (state.link || state.linkReading || state.linkOffer)) {
       state.linkHistoryForced = false;   // they are choosing incognito NOW; nothing to restore
       state.linkPrevSave = null;
       clearLink();
@@ -3011,7 +3261,16 @@ export function mountComparePage(deps) {
     // which is where the user is looking. Only a round where NOTHING could take the file is held
     // back here — the SW would answer CONSUME_FAIL{no_targets}, which names no column and explains
     // nothing (#1617).
-    if (state.disabled || !attachableTargets(targets).length || attachBusy() || state.sending || state.sessionStarted || !text || quotaExhausted()) return;
+    if (state.disabled || state.sending || state.sessionStarted || !text || quotaExhausted()) return;
+    if (ctx.debateChosen()) {
+      // 「토론」 tab: the orchestrator composes the opening and sends it (debate.js start). The tray
+      // is not its gate — the opening goes out SEND_VIA_DEBATE, which carries no file (plan §17.11 ②).
+      if (!targets.length || ctx.debateStartProblem() || state.link || state.linkReading) return;
+      state.sessionSaveHistory = !!state.saveHistory;
+      if (!ctx.debateStart(text)) state.sessionSaveHistory = null;
+      return;
+    }
+    if (!attachableTargets(targets).length || attachBusy()) return;
     state.question = text;
     state.sessionSaveHistory = !!state.saveHistory; // fixed for the session (FOLLOWUP carries no field)
     beginSend(text, targets, 'SEND');
@@ -3020,6 +3279,7 @@ export function mountComparePage(deps) {
   bindComposer(qInput, sendInitial, updateControls, win);
   qInput.addEventListener('keydown', noteActivity);
   stopBtn.addEventListener('click', () => {
+    if (ctx.debateActive()) { ctx.debatePause(); stopBtn.disabled = true; return; } // aborts the turn AND pauses the loop
     if (!state.port || !state.sending) return;
     state.port.postMessage({ type: 'ABORT' });
     stopBtn.disabled = true;
@@ -3031,6 +3291,13 @@ export function mountComparePage(deps) {
   function sendFollowup(from) {
     noteActivity();
     const text = String(from.input.value || '').trim();
+    if (ctx.debateActive()) {
+      // A debate: the words join the timeline (queued while an AI speaks) — debate.js userMessage.
+      if (!text || !canFollowUp() || quotaExhausted()) return;
+      for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
+      ctx.debateUserMessage(text);
+      return;
+    }
     const { targets, skipped } = followupPlan();
     if (!text || !attachableTargets(targets).length || attachBusy() || state.sending || !canFollowUp() || quotaExhausted()) return;
     state.pendingFollowup = text;
@@ -3079,7 +3346,7 @@ export function mountComparePage(deps) {
   track('open', { src: src || '', framed: !!embedHost, lang, has_q: !!q });
   readFeedbackAccount();
   // The stored layout must be known before the first status builds the columns.
-  readLayout().then(() => refreshStatus());
+  Promise.all([readLayout(), ctx.readDebatePrefs()]).then(() => refreshStatus());
 
   // Exposed for the flow guard only.
   return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession, fitEntry, setColumnFocus };

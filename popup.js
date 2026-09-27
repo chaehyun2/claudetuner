@@ -4,6 +4,7 @@ import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { getRecDismiss } from './bg/rec-dismiss.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
+import { PROFILE_PHOTO_KEY } from './bg/profile-photo.js';
 import { pinnedState } from './bg/analytics.js';
 import { serverSyncWithheldReason, getLastStatus, isServerSyncPaused } from './bg/storage.js';
 import { liveProviderErrors, providerErrorAction, providerErrorSnoozed } from './bg/provider-state.js';
@@ -439,7 +440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           // this is not the reversible "log out" it looks like. Name the account that keeps the
           // history: that is the fact the user needs and cannot see anywhere else.
           const doSwitch = async () => {
-            await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed']);
+            await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed', PROFILE_PHOTO_KEY]);
             await chrome.storage.local.set({ showLoginPrompt: true });
             location.reload();
           };

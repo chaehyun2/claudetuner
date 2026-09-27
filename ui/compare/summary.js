@@ -4,6 +4,7 @@
 // popover's content. The popover DOM and its listeners stay in compare.js (attached to ctx).
 // Bodies are exactly as they were in compare.js; ctx contract: see ui/compare/history.js.
 
+import { neutraliseQuoted } from './helpers.js';
 import { MAX_COLUMNS, colIdOf, PROVIDER_META, SUMMARY_PROMPT_MAX, SUMMARY_PER_COLUMN_MAX, SUMMARY_MIN_SHARE, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_FENCE_OPEN, SUMMARY_FENCE_CLOSE, SUMMARY_MODEL_LABEL_MAX, TURN_KIND_SUMMARY } from './constants.js';
 
 /** Installs the summary slice onto `ctx` (ctx contract: ui/compare/history.js header). */
@@ -111,7 +112,7 @@ export function installSummary(ctx) {
    * of the answer that could pass for a fence or a heading (starts with `<<<` or `#`) is set off by
    * one leading space — it still reads, it no longer parses as structure.
    */
-  const neutraliseAttachment = (text) => String(text).split('\n').map((line) => (/^(<<<|#)/.test(line) ? ` ${line}` : line)).join('\n');
+  const neutraliseAttachment = neutraliseQuoted; // helpers.js — shared with the debate prompts (debate-core.js)
   /**
    * The structured 「요약·비교」 request (Codex 3R #2): what the prompt is REGENERATED from — for the
    * wire, the folded display, a retry and a reload alike. `attachments` are the comparison round's

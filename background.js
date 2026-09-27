@@ -13,6 +13,7 @@ import {
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
+import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { updateBadgeForSelectedOrg, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
@@ -372,6 +373,8 @@ async function resolveSyncIdentity() {
 
 // Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  // A share page's 「이어서 질문하기」 (#1784 U4) — the compare controller checks the origin itself.
+  if (compareController.handleExternalMessage(message, sender, sendResponse)) return true;
   // Silent recovery from the dashboard: the page is signed in, mints an ext_token server-side
   // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
   // recovery path we shipped needs them to notice something first, and none did (2026-07-27).
@@ -1872,6 +1875,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await chrome.storage.local.set({
           independentAccount: { email: data.email, name: data.name || '' },
         });
+        // The debate room's own avatar (bg/profile-photo.js): the photo Google put in this same
+        // id_token, bound to the account the server just confirmed. The server verified the token
+        // (resp.ok above); this only peeks at a display claim.
+        const photo = profilePhotoRecord(data.email, decodeJwtPayload(idToken));
+        if (photo) await chrome.storage.local.set({ [PROFILE_PHOTO_KEY]: photo });
+        else await chrome.storage.local.remove(PROFILE_PHOTO_KEY);
         await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {

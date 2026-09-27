@@ -200,7 +200,9 @@ export function installExport(ctx) {
     const m = list.find((x) => x && String(x.id) === String(model));
     return m ? modelOptionText(m, t) : String(model);
   }
-  const compareMarkdown = () => markdownFor(participatingColumns());
+  // A debate session exports its timeline: the columns' user turns there are composed prompts,
+  // not questions, and a moderator's answer ends in its control line (#1769 §0.4 ⑤).
+  const compareMarkdown = () => (ctx.debateActive && ctx.debateActive() ? ctx.debateMarkdown() : markdownFor(participatingColumns()));
   const columnMarkdown = (col) => (col.participated ? markdownFor([col]) : '');
   /** A column holds at least one answer — text, or images alone (#1684). */
   const columnHasAnswer = (c) => c.turns.some((turn) => turn.role === 'assistant' && (turn.text || ctx.outImageCount(turn)));

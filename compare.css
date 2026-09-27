@@ -8,6 +8,11 @@
   --bg-body: #f6f6f8; --bg-card: #ffffff; --bg-hover: #f3f4f6; --bg-subtle: #f4f4f6; --border: #e5e7eb; --border-strong: #d1d5db;
   --text-primary: #1e1b4b; --text-secondary: #5b6472; --text-muted: #9ca3af;
   --accent: #4f46e5; --accent-hover: #4338ca; --accent-light: #eef2ff;
+  --debate-ava-claude: #fbe9e1; --debate-ava-chatgpt: #dcf5ec; --debate-ava-gemini: #e3ecfd; /* debate avatar tiles (#1769) */
+  /* Debate chat room (#1769 plan §14): the familiar messenger palette — values cross-checked from public
+     clones (room #b2c7d9, others' bubble white, own bubble #fee500); no code copied. */
+  --debate-room-bg: #b2c7d9; --debate-room-fg: #2b3a48; --debate-bubble-bg: #ffffff; --debate-bubble-fg: #1a1a1a;
+  --debate-me-bg: #fee500; --debate-me-fg: #1a1a1a; --debate-notice-bg: #d6e0ea; --debate-notice-fg: #1a1a1a; --debate-logo-bg: #ffffff; --debate-logo-fg: #1a1a1a;
   --btn-primary-bg: #4f46e5; --btn-primary-hover: #4338ca; --btn-primary-fg: #ffffff;
   --success: #15803d; --success-bg: #ecfdf3;
   --danger: #b91c1c; --danger-bg: #fef2f2;
@@ -24,6 +29,9 @@
   --bg-body: #0f1419; --bg-card: #1a1f2e; --bg-hover: #252d3d; --bg-subtle: #222937; --border: #2d3748; --border-strong: #3b4557;
   --text-primary: #F0F0F0; --text-secondary: #A0AEC0; --text-muted: #718096;
   --accent: #818CF8; --accent-hover: #6366F1; --accent-light: #1e1b4b;
+  --debate-ava-claude: #3a2a24; --debate-ava-chatgpt: #1e3a31; --debate-ava-gemini: #22304a;
+  --debate-room-bg: #19202b; --debate-room-fg: #b9c4d2; --debate-bubble-bg: #232b38; --debate-bubble-fg: #eef1f5;
+  --debate-me-bg: #fee500; --debate-me-fg: #1a1a1a; --debate-notice-bg: #202837; --debate-notice-fg: #e3e8ee; --debate-logo-bg: #f4f6f8; --debate-logo-fg: #1a1a1a;
   --btn-primary-bg: #4f46e5; --btn-primary-hover: #4338ca; --btn-primary-fg: #ffffff;
   --success: #4ade80; --success-bg: #052e16;
   --danger: #fca5a5; --danger-bg: #2a0a0a;
@@ -61,6 +69,31 @@ button:disabled { cursor: not-allowed; }
    under the columns (2026-09-26 user report). */
 .cmp-topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 36px; flex-shrink: 0; }
 .cmp-title { font-size: 20px; font-weight: 700; letter-spacing: -.01em; line-height: 1.3; margin-right: 2px; }
+/* Mode tabs (plan §17, #1769): 🔍 크로스체크 | 🗣️ 토론 in the heading's place while the debate is
+   offered — a segmented pair at heading weight; the h1 stays for assistive tech (.cmp-sr-only).
+   The confirm popover (leaving a session that would lose something) hangs under the pair. */
+.cmp-sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cmp-mode-wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+/* ⚙ 토론 설정 (plan §18.2): a round icon button beside the tabs; open = accent ring; the dot = a
+   setting differs from the defaults. */
+.cmp-debate-gear { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+.cmp-debate-gear:hover:not(:disabled) { background: var(--bg-hover); }
+.cmp-debate-gear[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-light); }
+.cmp-debate-gear:disabled { cursor: not-allowed; opacity: .55; }
+.cmp-debate-gear:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cmp-debate-gear-glyph { font-size: 16px; line-height: 1; }
+.cmp-debate-gear-dot { display: none; position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-card); }
+.cmp-debate-gear.is-changed .cmp-debate-gear-dot { display: block; }
+.cmp-mode-tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); }
+.cmp-mode-tab { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--text-secondary); font: inherit; font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; cursor: pointer; transition: background-color .15s ease, color .15s ease, box-shadow .15s ease; }
+.cmp-mode-tab:hover:not(:disabled):not(.is-active) { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-mode-tab.is-active { background: var(--bg-card); color: var(--text-primary); font-weight: 700; box-shadow: var(--shadow-pop); cursor: default; }
+.cmp-mode-tab:disabled { cursor: not-allowed; opacity: .55; }
+.cmp-mode-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cmp-mode-tab-glyph { font-size: 15px; line-height: 1; }
+.cmp-mode-confirm { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: max-content; max-width: min(360px, calc(100vw - 32px)); padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); box-shadow: 0 8px 24px rgba(17, 24, 39, .14); animation: cmp-fade-in .15s ease-out both; }
+.cmp-mode-confirm-text { margin: 0 0 10px; font-size: 13px; line-height: 1.45; color: var(--text-primary); }
+.cmp-mode-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
 /* Beta pill next to the heading (cmp-beta-contract §3): accent on its tint — the streaming badge's AA pair. */
 .cmp-beta-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
 .cmp-src-chip { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px; border-radius: var(--radius-pill); background: var(--bg-card); border: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
@@ -295,7 +328,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-col-service-icon { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 /* The popover: under the column head, inside the column card (the card clips overflow, so it scrolls within). */
 /* while a column's picker is open the card releases its overflow clip (the list hangs below a short card) */
-.cmp-col.cmp-col-picking { overflow: visible; }
+/* The open list must sit above the NEXT row's cards: each .cmp-col is its own stacking context
+   (container-type → layout containment; the fade-in animation's fill), so the popover's z-index is
+   trapped inside it — the whole picking column is lifted instead (2026-09-26 user report: with 5
+   columns in two rows the second row covered the options). */
+.cmp-col.cmp-col-picking { overflow: visible; z-index: 5; }
 .cmp-col-picker-pop { position: absolute; left: 10px; right: 10px; top: 48px; z-index: 3; max-height: min(60vh, 420px); overflow: auto; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); box-shadow: var(--shadow-card); }
 .cmp-col-picker-group + .cmp-col-picker-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 .cmp-col-picker-vendor { display: flex; align-items: center; gap: 7px; padding: 4px 8px 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); }
@@ -405,6 +442,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-history-q { font-size: 13px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmp-history-meta { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-secondary); }
 .cmp-history-meta .cmp-dot { width: 7px; height: 7px; }
+.cmp-history-shares { align-self: flex-start; margin: 0 12px 10px; }
+.cmp-history-debate { display: inline-flex; align-items: center; gap: 3px; height: 17px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 10.5px; font-weight: 650; }
 .cmp-history-del { flex-shrink: 0; width: 32px; border: 0; background: transparent; border-radius: 10px; color: var(--text-secondary); font-size: 18px; line-height: 1; cursor: pointer; }
 .cmp-history-del:hover { background: var(--danger-bg); color: var(--danger); }
 .cmp-history-empty { padding: 14px 10px; font-size: 13px; color: var(--text-secondary); text-align: center; }
@@ -689,6 +728,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
      and each is capped at 72vh (its body still scrolls inside); the bottom composer stays docked. */
   #compare-root { height: auto; min-height: 100vh; padding: 12px 12px 0; gap: 12px; }
   .cmp-title { font-size: 18px; }
+  .cmp-mode-tab { height: 30px; padding: 0 12px; font-size: 14px; }
   /* Wraps instead of running off the right edge — at 420px 「중지」·「새 대화」 were cut off (#1713); 「중지」 must stay reachable mid-stream. */
   .cmp-topbar-side { width: 100%; margin-left: 0; justify-content: flex-start; flex-wrap: wrap; row-gap: 8px; }
   /* One column, and one that can shrink: minmax(340px, 1fr) would overflow a viewport under ~364px (Codex 1R #4). */
@@ -705,3 +745,220 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 
 /* `hidden` must beat every display rule above (.cmp-composer is display:flex — Codex #16). */
 [hidden] { display: none !important; }
+
+/* ── 토론 모드 (#1769, ui/compare/debate.js) ──
+   Setup (pre-session, inside the question card): moderator / stance selects and the cast chips
+   whose name opens an inline alias input. Session: `is-debate` on the root hides the columns grid
+   and shows ONE timeline in its place — speaker heads on every AI turn, the opening round as a row
+   of cards, the user's words as right-aligned bubbles; the bar above the dock holds the pick chips,
+   the status line and 멈춤/계속. */
+.cmp-debate-setup { display: flex; flex-direction: column; gap: 8px; padding: 10px 2px 2px; border-top: 1px dashed var(--border); margin-top: 8px; }
+.cmp-debate-setup-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.cmp-debate-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.cmp-debate-field-name { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+.cmp-debate-select { height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
+.cmp-debate-tone-input { flex: 1 1 240px; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
+.cmp-debate-cast { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cmp-debate-chip { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); font-size: 13px; }
+.cmp-debate-chip.is-moderator { border-style: dashed; }
+.cmp-debate-chip-name { border: 0; background: none; padding: 0; font: inherit; font-weight: 650; color: var(--text-primary); cursor: pointer; text-decoration: underline dotted var(--border-strong); text-underline-offset: 3px; }
+.cmp-debate-chip-name:hover { color: var(--accent); }
+.cmp-debate-chip-svc { font-size: 11.5px; color: var(--text-secondary); }
+.cmp-debate-alias-input { width: 9em; height: 22px; padding: 0 6px; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
+.cmp-debate-avatar { font-size: 16px; line-height: 1; }
+/* Participant cards (plan §17.5): the debate tab's pre-session columns. `is-debate-setup` on the root
+   puts the head's cast slot (avatar · alias · 🎙) on its own first row, drops the service dot the
+   avatar replaces; the grid stays the columns' own (a narrower card cut the model face and pushed ✕ out). */
+.cmp-col-cast { display: flex; align-items: center; flex: 1 1 100%; min-width: 0; }
+/* Only where the avatar is there to replace it: a column outside the cast (not signed in) keeps its dot (Codex U2 1R ②). */
+#compare-root.is-debate-setup .cmp-col-cast:not([hidden]) ~ .cmp-col-id > .cmp-dot { display: none; }
+#compare-root.is-debate-setup .cmp-col-head { row-gap: 6px; padding-top: 12px; }
+#compare-root.is-debate-setup .cmp-col.is-moderator { border-style: dashed; border-color: var(--accent); }
+.cmp-col-cast .cmp-debate-chip { height: auto; min-width: 0; padding: 0; gap: 10px; border: 0; background: none; font-size: 15px; }
+.cmp-col-cast .cmp-debate-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-col-cast .cmp-debate-alias-input { width: 11em; height: 28px; font-size: 14px; }
+.cmp-col-cast .cmp-debate-ava-badge { box-shadow: 0 0 0 2px var(--bg-card); }
+.cmp-col-cast .cmp-debate-ava-badge.is-word { box-shadow: inset 0 0 0 1.5px var(--brand-chatgpt), 0 0 0 2px var(--bg-card); }
+.cmp-col-cast .cmp-debate-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.cmp-debate-err { margin: 0; font-size: 12.5px; color: var(--danger); }
+.cmp-debate-err-open { margin-left: 8px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+/* The ⚙ closed (plan §18.3): no separator over a lone summary / error line; the body is hidden. */
+.cmp-debate-setup.is-closed { border-top: 0; padding-top: 0; margin-top: 6px; }
+.cmp-debate-setup-body { display: flex; flex-direction: column; gap: 8px; }
+.cmp-debate-summary { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 0; border: 0; background: none; color: var(--text-secondary); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.cmp-debate-summary > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: underline dotted var(--border-strong); text-underline-offset: 3px; }
+.cmp-debate-summary:hover { color: var(--accent); }
+.cmp-debate-summary-glyph { font-size: 13px; line-height: 1; }
+.cmp-debate-hint { margin: 0; font-size: 12px; color: var(--text-secondary); }
+
+.cmp-debate-timeline { flex: 1 1 auto; min-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px 18px; line-height: 1.45; background: var(--debate-room-bg); border-radius: var(--radius-card); }
+#compare-root.is-debate .cmp-columns { display: none; }
+.cmp-debate-timeline > * { max-width: 820px; margin-left: auto; margin-right: auto; }
+.cmp-debate-timeline > * + * { margin-top: 10px; }
+.cmp-debate-opening { display: flex; flex-direction: column; gap: 10px; }
+/* Room head + dividers: centred pills, like a date line. */
+.cmp-debate-room { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; }
+/* Side by side, not overlapped: an overlapping tile would cover its neighbour's service badge. */
+.cmp-debate-room-avas { display: inline-flex; gap: 6px; }
+.cmp-debate-room-line, .cmp-debate-divider { font-size: 11.5px; color: var(--debate-notice-fg); background: var(--debate-notice-bg); border-radius: 16px; padding: 4px 12px; }
+.cmp-debate-divider { display: table; }
+
+/* Avatars: a squircle profile tile — the model's emoji on the service tint, the service mark as a
+   corner badge on a light disc (debate.js avatar(), brand-marks.js). Decorative (aria-hidden). */
+.cmp-debate-ava { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 35%; background: var(--bg-subtle); font-size: 19px; line-height: 1; flex-shrink: 0; }
+.cmp-debate-ava[data-provider="claude"] { background: var(--debate-ava-claude); }
+.cmp-debate-ava[data-provider="chatgpt"] { background: var(--debate-ava-chatgpt); }
+.cmp-debate-ava[data-provider="gemini"] { background: var(--debate-ava-gemini); }
+/* The badge: a light disc at the bottom-right corner, ringed in the room colour so it reads as
+   separate from the tile it overlaps. */
+.cmp-debate-ava-badge { position: absolute; right: -4px; bottom: -4px; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; background: var(--debate-logo-bg); box-shadow: 0 0 0 2px var(--debate-room-bg); }
+.cmp-debate-ava-badge svg { width: 11px; height: 11px; }
+.cmp-debate-ava[data-provider="claude"] .cmp-debate-ava-badge svg { fill: var(--brand-claude); }
+.cmp-debate-ava[data-provider="gemini"] .cmp-debate-ava-badge svg { fill: var(--brand-gemini); }
+/* The OpenAI mark is monochrome on its own site — dark on the light disc reads as ChatGPT at a glance. */
+.cmp-debate-ava[data-provider="chatgpt"] .cmp-debate-ava-badge svg { fill: var(--debate-logo-fg); }
+/* The letter tile (no usable mark): dark letters on the light disc, ringed in the service colour. */
+.cmp-debate-ava-badge.is-word { color: var(--debate-logo-fg); box-shadow: inset 0 0 0 1.5px var(--brand-chatgpt), 0 0 0 2px var(--debate-room-bg); font-size: 5.5px; font-weight: 800; letter-spacing: -.03em; }
+
+/* An AI message row = turn.root itself (debate.js decorateTurn), laid out by named areas (§14.1 ③):
+   avatar | name line / process panel / bubble + time beside it / copy icon. Anything else a turn
+   may hold lands in the content columns. */
+.cmp-debate-msg { display: grid; grid-template-columns: 36px fit-content(calc(100% - 110px)) minmax(0, 1fr); grid-template-areas: "ava meta meta" "ava act act" "ava bubble side" "ava copy copy"; column-gap: 8px; row-gap: 3px; align-items: start; }
+.cmp-debate-msg > * { grid-column: 2 / -1; min-width: 0; }
+.cmp-debate-msg > .cmp-debate-ava { grid-area: ava; }
+.cmp-debate-msg > .cmp-debate-meta { grid-area: meta; }
+.cmp-debate-msg > .cmp-act { grid-area: act; justify-self: start; }
+.cmp-debate-msg > .cmp-turn-assistant { grid-area: bubble; }
+.cmp-debate-msg > .cmp-debate-side { grid-area: side; align-self: end; }
+.cmp-debate-msg > .cmp-copy { grid-area: copy; justify-self: start; }
+.cmp-debate-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; }
+.cmp-debate-name { font-size: 12.5px; font-weight: 600; color: var(--debate-room-fg); }
+.cmp-debate-svc, .cmp-debate-tier { font-size: 11px; color: var(--debate-room-fg); opacity: .85; }
+.cmp-debate-tier::before { content: '\00B7'; margin-right: 5px; }
+.cmp-debate-badge { display: inline-flex; align-items: center; height: 17px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); font-size: 10px; font-weight: 650; }
+/* The bubble: white, 12px corners, a small tail toward the avatar (::before triangle). */
+.cmp-debate-msg > .cmp-turn-assistant { position: relative; width: auto; max-width: 100%; overflow-x: auto; background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); border-radius: 12px; padding: 8px 12px; font-size: 14px; line-height: 1.45; box-shadow: 0 1px 1px rgba(0, 0, 0, .06); }
+.cmp-debate-msg > .cmp-turn-assistant::before { content: ''; position: absolute; top: 10px; left: -6px; border-style: solid; border-width: 5px 7px 5px 0; border-color: transparent var(--debate-bubble-bg) transparent transparent; }
+.cmp-debate-msg > .cmp-turn-assistant > :last-child { margin-bottom: 0; }
+/* The time beside the bubble (bottom), the answer time above it. */
+.cmp-debate-side { display: flex; flex-direction: column; gap: 1px; font-size: 10.5px; color: var(--debate-room-fg); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Typing (§14.1 ①②): the words are painted but hidden (aria-hidden too); three dots blink in turn. */
+.cmp-debate-msg.is-typing > .cmp-act { display: none; }
+/* 과정 in the debate chat (2026-09-27 user decision): only when the turn searched the web — the queries and
+   sources back a claim; thinking alone is the AI's own notes on its role and tone. The columns view keeps every panel. */
+.cmp-debate-msg > .cmp-act:not(.has-search) { display: none; }
+.cmp-debate-msg.is-typing > .cmp-turn-assistant > * { display: none; }
+.cmp-debate-msg.is-typing > .cmp-turn-assistant { font-size: 0; min-height: 34px; min-width: 56px; }
+.cmp-debate-msg.is-typing > .cmp-turn-assistant::after { content: ''; position: absolute; left: 14px; top: 14px; width: 6px; height: 6px; border-radius: 50%; animation: cmp-typing 1.2s infinite; }
+@keyframes cmp-typing {
+  0%, 100% { background: var(--text-secondary); box-shadow: 10px 0 var(--border-strong), 20px 0 var(--border-strong); }
+  33% { background: var(--border-strong); box-shadow: 10px 0 var(--text-secondary), 20px 0 var(--border-strong); }
+  66% { background: var(--border-strong); box-shadow: 10px 0 var(--border-strong), 20px 0 var(--text-secondary); }
+}
+/* …and the whole answer pops in when it is done. */
+.cmp-debate-msg.is-revealed > .cmp-turn-assistant { animation: cmp-pop .22s ease-out both; }
+@keyframes cmp-pop { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+/* The copy control: the icon only (accessible name kept), always visible once settled. */
+.cmp-debate-msg > .cmp-copy { width: 22px; height: 22px; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--debate-room-fg); }
+.cmp-debate-msg > .cmp-copy .cmp-copy-label { display: none; }
+/* The moderator: a centred notice — no avatar, a small head, the pill carries the words. */
+.cmp-debate-msg.is-moderator { grid-template-columns: minmax(0, 1fr); grid-template-areas: "meta" "act" "bubble" "copy"; justify-items: center; max-width: 620px; }
+.cmp-debate-msg.is-moderator > * { grid-column: 1; }
+.cmp-debate-msg.is-moderator > .cmp-debate-ava, .cmp-debate-msg.is-moderator > .cmp-debate-side { display: none; }
+.cmp-debate-msg.is-moderator > .cmp-turn-assistant { background: var(--debate-notice-bg); color: var(--debate-notice-fg); box-shadow: none; font-size: 13px; text-align: left; }
+.cmp-debate-msg.is-moderator > .cmp-turn-assistant::before { display: none; }
+.cmp-debate-msg.is-moderator > .cmp-copy { justify-self: center; }
+.cmp-debate-msg.is-moderator .cmp-debate-badge { background: var(--debate-notice-bg); color: var(--debate-notice-fg); }
+
+/* The user's words: right, yellow bubble with its tail, the time on its left. */
+.cmp-debate-user { display: flex; flex-direction: row-reverse; align-items: flex-end; gap: 6px; }
+.cmp-debate-ububble { position: relative; max-width: 70%; background: var(--debate-me-bg); color: var(--debate-me-fg); border-radius: 12px; padding: 8px 12px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; animation: cmp-pop .22s ease-out both; }
+.cmp-debate-ububble::after { content: ''; position: absolute; top: 10px; right: -6px; border-style: solid; border-width: 5px 0 5px 7px; border-color: transparent transparent transparent var(--debate-me-bg); }
+.cmp-debate-user .cmp-debate-side { align-items: flex-end; }
+/* The user's own avatar, right of the bubble (row-reverse puts the first child rightmost): the
+   Google photo, or the account's first letter on the accent tile (debate.js meAvatar). */
+.cmp-debate-me-ava { align-self: flex-start; background: var(--accent-light); color: var(--accent); font-size: 15px; font-weight: 700; overflow: hidden; }
+.cmp-debate-me-ava img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cmp-debate-user.is-queued .cmp-debate-ububble { opacity: .65; }
+
+@media (max-width: 720px) {
+  /* Narrow: the root grows with its content (like the columns, capped at 72vh), so the timeline keeps its own scroll — debate.js follow() scrolls it. */
+  .cmp-debate-timeline { padding: 8px 8px 14px; flex: 0 0 auto; height: 72vh; min-height: 0; }
+  .cmp-debate-msg { grid-template-columns: 30px fit-content(calc(100% - 84px)) minmax(0, 1fr); column-gap: 6px; }
+  .cmp-debate-ava { width: 30px; height: 30px; font-size: 16px; }
+  .cmp-debate-ava-badge { width: 15px; height: 15px; right: -3px; bottom: -3px; }
+  .cmp-debate-ava-badge svg { width: 10px; height: 10px; }
+  .cmp-debate-ububble { max-width: 82%; }
+}
+
+.cmp-debate-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 2px; }
+.cmp-debate-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.cmp-debate-pick { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px 0 5px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12.5px; cursor: pointer; }
+.cmp-debate-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.cmp-debate-pick.is-out, .cmp-debate-pick:disabled { opacity: .45; cursor: default; }
+.cmp-debate-status { flex: 1 1 200px; font-size: 12px; font-style: italic; color: var(--text-secondary); }
+
+/* ── share links (#1784 U3): the topbar button, the dialog, 「내 공유 링크」 ── */
+.cmp-btn-share.is-shared::before { content: '\1F517'; font-size: 11px; }
+.cmp-history-shared { font-size: 11px; line-height: 1; }
+.cmp-share { position: fixed; inset: 0; z-index: 900; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(15, 20, 25, .45); }
+.cmp-share[hidden] { display: none; }
+.cmp-share-box { width: min(620px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: var(--shadow-pop); animation: cmp-fade-in .15s ease-out both; }
+.cmp-share-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cmp-share-title { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.cmp-share-close { width: 30px; height: 30px; border: 0; background: transparent; color: var(--text-secondary); font-size: 20px; line-height: 1; border-radius: var(--radius-ctl); cursor: pointer; }
+.cmp-share-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-share-link { display: flex; gap: 6px; align-items: center; }
+.cmp-share-link[hidden] { display: none; }
+.cmp-share-url { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-ctl); background: var(--bg-subtle); color: var(--text-primary); font-size: 12.5px; }
+.cmp-share-form { display: flex; flex-direction: column; gap: 6px; }
+.cmp-share-label { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.cmp-share-input { height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-ctl); background: var(--bg-card); color: var(--text-primary); font-size: 13px; }
+.cmp-share-author { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 4px 0 0; padding: 0; border: 0; }
+.cmp-share-author legend { width: 100%; margin-bottom: 4px; }
+.cmp-share-radio { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text-primary); cursor: pointer; }
+.cmp-share-name { flex: 1 1 180px; }
+.cmp-share-name[hidden] { display: none; }
+.cmp-share-warn { margin: 0; padding: 8px 10px; border-radius: var(--radius-ctl); background: var(--warn-bg); color: var(--text-primary); font-size: 12px; line-height: 1.45; }
+.cmp-share-note { margin: 0; font-size: 12px; color: var(--text-secondary); line-height: 1.45; }
+.cmp-share-note[hidden] { display: none; }
+.cmp-share-error { margin: 0; font-size: 12.5px; color: var(--danger); }
+.cmp-share-error[hidden], .cmp-share-error:empty { display: none; }
+.cmp-share-preview { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
+.cmp-share-card { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); }
+.cmp-share-card-host { font-size: 11px; color: var(--text-secondary); }
+.cmp-share-card-title { font-size: 13px; font-weight: 650; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-share-card-by { font-size: 11.5px; color: var(--text-secondary); }
+.cmp-share-round { margin: 4px 0 0; font-size: 11.5px; font-weight: 650; color: var(--text-secondary); }
+.cmp-share-msg { padding: 8px 10px; border-radius: var(--radius-ctl); background: var(--bg-card); border: 1px solid var(--border); font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; }
+.cmp-share-msg.is-me { background: var(--accent-light); border-color: transparent; white-space: pre-wrap; }
+.cmp-share-msg.is-focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cmp-share-msg-who { margin-bottom: 4px; font-size: 11.5px; font-weight: 650; color: var(--text-secondary); }
+.cmp-share-msg-body > :first-child { margin-top: 0; }
+.cmp-share-msg-body > :last-child { margin-bottom: 0; }
+.cmp-share-actions, .cmp-share-confirm { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: center; }
+.cmp-share-actions[hidden], .cmp-share-confirm[hidden] { display: none; }
+.cmp-share-confirm .cmp-share-note { flex: 1 1 100%; }
+.cmp-share-mine-btn { margin-right: auto; }
+.cmp-share-delete:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.cmp-share-delete:not(:disabled):hover { background: var(--danger-bg); }
+.cmp-share-delete[hidden] { display: none; }
+.cmp-share-mine { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+.cmp-share-mine[hidden] { display: none; }
+.cmp-share-mine-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.cmp-share-mine-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); }
+.cmp-share-mine-meta { color: var(--text-secondary); white-space: nowrap; }
+/* 「공유」 under a bubble (#1784 U3c): the copy button's look; shown only while the page may share. */
+/* Cross-check answers: 「답변 복사」 and 「공유」 share one line under the answer — the block wraps as a
+   row whose other children are full width, so the answer still comes first and the actions under it. */
+.cmp-turn-block-assistant:not(.cmp-debate-msg) { flex-flow: row wrap; align-items: center; column-gap: 2px; }
+.cmp-turn-block-assistant:not(.cmp-debate-msg) > * { flex: 0 0 100%; }
+.cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-copy, .cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-turn-share { flex: 0 0 auto; }
+/* Debate bubbles: an icon beside the copy icon, in the copy cell (centred under a moderator's line). */
+.cmp-debate-msg > .cmp-turn-share { grid-area: copy; justify-self: start; margin-left: 24px; height: 22px; padding: 0 3px; font-size: 0; color: var(--debate-room-fg); }
+.cmp-debate-msg > .cmp-turn-share::before { font-size: 11px; }
+.cmp-debate-msg.is-moderator > .cmp-turn-share { justify-self: center; margin-left: 0; transform: translateX(24px); }
+.cmp-turn-share { display: none; align-items: center; gap: 4px; height: 26px; padding: 0 6px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--text-secondary); font-size: 11.5px; font-weight: 600; line-height: 1; white-space: nowrap; flex-shrink: 0; cursor: pointer; }
+.cmp-turn-share::before { content: '\1F517'; font-size: 10px; }
+.cmp-can-share .cmp-turn-share:not([hidden]) { display: inline-flex; }
+.cmp-turn-share:hover { background: var(--bg-hover); color: var(--text-primary); }

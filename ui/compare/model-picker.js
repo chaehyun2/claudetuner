@@ -250,6 +250,9 @@ export function installModelPicker(ctx) {
     state.columns.delete(col.id);
     state.columnIds = state.columnIds.map((id) => (id === col.id ? next : id));
     if (state.pickerFor === col.id) state.pickerFor = next; // the open picker follows its column
+    // The debate's moderator follows its column's new id (§18.9 ①): the default seat, and a chosen AI moderator.
+    if (state.debateSeat === col.id) state.debateSeat = next;
+    if (state.debatePrefs && state.debatePrefs.modCol === col.id) { state.debatePrefs.modCol = next; if (ctx.saveDebatePrefs) ctx.saveDebatePrefs(); }
     col.id = next;
     col.node.setAttribute('data-col', next);
     state.columns.set(next, col);

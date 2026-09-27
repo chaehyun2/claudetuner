@@ -58,7 +58,9 @@ export function installActivity(ctx) {
       item.kind = kind;
       a.entries.set(id, item);
       a.list.appendChild(item);
-      if (kind === ACTIVITY_TOOL_USE) a.searches++;
+      // `has-search`: the debate chat shows the panel only for a turn that searched (compare.css) —
+      // a search is the evidence behind a claim; thinking alone is the AI's notes on its role and tone.
+      if (kind === ACTIVITY_TOOL_USE) { a.searches++; a.box.classList.add('has-search'); }
     }
     if (kind === ACTIVITY_THINKING) {
       // Deltas append (the SW forwards the client's throttled slices); a final with text is the tail.

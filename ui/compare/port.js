@@ -28,7 +28,9 @@ export function installPort(ctx) {
         if (!state.linkReading) return;                 // cancelled while it was being read
         state.linkReading = false;
         state.link = {
-          provider: msg.provider,
+          // `kind` (#1784 U4): a share page has no provider — the chip names its title instead.
+          kind: msg.kind === 'share' ? 'share' : 'vendor',
+          provider: msg.kind === 'share' ? null : msg.provider,
           title: typeof msg.title === 'string' ? msg.title : null,
           turns: Number.isFinite(msg.turns) ? msg.turns : 0,
           truncated: msg.truncated === true,
@@ -51,7 +53,8 @@ export function installPort(ctx) {
       }
       case 'CONSUME_OK': {
         const first = !state.sessionStarted;
-        if (first) { ctx.commitPrompt(state.question); ctx.renderQuestionBubbles(); if (!state.sessionId) state.sessionId = ctx.newSessionId(); state.firstRound = state.roundInFlight; }
+        // firstRound before the bubbles: the first question's 「공유」 names that round (#1784 U3c).
+        if (first) { state.firstRound = state.roundInFlight; ctx.commitPrompt(state.question); ctx.renderQuestionBubbles(); if (!state.sessionId) state.sessionId = ctx.newSessionId(); }
         state.sessionStarted = true;
         state.rounds++;
         // A summary (or its retry) is ABOUT a comparison, not a new one: it leaves the active round
@@ -193,6 +196,9 @@ export function installPort(ctx) {
         // next attempt is again a first-message SEND{resume}.
         if (!state.sessionStarted) closePort();
         if (state.resuming) { state.resuming = false; closePort(); }
+        // A debate round that was refused gives back what it reserved BEFORE finishSend's settle
+        // hook runs (debate.js onRoundRefused / onRoundSettled).
+        if (ctx.debateRoundRefused) ctx.debateRoundRefused();
         finishSend();
         return;
       }
@@ -641,7 +647,7 @@ export function installPort(ctx) {
     // What this send IS, for the wire (`kind`, cmp-beta-contract §3): a retry is a retry whatever
     // else it is; a summary is a summary even on a fresh port; the rest is the composer's SEND
     // (resume when it rides SEND{resume}) or FOLLOWUP.
-    const sendKind = ctx.sendKindFor(type, kind, retry, resume);
+    const sendKind = ctx.sendKindFor(type, kind, retry, resume, targets);
     // The first round fixes the routing set at 「전체」 (every participant); C's checkboxes prune it.
     if (type === 'SEND') { state.followupTargets = new Set(targets); ctx.examples.hidden = true; }
     // 🔴 The SAME predicate the wire uses below (`carries`), needed here because the turns are
@@ -772,6 +778,9 @@ export function installPort(ctx) {
     ctx.syncWaitTimer();
     ctx.updateControls();
     ctx.persistSession(); // every settled round updates the local history entry (kept sessions only)
+    // 「토론 모드」 (#1769): the orchestrator reads what the round produced and takes the next step.
+    // Every way a round ends comes through here (ALL_DONE, CONSUME_FAIL, the port gone).
+    if (ctx.debateRoundSettled) ctx.debateRoundSettled();
   }
 
   function currentTargets() {

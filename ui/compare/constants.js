@@ -14,7 +14,7 @@ export const COMPARE_PROVIDERS = ['claude', 'gemini', 'chatgpt'];
 // joined through `col.provider`. A bare provider id is the LEGACY key — an old history entry, an
 // event from an SW that only names the provider — and reads as that provider's `auto` column
 // (the first column of the provider on the page).
-export const MAX_COLUMNS = 5;
+export const MAX_COLUMNS = 6;
 export const MODEL_AUTO_ID = 'auto';
 export const colIdOf = (provider, model) => `${provider}:${model == null || model === '' ? MODEL_AUTO_ID : String(model)}`;
 /** `{provider, model}` of a colId (model null = auto), or null when the provider is not one of ours. A bare provider id = its auto column. */
@@ -86,10 +86,55 @@ export const SEND_KIND_FOLLOWUP = 'followup';
 export const SEND_KIND_SUMMARY = 'summary';
 export const SEND_KIND_RETRY = 'retry';
 export const SEND_KIND_RESUME = 'resume';
+// A debate (#1769 §16.8): its opening send, and every send after it (a speaker's or the moderator's
+// turn). Statistics only — the debit is the same as any send's.
+export const SEND_KIND_DEBATE = 'debate';
+export const SEND_KIND_DEBATE_TURN = 'debate_turn';
+// A debate send to its AI moderator (§18.8): the server counts which model moderates by it.
+export const SEND_KIND_DEBATE_MOD = 'debate_mod';
 // Beta reset (same contract): while status.betaReset is true a counted quota at 0 offers
 // 「오늘 횟수 초기화」 instead of the Pro CTA — this message asks the SW (→ POST /api/compare/reset)
 // and its answer `{ok, quota}` is applied as a fresh status quota.
 export const RESET_MSG_TYPE = 'COMPARE_RESET';
+// Share links (#1784 U3): the page's one message to the share API (bg/compare.js shareRequest) and
+// its ops. The SW answers the server's own `code` on a refusal; the page shows `share_err_<code>`.
+export const SHARE_MSG_TYPE = 'COMPARE_SHARE';
+export const SHARE_OP_CREATE = 'create';
+export const SHARE_OP_UPDATE = 'update';
+export const SHARE_OP_DELETE = 'delete';
+export const SHARE_OP_LIST = 'list';
+export const SHARE_AUTHOR_ANON = 'anon';
+export const SHARE_AUTHOR_NAME = 'name';
+export const SHARE_AUTHOR_NAME_PHOTO = 'name_photo';
+export const SHARE_AUTHOR_MODES = [SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO];
+/** chrome.storage.local: the author choice to preselect next time (plan §10.2 — anonymous until changed). */
+export const SHARE_AUTHOR_PREF_KEY = 'ct_cmp_share_author';
+/**
+ * chrome.storage.local: this browser's shares, `{ [sessionId]: {id, title, updatedAt, kind} }` — what
+ * turns the dialog into 「업데이트 / 삭제」 for a conversation already shared and puts 🔗 on its
+ * history row. Kept BESIDE the history (not in the entry): the server list is the truth, and a
+ * share outlives the history entry it came from (「내 공유 링크」 still reaches it).
+ */
+export const SHARE_MAP_KEY = 'ct_cmp_shares';
+export const SHARE_MAP_MAX = 200;
+/** Web Lock serialising every share write across this browser's compare tabs (share.js underShareLock). */
+export const SHARE_LOCK_NAME = 'ct-cmp-share';
+export const SHARE_LOCK_WAIT_MS = 30000;
+export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
+export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
+/** A share page's path (`/c/<id>`) — a pasted one is a conversation to continue (#1784 U4; the SW's SHARE_LINK_PATH_RE is the other half). */
+export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
+/**
+ * The ONE way a share link is spelled on the page: the constant origin + an id that is exactly 22
+ * base62 characters, else null (the caller draws no link). test/compare-xss-guard.mjs lets a slice pass
+ * a non-constant URL to ctx.link only as `shareHref` taken from here and null-checked.
+ */
+export function shareUrlOf(id) {
+  return typeof id === 'string' && SHARE_ID_RE.test(id) ? `${SHARE_SITE_ORIGIN}/c/${id}` : null;
+}
+/** Server caps the dialog mirrors (worker/src/utils/compare-share.ts TITLE_MAX / AUTHOR_NAME_MAX). */
+export const SHARE_TITLE_INPUT_MAX = 120;
+export const SHARE_NAME_INPUT_MAX = 40;
 // Analytics `send.models`: a target with no model choice (no catalog / the provider default) reads as this.
 export const MODELS_CSV_AUTO = 'auto';
 // …and each id is cut to its last path segment and this many chars, so three `provider:id` pairs
@@ -175,6 +220,9 @@ export const CODE_SESSION_ENDED = 'session_ended';
 // code; these are the ones with a sentence of their own, and anything else falls back to the
 // generic line — a code the page does not know must not become a blank notice.
 export const CODE_NOT_FOUND = 'not_found';
+/** READ_LINK of a share page (#1784 U4, bg/compare.js SHARE_LINK_CODES). */
+export const CODE_SHARE_DELETED = 'share_deleted';
+export const CODE_SHARE_PRIVATE = 'share_private';
 export const CODE_UNSUPPORTED = 'unsupported';
 export const CODE_BAD_REQUEST = 'bad_request';
 export const CODE_LINK_CONTEXT_MISSING = 'link_context_missing';
@@ -257,6 +305,9 @@ export const USAGE_FULL_PCT = 100;
 // follow-up sent from a column's own composer reports `send.via = 'column'` (the same event name,
 // one more param — the SW allowlist is untouched); the Auto retry's model_change keeps the value.
 export const SEND_VIA_COLUMN = 'column';
+// A round the 「토론 모드」 orchestrator sent (ui/compare/debate.js, #1769): never carries the dock's
+// attachment tray (roundOwnsTray), and says so in GA like SEND_VIA_COLUMN.
+export const SEND_VIA_DEBATE = 'debate';
 // Timed send-path stages (bg/compare.js, package v0.3.0) the badge reads: DIAG{stage, detail.at}.
 // first_chunk − send_start = time to first token; stream_done − send_start = the whole answer.
 export const STAGE_SEND_START = 'send_start';
@@ -336,6 +387,23 @@ export const SUMMARY_FENCE_CLOSE = (n) => `<<<end answer ${n}>>>`;
 // line — the budget below counts labels as fixed text, and an unbounded one could eat it whole.
 export const SUMMARY_MODEL_LABEL_MAX = 64;
 export const TURN_KIND_SUMMARY = 'summary';
+// 「토론 모드」 (#1769, docs/plans/compare-debate-mode.md): the turns a debate round draws carry this
+// kind — the composed prompt (a user turn) is not shown in the timeline and folds in the columns, the
+// answer is drawn with its speaker head. The WIRE kind stays send / followup (see debate.js header).
+export const TURN_KIND_DEBATE = 'debate';
+// The debate runs on by itself (plan §15 — no 「▶ 계속」 every few turns). Its safeguards: at most
+// DEBATE_SEND_BUDGET counted sends per run (opening + turns + moderator calls — each is one compare
+// and one request on the user's own AI account; 「▶ 계속」 buys another budget), and a pause before the
+// next send once the tab has been hidden for DEBATE_HIDDEN_PAUSE_MS. An AI moderator may only END
+// after DEBATE_MIN_TURNS_TO_END debater turns.
+export const DEBATE_SEND_BUDGET = 40;
+export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
+export const DEBATE_MIN_TURNS_TO_END = 2;
+// chrome.storage.local keys: the setup choices (toggle, moderator, stance) and the aliases (colId → name).
+export const DEBATE_PREFS_KEY = 'compareDebatePrefs';
+export const DEBATE_ALIASES_KEY = 'compareAliases';
+// The timeline follows new words while the reader is within this many px of its end.
+export const DEBATE_FOLLOW_PX = 80;
 export const BADGE_SEARCHING = 'col_searching';
 // A duration above this is not a measurement (a clock jump, an absurd timestamp) — no number.
 export const TTFT_MAX_MS = 60 * 60 * 1000;

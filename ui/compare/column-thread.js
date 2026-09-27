@@ -5,7 +5,7 @@
 // pair and the error copy. Bodies are exactly as they were in compare.js
 // (test/mutants/compare-page.json anchors on them). The ctx contract is written up in history.js.
 
-import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, ERROR_TITLE_MAX } from './constants.js';
+import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { retryNeedsAttachment } from './attachments.js';
 import { imageIdsOf } from './image-store.js';
@@ -31,6 +31,7 @@ export function installColumnThread(ctx) {
   }
   /** Scroll a column to its end (next frame, like a paint) and let the scroll event clear the scrolled-up mark. */
   function scrollColumnToEnd(col) {
+    if (ctx.debateActive && ctx.debateActive()) { ctx.debateFollow(); return; } // the timeline scrolls, not the (hidden) column
     raf(() => { col.body.scrollTop = col.body.scrollHeight; syncJumpButton(col); });
   }
   /**
@@ -49,6 +50,7 @@ export function installColumnThread(ctx) {
    * never move a view the user scrolled away from (see FOLLOW_AT_BOTTOM_PX).
    */
   function maybeFollowStream(col, turn) {
+    if (ctx.debateActive && ctx.debateActive()) { ctx.debateFollow(); return; }
     if (col.userScrolledUp) { syncJumpButton(col); return; }
     // The pill was pressed during the stream: the reader asked for the tail — follow it to the end
     // until they scroll up again (an anchored column would otherwise stay put after the jump).
@@ -81,12 +83,13 @@ export function installColumnThread(ctx) {
     let followUps = [];
     try {
       // A cut answer (stopped / errored / stalled) completes a dangling table header it ended on (#1714 ④).
-      const rendered = renderAnswer(turn.text, doc, { cut: !!(turn.errorText || turn.stalled) });
+      // A debate moderator's reply is drawn without its control line (debate.js displayText).
+      const rendered = renderAnswer(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text, doc, { cut: !!(turn.errorText || turn.stalled) });
       turn.node.appendChild(rendered.fragment);
       followUps = rendered.followUps;
     } catch {
       // md-render is bounded, but a renderer failure must never blank the answer: fall back to text.
-      turn.node.appendChild(doc.createTextNode(turn.text));
+      turn.node.appendChild(doc.createTextNode(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text));
     }
     // Images in the answer (#1684): the turn's cached strip, moved back under the text — never rebuilt.
     if (ctx.outImageCount(turn)) turn.node.appendChild(ctx.outImageStrip(col, turn));
@@ -159,20 +162,27 @@ export function installColumnThread(ctx) {
   // `model` = the served model captured for THIS answer (an attachment is labelled with its own).
   function pushUserTurn(col, text, kind = null, extra = null) {
     const summary = kind === TURN_KIND_SUMMARY;
+    // A debate prompt (#1769) is the page's composition, not the user's words: folded like a
+    // summary request in the columns, and kept out of the timeline altogether (debate.js turnHost).
+    const debate = kind === TURN_KIND_DEBATE;
     let node;
-    if (summary) {
+    if (summary || debate) {
       node = el('details', 'cmp-turn cmp-turn-user cmp-turn-summary-req');
-      node.appendChild(el('summary', 'cmp-summary-req-title', t('summary_req_summary')));
+      node.appendChild(el('summary', 'cmp-summary-req-title', t(debate ? 'debate_req_summary' : 'summary_req_summary')));
       node.appendChild(el('pre', 'cmp-summary-req-text', text));
     } else node = el('div', 'cmp-turn cmp-turn-user', text);
-    const turn = { role: 'user', text, node, root: null, ...(summary ? { kind: TURN_KIND_SUMMARY } : {}), ...turnExtra(extra) };
+    const turn = { role: 'user', text, node, root: null, ...(summary ? { kind: TURN_KIND_SUMMARY } : {}), ...(debate ? { kind: TURN_KIND_DEBATE } : {}), ...turnExtra(extra) };
     if (turn.img) node.appendChild(ctx.attachMark(turn.img));
     const root = el('div', 'cmp-turn-block cmp-turn-block-user');
     root.appendChild(node);
     root.appendChild(ctx.copyButton(() => turn.text, { kind: COPY_KIND_THREAD, provider: col.provider }));
+    // 「공유」 from this question (#1784 U3c) — a follow-up's own words only (not a composed request),
+    // and only a turn with a round (a skipped column's copy of the question has none: the button
+    // could not name a bubble — Codex U3c 1R).
+    if (!summary && !debate && Number.isFinite(turn.round)) root.appendChild(ctx.shareTurnButton(() => ({ round: turn.round })));
     turn.root = root;
     col.turns.push(turn);
-    col.body.appendChild(root);
+    (ctx.turnHost ? ctx.turnHost(col, turn) : col.body).appendChild(root);
   }
   /** The provenance fields of `extra` worth keeping on a turn record: a finite round, a summary structure, a model. */
   function turnExtra(extra) {
@@ -195,7 +205,7 @@ export function installColumnThread(ctx) {
   }
   function pushAssistantTurn(col, kind = null, extra = null) {
     const node = el('div', 'cmp-turn cmp-turn-assistant is-streaming');
-    const turn = { role: 'assistant', text: '', node, root: null, copyBtn: null, ...(kind === TURN_KIND_SUMMARY ? { kind: TURN_KIND_SUMMARY } : {}), ...turnExtra(extra) };
+    const turn = { role: 'assistant', text: '', node, root: null, copyBtn: null, ...(kind === TURN_KIND_SUMMARY ? { kind: TURN_KIND_SUMMARY } : {}), ...(kind === TURN_KIND_DEBATE ? { kind: TURN_KIND_DEBATE } : {}), ...turnExtra(extra) };
     const root = el('div', 'cmp-turn-block cmp-turn-block-assistant');
     if (turn.kind === TURN_KIND_SUMMARY) {
       root.classList.add('cmp-turn-block-summary');
@@ -223,10 +233,16 @@ export function installColumnThread(ctx) {
     const copyBtn = ctx.copyButton(() => turn.text, { kind: COPY_KIND_TURN, provider: col.provider, label: t('copy_answer') });
     copyBtn.hidden = true;
     root.appendChild(copyBtn);
+    // 「공유」 from this answer (#1784 U3c) — shown by share.js syncTurnShareButtons once settled.
+    const shareBtn = ctx.shareTurnButton(() => ({ round: turn.round, col: col.id }));
+    shareBtn.hidden = true;
+    root.appendChild(shareBtn);
     turn.root = root;
     turn.copyBtn = copyBtn;
+    turn.shareBtn = shareBtn;
     col.turns.push(turn);
-    col.body.appendChild(root);
+    (ctx.turnHost ? ctx.turnHost(col, turn) : col.body).appendChild(root);
+    if (ctx.decorateDebateTurn) ctx.decorateDebateTurn(col, turn); // the speaker head, in a debate session only
     col.status = 'streaming';
     col.errorCode = null;
     col.errorTitle = '';
@@ -246,12 +262,16 @@ export function installColumnThread(ctx) {
   }
   function pushSkippedTurn(col) {
     const node = el('div', 'cmp-turn cmp-turn-assistant is-skipped', t('col_skipped'));
-    col.turns.push({ role: 'skipped', text: '', node, root: node });
-    col.body.appendChild(node);
+    const turn = { role: 'skipped', text: '', node, root: node };
+    col.turns.push(turn);
+    (ctx.turnHost ? ctx.turnHost(col, turn) : col.body).appendChild(node);
   }
   /** The turn stopped streaming: offer its copy button when there is something to copy. */
   function settleTurn(turn) {
+    if (ctx.debateReveal) ctx.debateReveal(turn); // a debate turn shows its words now (debate.js reveal — no-op otherwise)
     if (turn && turn.copyBtn) turn.copyBtn.hidden = !turn.text;
+    if (turn) turn.settled = true; // its 「공유」 may show now (share.js syncTurnShareButtons)
+    if (ctx.syncTurnShareButtons) ctx.syncTurnShareButtons();
     if (turn && turn.widenBtn) turn.widenBtn.hidden = !turn.text; // a summary verdict: 「넓게 보기」 once there is one
     ctx.syncCopyAll();
   }
