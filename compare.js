@@ -210,6 +210,7 @@ export function mountComparePage(deps) {
     mePhoto: null,
     roundStartedAt: null, // clock.now() at the last beginSend — analytics `round_done.ms`
     checking: false,      // a COMPARE_STATUS read is in flight (gates show 「확인 중…」)
+    permissionAsking: false, // 「보내기」's site-permission prompt is open (#1838) — the send waits on it
     notice: null,         // { kind, owner } of the notice on screen (see NOTICE_OWNER_*), null when none
     idleEnded: false,     // the keepalive stopped for lack of activity (the session then dies by itself: idle copy)
     summaryPending: null, // colId of the judge whose 「요약·비교」 FOLLOWUP awaits its CONSUME_OK / CONSUME_FAIL (C5)
@@ -2781,8 +2782,16 @@ export function mountComparePage(deps) {
     // in flight, a column that takes files — are not its (plan §17.11 ②); its own reasons are.
     const inDebateTab = debateTab();
     const debateHeld = inDebateTab && !!ctx.debateStartProblem();
-    const trayOk = inDebateTab ? currentTargets().length > 0 : !attachBusy() && attachableTargets(currentTargets()).length > 0;
-    const canSend = !state.sending && !state.sessionStarted && !exhausted && !state.linkReading && !debateHeld && currentQuestion().length > 0 && trayOk;
+    // #1838: a column still waiting on site access counts as a target for the BUTTON — pressing it
+    // is what asks for the access (sendInitial). The crosscheck tab only; the debate tab's roster
+    // rules (debateStartProblem) decide there.
+    // With a file attached, only a pending column that can TAKE the file counts (Codex 1R follow-up:
+    // granting access for a site with no upload path ended in a send with no target).
+    const pendingProviders = inDebateTab ? [] : ctx.permissionPendingProviders();
+    const pendingCols = ctx.allColumns().filter((c) => pendingProviders.includes(c.provider) && !c.closed).map((c) => c.id);
+    const permissionPending = attachableTargets(pendingCols).length > 0;
+    const trayOk = inDebateTab ? currentTargets().length > 0 : !attachBusy() && (attachableTargets(currentTargets()).length > 0 || permissionPending);
+    const canSend = !state.sending && !state.permissionAsking && !state.sessionStarted && !exhausted && !state.linkReading && !debateHeld && currentQuestion().length > 0 && trayOk;
     sendBtn.disabled = !canSend;
     sendBtn.textContent = state.sending ? t('sending') : t(inDebateTab ? 'debate_start_btn' : 'send');
     const addLabel = t(inDebateTab ? 'debate_add_participant' : 'col_add');
@@ -3349,6 +3358,59 @@ export function mountComparePage(deps) {
   /** First send, from the button or Enter in the question card. */
   function sendInitial() {
     noteActivity();
+    // 🔴 While the prompt is open the send is ALREADY decided — Enter / a second click must not go
+    // around it (Codex 1R #1: Enter fell through to sendNow and debited a round without the column
+    // the user was granting).
+    if (state.permissionAsking) return;
+    // #1838 — ASK AT THE SEND. A column still lacking site access used to wait behind its own
+    // 「허용」 button, and ~2/3 of the people who met that gate never pressed it (GA 09-20~27: 204
+    // saw it, ~70 granted, 6–7 refused). Now the send itself asks: one prompt for every pending
+    // site, INSIDE this click / keydown (askSitePermission requests before any await, so the
+    // gesture holds). Granted → a FRESH status read and the round includes those columns (Auto —
+    // their plan is unknown until the site is readable; the MODELS re-list catches up after the
+    // tab opens); refused / dismissed → the round goes to the columns that can take it.
+    if (!debateTab() && !state.disabled && !state.sending && !state.sessionStarted && currentQuestion() && !quotaExhausted()) {
+      const pending = ctx.permissionPendingProviders();
+      if (pending.length) {
+        // What the user pressed 「보내기」 ON. If any of it changed while the prompt was open (the
+        // question edited, the debate tab chosen, a link read started) the queued send is dropped,
+        // not re-aimed at the new state (Codex 1R #2).
+        const intent = currentQuestion();
+        state.permissionAsking = true;
+        updateControls();
+        const asked = ctx.askSitePermission(pending, 'send'); // synchronous start: the gesture holds
+        asked.then(async ({ granted, unavailable }) => {
+          if (granted) {
+            // A read that started BEFORE the grant would answer the old permissions and the round
+            // would leave the new column out (Codex 1R #3) — bump so it is dropped and read anew.
+            bumpStatusEpoch();
+            await ctx.refreshStatus();
+          }
+          return { granted, unavailable };
+        }).catch(() => ({ granted: false, unavailable: false })).then(({ unavailable }) => {
+          state.permissionAsking = false;
+          updateControls();
+          if (debateTab() || state.linkReading || currentQuestion() !== intent) return;
+          const willSend = currentTargets().length > 0;
+          if (unavailable) {
+            // The web shell's iframe would not SHOW the prompt (Codex 1R #4): say so in the waiting
+            // columns, and when nothing else can take the round, go where the prompt is guaranteed —
+            // the same extension-tab fallback the gate's own button uses.
+            ctx.notePermissionTabHint();
+            if (!willSend) { ctx.openInExtensionTab(); return; }
+          }
+          sendNow();
+        });
+        return;
+      }
+    }
+    sendNow();
+  }
+  /** The send itself, once any site-access prompt has settled (sendInitial). */
+  function sendNow() {
+    // The button is disabled during a link read, but sendNow can now run AFTER the click (a prompt
+    // in between) — the read-in-flight rule is repeated here (Codex 1R #2).
+    if (state.linkReading) return;
     const text = currentQuestion();
     const targets = currentTargets();
     // 🔴 AC17: no targets → no port, no consume. `disabled` alone is not a guarantee (a stale

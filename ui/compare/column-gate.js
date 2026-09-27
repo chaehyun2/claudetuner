@@ -53,7 +53,18 @@ export function installColumnGate(ctx) {
    * Chrome grants a multi-origin request all-or-nothing, in a single bubble.
    */
   function providersNeedingPermission(provider) {
-    const out = [provider];
+    return permissionPendingProviders(provider);
+  }
+  /**
+   * The same set without a pressed button (#1838): every visible column's provider still lacking
+   * site access — what ONE prompt at 「보내기」 covers. `first` (a pressed gate's provider) leads
+   * and is included even if the status has not caught up.
+   */
+  function permissionPendingProviders(first = null) {
+    // No status yet = no facts: gateKindFor(null) reads as "permission", which would put every
+    // column in a send-time prompt before the page even knows what is granted.
+    if (!first && !(state.status && state.status.providers)) return [];
+    const out = first ? [first] : [];
     for (const col of state.columns.values()) {
       if (out.includes(col.provider) || !PROVIDER_META[col.provider] || (state.excludeSrc && col.provider === src) || col.closed) continue; // closed = ✕ in the session / not in a loaded entry (1.36.0 batch review)
       const pstate = state.status && state.status.providers ? state.status.providers[col.provider] : null;
@@ -79,22 +90,39 @@ export function installColumnGate(ctx) {
    * re-ask the SW so the columns flip to sendable/login (gate) or get their retry back (action
    * row, col.gateCleared). `hint` is where the "the prompt moved to an extension tab" line goes.
    */
+  /**
+   * 🔴 THE ONLY chrome.permissions.request IN THE COMPARE FEATURE (AC16). Reached from a user
+   * gesture only — the gate / action-row buttons (requestProviderPermission) and, since #1838, the
+   * send button (compare.js sendInitial). The request is this function's FIRST statement, before
+   * any await, so a caller that invokes it synchronously inside its click / keydown handler keeps
+   * the gesture Chrome requires. `{ granted, unavailable }` — `unavailable`: inside the web shell's
+   * iframe Chrome may decline to SHOW the prompt at all (the call rejects — a user's "no" resolves
+   * false and does not land there). `via` tags the analytics event with the path that asked.
+   */
+  async function askSitePermission(providers, via = null) {
+    let granted = false;
+    let unavailable = false;
+    try { granted = (await chrome.permissions.request({ origins: providers.map((p) => PROVIDER_META[p].origin) })) === true; } catch {
+      unavailable = !!embedHost;
+    }
+    // One event per provider the prompt covered, so the per-provider gate → grant funnel stays comparable.
+    for (const p of providers) track('permission_result', via ? { provider: p, granted, via } : { provider: p, granted });
+    return { granted, unavailable };
+  }
+  /** The send path's 「the prompt moved to an extension tab」 line, in every column still waiting on access (#1838). */
+  function notePermissionTabHint() {
+    for (const col of state.columns.values()) {
+      if (col.gate && col.gate.kind === GATE_PERMISSION && col.gate.hint) col.gate.hint.textContent = t('provider_permission_tab_hint');
+    }
+  }
   async function requestProviderPermission(provider, btn, hint) {
     if (state.disabled) return;
     const providers = providersNeedingPermission(provider);
     btn.disabled = true;
-    let promptUnavailable = false;
     try {
-      let granted = false;
-      try { granted = (await chrome.permissions.request({ origins: providers.map((p) => PROVIDER_META[p].origin) })) === true; } catch {
-        // Refused / unavailable. Inside the web shell's iframe Chrome may decline to SHOW the
-        // prompt at all (the call rejects — a user's "no" resolves false and does not land here):
-        // the extension's own tab is where the prompt is guaranteed, so open this page there with
-        // the same query and say so. The button stays; a plain retry is still possible.
-        promptUnavailable = !!embedHost;
-      }
-      // One event per provider the prompt covered, so the per-provider gate → grant funnel stays comparable.
-      for (const p of providers) track('permission_result', { provider: p, granted });
+      // The extension's own tab is where the prompt is guaranteed when the iframe refused to show it:
+      // open this page there with the same query and say so. The button stays; a retry is possible.
+      const { unavailable: promptUnavailable } = await askSitePermission(providers);
       if (promptUnavailable) ctx.openInExtensionTab();
       hint.textContent = '';
       await ctx.refreshStatus();
@@ -248,7 +276,7 @@ export function installColumnGate(ctx) {
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
-    gateKindFor, checkAgainButton, providerLoginLink, permissionButtonLabel, requestProviderPermission, renderColumnGate, renderPlan, countdown, usageResetAt,
+    gateKindFor, checkAgainButton, providerLoginLink, permissionButtonLabel, requestProviderPermission, permissionPendingProviders, askSitePermission, notePermissionTabHint, renderColumnGate, renderPlan, countdown, usageResetAt,
     windowText, miniGauge, renderUsage, syncGateStatus,
   });
 }

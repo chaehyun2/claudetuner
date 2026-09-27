@@ -20,6 +20,26 @@
   if (typeof engine !== 'function') return;
   try { if (!chrome.runtime?.id) return; } catch { return; } // dead context guard
 
+  // 🔴 TWO SIDEBAR DOMS ARE LIVE AT ONCE, per account (#1676). The 2026-09-26 redesign renders a
+  // conversation row as a <div data-sidebar-chatgpt-conversation-key> with no href, while a Free
+  // account measured 2026-09-27 still gets the <a href="/c/<id>"> list (28 rows, no new attributes).
+  // Both are FIRST-CLASS here — neither is a fallback — so a later clean-up must not drop the <a>
+  // path as "legacy": that is what Free users see.
+  const LEGACY_ROW = 'a[href*="/c/"]';
+  const NEW_ROW_ATTR = 'data-sidebar-chatgpt-conversation-key';
+  // ChatGPT conversation ids are UUIDs (every /c/<id> observed, incl. 28/28 on a Free account).
+  const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  // The new row's key → a conversation id, ONLY when the WHOLE value is one of the shapes we can
+  // vouch for: a bare UUID, `/c/<uuid>`, or `https://chatgpt.com/c/<uuid>` (Codex 1R: a `/c/`
+  // found mid-string, or a non-UUID after it, is not one). 🪤 The key's value was never captured
+  // live (#1676) — anything else yields null, which makes the row inert for drag-import rather
+  // than filing a WRONG conversation into a folder.
+  const NEW_ROW_KEY_RE = new RegExp(`^(?:(?:https://chatgpt\\.com)?/c/)?(${UUID})$`, 'i');
+  function conversationIdFromKey(key) {
+    const m = String(key || '').trim().match(NEW_ROW_KEY_RE);
+    return m ? m[1] : null;
+  }
+
   // ── Provider adapter: everything host-coupled for chatgpt.com ──
   // Implements the pinned adapter interface (mirrors CLAUDE_ADAPTER).
   const CHATGPT_ADAPTER = {
@@ -35,15 +55,24 @@
       const m = location.pathname.match(/\/c\/([\w-]+)/);
       return m ? m[1] : null;
     },
-    // Sidebar conversation-link selector; specific when a chatId is given, else the
-    // generic form used for pointer-drag hit-testing.
+    // Sidebar conversation-row selector — BOTH DOMs; specific when a chatId is given, else the
+    // generic form used for pointer-drag hit-testing. `chatId` comes from getCurrentChatId()
+    // (`[\w-]+`), so it is safe inside the quoted attribute value.
     getChatLinkSelector(chatId) {
-      return chatId ? `a[href*="/c/${chatId}"]` : 'a[href*="/c/"]';
+      if (!chatId) return `${LEGACY_ROW}, [${NEW_ROW_ATTR}]`;
+      return `a[href*="/c/${chatId}"], [${NEW_ROW_ATTR}="${chatId}"], [${NEW_ROW_ATTR}$="/c/${chatId}"]`;
     },
-    // Extract a conversation id from an <a href> (pointer-drag import).
-    chatIdFromHref(href) {
-      const m = (href || '').match(/\/c\/([\w-]+)/);
-      return m ? m[1] : null;
+    // Conversation id of a row (pointer-drag import): the <a>'s href, else the new row's key.
+    chatIdFromLink(el) {
+      const m = (el?.getAttribute?.('href') || '').match(/\/c\/([\w-]+)/);
+      if (m) return m[1];
+      return conversationIdFromKey(el?.getAttribute?.(NEW_ROW_ATTR));
+    },
+    // Visible title: the new row's title span when there is one (the row also holds its options
+    // button), else the row's text.
+    chatTitleOf(el) {
+      const t = el?.querySelector?.('[data-thread-title]');
+      return (t ? t.textContent : el?.textContent) || '';
     },
     // Canonical conversation URL for a rendered folded-chat link.
     chatUrl(id) { return `https://chatgpt.com/c/${encodeURIComponent(id)}`; },

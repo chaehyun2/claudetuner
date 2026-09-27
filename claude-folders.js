@@ -36,11 +36,14 @@
     getChatLinkSelector(chatId) {
       return chatId ? `a[href*="/chat/${chatId}"]` : 'a[href*="/chat/"]';
     },
-    // Extract a conversation id from an <a href> (pointer-drag import).
-    chatIdFromHref(href) {
-      const m = (href || '').match(/\/chat\/([\w-]+)/);
+    // Conversation id of a sidebar row / folded-chat link (pointer-drag import). Claude's rows
+    // are <a href="/chat/<id>">.
+    chatIdFromLink(el) {
+      const m = (el?.getAttribute?.('href') || '').match(/\/chat\/([\w-]+)/);
       return m ? m[1] : null;
     },
+    // Visible title of that row.
+    chatTitleOf(el) { return el?.textContent || ''; },
     // Canonical conversation URL for a rendered folded-chat link.
     chatUrl(id) { return `https://claude.ai/chat/${encodeURIComponent(id)}`; },
     // Strip Claude's document.title suffix (" - Claude") to recover the bare title.
@@ -342,7 +345,7 @@
   // Best-effort title for a chat: active sidebar link text, else document.title.
   function getCurrentChatTitle(chatId) {
     const link = document.querySelector(ADAPTER.getChatLinkSelector(chatId));
-    const fromLink = link?.textContent?.trim();
+    const fromLink = link ? ADAPTER.chatTitleOf(link).trim() : '';
     if (fromLink) return fromLink.slice(0, 120);
     const dt = ADAPTER.stripTitleSuffix(document.title || '');
     return dt || 'Untitled';
@@ -1659,12 +1662,13 @@
       if (!chatEl) return; // some other panel link (not a folded chat) — ignore
       srcFolderId = chatEl.getAttribute('data-folder-id');
     }
-    const chatId = ADAPTER.chatIdFromHref(link.getAttribute('href') || '');
+    // Through the adapter, not `href`: a ChatGPT sidebar row is not always an <a> (#1676).
+    const chatId = ADAPTER.chatIdFromLink(link);
     if (!chatId) return;
     // Disable the link's native drag for this gesture so it can't compete with ours.
     _ptr = {
       chatId,
-      title: (link.textContent || '').trim().slice(0, 120),
+      title: ADAPTER.chatTitleOf(link).trim().slice(0, 120),
       srcFolderId,
       startX: e.clientX, startY: e.clientY,
       dragging: false, ghost: null, targetRow: null,
