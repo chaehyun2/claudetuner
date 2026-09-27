@@ -392,3 +392,6 @@
 .ct-sb-peak {
   cursor: default;
 }
+
+/* ⓘ on the withheld notice — the dated Free-plan explanation lives in its title (inquiry #208). */
+.ct-sb-tip { cursor: help; opacity: 0.7; }

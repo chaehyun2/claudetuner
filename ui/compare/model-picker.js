@@ -8,7 +8,7 @@
 
 import { COMPARE_PROVIDERS, colIdOf, parseColId, PROVIDER_META, MODELS_CSV_AUTO, MODELS_CSV_ID_MAX, MODEL_ID_RE, MODEL_AUTO_VALUE } from './constants.js';
 import { CHATGPT_EFFORT_SEPARATOR, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
-import { modelOptionText } from './helpers.js';
+import { modelOptionText, lockedInCatalog, lockedSuffix } from './helpers.js';
 
 /** Installs the model-picker slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installModelPicker(ctx) {
@@ -87,7 +87,7 @@ export function installModelPicker(ctx) {
     let first = null;
     for (const p of COMPARE_PROVIDERS) {
       const own = choices.filter((c) => c.provider === p); // Auto first, then the catalog
-      const target = own.find((c) => !c.present) || null; // `p:auto` when free, else the first free model
+      const target = own.find((c) => !c.present && !c.locked) || null; // `p:auto` when free, else the first free model the plan can run (#1831 1R #1)
       const free = target !== null;
       const current = p === col.provider;
       const opt = el('button', 'cmp-col-picker-opt');
@@ -187,7 +187,7 @@ export function installModelPicker(ctx) {
    * modelTouched / the Auto retry reset / GA), so the colId stays and only `model` moves.
    */
   function sessionChoices(col) {
-    return [...col.modelSelect.querySelectorAll('option')].map((o) => ({ id: col.id, provider: col.provider, model: o.value === MODEL_AUTO_VALUE ? null : o.value, value: o.value, label: o.textContent, present: false }));
+    return [...col.modelSelect.querySelectorAll('option')].map((o) => ({ id: col.id, provider: col.provider, model: o.value === MODEL_AUTO_VALUE ? null : o.value, value: o.value, label: o.textContent, present: false, locked: o.disabled }));
   }
   /**
    * The MODEL list: THIS column's provider only, in both phases (2026-09-21 — another service is
@@ -211,9 +211,11 @@ export function installModelPicker(ctx) {
       const current = inSession ? c.value === col.modelSelect.value : c.id === col.id;
       opt.setAttribute('aria-selected', current ? 'true' : 'false');
       const otherMode = inSession && crossesMode(col, c.value);
-      opt.disabled = (c.present && !current) || otherMode; // a combo the page already shows / the other mode
+      const locked = !current && c.locked === true; // the plan cannot run it (#1831) — shown, not pickable
+      opt.disabled = (c.present && !current) || otherMode || locked; // a combo the page already shows / the other mode / the plan
       if (c.present && !current) opt.title = t('col_picker_dup');
       else if (otherMode) opt.title = t('col_picker_other_mode');
+      else if (locked) opt.title = t('model_plan_locked');
       opt.addEventListener('click', () => {
         if (opt.disabled) return;
         const picked = inSession ? (pickSessionModel(state.pickerFor, c.value), true) : ctx.chooseColumn(state.pickerFor, c);
@@ -277,6 +279,18 @@ export function installModelPicker(ctx) {
     }
     const toValue = (id) => (id == null ? MODEL_AUTO_VALUE : String(id));
     const known = new Set(list.map((m) => toValue(m.id)));
+    // 🔴 A model the plan cannot run (#1831) is listed but never RESOLVED to — not from a stored seed,
+    // a layout column, a previous pick, or as the fallback: resolving to it spends a send on a refusal.
+    // `known` stays the full list (it only maps old ids forward in `carry`).
+    // A catalog where NOTHING is runnable locks nothing (1R follow-up): falling back to a locked row
+    // would send it anyway, and a list the gate emptied is not one we can improve on.
+    const isLocked = (m) => lockedInCatalog(list, m);
+    const usable = list.filter((m) => !isLocked(m));
+    const selectable = new Set(usable.map((m) => toValue(m.id)));
+    // 🔴 In session the thread's own model is KEPT even when a later catalog locks it (1R #2): a
+    // silent switch to Auto mid-conversation changes who answers without telling anyone. Sending it
+    // fails with the plan_tier copy and the 「Auto로 바꿔 다시 보내기」 action — an informed switch.
+    const resolvable = (v) => (state.sessionStarted ? known.has(v) : selectable.has(v));
     // 🔴 A model id from before the catalog carried power stops (package v0.11.0): a stored
     // `gpt-5-6-thinking` is no row any more — its rows are `gpt-5-6-thinking__standard` / `__extended`
     // / `__max`. Without this the user's Thinking choice fell back to the default (Instant),
@@ -304,7 +318,7 @@ export function installModelPicker(ctx) {
         if (om != null && String(carry(om)) === String(stored)) { stored = undefined; break; }
       }
     }
-    const fallback = list.find((m) => m.default) || list[0];
+    const fallback = usable.find((m) => m.default) || usable[0] || list[0];
     let value;
     // The column's own model: the user's pick on this page, or the model it was created with (a
     // non-auto colId); an `auto` column with nothing picked yet follows the stored seed / the default.
@@ -316,13 +330,29 @@ export function installModelPicker(ctx) {
     // the time) stays Auto when another compare tab later writes a seed for the provider.
     const explicit = parseColId(col.id).model != null;
     const current = col.modelTouched || state.sessionStarted || (explicit && col.model != null) ? carry(col.model) : undefined;
-    if (current !== undefined && known.has(toValue(current))) value = toValue(current);
+    if (current !== undefined && resolvable(toValue(current))) value = toValue(current);
     // An intentional Auto (null — the user's pick, or 「Auto로 바꿔 다시 보내기」) on a catalog that has no
     // Auto entry reconciles to the catalog's DEFAULT, never back to the stored model that was just
     // rejected (Codex batch-1 #1).
     else if (current === null) value = toValue(fallback.id);
-    else if (stored !== undefined && known.has(toValue(stored))) value = toValue(stored);
-    else value = toValue(fallback.id);
+    else {
+      value = stored !== undefined && selectable.has(toValue(stored)) ? toValue(stored) : toValue(fallback.id);
+      // 🔴 A column whose OWN model the plan now locks (a layout saved on a paid plan, #1831) must not
+      // land on what another column of the provider already sends (1.40.0 batch review): a
+      // `claude:auto` debater + a `claude:claude-opus-5-5` moderator on Free both went out as Auto —
+      // two "different" participants answering as one model, the usage spent twice. Checked on the
+      // FINAL value, after the seed (2R: with the locked column first, a null seed made it Auto
+      // before any check ran). It takes the first runnable row no sibling holds; when every row is
+      // taken it keeps the value it had.
+      if (current != null && known.has(toValue(current))) {
+        const taken = new Set();
+        for (const other of state.columns.values()) {
+          if (other !== col && other.provider === col.provider) taken.add(toValue(other.model == null ? null : carry(other.model)));
+        }
+        const open = taken.has(value) ? usable.find((m) => !taken.has(toValue(m.id))) : null;
+        if (open) value = toValue(open.id);
+      }
+    }
     // 🔴 In session a ChatGPT thread keeps its mode even when the list no longer has its model (a
     // restore on the static list, a MODELS refresh — Codex ext 1R): falling back across the mode
     // would send a Chat model into a Work conversation, answered silently by the Work equivalent.
@@ -333,7 +363,7 @@ export function installModelPicker(ctx) {
     // linked Work conversation went out as `gpt-5-5`). An Auto column is held to it too.
     let kept = null;
     if (crossesMode(col, value)) {
-      const same = list.find((m) => !crossesMode(col, toValue(m.id)));
+      const same = usable.find((m) => !crossesMode(col, toValue(m.id)));
       if (same) value = toValue(same.id);
       else {
         const keep = [current == null ? null : toValue(current), threadModelId(col)].find((v) => v != null && !crossesMode(col, v));
@@ -342,12 +372,13 @@ export function installModelPicker(ctx) {
     }
     clear(sel);
     for (const m of list) {
-      const o = el('option', null, modelOptionText(m, t));
+      const o = el('option', null, modelOptionText(m, t) + (isLocked(m) ? lockedSuffix(m, t) : ''));
       // The site's own one-liner, where it gives one (v0.10.2): 「리서치급 추론 능력」,
       // 「10월 14일 지원 종료」. 🔴 On the TITLE, not in the option text — it is written in the
       // SITE's language, which is usually but not always the reader's, and a mixed-language row
       // reads as broken. The visible line stays ours; this is the detail behind it.
       if (typeof m.explainer === 'string' && m.explainer) o.title = m.explainer;
+      if (isLocked(m)) { o.disabled = true; o.title = t('model_plan_locked'); }
       o.value = toValue(m.id);
       o.setAttribute('value', toValue(m.id));
       if (o.value === value) o.setAttribute('selected', 'selected');

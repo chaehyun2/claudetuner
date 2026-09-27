@@ -193,6 +193,7 @@
     .gauge-value { font-size: 16px; font-weight: 700; white-space: nowrap; flex-shrink: 0; }
     .gauge-predict-inline { font-size: 11px; font-weight: 700; margin-left: 1px; padding: 0 3px; border-radius: 3px; white-space: nowrap; flex-shrink: 0; }
     .gauge-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    .withheld-tip { cursor: help; }
     /* Per-gauge limit-hit warning line: "⚠️ {time} 한도 도달 예상" (shown only near 100%). */
     .gauge-predict-line { margin-top: 4px; }
     .gauge-predict-line .gpl-main { font-size: 11px; font-weight: 600; }

@@ -187,6 +187,42 @@ export function usageWithheldText(org) {
   return t('usage_withheld_plan', p);
 }
 
+/**
+ * TRUE when the withheld notice may also say WHEN and FOR WHOM it started.
+ *
+ * Anthropic stopped serving Claude Free accounts any usage window on 2026-08-21 17:00 UTC
+ * (#1391) — unannounced, and users read the bare notice as "my account is broken" (inquiry #208).
+ * The tooltip that explains it names that plan and that date, so it may only appear on a Free
+ * observation: on any other tier the same sentence would state a false date.
+ *
+ * 🔴 THIS NEVER DECIDES WHETHER THE NOTICE APPEARS. That is still `usageWithheldForDisplay`,
+ * which reads the response, not the plan. This only decides whether the notice gets the extra
+ * explanation. Pass `org.noUsagePlan`, not `org.plan` (see usageWithheldText).
+ *
+ * Pure and DOM-free: the service worker imports it (bg/sidebar-usage.js) so the in-page widgets
+ * apply the same rule without restating it.
+ */
+export function usageWithheldIsFreeCutover(plan) {
+  return typeof plan === 'string' && plan.trim().toLowerCase() === 'free';
+}
+
+/**
+ * Append the ⓘ explanation to an element already holding usageWithheldText(org). No-op unless
+ * the observation is a Free one. Idempotent only in the sense every caller needs: the element's
+ * text is rewritten (textContent) on every render, which removes a previous icon first.
+ */
+export function appendUsageWithheldTip(el, org) {
+  if (!el || !usageWithheldIsFreeCutover(org && org.noUsagePlan)) return;
+  const tip = t('usage_withheld_free_tip');
+  const icon = document.createElement('span');
+  icon.className = 'withheld-tip';
+  icon.textContent = 'ⓘ';
+  icon.title = tip;
+  icon.setAttribute('aria-label', tip);
+  icon.tabIndex = 0;
+  el.append(' ', icon);
+}
+
 export function usageWithheldForDisplay(org, util5h, util7d, extraUsage) {
   // 🔴 EXTRA USAGE COUNTS AS SOMETHING TO SHOW. Without this the popup printed "Claude isn't
   // providing usage for this account" directly above a working spend gauge — the account has null

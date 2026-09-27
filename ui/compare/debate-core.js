@@ -121,9 +121,10 @@ export function problemInSettings(key) {
 // (a reasoning model costs 20–60 s and the user's limit per call; a too-light one breaks the
 // `NEXT:` line). Its service: a paid plan first, then this order (user decision, 2026-09-27).
 export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
-// Claude's moderator model by plan: Auto resolves to Sonnet 5 on a paid plan and Sonnet 4.6 on
-// free (vendor-ai/models.js AUTO_LABELS) — the moderator asks for that model explicitly, so it is
-// its own column beside the Claude debater's `claude:auto`.
+// Claude's moderator model by plan — asked for explicitly, so it is its own column beside the Claude
+// debater's `claude:auto`. Since vendor-ai v0.15.0 Auto resolves to Sonnet 5 on Free too (#1831);
+// the Free moderator stays on Sonnet 4.6 (free-tier in claude.ai's gate, fast) so the moderator and
+// the Free debater are different models and read as different voices.
 export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5';
 export const CLAUDE_MODERATOR_FREE = 'claude-sonnet-4-6';
 /** A plan label (status.providers[p].plan) is a paid plan: present and not 「Free」 — renderPlan's `data-tier` rule. */

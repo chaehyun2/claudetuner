@@ -97,6 +97,8 @@
       peak: 'PEAK',
       no_data: '데이터 수집 중...',
       no_usage: 'Claude가 이 계정의 사용량을 제공하지 않습니다',
+      // WORD-FOR-WORD the popup's usage_withheld_free_tip (i18n.js) — test/usage-withheld-notice-guard.mjs compares them.
+      no_usage_free_tip: '2026년 8월 22일부터 Claude가 무료 플랜 계정에 사용량 수치를 제공하지 않습니다. Claude 설정 화면에서도 표시되지 않으며, 사용 한도는 그대로 적용됩니다. Claude가 다시 제공하면 자동으로 표시됩니다.',
       // 🪤 `no_usage`와 다른 말이다. 저건 「Claude가 안 준다」는 주장이고, 이건 「우리가 못 그렸다」다.
       // stale 코어에서 지출 막대를 접으면 Claude는 데이터를 준 것이므로 no_usage는 거짓이 된다
       // (문의 #198이 바로 그 형태였다). 새로고침은 콘텐트 스크립트를 다시 주입해 stale 코어를 고친다.
@@ -121,6 +123,7 @@
       peak: 'PEAK',
       no_data: 'Collecting data...',
       no_usage: "Claude isn't providing usage for this account",
+      no_usage_free_tip: "Since August 2026, Claude no longer provides usage figures for Free plan accounts — they don't appear in Claude's own settings either. Usage limits still apply. They'll reappear here automatically if Claude restores them.",
       cant_show: "Couldn't display usage. Try refreshing the page",
       soon: 'Resetting soon',
       pred_tip: 'Estimated usage at reset',
@@ -541,7 +544,9 @@
     // exactly what inquiry #198 was: Anthropic stopped serving Free-plan windows on 2026-08-21
     // 17:00 UTC and the widget said nothing at all about it.
     if (_data.noUsage) {
-      content.innerHTML = `<div class="ct-sb-message text-text-500">${escapeHtml(t('no_usage'))}</div>`;
+      // ⓘ = the dated Free-plan explanation; `noUsageFree` is decided by the SW (bg/sidebar-usage.js).
+      const tip = _data.noUsageFree ? escapeHtml(t('no_usage_free_tip')) : '';
+      content.innerHTML = `<div class="ct-sb-message text-text-500">${escapeHtml(t('no_usage'))}${tip ? ` <span class="ct-sb-tip" title="${tip}" aria-label="${tip}" tabindex="0">ⓘ</span>` : ''}</div>`;
       return;
     }
 
@@ -761,7 +766,7 @@
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
-            _data.noUsage === res.noUsage &&
+            _data.noUsage === res.noUsage && _data.noUsageFree === res.noUsageFree &&
             _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;
         renderContent();

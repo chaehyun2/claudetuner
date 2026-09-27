@@ -71,7 +71,7 @@ const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_D
 const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
-import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl } from './ui/compare/helpers.js';
+import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix } from './ui/compare/helpers.js';
 import { NARROW_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
@@ -2310,6 +2310,13 @@ export function mountComparePage(deps) {
    * A catalog without an Auto entry (ChatGPT) resolves `auto` to its DEFAULT model, so `p:auto` and
    * `p:<default>` are the SAME request: each counts as present when the other's column exists.
    */
+  /** TRUE when the plan cannot run (provider, model) — lockedInCatalog over the current status's catalog (#1831). */
+  function choiceLocked(provider, model) {
+    if (model == null) return false;
+    const list = state.status && state.status.models && Array.isArray(state.status.models[provider]) ? state.status.models[provider] : [];
+    const entry = list.find((m) => m && typeof m === 'object' && m.id != null && String(m.id) === String(model)) || null;
+    return lockedInCatalog(list, entry);
+  }
   function columnChoices() {
     const st = state.status || {};
     const out = [];
@@ -2322,7 +2329,10 @@ export function mountComparePage(deps) {
       for (const model of models) {
         const id = colIdOf(p, model);
         const twin = autoAlias == null ? null : model == null ? colIdOf(p, autoAlias) : model === autoAlias ? colIdOf(p, null) : null;
-        out.push({ id, provider: p, model, label: model == null ? t('col_picker_auto') : modelLabelOf(p, model), present: has(id) || (twin != null && has(twin)) });
+        // `locked`: the plan cannot run it (#1831) — listed with 「· Pro 이상」, never picked or auto-added.
+        const locked = choiceLocked(p, model);
+        const entry = locked ? list.find((m) => m.id != null && String(m.id) === model) : null;
+        out.push({ id, provider: p, model, label: model == null ? t('col_picker_auto') : modelLabelOf(p, model) + (entry ? lockedSuffix(entry, t) : ''), present: has(id) || (twin != null && has(twin)), locked });
       }
     }
     return out;
@@ -2335,7 +2345,7 @@ export function mountComparePage(deps) {
    */
   function addColumnByUser() {
     if (state.sessionStarted) return;
-    const choices = columnChoices().filter((c) => !c.present);
+    const choices = columnChoices().filter((c) => !c.present && !c.locked);
     const shown = new Set(state.columnIds.map((id) => parseColId(id).provider));
     const choice = choices.find((c) => !shown.has(c.provider)) || choices[0];
     if (!choice) return;
@@ -2439,6 +2449,8 @@ export function mountComparePage(deps) {
     if (!col || col.id !== colId || state.sessionStarted) return false;
     const next = colIdOf(choice.provider, choice.model);
     if (next !== col.id && state.columns.has(next) && state.columns.get(next).id === next) return false;
+    // A model the plan cannot run is never chosen (#1831 1R #1) — whichever list or key led here.
+    if (choiceLocked(choice.provider, choice.model)) return false;
     if (choice.provider === col.provider) {
       col.modelTouched = true;
       setColumnModel(col, choice.model);

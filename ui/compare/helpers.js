@@ -240,3 +240,31 @@ export function modelOptionText(m, tr) {
   if (name && role && tr(role) !== role) return `${name} · ${tr(role)}`;
   return String(m.label || m.id || '');
 }
+
+/**
+ * TRUE when the catalog says this account's plan cannot run the model (vendor-ai v0.15.0: Claude's
+ * `available: false`, read from claude.ai's own plan gate — #1831). Such a model is SHOWN but not
+ * selectable (user decision 2026-09-27): hiding it hides what an upgrade buys, and a selectable one
+ * spends a send on 「지금은 이 모델을 쓸 수 없어요」. Only an explicit `false` locks — a catalog
+ * without the field (static, Gemini, ChatGPT) locks nothing.
+ */
+export function modelLocked(m) {
+  return !!m && typeof m === 'object' && m.available === false;
+}
+
+/**
+ * The lock as the PAGE applies it, for a row of `list`: locked AND the list still has a runnable
+ * row. A catalog with none locks nothing (a locked fallback would be sent anyway) — one rule for
+ * the model select, the pre-session list, the service switch, 「＋ 열 추가」 and chooseColumn
+ * (#1831 2R: two copies of the rule disagreed on an all-locked list).
+ */
+export function lockedInCatalog(list, m) {
+  return Array.isArray(list) && list.some((x) => x && typeof x === 'object' && !modelLocked(x)) && modelLocked(m);
+}
+
+/** 「 · Pro 이상」 after a locked model's label ('' when unlocked or the tier is unnamed). */
+export function lockedSuffix(m, tr) {
+  if (!modelLocked(m) || typeof m.minimumTier !== 'string' || !m.minimumTier) return '';
+  const tier = m.minimumTier.charAt(0).toUpperCase() + m.minimumTier.slice(1);
+  return ` · ${tr('model_tier_needed', tier)}`;
+}

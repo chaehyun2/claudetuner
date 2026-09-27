@@ -1,6 +1,7 @@
 // Builds the usage payload the in-page sidebar renders, and pushes it.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
 import { calcPredictedAtReset } from '../ui/prediction-core.js';
+import { usageWithheldIsFreeCutover } from '../ui/util.js';
 import { hasProviderPermission } from './providers.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
@@ -156,9 +157,13 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   const extraDrawnHere = extraGaugeDrawn({ euEnabled, el: euLimit, eu: euUsed });
   const nothingToShow = h5 == null && d7 == null && !extraDrawnHere;
   const noUsage = !!orgData?.noUsage && nothingToShow;
+  // Whether the notice may also carry the dated Free-plan explanation (ⓘ tooltip, inquiry #208).
+  // Decided HERE, by the popup's own predicate, so the content scripts only read a boolean and never
+  // restate the plan rule. `noUsagePlan` is written with the observation; `plan` can be stale.
+  const noUsageFree = noUsage && usageWithheldIsFreeCutover(orgData?.noUsagePlan);
 
   return {
-    plan, h5, d7, r5, r7, w5s, w7s, noUsage, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
+    plan, h5, d7, r5, r7, w5s, w7s, noUsage, noUsageFree, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
     addl: addl && addl.length ? addl : null,
     gates: gates && gates.length ? gates : null,
     // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now
