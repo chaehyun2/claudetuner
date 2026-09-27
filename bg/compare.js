@@ -326,7 +326,7 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // 「토론」 (#1769): counts, kinds and flags only — never a topic, an alias or a message. Emitted
   // since 2026-09-26 but never listed here, so the SW dropped every one (found with plan §17 U1).
   'debate_settings', 'debate_start', 'debate_end', 'debate_pause', 'debate_resume', 'debate_pick', 'debate_user', 'debate_restore',
-  'debate_budget', 'debate_hidden_pause', 'debate_mod_fallback', 'debate_tone', 'debate_alias',
+  'debate_budget', 'debate_hidden_pause', 'debate_mod_fallback', 'debate_tone', 'debate_alias', 'debate_ask', 'debate_finish',
   // 「내 공유 링크」 opened from the history panel (manage mode, no params).
   'share_mine_open',
   // Share links (#1784 U3): kind / author mode / 0-1 flags only — never a title, a link or an id.
@@ -1639,7 +1639,15 @@ export function createCompareController({
   function emitEvent(name, params) {
     const ev = sanitizeCompareEvent(name, params);
     if (!ev || typeof sendGAEvent !== 'function') return false;
-    try { Promise.resolve(sendGAEvent(ev.name, ev.params)).catch(() => {}); } catch { /* telemetry */ }
+    // #1842: a debate run's finish also goes to our server (POST /api/compare/debate). The run's
+    // identity (session_id, run) is for that upsert only — GA gets the rest (no per-session ids).
+    let gaParams = ev.params;
+    if (ev.name === 'cmp_debate_finish') {
+      const { session_id: sessionId, run, seq, ...rest } = ev.params;
+      gaParams = rest;
+      postDebateStat({ ...rest, session_id: sessionId, run, seq, ext_version: manifestVersion() });
+    }
+    try { Promise.resolve(sendGAEvent(ev.name, gaParams)).catch(() => {}); } catch { /* telemetry */ }
     return true;
   }
 
@@ -1651,6 +1659,19 @@ export function createCompareController({
       const v = runtime?.getManifest?.()?.version;
       return typeof v === 'string' && v ? v : null;
     } catch { return null; }
+  }
+  // `POST /api/compare/debate` (#1842) — fire-and-forget like postOutcome: statistics, every failure
+  // swallowed. The server re-validates every field against its own fixed lists.
+  function postDebateStat(stat) {
+    if (typeof stat.session_id !== 'string' || !Number.isSafeInteger(stat.run)) return false;
+    const body = JSON.stringify(stat);
+    Promise.resolve()
+      .then(async () => {
+        const config = await getConfig();
+        await authedFetch(config, `${config.serverUrl}/api/compare/debate`, { method: 'POST', headers: { ...JSON_HEADERS }, body });
+      })
+      .catch(() => { /* telemetry */ });
+    return true;
   }
   // `POST /api/compare/outcome {event_id, results}` — fire-and-forget: not awaited by the send,
   // every failure swallowed (the round is over; nothing the page could do with it). Only ever

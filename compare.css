@@ -793,6 +793,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
   .cmp-debate-field > .cmp-debate-modpicks, .cmp-debate-field > .cmp-debate-tone-input { grid-column: 1; }
   .cmp-debate-opt { padding: 7px 9px; }
   .cmp-debate-opt-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 토론 길이 (#1843): its description IS the rule (it concludes on request or at the send limit) — it wraps, never clipped. */
+  #cmp-debate-pace .cmp-debate-opt-desc { white-space: normal; overflow: visible; }
 }
 .cmp-debate-cast { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .cmp-debate-chip { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-subtle); font-size: 13px; }
@@ -954,8 +956,21 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 }
 
 /* ── share links (#1784 U3): the topbar button, the dialog, 「내 공유 링크」 ── */
-.cmp-btn-share > .cmp-link-icon { display: none; width: 12px; height: 12px; margin-right: 4px; flex-shrink: 0; }
+.cmp-btn-share > .cmp-link-icon { display: none; width: 12px; height: 12px; flex-shrink: 0; }
 .cmp-btn-share.is-shared > .cmp-link-icon { display: inline-block; }
+/* 「공유하기」 stands out (2026-09-27): the filled button's tokens, its share glyph until a link exists. */
+.cmp-btn-share { gap: 5px; background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); color: var(--btn-primary-fg); }
+.cmp-btn-share:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
+.cmp-btn-share > .cmp-share-icon { width: 13px; height: 13px; flex-shrink: 0; }
+.cmp-btn-share.is-shared > .cmp-share-icon { display: none; }
+/* The first time a conversation can be shared, the button pulses twice — once per conversation (share.js). */
+.cmp-btn-share.is-nudge { animation: cmp-share-nudge 1.4s ease-out 2; }
+@keyframes cmp-share-nudge { 0% { box-shadow: 0 0 0 0 rgba(79, 70, 229, .5); } 70% { box-shadow: 0 0 0 9px rgba(79, 70, 229, 0); } 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0); } }
+@media (prefers-reduced-motion: reduce) { .cmp-btn-share.is-nudge { animation: none; } }
+/* Folded (narrow): 공유하기 sits on the title line, pushed right, just before 「⋯」. */
+.cmp-topbar.is-folded > .cmp-btn-share { margin-left: auto; padding: 0 9px; }
+.cmp-topbar.is-folded > .cmp-btn-share > .cmp-share-label { display: none; } /* the glyph only — the title line also holds the tabs */
+.cmp-topbar.is-folded > .cmp-btn-share + .cmp-more { margin-left: 8px; }
 .cmp-history-shared { display: inline-flex; align-items: center; color: var(--text-secondary); }
 .cmp-history-shared > .cmp-link-icon { width: 12px; height: 12px; }
 .cmp-history-shares { display: inline-flex; align-items: center; gap: 5px; }

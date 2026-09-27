@@ -501,17 +501,22 @@ export function mountComparePage(deps) {
   summaryBtn.setAttribute('aria-haspopup', 'dialog');
   summaryBtn.setAttribute('aria-expanded', 'false');
   topbarSide.appendChild(summaryBtn);
-  // 「공유」 (#1784 U3): hidden unless the SW's status says `shareOn` (flags.json `compare_share`);
-  // enabled for a KEPT conversation with an answer (share.js shareable). Opens the share dialog.
-  const shareBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-share', t('share_btn'));
+  // 「공유하기」 (#1784 U3): hidden unless the SW's status says `shareOn` (flags.json `compare_share`);
+  // enabled for a conversation with an answer (share.js shareable). One click makes the link.
+  // Made prominent (2026-09-27 user request — 「사용자들이 좀 더 적극적으로 활용했으면」): a filled
+  // button, first in the bar's action group, and never folded into 「⋯」.
+  const shareBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-share');
+  shareBtn.appendChild(el('span', 'cmp-share-label', t('share_btn')));
+  shareBtn.setAttribute('aria-label', t('share_btn')); // the name stays when narrow widths show the glyph only
   shareBtn.id = 'cmp-share-btn';
   shareBtn.type = 'button';
   shareBtn.hidden = true;
   shareBtn.disabled = true;
   shareBtn.setAttribute('aria-haspopup', 'dialog');
-  // Shown only once this conversation has a link (share.js toggles .is-shared) — CSS.
+  // The share glyph; the link glyph once this conversation has a link (share.js toggles .is-shared) — CSS.
   shareBtn.prepend(ctx.linkIcon());
-  topbarSide.appendChild(shareBtn);
+  shareBtn.prepend(ctx.shareIcon());
+  quotaLine.after(shareBtn);
   const copyAllBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-copy-all', t('copy_all'));
   copyAllBtn.id = 'cmp-copy-all';
   copyAllBtn.type = 'button';
@@ -538,7 +543,7 @@ export function mountComparePage(deps) {
   newChatBtn.disabled = true;
   topbarSide.appendChild(newChatBtn);
   topbar.appendChild(topbarSide);
-  // 「⋯」 (#1819): at narrow widths the secondary controls — 공유 · 전체 복사 · the session's history
+  // 「⋯」 (#1819): at narrow widths the secondary controls — 전체 복사 · the session's history
   // mode · the source chip · 의견 보내기 — fold into one disclosure menu, so the bar keeps two lines
   // (at 420px it was four). The nodes themselves move (a comment marks each one's home), so every
   // hidden / disabled / label update elsewhere keeps working on them unchanged.
@@ -559,7 +564,7 @@ export function mountComparePage(deps) {
   moreWrap.appendChild(moreBtn);
   moreWrap.appendChild(morePanel);
   topbar.insertBefore(moreWrap, topbarSide);
-  const foldable = [shareBtn, copyAllBtn, modeChip, srcChip, feedbackLink].filter(Boolean).map((node) => {
+  const foldable = [copyAllBtn, modeChip, srcChip, feedbackLink].filter(Boolean).map((node) => {
     const home = doc.createComment('');
     node.before(home);
     return { node, home };
@@ -574,6 +579,9 @@ export function mountComparePage(deps) {
     topbarFolded = fold;
     setMoreOpen(false);
     for (const { node, home } of foldable) { if (fold) morePanel.appendChild(node); else home.after(node); }
+    // 공유하기 never folds: at narrow widths it moves up to the title line, beside 「⋯」 — the one
+    // line with room to spare, and the first place the eye lands (2026-09-27).
+    if (fold) moreWrap.before(shareBtn); else quotaLine.after(shareBtn);
     moreWrap.hidden = !fold;
     topbar.classList.toggle('is-folded', fold);
   }
@@ -602,10 +610,9 @@ export function mountComparePage(deps) {
 
   // ── copy to clipboard: ui/compare/export.js (installExport, installed above) ──
   attachCopy(copyAllBtn, () => compareMarkdown(), (copied) => { copyAllBtn.textContent = t(copied ? 'copied' : 'copy_all'); }, COPY_KIND_ALL, null);
-  // The dialog hands focus back to whichever of 공유 / 「⋯」 is on screen WHEN IT CLOSES — the width
-  // may cross the fold while it is open, and 공유 sits in the closed menu while folded. The one-click
-  // popover hangs from the same one (`anchor`).
-  const shareHome = () => (topbarFolded ? moreBtn : shareBtn);
+  // The dialog hands focus back to 공유하기 when it closes, and the one-click popover hangs from it
+  // (`anchor`) — it stays in the bar at every width now.
+  const shareHome = () => shareBtn;
   const shareOpener = { focus: () => focusQuietly(shareHome()), anchor: shareHome };
   shareBtn.addEventListener('click', () => ctx.openShareDialog(null, shareOpener));
 

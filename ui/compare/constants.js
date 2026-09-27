@@ -412,6 +412,9 @@ export const TURN_KIND_DEBATE = 'debate';
 export const DEBATE_SEND_BUDGET = 50;
 export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
+// How often an AI moderator may stop the debate to ask the USER something (#1843) — one run's cap:
+// past it an ASK is read as no control (the rule picks the next speaker), so it cannot stall the run.
+export const DEBATE_MAX_ASKS = 2;
 // chrome.storage.local keys: the setup choices (toggle, moderator, stance) and the aliases (colId → name).
 export const DEBATE_PREFS_KEY = 'compareDebatePrefs';
 export const DEBATE_ALIASES_KEY = 'compareAliases';

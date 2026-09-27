@@ -161,9 +161,14 @@ export function installHistory(ctx) {
     return `s-${clock.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   };
   const clipText = (v) => String(v || '').slice(0, HISTORY_TEXT_MAX);
-  /** This session as a storable entry (null when there is nothing to store: no session, incognito, no participating column). */
-  function snapshotSession() {
-    if (!state.sessionStarted || !state.sessionId || state.sessionSaveHistory !== true) return null;
+  /**
+   * This session as a storable entry (null when there is nothing to store: no session, incognito, no
+   * participating column). `anyMode` builds it for an incognito session too — a SHARE (share.js) is
+   * the user's explicit upload to our server, which the site-side temporary chat and the local
+   * history (what incognito keeps empty) have nothing to do with. The history writer never passes it.
+   */
+  function snapshotSession({ anyMode = false } = {}) {
+    if (!state.sessionStarted || !state.sessionId || (!anyMode && state.sessionSaveHistory !== true)) return null;
     const columns = {};
     // Page order (state.columnIds), not the Map's insertion order — a replaced or re-keyed column
     // is re-inserted at the Map's end, and the entry's key order is what the history row's dots show.

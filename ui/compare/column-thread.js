@@ -230,7 +230,8 @@ export function installColumnThread(ctx) {
     // 「답변 복사」 under the answer (item 5): hidden while it streams, shown once the turn settled
     // (DONE / ERROR / ALL_DONE) and only if there is text to copy — an errored turn that never got
     // a chunk has none.
-    const copyBtn = ctx.copyButton(() => turn.text, { kind: COPY_KIND_TURN, provider: col.provider, label: t('copy_answer') });
+    // A moderator's copy is what it shows — its control line (NEXT / END / ASK) is the page's, not its words.
+    const copyBtn = ctx.copyButton(() => (ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text), { kind: COPY_KIND_TURN, provider: col.provider, label: t('copy_answer') });
     copyBtn.hidden = true;
     root.appendChild(copyBtn);
     // 「공유」 from this answer (#1784 U3c) — shown by share.js syncTurnShareButtons once settled.

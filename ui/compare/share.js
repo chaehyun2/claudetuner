@@ -124,9 +124,9 @@ export function installShare(ctx) {
   }
 
   // ── what is shared ──
-  /** The conversation on screen as a normalised entry (null: nothing stored — incognito, no session). */
+  /** The conversation on screen as a normalised entry (null: no session). An incognito one too — see snapshotSession. */
   function currentEntry() {
-    const snap = ctx.snapshotSession();
+    const snap = ctx.snapshotSession({ anyMode: true });
     return snap ? ctx.normalizeEntry(snap) : null;
   }
   /** The column's model in display words (share-snapshot.js shareModelLabel — never an internal id). */
@@ -139,20 +139,39 @@ export function installShare(ctx) {
       summaryQuestion: t('summary_md_q'),
     });
   }
-  /** The button: offered while the flag is on and there is a KEPT conversation with an answer. */
+  /** The button: offered while the flag is on and there is a conversation with an answer (incognito too). */
   function shareable() {
     // Not while a round is in flight: a streaming answer has no error / cut mark yet and would go up
     // as a complete one.
     // Never a frozen debate entry (history.js loadSession): shown as columns, it has no record to share.
-    return shareOn() && !state.frozenDebate && state.sessionStarted && state.sessionSaveHistory === true && !!state.sessionId && !state.sending && [...state.columns.values()].some(ctx.columnHasAnswer);
+    return shareOn() && !state.frozenDebate && state.sessionStarted && !!state.sessionId && !state.sending && [...state.columns.values()].some(ctx.columnHasAnswer);
   }
+  const NUDGE_CLASS = 'is-nudge';
+  const nudged = new Set(); // session ids whose 「공유하기」 has pulsed on this page
+  let nudgeWired = null; // the button the calm-down listeners are on (the bar is built after install)
   function syncShareButton() {
     if (!ctx.shareBtn) return;
+    if (nudgeWired !== ctx.shareBtn) {
+      nudgeWired = ctx.shareBtn;
+      const btn = ctx.shareBtn;
+      const calm = () => btn.classList.remove(NUDGE_CLASS);
+      btn.addEventListener('animationend', calm);
+      btn.addEventListener('click', calm);
+    }
     ctx.shareBtn.hidden = !shareOn() || !state.sessionStarted;
     ctx.shareBtn.disabled = !shareable();
-    // An incognito conversation is never stored, so it cannot be shared either — the button says why.
-    ctx.shareBtn.title = state.sessionStarted && state.sessionSaveHistory !== true ? t('share_incognito') : t('share_btn_title');
+    // An incognito conversation is shared like any other: the share is the user's own upload, while
+    // incognito is about the sites' history and the local list (it stays out of both).
+    ctx.shareBtn.title = t('share_btn_title');
     ctx.shareBtn.classList.toggle('is-shared', !!shareFor(state.sessionId));
+    // The first moment a conversation can be shared, the button pulses (CSS, twice) — once per
+    // conversation, and never for one that already has a link (2026-09-27: make sharing noticed).
+    if (!ctx.shareBtn.disabled && !ctx.shareBtn.hidden && state.sessionId && !nudged.has(state.sessionId) && !shareFor(state.sessionId)) {
+      nudged.add(state.sessionId);
+      ctx.shareBtn.classList.add(NUDGE_CLASS);
+    } else if (ctx.shareBtn.disabled || ctx.shareBtn.hidden || shareFor(state.sessionId)) {
+      ctx.shareBtn.classList.remove(NUDGE_CLASS); // another conversation / a link made elsewhere: no leftover pulse (1R)
+    }
     // The per-bubble buttons (shareTurnButton) follow the same gate through one class on the page.
     ctx.root.classList.toggle(SHARE_CAN_CLASS, shareable());
     syncTurnShareButtons();

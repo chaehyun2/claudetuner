@@ -49,6 +49,12 @@ export const TONE_CALM = 'calm';
 export const TONE_CUSTOM = 'custom';
 export const TONES = [TONE_FRIENDS, TONE_CALM, TONE_CUSTOM];
 export const DEBATE_TONE_MAX = 300;
+// Pace (#1843, user request 2026-09-27): 「깊게 파고들기」 (the default) — the AI moderator opens a new
+// angle every turn and ends only when the user asks; 「빠르게 결론」 — the earlier behaviour (it may
+// end once no new point comes up). Only an AI moderator reads it; the other kinds never end by themselves.
+export const PACE_DEEP = 'deep';
+export const PACE_QUICK = 'quick';
+export const PACES = [PACE_DEEP, PACE_QUICK];
 // The page's two tabs (plan §17, 2026-09-27): the same engine, two rooms. The mode is a page-level
 // choice made before the first send; in a session the tab shows what the session is.
 export const MODE_CROSSCHECK = 'crosscheck';
@@ -92,6 +98,7 @@ export function tabSwitchAction({ sessionStarted, sending, running, kept }) {
 export const SETTING_MODERATOR = 'moderator';
 export const SETTING_STANCE = 'stance';
 export const SETTING_TONE = 'tone';
+export const SETTING_PACE = 'pace';
 /**
  * The settings in `prefs` that differ from the defaults, in the order the panel shows them. `def` =
  * the default moderator for this page (defaultModerator — the plan-picked seat is a default, not a
@@ -104,6 +111,7 @@ export function changedSettings(prefs, def = { moderator: MOD_AUTO, modCol: null
   if (mod !== def.moderator || (mod === MOD_AI && (p.modCol || null) !== (def.modCol || null))) out.push(SETTING_MODERATOR);
   if ((p.stance || STANCE_NONE) !== STANCE_NONE) out.push(SETTING_STANCE);
   if ((p.tone || TONE_FRIENDS) !== TONE_FRIENDS) out.push(SETTING_TONE);
+  if ((p.pace || PACE_DEEP) !== PACE_DEEP) out.push(SETTING_PACE);
   return out;
 }
 // The start problems whose cause is a control inside the ⚙ panel (planCast's keys): with the panel
@@ -556,6 +564,14 @@ export function stancesOf(ids, stance) {
 // Every prompt carries `debate_call_full_name` (2026-09-27): default names are `<trait> <model>`
 // (쌍둥이 제미, 교수 GPT), and a model reads the trait as a title and calls the speaker by the tail
 // alone — 「제미 님」「GPT 님」 — which names nobody once two of a service take part.
+// Prompt wording (2026-09-27 quality pass, user request): techniques adapted from open-source debate
+// work — per-turn reasoning steps, "repeating adds nothing / add one new point", and "no 'in
+// conclusion' mid-debate" from ucl-dark/llm_debate (Khan et al. 2024, MIT); the critic role that
+// questions the others from thunlp/ChatEval (Apache-2.0); one question at a time, with options, from
+// obra/superpowers' brainstorming skill (MIT). Ideas only, no wording, from Multi-Agents-Debate (Liang
+// et al., GPL-3.0 — debaters are told disagreement is fine because the aim is the best answer) and
+// the llm-council chairman's two-step synthesis (candidates first, then the call). The wording
+// itself lives in compare-i18n.js.
 /**
  * The opening. Everyone answers blind (nobody has seen anyone else yet), which is the point of
  * opening simultaneously. `self` = `{ name, stanceKey }` of the debater this copy goes to (the SEND
@@ -597,7 +613,7 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
  * its reply ends with a control line (MODERATOR_CONTROL_RE) the page parses and hides.
  * `first` = its first call (it has not seen the topic yet, so it gets it here).
  */
-export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false }) {
+export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false, pace = PACE_QUICK, canAsk = false }) {
   const lines = [];
   if (first) lines.push(t(friendly(tone) ? 'debate_mod_intro_friends' : 'debate_mod_intro'), t('debate_topic_label'), neutraliseQuoted(String(topic || '').slice(0, DEBATE_TOPIC_MAX)));
   // Numbered (plan §14.2): the moderator names the next speaker by NUMBER — free-text names were
@@ -618,14 +634,54 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   // A free debate whose openings all land on one side is a dull one (#1817 ④): on its first call —
   // the one that reads the openings — the moderator may hand one debater the other side.
   if (first && freeStance) lines.push(t('debate_mod_same_side'));
+  // 「깊게」 (#1843): not only picking up points the debaters raised — the moderator brings one of its own.
+  const deep = pace === PACE_DEEP;
+  if (deep && !wrapUp) lines.push(t(friendly(tone) ? 'debate_mod_deepen_friends' : 'debate_mod_deepen'));
+  // What only the user knows (their situation, constraints, preferences) is asked, not guessed (#1843).
+  if (canAsk && !wrapUp) lines.push(t('debate_mod_ask_rule'));
   lines.push(t('debate_call_full_name'));
   const style = styleLine(tone, t, true);
   if (style) lines.push(style);
   // The last send of the budget: the moderator closes the debate (plan §15.1 ③).
   if (wrapUp) lines.push(t('debate_mod_wrapup'));
   // The control line instruction is ALWAYS the last thing the moderator reads, whatever the tone (§12.1 ①②).
-  lines.push(canEnd || wrapUp ? t('debate_mod_control') : t('debate_mod_control_no_end'));
+  lines.push(t(controlKey({ canEnd, wrapUp, deep, canAsk })));
   return lines.join('\n');
+}
+
+/**
+ * Which control-line instruction the moderator reads last: the wrap-up MUST end; otherwise END is
+ * offered only when the page would accept it (`canEnd`) — and under 「깊게」 only on the user's word —
+ * and ASK only while the run has asks left.
+ */
+export function controlKey({ canEnd, wrapUp, deep, canAsk }) {
+  if (wrapUp) return 'debate_mod_control';
+  const base = !canEnd ? 'debate_mod_control_no_end' : deep ? 'debate_mod_control_on_request' : 'debate_mod_control';
+  return canAsk ? `${base}_ask` : base;
+}
+/**
+ * May an AI moderator END now (the wrap-up aside)? After `minTurns` debater turns, never with the
+ * user's words still queued — and under 「깊게」 only right after the USER spoke (#1843, 1R): the
+ * prompt tells it to end only when the user asks, and the page holds it to that, so a moderator
+ * that concludes on its own is read as no control (the rule picks the next speaker).
+ */
+/**
+ * Has the user spoken since the moderator last ANSWERED (#1843)? Read backwards through the
+ * transcript: a user line first → yes; an answered moderator line first → no. A moderator call that
+ * is still pending, failed (no words — 3R), or is the one being judged (`skip`) does not count as an
+ * answer: the user's 「마무리해 줘」 is still waiting for one.
+ */
+export function userSpokeSince(transcript, skip = null) {
+  for (let i = (transcript || []).length - 1; i >= 0; i--) {
+    const e = transcript[i];
+    if (!e || e.seq === skip) continue;
+    if (e.role === ROLE_USER) return true;
+    if (e.role === ROLE_MODERATOR && !e.pending && String(e.text || '').trim()) return false;
+  }
+  return false;
+}
+export function moderatorCanEnd({ pace, turnsUsed, minTurns, queued, userSpoke }) {
+  return turnsUsed >= minTurns && !queued && (pace !== PACE_DEEP || !!userSpoke);
 }
 
 // ── the moderator's control line ──
@@ -633,9 +689,11 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
 // The Korean forms (다음: / 끝 / 종료) are written as escapes — the i18n guard keeps Hangul out of code.
 const CONTROL_NEXT_RE = /^\s*[*_`]*\s*(?:NEXT|\uB2E4\uC74C)\s*[:：]\s*(.+?)\s*[*_`]*\s*$/i;
 const CONTROL_END_RE = /^\s*[*_`]*\s*(?:END|\uB05D|\uC885\uB8CC)\s*[.!]?\s*[*_`]*\s*$/i;
+// ASK / 질문 (#1843): the moderator asks the user — the body is the question.
+const CONTROL_ASK_RE = /^\s*[*_`]*\s*(?:ASK|\uC9C8\uBB38)\s*[.!?]?\s*[*_`]*\s*$/i;
 /**
  * `{ body, control }` of a moderator reply: `control` = `{ kind: 'next', name }` | `{ kind: 'end' }`
- * | null, `body` = the text without the control line (what the timeline shows and the debaters get).
+ * | `{ kind: 'ask' }` | null, `body` = the text without the control line (what the timeline shows and the debaters get).
  */
 export function splitControl(text) {
   const lines = String(text || '').split('\n');
@@ -647,6 +705,7 @@ export function splitControl(text) {
   const next = CONTROL_NEXT_RE.exec(last);
   if (next) control = { kind: 'next', name: next[1] };
   else if (CONTROL_END_RE.test(last)) control = { kind: 'end' };
+  else if (CONTROL_ASK_RE.test(last)) control = { kind: 'ask' };
   if (!control) return { body: String(text || '').replace(/\s+$/, ''), control: null };
   return { body: lines.slice(0, i).join('\n').replace(/\s+$/, ''), control };
 }
@@ -774,10 +833,12 @@ export function hiddenTooLong({ hidden, since, now, limit }) {
 
 /**
  * The next debater after a moderator reply: its NEXT name when that is a real, eligible debater
- * other than `prev`; otherwise the rule (`fallback: true`). `end` when it said END and ending is allowed.
+ * other than `prev`; otherwise the rule (`fallback: true`). `end` when it said END and ending is allowed;
+ * `ask` when it asked the user (ASK) and asking is allowed (#1843) — else an ASK is no control at all.
  */
-export function chooseAfterModerator({ control, candidates, order, eligible, prev, lastSpoke, canEnd, numbered = null }) {
+export function chooseAfterModerator({ control, candidates, order, eligible, prev, lastSpoke, canEnd, canAsk = false, numbered = null }) {
   if (control && control.kind === 'end' && canEnd) return { end: true, id: null, fallback: false };
+  if (control && control.kind === 'ask' && canAsk) return { ask: true, id: null, fallback: false };
   if (control && control.kind === 'next') {
     // Resolution order (plan §14.2, Codex meta 5R): each step either DECIDES or passes on — a step
     // that recognised its form never hands a failure to the next (that is how `12 플래시 토끼` became
@@ -830,6 +891,7 @@ export function readDebateRecord(raw, colIds, textMax) {
   const cast = [...debaters, ...(modCol ? [modCol] : [])];
   const inCast = (id) => cast.includes(id);
   const isDebater = (id) => debaters.includes(id);
+  if (raw.pace !== undefined && !PACES.includes(raw.pace)) return undefined;
   if (!STANCES.includes(raw.stance) || !plainObj(raw.tone) || typeof raw.tone.kind !== 'string' || (raw.tone.custom !== undefined && typeof raw.tone.custom !== 'string')) return undefined;
   if (!plainObj(raw.aliases) || !plainObj(raw.dl) || !Array.isArray(raw.log) || raw.log.length > DEBATE_RECORD_LOG_MAX) return undefined;
   const aliases = {};
@@ -864,7 +926,8 @@ export function readDebateRecord(raw, colIds, textMax) {
   for (const k of ['modStarted', 'done', 'legacy']) if (raw[k] !== undefined && typeof raw[k] !== 'boolean') return undefined;
   if (prev === undefined || !fr || !el || !nonNegInt(turns)) return undefined;
   const tone = normalizeTone(raw.tone.kind, raw.tone.custom || '');
-  return { debaters, modCol, modKind: raw.modKind, stance: raw.stance, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
+  // A record from before 「깊게」 (#1843) ran the quick way — it goes on as it was.
+  return { debaters, modCol, modKind: raw.modKind, stance: raw.stance, pace: raw.pace || PACE_QUICK, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
 }
 /**
  * The log cut to `max` entries for the record, oldest first — but never a line some speaker has
@@ -937,7 +1000,7 @@ export function legacyDebateRecord(columns, firstRound) {
     prev = a.c;
     if (a.ok) fr.add(a.c);
   }
-  return { debaters, modCol, modKind: modCol ? MOD_AI : MOD_AUTO, stance: STANCE_NONE, tone: normalizeTone(TONE_FRIENDS, ''), aliases: {}, log, dl, prev, fr: [...fr], el: debaters.slice(), turns, modStarted, done: false, legacy: true };
+  return { debaters, modCol, modKind: modCol ? MOD_AI : MOD_AUTO, stance: STANCE_NONE, pace: PACE_QUICK, tone: normalizeTone(TONE_FRIENDS, ''), aliases: {}, log, dl, prev, fr: [...fr], el: debaters.slice(), turns, modStarted, done: false, legacy: true };
 }
 /**
  * The transcript a record describes, its words read back from the turns: `lookup(colId, round)` =
