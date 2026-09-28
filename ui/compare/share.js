@@ -23,7 +23,7 @@ import { buildShareSnapshot, shareModelLabel } from './share-snapshot.js';
 import { renderAnswer } from '../md-render.js';
 import {
   PROVIDER_META, COPY_FEEDBACK_MS, SHARE_MSG_TYPE, SHARE_OP_CREATE, SHARE_OP_UPDATE, SHARE_OP_DELETE, SHARE_OP_LIST, SHARE_OP_PASSWORD,
-  SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO, SHARE_AUTHOR_MODES, SHARE_AUTHOR_PREF_KEY, SHARE_MAP_KEY, SHARE_MAP_MAX,
+  SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO, SHARE_AUTHOR_MODES, SHARE_AUTHOR_DEFAULT, SHARE_AUTHOR_PREF_KEY, SHARE_AUTHOR_PREF_KEY_V1, SHARE_MAP_KEY, SHARE_MAP_MAX,
   SHARE_ID_RE, SHARE_TITLE_INPUT_MAX, SHARE_NAME_INPUT_MAX, SHARE_VIS_PUBLIC, SHARE_VIS_PRIVATE, SHARE_PASSWORD_MIN, SHARE_PASSWORD_INPUT_MAX, SHARE_LOCK_NAME, SHARE_LOCK_WAIT_MS, shareUrlOf,
 } from './constants.js';
 import { sendMessage } from './helpers.js';
@@ -52,6 +52,12 @@ const SHARE_CARD_BUDGET_MS = 20000;
 export const SHARE_ONE_CLICK = true;
 /** writeShare's `asked` meaning 「whatever link this conversation has when the lock is held」 (one-click). */
 const SHARE_ASK_LATEST = Symbol('share-ask-latest');
+/**
+ * writeShare's `mode` for a one-click 「공유」: decide the author UNDER the lock, from the link the map holds
+ * then (authorFor) — a decision taken before the lock would miss another tab making the link anonymous
+ * meanwhile and widen it back to name + photo (Codex share-default 2R).
+ */
+const SHARE_AUTHOR_AUTO = Symbol('share-author-auto');
 /** The popover's geometry: its width, the gutter it keeps to the window edges, its gap to the button. */
 const POP_WIDTH_PX = 360;
 const POP_GUTTER_PX = 16;
@@ -89,7 +95,7 @@ export function installShare(ctx) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
     for (const [sid, v] of Object.entries(raw)) {
       if (v && typeof v === 'object' && typeof v.id === 'string' && SHARE_ID_RE.test(v.id)) {
-        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '', ...(typeof v.label === 'string' && v.label ? { label: v.label.slice(0, SHARE_TITLE_INPUT_MAX) } : {}), ...(v.vis === 'private' ? { vis: 'private' } : {}) };
+        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '', ...(typeof v.label === 'string' && v.label ? { label: v.label.slice(0, SHARE_TITLE_INPUT_MAX) } : {}), ...(v.vis === 'private' ? { vis: 'private' } : {}), ...(SHARE_AUTHOR_MODES.includes(v.author) ? { author: v.author } : {}) };
       }
     }
     return out;
@@ -464,7 +470,7 @@ export function installShare(ctx) {
     const current = () => my === gen && state.sessionId === entry.id; // not closed, not reopened, same conversation
     await loadShares();
     if (!current()) return;
-    const pref = await readKey(SHARE_AUTHOR_PREF_KEY);
+    const [pref, legacyPref] = await Promise.all([readKey(SHARE_AUTHOR_PREF_KEY), readKey(SHARE_AUTHOR_PREF_KEY_V1)]);
     if (!current()) return;
     opener = from || ctx.shareBtn || null;
     dlg.entry = entry;
@@ -472,7 +478,7 @@ export function installShare(ctx) {
     dlg.sessionId = entry.id;
     dlg.share = shareFor(entry.id);
     dlg.titleInput.value = dlg.share ? dlg.share.title : '';
-    const mode = SHARE_AUTHOR_MODES.includes(pref) ? pref : SHARE_AUTHOR_ANON; // anonymous until the user picks otherwise (§10.2)
+    const mode = authorFor(dlg.share, pref, legacyPref); // a new link: the pick, else name + photo; an existing one: as it is
     for (const m of SHARE_AUTHOR_MODES) dlg.radios[m].checked = m === mode;
     dlg.nameInput.value = '';
     syncNameInput();
@@ -619,6 +625,11 @@ export function installShare(ctx) {
     const latest = asked === SHARE_ASK_LATEST;
     if (latest) asked = current;
     if (!asked && current) return { exists: current };
+    const autoAuthor = mode === SHARE_AUTHOR_AUTO;
+    if (autoAuthor) {
+      const [pref, legacyPref] = await Promise.all([readKey(SHARE_AUTHOR_PREF_KEY), readKey(SHARE_AUTHOR_PREF_KEY_V1)]);
+      mode = authorFor(asked, pref, legacyPref);
+    }
     // `password` (#1784 U5): a NEW private share — handed to the SW once, kept nowhere here.
     const res = await sendMessage(chrome, {
       type: SHARE_MSG_TYPE, op: asked ? SHARE_OP_UPDATE : SHARE_OP_CREATE, ...(asked ? { id: asked.id } : {}),
@@ -630,22 +641,25 @@ export function installShare(ctx) {
       const gone = !!asked && (code === 'share_deleted' || code === 'not_found');
       if (gone) await forgetShareId(asked.id);
       // One click on a link deleted elsewhere makes a fresh one: the user asked for 「a link」, not that one.
-      if (gone && latest) return writeShare(sessionId, null, snapshot, mode, authorName, password);
+      // A fresh link is a NEW link: an automatic author is decided again (the pick or the default), not the dead link's.
+      if (gone && latest) return writeShare(sessionId, null, snapshot, autoAuthor ? SHARE_AUTHOR_AUTO : mode, authorName, password);
       return { error: code, gone };
     }
     // 🔴 Recorded whatever became of the dialog: the link EXISTS on the server now, and closing the
     // dialog mid-request must not leave it unreachable from this conversation (「업데이트 / 삭제」).
     // The visibility the server answered wins (a password set from another browser); else what was asked.
     const priv = res.visibility ? res.visibility === SHARE_VIS_PRIVATE : !!password || (!!asked && asked.vis === SHARE_VIS_PRIVATE);
-    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot), ...(priv ? { vis: SHARE_VIS_PRIVATE } : {}) };
+    const settledAuthor = !priv && res.author && SHARE_AUTHOR_MODES.includes(res.author.mode) ? res.author.mode : SHARE_AUTHOR_ANON;
+    // The record keeps who the link shows as: re-sharing an existing link keeps it (linkAuthor), never the new default.
+    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot), author: settledAuthor, ...(priv ? { vis: SHARE_VIS_PRIVATE } : {}) };
     // A display name for 「내 공유 링크」 (a private share has no title on the server): the first question.
     const label = (snapshot.title || firstQuestion(snapshot)).split('\n')[0].slice(0, SHARE_TITLE_INPUT_MAX);
     await updateShares((map) => { map[sessionId] = label ? { ...record, label } : record; });
-    if (!priv) await writeKey(SHARE_AUTHOR_PREF_KEY, mode);
+    // The author preference is NOT written here — only an explicit pick is remembered (rememberAuthor).
     const settled = res.author && SHARE_AUTHOR_MODES.includes(res.author.mode) ? res.author.mode : SHARE_AUTHOR_ANON;
     track(asked ? 'share_update' : 'share_create', { kind: snapshot.kind, author: priv ? SHARE_AUTHOR_ANON : mode, settled, focus: snapshot.focus ? 1 : 0, private: priv ? 1 : 0 });
     // A private share never gets a card (its link preview stays the fixed lock image).
-    return { record, settled, author: res.author || { mode: SHARE_AUTHOR_ANON }, updated: !!asked, card: priv || !res.rev ? null : { id: res.id, rev: res.rev, snapshot, author: res.author || { mode: SHARE_AUTHOR_ANON } } };
+    return { record, settled, askedMode: priv ? SHARE_AUTHOR_ANON : mode, author: res.author || { mode: SHARE_AUTHOR_ANON }, updated: !!asked, card: priv || !res.rev ? null : { id: res.id, rev: res.rev, snapshot, author: res.author || { mode: SHARE_AUTHOR_ANON } } };
   }
   /**
    * Best effort, never seen by the user: the share already exists, and without a card its link
@@ -754,6 +768,7 @@ export function installShare(ctx) {
     paintLink();
     // The 「no name → anonymous」 note is about a PUBLIC share's author; a private one is anonymous by design.
     if (!password && out.settled !== mode) dlg.linkNote.textContent = t('share_author_fallback');
+    if (!password) await rememberAuthor(mode); // the dialog's radios are the user's choice
     repaintPreview();
     dlg.copyBtn.focus();
   }
@@ -1095,10 +1110,10 @@ export function installShare(ctx) {
     if (!entry) return;
     const stillHere = () => gen === my && state.sessionId === entry.id; // not closed, not clicked again, same conversation
     // Both reads start at the click (the author preference another tab may change meanwhile — Codex ui 1R).
-    const [, pref] = await Promise.all([loadShares(), readKey(SHARE_AUTHOR_PREF_KEY)]);
+    const [, pref, legacyPref] = await Promise.all([loadShares(), readKey(SHARE_AUTHOR_PREF_KEY), readKey(SHARE_AUTHOR_PREF_KEY_V1)]);
     if (!stillHere()) return;
     const known = shareFor(entry.id);
-    const mode = SHARE_AUTHOR_MODES.includes(pref) ? pref : SHARE_AUTHOR_ANON; // anonymous until the user picks otherwise (§10.2)
+    const mode = authorFor(known, pref, legacyPref); // a new link: the pick, else name + photo (2026-09-28); an existing one: as it is
     const built = build(entry, known ? known.title : '', focus);
     Object.assign(pop, { sessionId: entry.id, share: null, snapshot: built.error ? null : built.snapshot, settled: mode, authorName: '', fallback: false, pwEditing: false, confirming: false, subKey: '' });
     setPopError(null);
@@ -1115,7 +1130,7 @@ export function installShare(ctx) {
     track('share_open', { kind: snapshot.kind, focus: focus ? 1 : 0, existing: known ? 1 : 0, one_click: 1 });
     let out;
     try {
-      out = await writeUnderLock(() => writeShare(entry.id, SHARE_ASK_LATEST, snapshot, mode, '', ''));
+      out = await writeUnderLock(() => writeShare(entry.id, SHARE_ASK_LATEST, snapshot, SHARE_AUTHOR_AUTO, '', ''));
     } catch {
       out = { error: 'generic' };
     } finally {
@@ -1129,7 +1144,8 @@ export function installShare(ctx) {
       setPopError(out.error);
       return;
     }
-    Object.assign(pop, { phase: 'ready', share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: mode !== SHARE_AUTHOR_ANON && out.settled !== mode });
+    // The fallback note compares with the author decided under the lock, not the guess shown while waiting.
+    Object.assign(pop, { phase: 'ready', share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: out.askedMode !== SHARE_AUTHOR_ANON && out.settled !== out.askedMode });
     const copied = await ctx.copyText(shareUrlOf(out.record.id));
     if (gen !== my) return;
     if (copied) track('share_copy', { kind: snapshot.kind, from: 'one_click' });
@@ -1205,7 +1221,8 @@ export function installShare(ctx) {
     }
     const vis = r.visibility === SHARE_VIS_PRIVATE ? SHARE_VIS_PRIVATE : SHARE_VIS_PUBLIC;
     const withVis = (rec) => {
-      const next = { ...rec };
+      // Setting or removing a password leaves the link anonymous on the server (a reopened link stays so until picked).
+      const next = { ...rec, author: SHARE_AUTHOR_ANON };
       if (vis === SHARE_VIS_PRIVATE) next.vis = vis;
       else delete next.vis;
       return next;
@@ -1219,6 +1236,22 @@ export function installShare(ctx) {
     const card = vis === SHARE_VIS_PUBLIC && r.rev && cardSnapshot ? { id, rev: r.rev, snapshot: cardSnapshot, author: { mode: SHARE_AUTHOR_ANON } } : null;
     return { vis, card, record: record || withVis(base) };
   }
+  /**
+   * The author to send for this conversation's share: an EXISTING link keeps who it shows as now — the
+   * record's author, or for a record from before it was kept, what the old preference said (that is what
+   * re-sharing sent then), else anonymous. Only a NEW link takes the user's pick or the default. Re-sharing
+   * never widens a link's exposure (Codex share-default 1R: a link anonymous after a password was set and
+   * removed came back as name + photo on the next 「공유」).
+   */
+  function authorFor(known, pref, legacyPref) {
+    if (known) {
+      if (SHARE_AUTHOR_MODES.includes(known.author)) return known.author;
+      return SHARE_AUTHOR_MODES.includes(legacyPref) ? legacyPref : SHARE_AUTHOR_ANON;
+    }
+    return SHARE_AUTHOR_MODES.includes(pref) ? pref : SHARE_AUTHOR_DEFAULT;
+  }
+  /** An author the user picked (not a default) is the one preselected next time. */
+  const rememberAuthor = (mode) => (SHARE_AUTHOR_MODES.includes(mode) ? writeKey(SHARE_AUTHOR_PREF_KEY, mode) : Promise.resolve());
   /** Who the link shows as: the same link, updated with the snapshot of the click — the server settles the author. */
   async function changeAuthor(mode) {
     if (busy || !pop || !pop.share || !pop.snapshot || mode === pop.settled || !SHARE_AUTHOR_MODES.includes(mode)) return;
@@ -1243,6 +1276,7 @@ export function installShare(ctx) {
     if (gen !== my) return;
     if (out.error) { paintPop(); setPopError(out.error); return; }
     Object.assign(pop, { share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: mode !== SHARE_AUTHOR_ANON && out.settled !== mode, subKey: '' });
+    await rememberAuthor(mode); // the popover's choice is the user's
     paintPop();
   }
   async function deletePop() {

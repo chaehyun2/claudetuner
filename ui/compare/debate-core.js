@@ -40,7 +40,10 @@ export const MODERATOR_KINDS = [MOD_AUTO, MOD_AI, MOD_USER];
 export const STANCE_NONE = 'none';
 export const STANCE_PRO_CON = 'procon';
 export const STANCE_DEVIL = 'devil';
-export const STANCES = [STANCE_NONE, STANCE_PRO_CON, STANCE_DEVIL];
+// #1856 ③: a ROLE rather than a personality — research: among mixed-model debates the less agreeable
+// role scores best. The last debater asks for sources behind factual claims and checks them itself.
+export const STANCE_VERIFY = 'verify';
+export const STANCES = [STANCE_NONE, STANCE_PRO_CON, STANCE_DEVIL, STANCE_VERIFY];
 // Tone (plan §12): how the AIs talk — like close friends (the default, 2026-09-26 user request),
 // the calm debate wording of phases 1–2, or the user's own style line. Only the TASK sentences change
 // with the tone; the quoting rule, identity / stance lines and the moderator's control line never do.
@@ -55,6 +58,22 @@ export const DEBATE_TONE_MAX = 300;
 export const PACE_DEEP = 'deep';
 export const PACE_QUICK = 'quick';
 export const PACES = [PACE_DEEP, PACE_QUICK];
+// Reply length (#1862, user request 2026-09-28): how much ONE turn says — independent of the pace (how
+// many turns). A flat cap ended many turns too short, a loose one made every turn long: the setting is
+// the base, a turn with evidence may go to twice it, and the moderator can grant a longer turn (LONG).
+export const LENGTH_SHORT = 'short';
+export const LENGTH_NORMAL = 'normal';
+export const LENGTH_LONG = 'long';
+export const LENGTHS = [LENGTH_SHORT, LENGTH_NORMAL, LENGTH_LONG];
+// A user's 「자세히」 is read by the debater itself (#1862, after 5R): the length line says a turn may
+// double when the user asked for detail. A pattern list could not tell 「자세히 설명해 주지 마」 from
+// 「자세히 분석해 줘 예시는 필요 없어」 — every review round found a new counterexample. The moderator's
+// LONG stays the page's own, certain grant (numbered, parsed).
+const lengthOf = (x) => (LENGTHS.includes(x) ? x : LENGTH_NORMAL);
+/** 「길이: …」 for a debater's opening / turn, by the reply-length setting and the tone. */
+function debaterLengthLine(t, role, length, tone) {
+  return t('debate_len_line', t(`debate_len_${role}_${lengthOf(length)}_${friendly(tone) ? 'friends' : 'calm'}`));
+}
 // The page's two tabs (plan §17, 2026-09-27): the same engine, two rooms. The mode is a page-level
 // choice made before the first send; in a session the tab shows what the session is.
 export const MODE_CROSSCHECK = 'crosscheck';
@@ -99,6 +118,7 @@ export const SETTING_MODERATOR = 'moderator';
 export const SETTING_STANCE = 'stance';
 export const SETTING_TONE = 'tone';
 export const SETTING_PACE = 'pace';
+export const SETTING_LENGTH = 'length';
 /**
  * The settings in `prefs` that differ from the defaults, in the order the panel shows them. `def` =
  * the default moderator for this page (defaultModerator — the plan-picked seat is a default, not a
@@ -112,6 +132,7 @@ export function changedSettings(prefs, def = { moderator: MOD_AUTO, modCol: null
   if ((p.stance || STANCE_NONE) !== STANCE_NONE) out.push(SETTING_STANCE);
   if ((p.tone || TONE_FRIENDS) !== TONE_FRIENDS) out.push(SETTING_TONE);
   if ((p.pace || PACE_DEEP) !== PACE_DEEP) out.push(SETTING_PACE);
+  if ((p.length || LENGTH_NORMAL) !== LENGTH_NORMAL) out.push(SETTING_LENGTH);
   return out;
 }
 // The start problems whose cause is a control inside the ⚙ panel (planCast's keys): with the panel
@@ -195,6 +216,40 @@ export function defaultModerator(seat, targets) {
 const DEFAULT_MOD_MIN_TARGETS = 3;
 
 export const SPEAKER_USER = 'user';
+// #1856 stage 0: the services that REPORT their web searches as activity events (Claude's web_search,
+// ChatGPT's web tool). Gemini reports none, so 「no search on record」 would be every Gemini link — it
+// is left out rather than flagged.
+export const SEARCH_REPORTING_PROVIDERS = ['claude', 'chatgpt'];
+// 「이름: Claude」 / 「이름 · Gemini」 / 「이름 - ChatGPT」 at the END of a NEXT name — the service line's shape.
+const SERVICE_SUFFIX_RE = /\s*[:·•\-–—]\s*(?:claude|gemini|chatgpt)\s*$/i;
+const URL_RE = /https?:\/\/[^\s<>()\[\]"'`]+/gi;
+/**
+ * The http(s) links in `text`, trailing punctuation dropped, lower-cased host, unique. `claimsOnly`
+ * (1R): links inside code (fenced or inline — examples, not sources) and quoted lines (`> …` — someone
+ * else's words) are not the speaker's claim and are skipped.
+ */
+export function linksIn(text, { claimsOnly = false } = {}) {
+  const out = new Set();
+  let src = String(text || '');
+  if (claimsOnly) src = src.replace(/```[\s\S]*?(```|$)/g, ' ').replace(/`[^`\n]*`/g, ' ').replace(/^[ \t]*>.*$/gm, ' ');
+  for (const m of src.matchAll(URL_RE)) {
+    const raw = m[0].replace(/[.,;:!?。、]+$/u, '');
+    try { const u = new URL(raw); out.add(`${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/$/, '')}${u.search}`); } catch { /* not a URL after all */ }
+  }
+  return [...out];
+}
+/**
+ * #1856 stage 0 — a turn that brings in NEW links although it ran NO web search this turn (the links
+ * are from memory, which is where invented citations come from). Only for a service that reports its
+ * searches. `knownTexts` = everything already on record before this turn (the topic, every earlier
+ * line — the user's, the other debaters', the moderator's — and the user's queued words): repeating
+ * a link from there is quoting, not a claim (1R). [] = nothing to flag.
+ */
+export function unsearchedLinks({ provider, text, searches, knownTexts = [] }) {
+  if (!SEARCH_REPORTING_PROVIDERS.includes(provider) || searches > 0) return [];
+  const known = new Set(knownTexts.flatMap((x) => linksIn(x)));
+  return linksIn(text, { claimsOnly: true }).filter((l) => !known.has(l));
+}
 export const ROLE_USER = 'user';
 export const ROLE_PARTICIPANT = 'participant';
 export const ROLE_MODERATOR = 'moderator';
@@ -557,10 +612,13 @@ export function stancesOf(ids, stance) {
   const out = new Map(ids.map((id) => [id, null]));
   if (stance === STANCE_PRO_CON) ids.forEach((id, i) => out.set(id, i % 2 === 0 ? 'debate_stance_pro' : 'debate_stance_con'));
   else if (stance === STANCE_DEVIL && ids.length) out.set(ids[ids.length - 1], 'debate_stance_devil');
+  else if (stance === STANCE_VERIFY && ids.length) out.set(ids[ids.length - 1], 'debate_stance_verify');
   return out;
 }
 
 // ── prompts ──
+// The user is NOT told to be nameless (2026-09-28 user decision, reverting #1851): an AI that knows the
+// account's name (Claude does) may call the user by it — 「사용자,」 read stiff, most of all in the friends tone.
 // Every prompt carries `debate_call_full_name` (2026-09-27): default names are `<trait> <model>`
 // (쌍둥이 제미, 교수 GPT), and a model reads the trait as a title and calls the speaker by the tail
 // alone — 「제미 님」「GPT 님」 — which names nobody once two of a service take part.
@@ -580,11 +638,12 @@ export function stancesOf(ids, stance) {
  * GPT-6 Astra) cannot tell which list line is theirs, and one argued the other's side. Without
  * `self` the text names the cast but not the reader (the generic copy the wire's `text` keeps).
  */
-export function openingPrompt({ t, names, moderatorName, stanceLines, topic, tone, self = null }) {
+export function openingPrompt({ t, names, moderatorName, stanceLines, topic, tone, self = null, length = LENGTH_NORMAL }) {
   const lines = [t('debate_open_head', names.join(', ')), t('debate_call_full_name'), moderatorName ? t('debate_open_moderator', moderatorName) : t('debate_open_user_moderates')];
   if (stanceLines && stanceLines.length) lines.push(t('debate_open_stances'), ...stanceLines);
   if (self && self.name) lines.push(t('debate_turn_you_are', self.name) + (self.stanceKey ? ` ${t('debate_turn_stance', t(self.stanceKey))}` : ''));
   lines.push(t(friendly(tone) ? 'debate_open_task_friends' : 'debate_open_task'));
+  lines.push(debaterLengthLine(t, 'open', length, tone));
   const style = styleLine(tone, t, false);
   if (style) lines.push(style);
   lines.push('', t('debate_topic_label'), neutraliseQuoted(String(topic || '').slice(0, DEBATE_TOPIC_MAX)));
@@ -595,7 +654,7 @@ export function openingPrompt({ t, names, moderatorName, stanceLines, topic, ton
  * = the moderator's question to it (or null); `firstReply` = its first turn after the opening —
  * the only place its own name is introduced (the opening could not: it was one text for all).
  */
-export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstReply, tone }) {
+export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstReply, tone, length = LENGTH_NORMAL, long = false }) {
   const lines = [];
   if (firstReply) lines.push(t('debate_turn_you_are', selfName) + (stanceKey ? ` ${t('debate_turn_stance', t(stanceKey))}` : ''));
   lines.push(t('debate_turn_head'));
@@ -603,6 +662,10 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
   if (delta.omitted) lines.push(t('debate_omitted', delta.omitted));
   if (instruction) lines.push(t('debate_turn_instruction', neutraliseQuoted(instruction)));
   lines.push(t(friendly(tone) ? 'debate_turn_task_friends' : 'debate_turn_task'));
+  lines.push(debaterLengthLine(t, 'turn', length, tone));
+  // The moderator's LONG — granted by the page, not left to the debater to notice (#1862). A user's 「자세히」
+  // is in the delta above and the length line lets the debater act on it itself.
+  if (long) lines.push(t('debate_len_granted'));
   lines.push(t('debate_call_full_name'));
   const style = styleLine(tone, t, false);
   if (style) lines.push(style);
@@ -613,12 +676,15 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
  * its reply ends with a control line (MODERATOR_CONTROL_RE) the page parses and hides.
  * `first` = its first call (it has not seen the topic yet, so it gets it here).
  */
-export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false, pace = PACE_QUICK, canAsk = false }) {
+export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false, pace = PACE_QUICK, canAsk = false, services = null, length = LENGTH_NORMAL }) {
   const lines = [];
   if (first) lines.push(t(friendly(tone) ? 'debate_mod_intro_friends' : 'debate_mod_intro'), t('debate_topic_label'), neutraliseQuoted(String(topic || '').slice(0, DEBATE_TOPIC_MAX)));
   // Numbered (plan §14.2): the moderator names the next speaker by NUMBER — free-text names were
   // ambiguous four review rounds in a row. The number is the position in `names`.
   lines.push(t('debate_mod_cast', names.map((n, i) => `${i + 1} ${n}`).join(', ')));
+  // Each debater's service on a line of its own (#1856 ②: a disputed fact goes to another COMPANY's AI) —
+  // NOT on the cast line, whose words a NEXT echoes (1R: 「NEXT: 거장 오퍼스 · Claude」 matched two Claudes).
+  if (services && services.some(Boolean)) lines.push(t('debate_mod_services', names.map((n, i) => `${n}: ${services[i] || '?'}`).join(', ')));
   lines.push(t('debate_turn_head'));
   if (delta.items.length) lines.push(renderItems(delta.items, t));
   if (delta.omitted) lines.push(t('debate_omitted', delta.omitted));
@@ -630,10 +696,18 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   // control line (debate_mod_control) carries the conclusion format for that case.
   const taskKey = friendly(tone) ? 'debate_mod_task_friends' : 'debate_mod_task';
   if (wrapUp) lines.push(t('debate_mod_task_conclude'));
-  else lines.push(lastName ? t(taskKey, lastName) : t(`${taskKey}_open`));
+  else {
+    lines.push(lastName ? t(taskKey, lastName) : t(`${taskKey}_open`));
+    lines.push(t('debate_len_mod_line', t(`debate_len_mod_${lengthOf(length)}`)));
+  }
   // A free debate whose openings all land on one side is a dull one (#1817 ④): on its first call —
   // the one that reads the openings — the moderator may hand one debater the other side.
   if (first && freeStance) lines.push(t('debate_mod_same_side'));
+  // #1856 ①②: facts, checked where it is cheap. Right after the blind openings (before anyone has
+  // read the others — research: one round of debate erases dissent, and outside checks stop changing
+  // the verdict) a clash of FACTS gets its sources asked for; later a still-unsourced clash is handed
+  // to another company's AI to check by search. Opinions are not the target. No extra call either way.
+  if (!wrapUp) lines.push(t(first ? 'debate_mod_fact_check' : 'debate_mod_verify_rule'));
   // 「깊게」 (#1843): not only picking up points the debaters raised — the moderator brings one of its own.
   const deep = pace === PACE_DEEP;
   if (deep && !wrapUp) lines.push(t(friendly(tone) ? 'debate_mod_deepen_friends' : 'debate_mod_deepen'));
@@ -644,6 +718,7 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   if (style) lines.push(style);
   // The last send of the budget: the moderator closes the debate (plan §15.1 ③).
   if (wrapUp) lines.push(t('debate_mod_wrapup'));
+  else lines.push(t('debate_mod_long_rule'));
   // The control line instruction is ALWAYS the last thing the moderator reads, whatever the tone (§12.1 ①②).
   lines.push(t(controlKey({ canEnd, wrapUp, deep, canAsk })));
   return lines.join('\n');
@@ -690,6 +765,7 @@ export function moderatorCanEnd({ pace, turnsUsed, minTurns, queued, userSpoke }
 const CONTROL_NEXT_RE = /^\s*[*_`]*\s*(?:NEXT|\uB2E4\uC74C)\s*[:：]\s*(.+?)\s*[*_`]*\s*$/i;
 const CONTROL_END_RE = /^\s*[*_`]*\s*(?:END|\uB05D|\uC885\uB8CC)\s*[.!]?\s*[*_`]*\s*$/i;
 // ASK / 질문 (#1843): the moderator asks the user — the body is the question.
+const LONG_TAIL_RE = /\s+(?:LONG|\uAE38\uAC8C)\s*$/i; // LONG / 길게 at the end of a NEXT
 const CONTROL_ASK_RE = /^\s*[*_`]*\s*(?:ASK|\uC9C8\uBB38)\s*[.!?]?\s*[*_`]*\s*$/i;
 /**
  * `{ body, control }` of a moderator reply: `control` = `{ kind: 'next', name }` | `{ kind: 'end' }`
@@ -703,6 +779,8 @@ export function splitControl(text) {
   const last = lines[i];
   let control = null;
   const next = CONTROL_NEXT_RE.exec(last);
+  // The name is kept whole: a LONG / service tail is read off in chooseAfterModerator, AFTER an exact
+  // alias match (1R: an alias 「거장 오퍼스 LONG」 beside 「거장 오퍼스」).
   if (next) control = { kind: 'next', name: next[1] };
   else if (CONTROL_END_RE.test(last)) control = { kind: 'end' };
   else if (CONTROL_ASK_RE.test(last)) control = { kind: 'ask' };
@@ -848,7 +926,16 @@ export function chooseAfterModerator({ control, candidates, order, eligible, pre
     //  2) it starts with a number — the position in `numbered` (the order that moderator call was
     //     shown: `2`, `2번`, `#2`, `2 이름`), or the rule when the number points nowhere usable;
     //  3) otherwise a name (matchSpeaker over the debaters who can speak).
-    const text = String(control.name || '');
+    // A service echoed from the 「참가자별 서비스」 line (#1856 2R: 「거장 오퍼스: Claude」) is not part of the
+    // name — unless the whole string IS someone's name (3R: an alias 「Mira - Claude」 beside 「Mira」).
+    // 「NEXT: 2 LONG」 (#1862): the moderator lets that speaker answer at length — the grant rides on the pick.
+    // Tails come off only when the string as it stands is nobody's exact name.
+    const raw = String(control.name || '');
+    const isExact = (x) => candidates.some((c) => c.names.some((n) => normName(n) === normName(x)));
+    let text = raw;
+    let long = false;
+    if (!isExact(text) && LONG_TAIL_RE.test(text)) { text = text.replace(LONG_TAIL_RE, ''); long = true; }
+    if (!isExact(text)) text = text.replace(SERVICE_SUFFIX_RE, '');
     const usable = (id) => !!id && id !== prev && eligible.has(id);
     const exact = candidates.filter((c) => c.names.some((n) => normName(n) === normName(text)));
     let id = null;
@@ -859,7 +946,7 @@ export function chooseAfterModerator({ control, candidates, order, eligible, pre
       if (num) { id = Array.isArray(numbered) ? numbered[Number(num[1]) - 1] || null : null; decided = true; }
     }
     if (!decided) id = matchSpeaker(text, candidates.filter((c) => eligible.has(c.id)));
-    if (usable(id)) return { end: false, id, fallback: false };
+    if (usable(id)) return { end: false, id, fallback: false, ...(long ? { long: true } : {}) };
   }
   return { end: false, id: autoNext({ order, eligible, prev, lastSpoke }), fallback: true };
 }
@@ -892,6 +979,8 @@ export function readDebateRecord(raw, colIds, textMax) {
   const inCast = (id) => cast.includes(id);
   const isDebater = (id) => debaters.includes(id);
   if (raw.pace !== undefined && !PACES.includes(raw.pace)) return undefined;
+  if (raw.vf !== undefined && typeof raw.vf !== 'boolean') return undefined;
+  if (raw.length !== undefined && !LENGTHS.includes(raw.length)) return undefined;
   if (!STANCES.includes(raw.stance) || !plainObj(raw.tone) || typeof raw.tone.kind !== 'string' || (raw.tone.custom !== undefined && typeof raw.tone.custom !== 'string')) return undefined;
   if (!plainObj(raw.aliases) || !plainObj(raw.dl) || !Array.isArray(raw.log) || raw.log.length > DEBATE_RECORD_LOG_MAX) return undefined;
   const aliases = {};
@@ -927,7 +1016,10 @@ export function readDebateRecord(raw, colIds, textMax) {
   if (prev === undefined || !fr || !el || !nonNegInt(turns)) return undefined;
   const tone = normalizeTone(raw.tone.kind, raw.tone.custom || '');
   // A record from before 「깊게」 (#1843) ran the quick way — it goes on as it was.
-  return { debaters, modCol, modKind: raw.modKind, stance: raw.stance, pace: raw.pace || PACE_QUICK, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
+  // The verifier is stored as `stance: 'none'` + `vf: true` (1R: a 1.42 reader refuses an unknown stance and
+  // then drops the whole entry — this way it reads a free debate). A normalised record may carry 'verify'.
+  const stance = raw.vf === true && raw.stance === STANCE_NONE ? STANCE_VERIFY : raw.stance;
+  return { debaters, modCol, modKind: raw.modKind, stance, pace: raw.pace || PACE_QUICK, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
 }
 /**
  * The log cut to `max` entries for the record, oldest first — but never a line some speaker has
@@ -1000,7 +1092,7 @@ export function legacyDebateRecord(columns, firstRound) {
     prev = a.c;
     if (a.ok) fr.add(a.c);
   }
-  return { debaters, modCol, modKind: modCol ? MOD_AI : MOD_AUTO, stance: STANCE_NONE, pace: PACE_QUICK, tone: normalizeTone(TONE_FRIENDS, ''), aliases: {}, log, dl, prev, fr: [...fr], el: debaters.slice(), turns, modStarted, done: false, legacy: true };
+  return { debaters, modCol, modKind: modCol ? MOD_AI : MOD_AUTO, stance: STANCE_NONE, pace: PACE_QUICK, length: LENGTH_NORMAL, tone: normalizeTone(TONE_FRIENDS, ''), aliases: {}, log, dl, prev, fr: [...fr], el: debaters.slice(), turns, modStarted, done: false, legacy: true };
 }
 /**
  * The transcript a record describes, its words read back from the turns: `lookup(colId, round)` =

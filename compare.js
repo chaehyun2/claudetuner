@@ -506,7 +506,9 @@ export function mountComparePage(deps) {
   // Made prominent (2026-09-27 user request — 「사용자들이 좀 더 적극적으로 활용했으면」): a filled
   // button, first in the bar's action group, and never folded into 「⋯」.
   const shareBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-share');
-  shareBtn.appendChild(el('span', 'cmp-share-label', t('share_btn')));
+  // Its own class (#1849): `cmp-share-label` is the share dialog's grey form label, and sharing it
+  // painted this label grey on the filled button.
+  shareBtn.appendChild(el('span', 'cmp-share-btn-label', t('share_btn')));
   shareBtn.setAttribute('aria-label', t('share_btn')); // the name stays when narrow widths show the glyph only
   shareBtn.id = 'cmp-share-btn';
   shareBtn.type = 'button';
@@ -2766,12 +2768,15 @@ export function mountComparePage(deps) {
   }
 
   /** The composers' placeholder: the debate's shorter one while the bar is folded (#1819 — one line at 420px). */
+  ctx.syncComposerPlaceholders = () => syncComposerPlaceholders(); // debate.js renderBar (#1852)
   function syncComposerPlaceholders() {
     const debating = ctx.debateActive();
     // The short wording is for the eye at a narrow width only; the accessible name keeps the full one.
-    const full = t(debating ? 'debate_followup_placeholder' : 'followup_placeholder');
+    // #1852: while the AI moderator waits for the user's answer, the box says so.
+    const asked = debating && !!(ctx.debateAsked && ctx.debateAsked());
+    const full = t(asked ? 'debate_answer_placeholder' : debating ? 'debate_followup_placeholder' : 'followup_placeholder');
     for (const c of composers) {
-      c.input.placeholder = t(debating ? (topbarFolded ? 'debate_followup_placeholder_short' : 'debate_followup_placeholder') : 'followup_placeholder');
+      c.input.placeholder = asked ? full : t(debating ? (topbarFolded ? 'debate_followup_placeholder_short' : 'debate_followup_placeholder') : 'followup_placeholder');
       c.input.setAttribute('aria-label', full);
     }
   }

@@ -26,9 +26,15 @@ import {
   openingPrompt, turnPrompt, moderatorPrompt, splitControl, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
-  SETTING_MODERATOR, SETTING_STANCE, SETTING_TONE, SETTING_PACE, PACES, PACE_DEEP, moderatorCanEnd, userSpokeSince, changedSettings, problemInSettings, defaultModerator, tierSlug,
+  unsearchedLinks, STANCE_VERIFY, SETTING_MODERATOR, SETTING_STANCE, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_DEEP, moderatorCanEnd, userSpokeSince, changedSettings, problemInSettings, defaultModerator, tierSlug,
 } from './debate-core.js';
 
+// #1862 fold heights (px of bubble) by reply length, and the slack a bubble may exceed them by unfolded
+// (a bubble a few px over the line is not worth a button).
+// 「더 보기」 folding is parked (2026-09-28 user: 「잠시 빼두자」) — the code stays, this switch keeps it off.
+const FOLD_ENABLED = false;
+const FOLD_PX = { short: 180, normal: 280, long: 460 };
+const FOLD_SLACK_PX = 60;
 const PHASE_OPENING = 'opening';
 const PHASE_SPEAKING = 'speaking';
 const PHASE_MODERATING = 'moderating';
@@ -61,7 +67,7 @@ export function installDebate(ctx) {
   // `settingsOpen`: the ⚙ panel (plan §18) — closed until the user opens it once, then remembered.
   // `modChosen`: the user picked the moderator (the 「진행」 select) — until then the plan-picked seat
   // moderates by default (plan §18.8; `state.debateSeat` is set by compare.js with the debate layout).
-  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEEP, settingsOpen: false };
+  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEEP, length: LENGTH_NORMAL, settingsOpen: false };
   if (state.debateSeat === undefined) state.debateSeat = null;
   state.aliases = {};
   state.debate = null;
@@ -69,6 +75,8 @@ export function installDebate(ctx) {
   const debateOn = () => !!(state.status && state.status.debateOn === true);
   const doc_active = () => (ctx.doc && ctx.doc.activeElement) || null;
   const debateActive = () => !!state.debate;
+  /** The AI moderator asked the user something and waits for the answer (#1843 ASK). */
+  const debateAsked = () => !!state.debate && state.debate.phase === PHASE_ASKED;
   /** The name the page shows for a cast column in the debate on screen ('' outside one) — what a share carries (#1784). */
   const debateNameOf = (id) => (state.debate && state.debate.names.get(id) ? state.debate.names.get(id).name || '' : '');
   /** The avatar emoji the page shows for a cast column ('' outside a debate) — a share carries it too (never a photo). */
@@ -99,6 +107,7 @@ export function installDebate(ctx) {
               toneCustom: typeof p.toneCustom === 'string' ? cleanTone(p.toneCustom).slice(0, DEBATE_TONE_MAX * 2) : '',
               // No / unknown pace = 「깊게」, the default (#1843) — the stored prefs predate it.
               pace: PACES.includes(p.pace) ? p.pace : PACE_DEEP,
+              length: LENGTHS.includes(p.length) ? p.length : LENGTH_NORMAL, // #1862
               settingsOpen: p.settingsOpen === true,
             };
           }
@@ -151,7 +160,7 @@ export function installDebate(ctx) {
   /** Each debater's side (i18n key or null) — the ONE assignment the cards preview and start() uses. */
   const castStances = (plan) => stancesOf(plan.debaters, state.debatePrefs.stance);
   /** The short badge of a side (the devil's prompt line is a sentence, not a badge). */
-  const stanceBadge = (key) => t(key === 'debate_stance_devil' ? 'debate_stance_badge_devil' : key);
+  const stanceBadge = (key) => t(key === 'debate_stance_devil' ? 'debate_stance_badge_devil' : key === 'debate_stance_verify' ? 'debate_stance_badge_verify' : key);
   /** `{ debaters, modCol, names, conflicts, problem }` for the current setup (problem = i18n key or null). */
   function planCast() {
     const targets = reachable();
@@ -430,7 +439,7 @@ export function installDebate(ctx) {
   modGroup.field.appendChild(modPicks);
   setupRow.appendChild(modGroup.field);
   const stanceGroup = optGroup('cmp-debate-stance', 'debate_stance_label', [
-    [STANCES[0], `debate_stance_opt_${STANCES[0]}`, '\u{1F4AC}'], [STANCES[1], `debate_stance_opt_${STANCES[1]}`, '\u{2696}\u{FE0F}'], [STANCES[2], `debate_stance_opt_${STANCES[2]}`, '\u{1F608}'],
+    [STANCES[0], `debate_stance_opt_${STANCES[0]}`, '\u{1F4AC}'], [STANCES[1], `debate_stance_opt_${STANCES[1]}`, '\u{2696}\u{FE0F}'], [STANCES[2], `debate_stance_opt_${STANCES[2]}`, '\u{1F608}'], [STANCES[3], `debate_stance_opt_${STANCES[3]}`, '\u{1F50E}'],
   ], (v) => setStance(v));
   setupRow.appendChild(stanceGroup.field);
   // 말투 (§12): friends (default) / calm / custom — the custom line is a one-line input under the cards.
@@ -451,6 +460,11 @@ export function installDebate(ctx) {
     [PACES[0], `debate_pace_opt_${PACES[0]}`, '\u{1F50D}'], [PACES[1], `debate_pace_opt_${PACES[1]}`, '\u{23F1}\u{FE0F}'],
   ], (v) => setPace(v));
   setupRow.appendChild(paceGroup.field);
+  // 발언 길이 (#1862): how much one turn says — short / normal (default) / long. Every moderation kind.
+  const lengthGroup = optGroup('cmp-debate-length', 'debate_length_label', [
+    [LENGTHS[0], `debate_length_opt_${LENGTHS[0]}`, '\u{1F90F}'], [LENGTHS[1], `debate_length_opt_${LENGTHS[1]}`, '\u{1F4AC}'], [LENGTHS[2], `debate_length_opt_${LENGTHS[2]}`, '\u{1F4DC}'],
+  ], (v) => setLength(v));
+  setupRow.appendChild(lengthGroup.field);
   setupBody.appendChild(setupRow);
   // The cast is not listed here any more (plan §17.5): each participant's avatar and alias sit on
   // its own column head — the debate tab draws the pre-session columns as participant cards.
@@ -534,6 +548,12 @@ export function installDebate(ctx) {
     savePrefs();
     ctx.updateControls();
   });
+  function setLength(length) {
+    state.debatePrefs.length = LENGTHS.includes(length) ? length : LENGTH_NORMAL;
+    savePrefs();
+    renderSetup();
+    ctx.updateControls();
+  }
   function setPace(pace) {
     state.debatePrefs.pace = PACES.includes(pace) ? pace : PACE_DEEP;
     savePrefs();
@@ -731,6 +751,7 @@ export function installDebate(ctx) {
     paintGroup(toneGroup, state.debatePrefs.tone, (v) => t(`debate_tone_desc_${v}`));
     // Only an AI moderator reads the pace: under the other kinds the choice stays shown, and says so.
     const noAi = mod.moderator !== MOD_AI;
+    paintGroup(lengthGroup, state.debatePrefs.length, (v) => t(`debate_length_desc_${v}`));
     paintGroup(paceGroup, state.debatePrefs.pace, (v) => t(noAi ? 'debate_pace_desc_needai' : `debate_pace_desc_${v}`), () => noAi);
     renderModPicks(targets, mod, need3);
     toneInput.hidden = state.debatePrefs.tone !== TONE_CUSTOM;
@@ -752,6 +773,8 @@ export function installDebate(ctx) {
         parts.push(kind === MOD_AI ? (modName ? t('debate_mod_ai', modName) : t('debate_mod_ai_any')) : t(kind === MOD_USER ? 'debate_mod_user' : 'debate_mod_auto'));
       } else if (k === SETTING_STANCE) {
         parts.push(`${t('debate_stance_label')}: ${t(`debate_stance_opt_${p.stance}`)}`);
+      } else if (k === SETTING_LENGTH) {
+        parts.push(`${t('debate_length_label')}: ${t(`debate_length_opt_${p.length}`)}`);
       } else if (k === SETTING_PACE) {
         parts.push(`${t('debate_pace_label')}: ${t(`debate_pace_opt_${p.pace}`)}`);
       } else if (k === SETTING_TONE) {
@@ -852,6 +875,7 @@ export function installDebate(ctx) {
     const info = d.names.get(col.id) || { name: ctx.colLabel(col), emoji: '' };
     const isMod = col.id === d.modCol;
     turn.debateRole = isMod ? ROLE_MODERATOR : ROLE_PARTICIPANT;
+    turn.debateProvider = col.provider; // #1856 stage 0 reads it when the turn is revealed
     const ava = avatar(col.provider, info, 'cmp-debate-ava', true);
     const head = el('div', 'cmp-debate-meta');
     head.appendChild(el('span', 'cmp-debate-name', info.name));
@@ -866,6 +890,9 @@ export function installDebate(ctx) {
     // bubble — the words are painted as always but hidden, from the accessibility tree too (the
     // timeline is aria-live) — and reveal() shows them all at once when the turn settles.
     turn.node.setAttribute('aria-hidden', 'true');
+    // #1854: a turn that searches the web says so beside the dots while it types (the 과정 panel is
+    // hidden until the answer is revealed) — a 97-second search read as a stalled debate.
+    if (turn.activity) turn.activity.onSearch = (n) => noteSearch(turn, n);
     d.typing.add(turn);
     if (isMod) turn.root.classList.add('is-moderator');
     turn.root.insertBefore(head, turn.root.firstChild);
@@ -874,6 +901,88 @@ export function installDebate(ctx) {
     // shows the room from the top so the topic stays in view (#1818 ⑩), and the bubbles filling in
     // at the same time must not yank the view (plan §11.4 ⑤) — a reader already at the end is followed.
     follow(d.phase !== PHASE_OPENING);
+  }
+  /**
+   * #1854: 「🔍 웹 검색 중 · 3회」 beside the typing dots. Drawn by CSS from an attribute on the bubble
+   * (`data-typing-note`, `::before`) — the bubble's children are repainted as the answer streams, an
+   * attribute survives that. The first search is announced once through a screen-reader-only line;
+   * the count updates are not (the timeline is aria-live).
+   */
+  function noteSearch(turn, n) {
+    if (!turn || !turn.node || !turn.root || !turn.root.classList.contains('is-typing')) return;
+    turn.node.setAttribute('data-typing-note', `\u{1F50D} ${t('debate_typing_search', n)}`);
+    if (!turn.searchAnnounced) {
+      turn.searchAnnounced = true;
+      const sr = el('span', 'cmp-sr-only cmp-debate-typing-sr', t('col_searching'));
+      turn.root.appendChild(sr);
+      turn.typingSr = sr;
+    }
+  }
+  /**
+   * #1856 stage 0: a revealed turn that names links but ran no web search this turn gets 「⚠️ 검색
+   * 기록 없음」 beside its name — the links may be recalled rather than looked up. Live turns only: a
+   * restored turn has no activity record to judge by. Screen only (not the transcript or a share).
+   */
+  function flagUnsearchedLinks(turn) {
+    const d = state.debate;
+    // Not the moderator (it hands the floor, it does not argue a sourced point — 1R).
+    if (!d || d.restoring || !turn || !turn.debateHead || turn.debateNoSearch || !turn.activity || turn.errorText || turn.debateRole === ROLE_MODERATOR) return;
+    // Everything already on record: the topic, every transcript line but this turn's own, and the user's
+    // words still queued (sent while this turn was typing — 1R #2).
+    // This turn's own line is still `pending` here (reveal runs before recordRound settles it); a
+    // settled line is on record whatever its words — even the same words repeated (2R).
+    const knownTexts = [d.topic, ...d.transcript.filter((e) => !e.pending && e.text).map((e) => e.text), ...d.queue.map((q) => q.text)];
+    const links = unsearchedLinks({ provider: turn.debateProvider, text: turn.text, searches: turn.activity.searches, knownTexts });
+    if (!links.length) return;
+    turn.debateNoSearch = true;
+    const badge = el('span', 'cmp-debate-badge is-warn', t('debate_nosearch_badge'));
+    badge.title = t('debate_nosearch_tip');
+    turn.debateHead.appendChild(badge);
+  }
+  /**
+   * #1862: a long debater turn shows its beginning and 「더 보기」 — a long reply no longer costs the
+   * reader the flow of the debate. The fold height follows the reply-length setting (a 「길게」 debate
+   * folds later). Never the moderator or the conclusion; measured a frame after the words appear.
+   */
+  // Every live fold watcher — 새 대화 / a history load (reset) disconnects them all (2R follow-up: no leak).
+  const foldObservers = new Set();
+  function foldIfLong(turn) {
+    const d = state.debate;
+    if (!FOLD_ENABLED || !d || !turn || !turn.root || !turn.node || turn.debateFoldWatch || turn.debateRole === ROLE_MODERATOR) return;
+    turn.debateFoldWatch = true;
+    const limit = FOLD_PX[d.length] || FOLD_PX[LENGTH_NORMAL];
+    const fold = (on) => { turn.root.classList.toggle('is-folded', on); turn.node.style.maxHeight = on ? `${limit}px` : ''; };
+    const setOpen = (open) => {
+      fold(!open);
+      turn.debateFold.textContent = t(open ? 'debate_less' : 'debate_more');
+      turn.debateFold.setAttribute('aria-expanded', String(open));
+    };
+    // Measured now and again whenever the bubble grows (1R: an output image or a re-wrap made it long
+    // after the first frame) — until it has folded once; the user's own 「접기/더 보기」 rules after that.
+    let observer = null;
+    const measure = () => {
+      if (turn.debateFold || !turn.root.isConnected) { if (observer && !turn.root.isConnected) observer.disconnect(); return; }
+      if (turn.node.scrollHeight <= limit + FOLD_SLACK_PX) return;
+      if (observer) { observer.disconnect(); foldObservers.delete(observer); }
+      const btn = el('button', 'cmp-debate-more', t('debate_more'));
+      btn.type = 'button';
+      turn.debateFold = btn;
+      btn.addEventListener('click', () => setOpen(turn.root.classList.contains('is-folded')));
+      turn.root.appendChild(btn);
+      setOpen(false);
+      // Keyboard focus moving INTO the folded part opens it (1R follow-up: a link below the fold took focus unseen).
+      // Only when the focused element sits BELOW the fold (2R: a visible link at the top reopened a turn the user had folded).
+      // Judged by the element's place in the bubble, not the screen: focusing it scrolls the clipped box itself.
+      turn.node.addEventListener('focusin', (e) => {
+        if (!turn.root.classList.contains('is-folded') || !e || !e.target) return;
+        let y = 0;
+        for (let el = e.target; el && el !== turn.node; el = el.offsetParent) y += el.offsetTop || 0;
+        if (turn.node.scrollTop > 0 || y + (e.target.offsetHeight || 0) > limit) { setOpen(true); turn.node.scrollTop = 0; }
+      });
+    };
+    ctx.raf(measure);
+    const RO = ctx.win && ctx.win.ResizeObserver;
+    if (typeof RO === 'function') { observer = new RO(() => measure()); observer.observe(turn.node); foldObservers.add(observer); }
   }
   /** 「오후 3:12」 / 「3:12 PM」 — the clock time a bubble shows beside it. */
   function clockNow() {
@@ -890,6 +999,11 @@ export function installDebate(ctx) {
     turn.root.classList.remove('is-typing');
     turn.root.classList.add('is-revealed');
     turn.node.removeAttribute('aria-hidden');
+    flagUnsearchedLinks(turn);
+    foldIfLong(turn);
+    // The search note goes with the dots (#1854) — the 과정 chip carries the record from here.
+    turn.node.removeAttribute('data-typing-note');
+    if (turn.typingSr) { turn.typingSr.remove(); turn.typingSr = null; }
     if (!turn.debateSide) {
       const side = el('div', 'cmp-debate-side');
       // A turn read back from the history has no clock time (it was never stored) — not 「now」.
@@ -910,6 +1024,16 @@ export function installDebate(ctx) {
     turn.debateConclusion = true;
     turn.root.classList.add('is-conclusion');
     if (turn.root.parentNode) turn.root.parentNode.insertBefore(el('div', 'cmp-debate-divider is-conclusion', t('debate_conclusion')), turn.root);
+  }
+  /**
+   * #1852: a moderator's question TO THE USER looks like one — a 「❓ 나에게 질문」 divider and a marked
+   * bubble (the plain moderator bubble read like any other turn and was easy to miss).
+   */
+  function markAsked(turn) {
+    if (!turn || !turn.root || turn.debateAsked) return;
+    turn.debateAsked = true;
+    turn.root.classList.add('is-ask');
+    if (turn.root.parentNode) turn.root.parentNode.insertBefore(el('div', 'cmp-debate-divider is-ask', t('debate_asked_you')), turn.root);
   }
   /** What a turn's text renders as: a moderator's reply without its control line. */
   function displayText(turn) {
@@ -1018,7 +1142,7 @@ export function installDebate(ctx) {
     const stances = castStances(plan);
     const openingGroup = el('div', 'cmp-debate-opening');
     state.debate = {
-      topic, debaters, modCol, names, stances, stance: state.debatePrefs.stance, pace: state.debatePrefs.pace, asks: 0,
+      topic, debaters, modCol, names, stances, stance: state.debatePrefs.stance, pace: state.debatePrefs.pace, length: state.debatePrefs.length || LENGTH_NORMAL, asks: 0, longFor: null,
       run: ctx.clock.now(), userMsgs: 0, restored: false, reported: null, reportSeq: 0, turnsAtRun: 0, // #1842 finish statistics
       modKind: modCol ? MOD_AI : (modChoice().moderator === MOD_USER ? MOD_USER : MOD_AUTO),
       transcript: [], seq: 0,
@@ -1050,7 +1174,7 @@ export function installDebate(ctx) {
     // The cast as the opening names it: alias (service model · model group) — no time yet (§13).
     const roster = debaters.map((id) => { const c = colOf(id); const m = metaLine({ label: ctx.colLabel(c), tierKey: tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) }, t); return m ? `${nameOf(id)} (${m})` : nameOf(id); });
     const stanceLines = [...stances.entries()].filter(([, k]) => k).map(([id, k]) => `- ${nameOf(id)} (${ctx.colLabel(colOf(id))}): ${t(k)}`);
-    const opening = { t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone };
+    const opening = { t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone, length: d.length };
     const text = openingPrompt(opening);
     // Each debater's own copy names it and its position (#1815); `text` stays the generic one.
     const texts = Object.fromEntries(debaters.map((id) => [id, openingPrompt({ ...opening, self: { name: nameOf(id), stanceKey: stances.get(id) } })]));
@@ -1138,9 +1262,27 @@ export function installDebate(ctx) {
           // 🔴 Words the user sent while the moderator was answering outrank its END (Codex 1R
           // blocker): ending here would strand them in the queue, never delivered.
           const pick = chooseAfterModerator({ control, candidates: candidates(), order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke, numbered: cur.numbered, canEnd: cur.wrapUp ? moderatorMayEnd({ turnsUsed: Infinity, minTurns: 0, queued: d.queue.length }) : mayEnd(d, cur.seq), canAsk: mayAsk(d, cur) });
-          if (pick.ask) { d.asks += 1; d.phase = PHASE_ASKED; renderBar(); track('debate_ask', { turns: d.turnsUsed, asks: d.asks }); return false; }
+          if (pick.ask) {
+            d.asks += 1;
+            d.phase = PHASE_ASKED;
+            markAsked(turn);
+            renderBar();
+            track('debate_ask', { turns: d.turnsUsed, asks: d.asks });
+            // #1852: the answer box says what it is for (updateControls → placeholder), the question
+            // is brought into view and the cursor waits in the box.
+            follow(true);
+            ctx.updateControls();
+            // Never taken from a field the user is typing in (1R #1): the cursor moves only from nowhere.
+            const box = ctx.doc && ctx.doc.getElementById('cmp-followup-input');
+            const active = ctx.doc && ctx.doc.activeElement;
+            const typing = !!active && active !== box && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+            if (box && ctx.focusQuietly && !typing) ctx.focusQuietly(box);
+            return false;
+          }
           if (pick.end) { if (entry) entry.conclusion = true; markConclusion(turn); d.phase = PHASE_DONE; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
           d.pendingNext = pick.id;
+          // 「NEXT: n LONG」: that speaker may answer at length this once (#1862).
+          d.longFor = pick.long && pick.id ? pick.id : null;
           if (pick.fallback && turn && turn.debateHead) turn.debateHead.appendChild(el('span', 'cmp-debate-badge is-auto', t('debate_auto_pick')));
         } else {
           d.modFails += 1;
@@ -1248,12 +1390,14 @@ export function installDebate(ctx) {
     const step = budgetStep({ used: d.sendsUsed, budget: d.sendBudget, aiModerator: d.modKind === MOD_AI && !!d.modCol, wrapUpDone: d.wrapUpDone, forced: !!(d.forced && d.eligible.has(d.forced)) });
     if (step === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); renderBar(); return; }
     d.phase = PHASE_SPEAKING;
-    if (step === 'wrapup') { d.forced = null; d.pendingNext = null; d.wrapUpDone = true; moderate(true); return; }
+    // A LONG grant belongs to the owed turn it came with — dropped whenever that turn is (2R #1).
+    if (step === 'wrapup') { d.forced = null; d.pendingNext = null; d.longFor = null; d.wrapUpDone = true; moderate(true); return; }
     // The user's pick goes first; the debater the moderator had just asked stays owed the floor (#1817 ③).
     if (d.forced && d.eligible.has(d.forced)) { const id = d.forced; d.forced = null; d.pendingNext = owedAfterForced(d.pendingNext, id); speak(id); return; }
     d.forced = null;
     if (d.pendingNext && d.eligible.has(d.pendingNext) && d.pendingNext !== d.prev) { const id = d.pendingNext; d.pendingNext = null; speak(id); return; }
     d.pendingNext = null;
+    d.longFor = null;
     if (d.modKind === MOD_USER) { d.phase = PHASE_AWAIT; renderBar(); return; }
     if (d.modKind === MOD_AI && d.modCol) { moderate(); return; }
     const id = autoNext({ order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke });
@@ -1270,7 +1414,11 @@ export function installDebate(ctx) {
   function speak(id) {
     const d = state.debate;
     const { delta, covered } = pendingFor(id);
-    const text = turnPrompt({ t, selfName: nameOf(id), stanceKey: d.stances.get(id), delta, instruction: null, firstReply: !d.firstReplied.has(id), tone: d.tone });
+    // A longer turn this once (#1862): the moderator's LONG for this speaker — spent only by the turn it is
+    // for (1R #2: the user's pick speaking first kept A's grant for A). A user's 「자세히」 the debater reads itself.
+    const long = d.longFor === id;
+    if (long) d.longFor = null;
+    const text = turnPrompt({ t, selfName: nameOf(id), stanceKey: d.stances.get(id), delta, instruction: null, firstReply: !d.firstReplied.has(id), tone: d.tone, length: d.length, long });
     d.seq += 1;
     d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_PARTICIPANT, name: nameOf(id), text: '', pending: true });
     d.current = { kind: PHASE_SPEAKING, col: id, seq: d.seq, covered };
@@ -1298,7 +1446,8 @@ export function installDebate(ctx) {
     const { delta, covered } = pendingFor(id);
     const order = d.debaters.filter((x) => d.eligible.has(x));
     const names = order.map(nameOf);
-    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: mayEnd(d), tone: d.tone, wrapUp, freeStance: d.stance === STANCE_NONE, pace: d.pace, canAsk: mayAsk(d, { wrapUp }) });
+    const services = order.map((x) => { const c = colOf(x); return c && PROVIDER_META[c.provider] ? PROVIDER_META[c.provider].label : ''; });
+    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: mayEnd(d), tone: d.tone, wrapUp, freeStance: d.stance === STANCE_NONE, pace: d.pace, canAsk: mayAsk(d, { wrapUp }), services, length: d.length });
     d.seq += 1;
     d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_MODERATOR, name: nameOf(id), text: '', pending: true });
     // The PHASE stays 「speaking」 (the debate is running); what is in flight is `current.kind` — a
@@ -1421,6 +1570,9 @@ export function installDebate(ctx) {
     // While it runs, how much of this run's send budget is used (plan §15 — the debate goes on by itself).
     if (running && d.sendsUsed) status = [status, t('debate_status_sends', d.sendsUsed, d.sendBudget)].filter(Boolean).join(' \u00B7 ');
     barStatus.textContent = status;
+    // The answer box's wording follows the phase wherever it changes (1R #2: ▶ 계속 with no compares
+    // left went asked → paused without a controls pass, and 「진행자 질문에 답하기…」 stayed).
+    if (typeof ctx.syncComposerPlaceholders === 'function') ctx.syncComposerPlaceholders();
     pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t('debate_resume');
     pauseBtn.disabled = d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
     pauseBtn.hidden = d.phase === PHASE_AWAIT;
@@ -1447,7 +1599,8 @@ export function installDebate(ctx) {
     const aliases = {};
     for (const [id, info] of d.names) if (info && info.custom) aliases[id] = info.name;
     return {
-      debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, stance: d.stance, pace: d.pace, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
+      // 🔎 verifier: written as 'none' + vf so an older reader keeps the entry (see readDebateRecord).
+      debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, stance: d.stance === STANCE_VERIFY ? STANCE_NONE : d.stance, ...(d.stance === STANCE_VERIFY ? { vf: true } : {}), pace: d.pace, length: d.length, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
       log: trimRecordLog(log, d.delivered, DEBATE_RECORD_LOG_MAX), dl: Object.fromEntries(d.delivered), prev: d.prev, fr: [...d.firstReplied], el: [...d.eligible],
       turns: d.turnsUsed, modStarted: d.modStarted, ...(d.phase === PHASE_DONE ? { done: true } : {}),
     };
@@ -1467,7 +1620,7 @@ export function installDebate(ctx) {
     // An entry from before records has no aliases of its own: today's are the best guess.
     const { names } = castNames(cast, (id) => (record.legacy ? state.aliases[id] : record.aliases[id]));
     state.debate = {
-      topic: state.question, debaters: record.debaters.slice(), modCol: record.modCol, names, stances: stancesOf(record.debaters, record.stance), stance: record.stance, pace: record.pace, asks: 0,
+      topic: state.question, debaters: record.debaters.slice(), modCol: record.modCol, names, stances: stancesOf(record.debaters, record.stance), stance: record.stance, pace: record.pace, length: record.length, asks: 0, longFor: null,
       // A restore's 「계속」 is a new run (#1842); its turn count starts where the record left off (1R).
       run: ctx.clock.now(), userMsgs: 0, restored: true, reported: null, reportSeq: 0, turnsAtRun: record.turns,
       modKind: record.modKind,
@@ -1600,7 +1753,7 @@ export function installDebate(ctx) {
     d.reportSeq += 1;
     const modC = d.modKind === MOD_AI && d.modCol ? colOf(d.modCol) : null;
     track('debate_finish', {
-      outcome, pace: d.pace, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, n: d.debaters.length,
+      outcome, pace: d.pace, length: d.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, n: d.debaters.length,
       turns: Math.max(0, d.turnsUsed - d.turnsAtRun), sends: d.sendsUsed, user_msgs: d.userMsgs, asks: d.asks,
       elapsed_s: Math.max(0, Math.round((ctx.clock.now() - d.run) / 1000)), restored: !!d.restored,
       ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {}),
@@ -1610,6 +1763,8 @@ export function installDebate(ctx) {
   /** 새 대화 / a history load: the debate (if any) is over; the page is the columns again. */
   function reset() {
     reportFinish('left');
+    for (const o of foldObservers) o.disconnect();
+    foldObservers.clear();
     state.debate = null;
     ctx.root.classList.remove(DEBATE_CLASS);
     timeline.hidden = true;
@@ -1623,7 +1778,7 @@ export function installDebate(ctx) {
 
   Object.assign(ctx, {
     debateReveal: reveal,
-    debateOn, debateActive, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
+    debateOn, debateActive, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
     debateStart: start, debateRoundRefused: onRoundRefused, debateRoundSettled: onRoundSettled, debateUserMessage: userMessage,
     debatePause: pause, debateResume: resume, debatePick: pick, renderDebateBar: renderBar, debateReset: reset,
     debateSnapshot: snapshot, debateMarkdown: markdown, debateRestoreBegin: restoreBegin, debateRestoreFinish: restoreFinish,

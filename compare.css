@@ -817,7 +817,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-col-cast .cmp-debate-alias-input { width: 11em; height: 28px; font-size: 14px; }
 .cmp-col-cast .cmp-debate-ava-badge { box-shadow: 0 0 0 2px var(--bg-card); }
 .cmp-col-cast .cmp-debate-ava-badge.is-word { box-shadow: inset 0 0 0 1.5px var(--brand-chatgpt), 0 0 0 2px var(--bg-card); }
-.cmp-col-cast .cmp-debate-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.cmp-col-cast .cmp-debate-badge.is-warn { background: var(--warn-bg); color: var(--warn); cursor: help; }
+.cmp-debate-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--accent-light); color: var(--accent); font-size: 11px; font-weight: 650; white-space: nowrap; }
 /* The side a debater will take (찬성 / 반대 / 반론 담당), previewed before the start (plan §19). */
 .cmp-col-cast .cmp-debate-badge.is-stance { background: var(--bg-subtle); color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--border); }
 .cmp-debate-err { margin: 0; font-size: 12.5px; color: var(--danger); }
@@ -843,6 +844,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-room-line, .cmp-debate-divider { font-size: 11.5px; color: var(--debate-notice-fg); background: var(--debate-notice-bg); border-radius: 16px; padding: 4px 12px; }
 .cmp-debate-divider { display: table; }
 /* The 「결론」 card's divider (#1817 ②): the bubble's colours, framed in the accent, so the end stands out. */
+.cmp-debate-divider.is-ask { font-weight: 700; color: var(--debate-bubble-fg); background: var(--debate-bubble-bg); border: 1.5px dashed var(--accent); }
 .cmp-debate-divider.is-conclusion { font-weight: 700; color: var(--debate-bubble-fg); background: var(--debate-bubble-bg); border: 1.5px solid var(--accent); }
 
 /* Avatars: a squircle profile tile — the model's emoji on the service tint, the service mark as a
@@ -892,6 +894,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-msg.is-typing > .cmp-turn-assistant > * { display: none; }
 .cmp-debate-msg.is-typing > .cmp-turn-assistant { font-size: 0; min-height: 34px; min-width: 56px; }
 .cmp-debate-msg.is-typing > .cmp-turn-assistant::after { content: ''; position: absolute; left: 14px; top: 14px; width: 6px; height: 6px; border-radius: 50%; animation: cmp-typing 1.2s infinite; }
+/* #1854: 「🔍 웹 검색 중 · N회」 beside the dots while a turn searches — the bubble widens once, the count is tabular. */
+/* `::before` is also the bubble's tail (absolute, bordered) — the note takes it back into the flow while it shows. */
+.cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note] { min-width: max-content; overflow: visible; }
+.cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note]::before { content: attr(data-typing-note); position: static; border: 0; display: inline-block; padding: 0 2px 0 40px; font-size: 12px; line-height: 18px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; animation: cmp-fade-in .2s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note]::before { animation: none; } }
 @keyframes cmp-typing {
   0%, 100% { background: var(--text-secondary); box-shadow: 10px 0 var(--border-strong), 20px 0 var(--border-strong); }
   33% { background: var(--border-strong); box-shadow: 10px 0 var(--text-secondary), 20px 0 var(--border-strong); }
@@ -901,6 +908,10 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-msg.is-revealed > .cmp-turn-assistant { animation: cmp-pop .22s ease-out both; }
 @keyframes cmp-pop { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
 /* The copy control: the icon only (accessible name kept), always visible once settled. */
+/* #1862: a long debater turn folds (its max-height set inline, by reply length) with a fade; 「더 보기」 sits in the copy row. */
+.cmp-debate-msg.is-folded > .cmp-turn-assistant { overflow: hidden; -webkit-mask-image: linear-gradient(#000 72%, transparent); mask-image: linear-gradient(#000 72%, transparent); }
+.cmp-debate-msg > .cmp-debate-more { grid-area: copy; justify-self: start; margin-left: 52px; height: 22px; padding: 0 8px; border: 1px solid var(--debate-room-fg); border-radius: var(--radius-pill); background: transparent; color: var(--debate-room-fg); font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+.cmp-debate-msg > .cmp-debate-more:hover { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); }
 .cmp-debate-msg > .cmp-copy { width: 22px; height: 22px; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--debate-room-fg); }
 .cmp-debate-msg > .cmp-copy .cmp-copy-label { display: none; }
 /* The moderator: a centred notice — no avatar, a small head, the pill carries the words. */
@@ -911,6 +922,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-msg.is-moderator > .cmp-turn-assistant::before { display: none; }
 .cmp-debate-msg.is-moderator > .cmp-copy { justify-self: center; }
 .cmp-debate-msg.is-moderator .cmp-debate-badge { background: var(--debate-notice-bg); color: var(--debate-notice-fg); }
+.cmp-debate-msg.is-moderator.is-ask > .cmp-turn-assistant { border: 2px dashed var(--accent); }
 .cmp-debate-msg.is-moderator.is-conclusion > .cmp-turn-assistant { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); border: 2px solid var(--accent); font-size: 14px; }
 
 /* The user's words: right, yellow bubble with its tail, the time on its left. */
@@ -969,7 +981,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 @media (prefers-reduced-motion: reduce) { .cmp-btn-share.is-nudge { animation: none; } }
 /* Folded (narrow): 공유하기 sits on the title line, pushed right, just before 「⋯」. */
 .cmp-topbar.is-folded > .cmp-btn-share { margin-left: auto; padding: 0 9px; }
-.cmp-topbar.is-folded > .cmp-btn-share > .cmp-share-label { display: none; } /* the glyph only — the title line also holds the tabs */
+.cmp-topbar.is-folded > .cmp-btn-share > .cmp-share-btn-label { display: none; } /* the glyph only — the title line also holds the tabs */
 .cmp-topbar.is-folded > .cmp-btn-share + .cmp-more { margin-left: 8px; }
 .cmp-history-shared { display: inline-flex; align-items: center; color: var(--text-secondary); }
 .cmp-history-shared > .cmp-link-icon { width: 12px; height: 12px; }

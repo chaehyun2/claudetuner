@@ -109,8 +109,19 @@ export const SHARE_AUTHOR_ANON = 'anon';
 export const SHARE_AUTHOR_NAME = 'name';
 export const SHARE_AUTHOR_NAME_PHOTO = 'name_photo';
 export const SHARE_AUTHOR_MODES = [SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO];
-/** chrome.storage.local: the author choice to preselect next time (plan §10.2 — anonymous until changed). */
-export const SHARE_AUTHOR_PREF_KEY = 'ct_cmp_share_author';
+/**
+ * Who a new public share shows as until the user picks otherwise: name + profile photo (2026-09-28 user
+ * decision — was anonymous, plan §10.2). A private (password) share is anonymous regardless.
+ */
+export const SHARE_AUTHOR_DEFAULT = SHARE_AUTHOR_NAME_PHOTO;
+/**
+ * chrome.storage.local: the author the USER picked (popover / dialog) — written only on an explicit choice.
+ * `_v2`: the old key held whatever the last share used, the old anonymous default included, so it cannot
+ * tell a choice from a default; it is ignored, and everyone starts from SHARE_AUTHOR_DEFAULT (2026-09-28).
+ */
+export const SHARE_AUTHOR_PREF_KEY = 'ct_cmp_share_author_v2';
+/** The old key — read only to keep an EXISTING link's author as it was re-shared before (share.js authorFor). */
+export const SHARE_AUTHOR_PREF_KEY_V1 = 'ct_cmp_share_author';
 /**
  * chrome.storage.local: this browser's shares, `{ [sessionId]: {id, title, updatedAt, kind} }` — what
  * turns the dialog into 「업데이트 / 삭제」 for a conversation already shared and puts 🔗 on its
@@ -337,6 +348,11 @@ export const ACTIVITY_THINKING = 'thinking';
 export const ACTIVITY_TOOL_USE = 'tool_use';
 export const ACTIVITY_TOOL_RESULT = 'tool_result';
 export const ACTIVITY_TOOL_WEB_SEARCH = 'web_search';
+/**
+ * Is this ACTIVITY tool a web search (#1854)? Claude names it `web_search`; ChatGPT's call arrives by its
+ * recipient — `web`, or `web.run` (the package passes the site's own names through).
+ */
+export const isWebSearchTool = (name) => name === ACTIVITY_TOOL_WEB_SEARCH || name === 'web' || (typeof name === 'string' && name.startsWith('web.'));
 // Local history (2026-09-18, user request): the last HISTORY_MAX kept sessions — question, every
 // column's turns and its continuation — in chrome.storage.local under HISTORY_KEY, so a session can
 // be reopened later and, when its continuations survive, continued (the resume path). Incognito

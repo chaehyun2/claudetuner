@@ -4,7 +4,7 @@
 // as they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract
 // is written up in history.js.
 
-import { ACTIVITY_THINKING, ACTIVITY_TOOL_USE, ACTIVITY_TOOL_RESULT, ACTIVITY_TOOL_WEB_SEARCH, MS_PER_SECOND } from './constants.js';
+import { ACTIVITY_THINKING, ACTIVITY_TOOL_USE, ACTIVITY_TOOL_RESULT, ACTIVITY_TOOL_WEB_SEARCH, MS_PER_SECOND, isWebSearchTool } from './constants.js';
 
 /** Installs the activity-panel slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installActivity(ctx) {
@@ -60,7 +60,14 @@ export function installActivity(ctx) {
       a.list.appendChild(item);
       // `has-search`: the debate chat shows the panel only for a turn that searched (compare.css) —
       // a search is the evidence behind a claim; thinking alone is the AI's notes on its role and tone.
-      if (kind === ACTIVITY_TOOL_USE) { a.searches++; a.box.classList.add('has-search'); }
+      // WEB searches only (#1854 1R/2R): ChatGPT's image_gen is a tool call too — counted, it read
+      // 「검색 1회」 in the panel and 「웹 검색 중」 in the debate. One count for the panel line, the
+      // debate's 「searched」 panel and the typing note (debate.js onSearch).
+      if (kind === ACTIVITY_TOOL_USE && isWebSearchTool(msg.name)) {
+        a.searches++;
+        a.box.classList.add('has-search');
+        if (typeof a.onSearch === 'function') a.onSearch(a.searches);
+      }
     }
     if (kind === ACTIVITY_THINKING) {
       // Deltas append (the SW forwards the client's throttled slices); a final with text is the tail.
