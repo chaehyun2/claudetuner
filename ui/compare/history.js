@@ -209,7 +209,7 @@ export function installHistory(ctx) {
       const sm = turn.summary;
       return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })) } };
     }
-    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.errorText && turn.openTabLink ? { openTab: true } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
   }
   /** The attachment MARKER a turn keeps — name (clipped) and size. Never the image; see HISTORY_ATTACH_NAME_MAX. */
   function storedImg(img) {
@@ -602,6 +602,7 @@ export function installHistory(ctx) {
         if (turn.kind !== undefined && typeof turn.kind !== 'string') return null;
         if (turn.stalled !== undefined && typeof turn.stalled !== 'boolean') return null; // #1519, additive: absent on older entries
         if (turn.cutError !== undefined && typeof turn.cutError !== 'boolean') return null; // #1527, same rule — typed like its sibling, not silently dropped
+        if (turn.openTab !== undefined && typeof turn.openTab !== 'boolean') return null; // no_tab's inline link, additive: absent on older entries
         const round = int(turn.round);
         const text = str(turn.text);
         const errorText = str(turn.errorText);
@@ -621,7 +622,7 @@ export function installHistory(ctx) {
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
         const k = kind === TURN_KIND_DEBATE ? kind : kind && (turn.role === 'assistant' || summary) ? kind : null;
-        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
+        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(errorText && turn.openTab === true ? { openTab: true } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
     }
@@ -787,7 +788,7 @@ export function installHistory(ctx) {
   function restoreAssistantTurn(col, stored, kind = null, extra = null) {
     const turn = ctx.pushAssistantTurn(col, kind, extra);
     turn.text = String(stored.text || '');
-    if (stored.errorText) { turn.errorText = String(stored.errorText); turn.node.classList.add('is-error'); }
+    if (stored.errorText) { turn.errorText = String(stored.errorText); turn.node.classList.add('is-error'); if (stored.openTab === true) turn.openTabLink = true; }
     if (stored.stalled === true) turn.stalled = true;
     if (stored.cutError === true) turn.cutError = true;
     if (stored.images) ctx.restoreOutputImages(turn, stored.images);

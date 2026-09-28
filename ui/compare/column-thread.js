@@ -5,7 +5,7 @@
 // pair and the error copy. Bodies are exactly as they were in compare.js
 // (test/mutants/compare-page.json anchors on them). The ctx contract is written up in history.js.
 
-import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
+import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, CODE_IN_BAND_ERROR, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { retryNeedsAttachment } from './attachments.js';
 import { imageIdsOf } from './image-store.js';
@@ -14,7 +14,7 @@ import { COMPARE_I18N } from '../compare-i18n.js';
 
 /** Installs the column-thread slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installColumnThread(ctx) {
-  const { doc, state, t, raf, el, clear, track } = ctx;
+  const { doc, state, t, raf, el, clear, link, track } = ctx;
   /** Re-render the assistant turn from the accumulated text (throttled to one paint per frame). */
   function scheduleRender(col) {
     if (col.renderScheduled) return;
@@ -99,6 +99,16 @@ export function installColumnThread(ctx) {
       if (turn.errorTitle) line.title = turn.errorTitle;
       turn.node.appendChild(line);
       turn.errorLine = line; // the ticker rewrites this node's text while a reset countdown runs
+      // A lost tab (no_tab, any reason) carries its own 「<Provider> 탭 열기」 link under the line —
+      // in the turn node, so the debate timeline shows it too (the column's action row is hidden
+      // there). Its own node, not inside `line`: the ticker rewrites that node's text. Built with
+      // createElement/setAttribute only (ctx's link helper); href is the provider's fixed site.
+      if (turn.openTabLink) {
+        const meta = PROVIDER_META[col.provider];
+        const wrap = el('p', 'cmp-col-error-link');
+        wrap.appendChild(link(meta.site, t('open_provider_tab', meta.label), 'cmp-open-tab-inline'));
+        turn.node.appendChild(wrap);
+      }
     }
     if (turn.stalled) turn.node.appendChild(el('p', 'cmp-col-stalled', cutNote(turn)));
     maybeFollowStream(col, turn);
@@ -310,7 +320,11 @@ export function installColumnThread(ctx) {
     col.actionHint.hidden = col.permBtn.hidden;
     if (col.permBtn.hidden) col.actionHint.textContent = '';
     // The open-tab link: 「탭 열기」 for a lost tab, 「탭에서 확인」 for a limit the site itself explains.
-    col.openTab.hidden = !(errored && (code === CODE_NO_TAB || busy));
+    // A no_tab whose error turn is still the column's last one carries the link inline (paintAssistant),
+    // so the row does not repeat it; after a readiness rollback popped that turn the row's link is back.
+    const last = col.turns[col.turns.length - 1];
+    const inlineTabLink = code === CODE_NO_TAB && !!last && last.role === 'assistant' && last.openTabLink === true;
+    col.openTab.hidden = !(errored && ((code === CODE_NO_TAB && !inlineTabLink) || busy));
     col.openTab.textContent = t(busy ? 'open_provider_check' : 'open_provider_tab', meta.label);
     // Only when the built picker HAS an Auto option (Codex batch-1 #1): ChatGPT's catalog has no
     // `id:null` entry, so "switch to Auto" would select nothing there and a later MODELS refresh
@@ -519,9 +533,11 @@ export function installColumnThread(ctx) {
     ctx.setBadge(col, null, '');
   }
 
-  function errorText(provider, code, reason, budgetMs) {
+  function errorText(provider, code, reason, budgetMs, inBandCode) {
     const label = PROVIDER_META[provider].label;
     if (code === CODE_RATE_LIMITED) return t(PROVIDER_RATE_LIMIT_KEY, label);
+    // The server's own number, when the SW could lift one (ERROR.inBandCode); '?' otherwise.
+    if (code === CODE_IN_BAND_ERROR) return t('err_in_band_error', label, Number.isInteger(inBandCode) ? inBandCode : '?');
     // The timeout names the budget the SW actually applied (ERROR.budgetMs), in whole minutes.
     if (code === CODE_TIMEOUT) return t('err_timeout', Math.max(1, Math.round((Number.isFinite(budgetMs) && budgetMs > 0 ? budgetMs : DEFAULT_SEND_BUDGET_MS) / MS_PER_MINUTE)));
     // Reason-specific copy first (err_no_tab_load_timeout → "click the tab to wake it"), then the

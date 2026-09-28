@@ -259,6 +259,15 @@ export const PROVIDER_SEND_TIMEOUT_MS = 10 * 60 * 1000;
 // page script's fetch is cancelled, no dangling request in the tab) and posts DONE{stalled:true}
 // with the text it streamed — not ERROR: the user has the answer. Other columns are untouched.
 export const STREAM_STALL_MS = 60 * 1000;
+// …but Gemini's own streams pause far longer mid-answer (live 2026-09-29, #1521: text gaps of
+// 31–34 s, keepalive envelopes that carry no text every 60 s), and cutting a Gemini turn is not
+// free: gemini.google.com DISCARDS a turn the client aborts (live run S/AB), so a merely slow
+// answer cut here is lost for good (vendor-ai v0.20.0 then continues from the last answered
+// turn instead of the discarded one). So Gemini's plain watchdog is this. The keepalives are NOT
+// used to re-arm it on purpose: a turn whose answer is complete but whose body stays open (#1519;
+// the site's own turn stayed open 220 s after its answer) keeps sending them, and re-arming on
+// them would leave that case only the 10-minute budget.
+export const GEMINI_STREAM_STALL_MS = 150 * 1000;
 // …stretched to this once the client says a picture is coming (STAGE_IMAGE_PENDING, #1684), for the
 // REST OF THAT SEND — not only until the first image: Gemini fetches its images one after another
 // (up to 90 s each) after a single image_pending, so dropping back to STREAM_STALL_MS at the first
@@ -1348,12 +1357,21 @@ function stripStreamHead(detail) {
   const at = detail.indexOf(ERROR_DETAIL_HEAD_MARKER);
   return at < 0 ? detail : detail.slice(0, at);
 }
+// Gemini `in_band_error` (vendor-ai v0.20.0): the server's numeric code rides only in the
+// package's message (`… in-band code <n>`), so it is lifted here into a number the page can put
+// in its copy — the page never parses prose. Absent when the message does not carry one.
+export const IN_BAND_ERROR_CODE = 'in_band_error';
+const IN_BAND_CODE_RE = /in-band code (\d{1,9})\b/;
 function errorExtras(e) {
   const out = {};
   if (typeof e?.reason === 'string' && e.reason) out.reason = e.reason;
   const raw = typeof e?.message === 'string' ? e.message : (e == null ? '' : String(e));
   const detail = stripStreamHead(raw);
   if (detail) out.detail = detail;
+  if (e?.code === IN_BAND_ERROR_CODE) {
+    const m = IN_BAND_CODE_RE.exec(raw);
+    if (m) out.inBandCode = Number(m[1]);
+  }
   if (typeof e?.diag === 'string' && e.diag) out.diag = e.diag.slice(0, ERROR_DIAG_MAX);
   return out;
 }
@@ -1550,6 +1568,7 @@ function fetchWithDeadline(fetchImpl, url, ms, handle) {
  * @param {Function} [deps.now] — defaults to Date.now
  * @param {number} [deps.sendTimeoutMs] — defaults to PROVIDER_SEND_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.streamStallMs] — defaults to STREAM_STALL_MS (tests shorten it)
+ * @param {number} [deps.geminiStreamStallMs] — defaults to GEMINI_STREAM_STALL_MS (tests shorten it)
  * @param {number} [deps.imageWaitStallMs] — defaults to IMAGE_WAIT_STALL_MS (tests shorten it)
  * @param {number} [deps.probeDisposeTimeoutMs] — defaults to PROBE_DISPOSE_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.listModelsTimeoutMs] — defaults to LIST_MODELS_TIMEOUT_MS (tests shorten it)
@@ -1583,6 +1602,7 @@ export function createCompareController({
   drainDelayMs = DRAIN_STARTUP_DELAY_MS,
   sendTimeoutMs = PROVIDER_SEND_TIMEOUT_MS,
   streamStallMs = STREAM_STALL_MS,
+  geminiStreamStallMs = GEMINI_STREAM_STALL_MS,
   imageWaitStallMs = IMAGE_WAIT_STALL_MS,
   linkReadTimeoutMs = LINK_READ_TIMEOUT_MS,
   probeDisposeTimeoutMs = PROBE_DISPOSE_TIMEOUT_MS,
@@ -2853,7 +2873,7 @@ export function createCompareController({
         lastInbound = now();
         clearTimeout(stallTimer);
         // Waiting on a picture: a longer silence is the provider drawing — but still a bounded one.
-        stallTimer = setTimeout(onStall, imageWait ? imageWaitStallMs : streamStallMs);
+        stallTimer = setTimeout(onStall, imageWait ? imageWaitStallMs : (provider === 'gemini' ? geminiStreamStallMs : streamStallMs));
       };
       // Re-arm only once text has started: an event before the first chunk is the thinking/readiness
       // phase, which has no stall clock.

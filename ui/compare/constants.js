@@ -321,6 +321,8 @@ export const CODE_AUTH_REQUIRED = 'auth_required';
 export const CODE_PERMISSION_REFUSED = 'permission_refused';
 export const CODE_MODEL_UNAVAILABLE = 'model_unavailable';
 export const CODE_OVERLOADED = 'overloaded';
+// Gemini (vendor-ai v0.20.0): an in-band code the package does not map; ERROR.inBandCode carries the number.
+export const CODE_IN_BAND_ERROR = 'in_band_error';
 export const GATE_CODES = new Set([CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED]);
 export const PROVIDER_BUSY_CODES = new Set([CODE_RATE_LIMITED, CODE_OVERLOADED]);
 // A 5h gauge at this utilisation explains a provider-side limit: the error line then carries the reset countdown.
@@ -468,7 +470,7 @@ export const WAIT_TICK_MS = 1000;
 export const WAIT_ELAPSED_SHOW_MS = 3000;
 export const MS_PER_SECOND = 1000;
 // ERROR also carries the client's machine-readable `reason` (package v0.2.3; today only no_tab has
-// one) and `detail` (the raw package message). Copy is looked up as err_<code>_<reason> when such a
+// one) and `detail` (the raw package message), and for `in_band_error` the numeric `inBandCode`. Copy is looked up as err_<code>_<reason> when such a
 // key exists, else err_<code>; the raw cause goes into the error line's `title` so hovering shows
 // what the client actually said (the SW console has the same line — bg/compare.js LOG_TAG).
 export const ERROR_TITLE_MAX = 300;

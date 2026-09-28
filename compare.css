@@ -438,6 +438,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-assistant { min-height: 1.6em; }
 .cmp-turn-assistant.is-skipped { color: var(--text-secondary); font-size: 13px; font-style: italic; }
 .cmp-turn-assistant .cmp-col-error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+.cmp-turn-assistant .cmp-col-error-link { font-size: 13px; margin-top: 4px; }
 /* A stalled answer (#1519): a muted note under what arrived; the badge keeps its done look, only the marker is muted. */
 .cmp-turn-assistant .cmp-col-stalled { color: var(--text-secondary); font-size: 12.5px; margin-top: 6px; }
 .cmp-col-badge .cmp-badge-stalled { color: var(--text-secondary); font-weight: 500; }

@@ -8,7 +8,7 @@
 // they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract is
 // written up in history.js.
 
-import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
+import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
 import { autoGrow, sendableTargets } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 import { linkErrorText } from './link.js';
@@ -279,7 +279,9 @@ export function installPort(ctx) {
         turn.node.classList.add('is-error');
         // Keep whatever streamed before the failure, then the reason underneath it (and the raw
         // cause in its title).
-        turn.errorText = ctx.errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs);
+        turn.errorText = ctx.errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs, msg.inBandCode);
+        // A lost tab gets a direct 「탭 열기」 link under its line (paintAssistant) — kept in history too.
+        turn.openTabLink = col.errorCode === CODE_NO_TAB;
         // C3: a provider-side limit with the 5h gauge full — the line also says when it resets.
         // The INSTANT is stored (never the relative string: it would freeze, and it would be
         // persisted into history); errorLineText() renders the countdown, the ticker keeps it current.

@@ -531,11 +531,17 @@ export const COMPARE_I18N = {
     // no_tab, by the client's `reason` (package v0.2.3): err_<code>_<reason>, looked up by compare.js
     // errorText() when present. Other reasons (closed_while_loading · not_found · open_not_allowed)
     // keep the generic line above.
-    err_no_tab_load_timeout: '{0} 탭이 30초 안에 로드되지 않았어요(로그인 문제가 아니에요) — 탭을 한 번 클릭해 깨운 뒤 다시 보내주세요',
+    err_no_tab_load_timeout: '{0} 탭이 30초 안에 로드되지 않았어요(로그인 문제가 아니에요) — 아래 링크로 {0}을(를) 연 뒤 다시 보내주세요',
     err_no_tab_changed_during_verify: '{0} 탭이 아직 준비 중이에요 — 다시 보내주세요',
     err_no_tab_discarded: '브라우저가 {0} 탭을 절전 상태로 내렸어요 — 다시 보내면 자동으로 깨워요',
     err_overloaded: '{0}이(가) 혼잡해요. 잠시 후 다시 시도해 주세요',
     err_empty_response: '빈 답변이 왔어요',
+    // Gemini (vendor-ai v0.20.0): the turn was still pending server-side when the stream ended — retryable.
+    err_queued: '{0}이(가) 아직 답을 끝내지 않았어요 — 다시 시도해 주세요',
+    // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; {1} = the number (ERROR.inBandCode).
+    err_in_band_error: '{0}이(가) 요청을 거절했어요 (코드 {1})',
+    // Gemini (vendor-ai v0.20.0, in-band 1097): the previous turn is still live server-side; the client already retried for up to 30 s.
+    err_previous_turn_pending: '{0}이(가) 이전 답변을 아직 마무리하는 중이에요 — 잠시 후 다시 시도해 주세요',
     // 첨부가 있는 라운드에서 업로드 경로가 없는 사이트의 열 (#1616 SW `unsupported`) — 차감되지 않는다.
     err_unsupported: '{0}은 아직 이미지를 받지 못해요',
     err_unknown: '알 수 없는 오류',
@@ -1143,11 +1149,14 @@ export const COMPARE_I18N = {
     consume_aborted: 'Stopped before the debit — this send was not counted.',
     err_http_error: '{0} server error',
     err_no_tab: 'Could not open a {0} tab',
-    err_no_tab_load_timeout: 'The {0} tab did not load within 30 seconds (not a sign-in problem) — click the tab once to wake it, then send again',
+    err_no_tab_load_timeout: 'The {0} tab did not load within 30 seconds (not a sign-in problem) — open {0} with the link below, then send again',
     err_no_tab_changed_during_verify: 'The {0} tab is still getting ready — send again',
     err_no_tab_discarded: 'The browser put the {0} tab to sleep — send again and it is woken automatically',
     err_overloaded: '{0} is overloaded. Please try again shortly',
     err_empty_response: 'Received an empty reply',
+    err_queued: "{0} hadn't finished answering yet — try again",
+    err_in_band_error: '{0} refused the request (code {1})',
+    err_previous_turn_pending: '{0} is still finishing its previous answer — try again in a moment',
     err_unsupported: '{0} cannot take images yet',
     err_unknown: 'Unknown error',
     err_compare_quota: 'You have used today\'s compares',
