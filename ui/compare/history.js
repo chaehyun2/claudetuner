@@ -18,12 +18,34 @@
 //     or a setter registered by its owner (ctx.bumpStatusEpoch).
 
 import { imageIdsOf } from './image-store.js';
+import { createEntryStore } from './history-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, HISTORY_ENTRY_MAX_BYTES, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { readDebateRecord, legacyDebateRecord } from './debate-core.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
+/**
+ * First thing cut when an entry is over its byte bound: a debate's COMPOSED PROMPTS (user turns of
+ * kind debate). They are never shown — the timeline is rebuilt from the answers and the record's log,
+ * and a continued debate goes on in the site's own conversation — yet each one carries the other
+ * speakers' words again, ~3× the answers. Cut them before a single answer is touched (2026-09-28 user:
+ * a long debate reopened from 「최근」 showed every answer cut to a few hundred chars, `…`). Halves
+ * their clip until `over()` is false, down to the same floor answers get (DEBATE_PROMPT_CLIP_MIN) —
+ * never to nothing: a debate opened as columns (the flag off) shows each request folded, and copies
+ * it (Codex 1R). Mutates `entry`.
+ */
+export function clipDebatePrompts(entry, over) {
+  let cap = HISTORY_TEXT_MAX;
+  while (cap > DEBATE_PROMPT_CLIP_MIN && over()) {
+    cap = Math.max(DEBATE_PROMPT_CLIP_MIN, Math.floor(cap / 2));
+    for (const c of Object.values(entry.columns || {})) {
+      for (const turn of c.turns || []) if (turn.role === 'user' && turn.kind === TURN_KIND_DEBATE && typeof turn.text === 'string' && turn.text.length > cap) turn.text = `${turn.text.slice(0, cap)}…`;
+    }
+  }
+}
+const DEBATE_PROMPT_CLIP_MIN = 200; // = fitEntry's floor for an answer
+
 export function installHistory(ctx) {
   const { chrome, deps, state, t, clock, nav, con, src, el, clear, dot, track } = ctx;
   // ── local history (recent sessions) ──
@@ -63,6 +85,10 @@ export function installHistory(ctx) {
   }
   let lastHistoryCount = 0; // from the last SUCCESSFUL read — what the button shows
   const lastErr = () => { try { return chrome && chrome.runtime ? chrome.runtime.lastError : null; } catch { return null; } };
+  // The entries themselves (#1877): IndexedDB, compressed — chrome.storage.local only as the fallback
+  // (and for an injected test storage, which keeps the old behaviour). `historyStorage` stays the
+  // page's chrome.storage.local for everything else (the share map).
+  const entryStore = deps.historyEntryStore || (deps.historyStorage ? createEntryStore({ storage: historyStorage, lastErr, idb: null }) : createEntryStore({ storage: historyStorage, lastErr }));
   /** Every stored entry (any key with the prefix), newest first; `ok:false` when the read failed. */
   function storageReadAll() {
     return new Promise((resolve) => {
@@ -85,41 +111,24 @@ export function installHistory(ctx) {
         list.sort((a, b) => b.updatedAt - a.updatedAt);
         resolve({ ok: true, list, keys, rejected });
       };
-      try {
-        const r = historyStorage.get(null, (v) => done(v, !!lastErr()));
-        if (r && typeof r.then === 'function') r.then((v) => done(v, false), () => done(null, true));
-      } catch { done(null, true); }
+      entryStore.getAll().then((r) => done(r.ok ? r.all : null, !r.ok), () => done(null, true));
     });
   }
   /** Re-read ONE key and say whether it still fails validation (true) — absent or valid = false. */
   function storageKeyInvalid(key) {
     return new Promise((resolve) => {
-      const done = (v, failed) => {
-        if (failed || !v || typeof v !== 'object' || !Object.hasOwn(v, key)) { resolve(false); return; }
+      const done = (r) => {
+        if (!r || !r.ok || r.value === undefined) { resolve(false); return; }
         let e = null;
-        try { e = normalizeEntry(v[key]); } catch { e = null; }
+        try { e = normalizeEntry(r.value); } catch { e = null; }
         resolve(e === null);
       };
-      try {
-        const r = historyStorage.get(key, (v) => done(v, !!lastErr()));
-        if (r && typeof r.then === 'function') r.then((v) => done(v, false), () => done(null, true));
-      } catch { done(null, true); }
+      entryStore.getOne(key).then(done, () => done(null));
     });
   }
   /** Write entries / remove keys; resolves true only when storage reported success. */
   function storageWrite(setObj, removeKeys) {
-    const call = (fn, arg) => new Promise((resolve) => {
-      try {
-        const r = fn(arg, () => resolve(!lastErr()));
-        if (r && typeof r.then === 'function') r.then(() => resolve(true), () => resolve(false));
-      } catch { resolve(false); }
-    });
-    return (async () => {
-      let ok = true;
-      if (removeKeys && removeKeys.length) ok = (await call((a, cb) => historyStorage.remove(a, cb), removeKeys)) && ok;
-      if (setObj && Object.keys(setObj).length) ok = (await call((a, cb) => historyStorage.set(a, cb), setObj)) && ok;
-      return ok;
-    })();
+    return entryStore.write(setObj, removeKeys).then((ok) => ok === true, () => false);
   }
   /**
    * One history operation under the chain: `mutate(list)` → `{ set?: {key: entry}, remove?: [key] }`
@@ -127,7 +136,7 @@ export function installHistory(ctx) {
    * from an empty read); the resolved list is re-read after a write so callers paint the truth.
    */
   function historyUpdate(mutate) {
-    if (!historyStorage) return Promise.resolve({ ok: false, list: [] });
+    if (!historyStorage || !entryStore) return Promise.resolve({ ok: false, list: [] });
     const step = historyChain.then(() => underHistoryLock(async () => {
       const read = await storageReadAll();
       if (!read.ok) return read;
@@ -215,7 +224,8 @@ export function installHistory(ctx) {
     };
   }
   /**
-   * Keep the COMPLETE persisted object under HISTORY_ENTRY_MAX_BYTES (6R #4: measured with
+   * Keep the COMPLETE persisted object under the store's bound (`entryStore.maxEntryBytes` —
+   * HISTORY_ENTRY_MAX_BYTES_IDB, or HISTORY_ENTRY_MAX_BYTES on the storage.local fallback; 6R #4: measured with
    * createdAt / activeRound / firstRound already on it) by halving the clip of what carries the
    * bulk — every answer, every attachment body inside a 「요약·비교」 request (the request's
    * structure — judge, question, fences, tail — is never touched; a cut attachment is marked
@@ -229,7 +239,8 @@ export function installHistory(ctx) {
    */
   const jsonBytes = (v) => { const str = JSON.stringify(v); try { return new TextEncoder().encode(str).length; } catch { return str.length * 3; } };
   function fitEntry(entry) {
-    const over = () => jsonBytes(entry) > HISTORY_ENTRY_MAX_BYTES;
+    const over = () => jsonBytes(entry) > entryStore.maxEntryBytes;
+    clipDebatePrompts(entry, over);
     let cap = HISTORY_TEXT_MAX;
     for (let i = 0; i < 12 && over(); i++) {
       cap = Math.max(200, Math.floor(cap / 2));

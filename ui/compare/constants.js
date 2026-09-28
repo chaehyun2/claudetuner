@@ -375,6 +375,15 @@ export const HISTORY_TEXT_MAX = 60000;
 // ~3 bytes per char) by clipping its answers further (Codex hist 1R #6: 20 × 3 × 60k Korean chars
 // serialised past the 10 MiB storage.local quota).
 export const HISTORY_ENTRY_MAX_BYTES = 200000;
+// #1877 (2026-09-28): entries live in IndexedDB, deflate-compressed (ui/compare/history-store.js) —
+// the cap above stays for the chrome.storage.local fallback. A 300-turn debate is ~2 MB of JSON with
+// its composed prompts (~540 KB of answers alone); compressed ~1/2 (answers) to ~1/6 (prompts).
+export const HISTORY_ENTRY_MAX_BYTES_IDB = 8000000;
+export const HISTORY_DB_NAME = 'ctcmp-history';
+export const HISTORY_DB_VERSION = 1;
+// Set in chrome.storage.local once a page moved the entries to IndexedDB — after that storage.local is
+// never read as the history (an IndexedDB that will not open is an error, not an empty history).
+export const HISTORY_STORE_MARK_KEY = 'compareHistoryStore';
 // Column metadata bounds (Codex 6R #4): a continuation is a handful of short ids (the SW's own
 // RESUME_* caps); anything larger is not one and is dropped (the column loads read-only).
 export const CONTINUATION_MAX_KEYS = 8;
@@ -422,10 +431,12 @@ export const TURN_KIND_SUMMARY = 'summary';
 export const TURN_KIND_DEBATE = 'debate';
 // The debate runs on by itself (plan §15 — no 「▶ 계속」 every few turns). Its safeguards: at most
 // DEBATE_SEND_BUDGET counted sends per run (opening + turns + moderator calls — each is one compare
-// and one request on the user's own AI account; 「▶ 계속」 buys another budget), and a pause before the
+// and one request on the user's own AI account). A spent budget never ends the run by itself: it stops
+// and ASKS — 「늘려서 계속」 buys another budget, 「결론 내기」 has the AI moderator conclude (2026-09-28 user:
+// the automatic wrap-up cut off a debater the moderator had just asked). And a pause before the
 // next send once the tab has been hidden for DEBATE_HIDDEN_PAUSE_MS. An AI moderator may only END
 // after DEBATE_MIN_TURNS_TO_END debater turns.
-export const DEBATE_SEND_BUDGET = 50;
+export const DEBATE_SEND_BUDGET = 50; // 2026-09-28 user: stays 50 now that a spent budget asks before going on
 export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
 // How often an AI moderator may stop the debate to ask the USER something (#1843) — one run's cap:

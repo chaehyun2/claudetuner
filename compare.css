@@ -278,6 +278,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    shown only while the reader is away from the end of a column that holds content (compare.js syncJumpButton). */
 .cmp-jump { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 2; height: 28px; padding: 0 12px; border-radius: var(--radius-pill); box-shadow: var(--shadow-card); font-size: 12px; }
 .cmp-jump[hidden] { display: none; }
+/* The debate's pill floats just above the sticky dock, over the timeline's end (2026-09-28). */
+.cmp-debate-jump { bottom: calc(100% + 22px); min-width: 36px; }
+.cmp-debate-jump.has-new { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); color: var(--btn-primary-fg); }
 .cmp-col[hidden] { display: none; }
 /* Head (item 12): two groups on a 30px control line — identity (dot · name → site · model pill ·
    plan) and tools (status badge · 대화 복사). At a 340px column the tools group wraps under the

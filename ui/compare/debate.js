@@ -836,12 +836,73 @@ export function installDebate(ctx) {
   bar.appendChild(barChips);
   bar.appendChild(barStatus);
   bar.appendChild(pauseBtn);
+  // Shown only at a spent budget with an AI moderator (renderBar) — the other answer to 「늘릴까요?」.
+  const concludeBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-conclude', t('debate_budget_conclude'));
+  concludeBtn.id = 'cmp-debate-conclude';
+  concludeBtn.type = 'button';
+  concludeBtn.hidden = true;
+  bar.appendChild(concludeBtn);
+  concludeBtn.addEventListener('click', () => concludeNow());
   pauseBtn.addEventListener('click', () => { if (!state.debate) return; if (isRunning() && !state.debate.pauseAfter) pause(true); else resume(); });
 
+  // Follow like a chat app (2026-09-28 user: 「ChatGPT처럼」): a reader who scrolled up stays where they
+  // are while new words arrive; a 「↓」 pill over the dock says there is more below and jumps there.
   let userFollow = true; // the reader is at (or near) the end of the timeline
-  timeline.addEventListener('scroll', () => {
+  let lastTop = 0;
+  let lastLayout = ''; // the timeline's own box (clientWidth × clientHeight) at the last scroll event
+  let unseen = false; // words arrived below while the reader was away
+  // The READER moved up (not the page — start() puts the room at its top by itself): only then does a
+  // new speaker leave the view alone.
+  let readerMoved = false;
+  let upSeq = 0; // bumps on every move up by the reader — a frame scheduled before one never scrolls
+  const jumpBtn = el('button', 'cmp-btn cmp-btn-sm cmp-jump cmp-debate-jump', t('debate_jump'));
+  jumpBtn.id = 'cmp-debate-jump';
+  jumpBtn.type = 'button';
+  jumpBtn.hidden = true;
+  jumpBtn.setAttribute('aria-label', t('debate_jump_aria'));
+  bar.appendChild(jumpBtn); // the dock is sticky: the pill floats just above it, over the timeline's end
+  const fromEnd = () => {
     const { scrollTop, clientHeight, scrollHeight } = timeline;
-    if ([scrollTop, clientHeight, scrollHeight].every(Number.isFinite)) userFollow = scrollHeight - (scrollTop + clientHeight) <= DEBATE_FOLLOW_PX;
+    return [scrollTop, clientHeight, scrollHeight].every(Number.isFinite) ? scrollHeight - (scrollTop + clientHeight) : null;
+  };
+  function syncJump() {
+    const f = fromEnd();
+    const away = !timeline.hidden && f !== null && f > DEBATE_FOLLOW_PX;
+    if (!away) unseen = false;
+    jumpBtn.hidden = !away;
+    jumpBtn.textContent = t(unseen ? 'debate_jump_new' : 'debate_jump');
+    jumpBtn.classList.toggle('has-new', unseen);
+  }
+  timeline.addEventListener('scroll', () => {
+    const top = timeline.scrollTop;
+    const f = fromEnd();
+    if (f === null) return;
+    // A move a RESIZE made (the box changes, the text re-wraps, scrollTop is clamped) is not the reader
+    // scrolling up. The box only — a stream grows scrollHeight all the time, and a scrollbar drag up
+    // during one must still count.
+    const layout = `${timeline.clientWidth}x${timeline.clientHeight}`;
+    const relaid = layout !== lastLayout;
+    lastLayout = layout;
+    // Up = the reader is reading (a stream that grows the page never moves scrollTop up); back
+    // at the end = follow again.
+    if (top < lastTop - 1 && !relaid) { userFollow = false; readerMoved = true; upSeq += 1; } else if (f <= DEBATE_FOLLOW_PX) { userFollow = true; readerMoved = false; }
+    lastTop = top;
+    syncJump();
+  });
+  // The intent, before its scroll lands: a paint scheduled in this frame must not pull the reader back
+  // (the old reader only learned from the scroll event — a small scroll up during a stream snapped back).
+  const readerUp = () => { userFollow = false; readerMoved = true; upSeq += 1; };
+  timeline.addEventListener('wheel', (e) => { if (e.deltaY < 0) readerUp(); }, { passive: true });
+  let touchY = null;
+  timeline.addEventListener('touchstart', (e) => { touchY = e.touches && e.touches[0] ? e.touches[0].clientY : null; }, { passive: true });
+  timeline.addEventListener('touchmove', (e) => { const y = e.touches && e.touches[0] ? e.touches[0].clientY : null; if (y !== null && touchY !== null && y > touchY) readerUp(); touchY = y; }, { passive: true });
+  timeline.addEventListener('keydown', (e) => { if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) readerUp(); });
+  jumpBtn.addEventListener('click', () => {
+    userFollow = true;
+    readerMoved = false;
+    unseen = false;
+    try { timeline.scrollTo({ top: timeline.scrollHeight, behavior: 'smooth' }); } catch { timeline.scrollTop = timeline.scrollHeight; }
+    syncJump();
   });
   // A resize fires no scroll: a narrower window re-wraps every bubble below a scrollTop that stays
   // put, so a reader who was at the end was left mid-conversation (#1819). Keep them at the end.
@@ -849,9 +910,16 @@ export function installDebate(ctx) {
   if (RO) new RO(() => { if (userFollow) timeline.scrollTop = timeline.scrollHeight; }).observe(timeline);
   /** Keep the newest words in view while the reader is at the end (`force`: a new turn started). */
   function follow(force = false) {
-    if (!force && !userFollow) return;
+    if (!force && !userFollow) { unseen = true; syncJump(); return; }
     if (force) userFollow = true;
-    ctx.raf(() => { timeline.scrollTop = timeline.scrollHeight; });
+    // Re-checked in the frame: the reader may have scrolled up after this was scheduled — then even a
+    // forced follow (a new speaker, the user's own message) stays put (Codex 1R: 400 → 1000).
+    const seq = upSeq;
+    ctx.raf(() => {
+      if (seq !== upSeq || (!force && !userFollow)) { unseen = true; syncJump(); return; }
+      timeline.scrollTop = timeline.scrollHeight;
+      syncJump();
+    });
   }
 
   /** Where a turn's DOM goes: the timeline in a debate session, the column body otherwise. */
@@ -897,10 +965,11 @@ export function installDebate(ctx) {
     if (isMod) turn.root.classList.add('is-moderator');
     turn.root.insertBefore(head, turn.root.firstChild);
     turn.root.insertBefore(ava, head);
-    // A new speaker brings the reader along — once, when it starts. Not during the opening: start()
-    // shows the room from the top so the topic stays in view (#1818 ⑩), and the bubbles filling in
-    // at the same time must not yank the view (plan §11.4 ⑤) — a reader already at the end is followed.
-    follow(d.phase !== PHASE_OPENING);
+    // A new speaker is followed only by a reader already at the end (2026-09-28 user: 「ChatGPT처럼」 —
+    // it used to pull everyone down at every turn; a reader scrolled up gets the 「↓ 새 발언」 pill).
+    // During the opening start() shows the room from the top (#1818 ⑩) and nothing pulls (§11.4 ⑤);
+    // the first speaker after it brings a reader who has not moved along.
+    follow(d.phase !== PHASE_OPENING && !readerMoved);
   }
   /**
    * #1854: 「🔍 웹 검색 중 · 3회」 beside the typing dots. Drawn by CSS from an attribute on the bubble
@@ -1122,7 +1191,7 @@ export function installDebate(ctx) {
   function reopen(d) {
     d.pauseAfter = false; // moving again cancels a 「멈춤」 still waiting for the turn in flight
     if (!STOPPED.includes(d.phase) || d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) return;
-    if (d.sendsUsed >= d.sendBudget) { d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET; d.wrapUpDone = false; }
+    if (d.sendsUsed >= d.sendBudget) d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET;
     hiddenSince = docHidden() ? ctx.clock.now() : null;
     d.phase = PHASE_SPEAKING;
   }
@@ -1149,7 +1218,7 @@ export function installDebate(ctx) {
       delivered: new Map(), lastSpoke: new Map(), prev: null,
       eligible: new Set(debaters), firstReplied: new Set(), modStarted: false, modFails: 0,
       phase: PHASE_OPENING, turnsUsed: 0,
-      sendsUsed: 1, sendBudget: DEBATE_SEND_BUDGET, wrapUpDone: false, // the opening is the first counted send
+      sendsUsed: 1, sendBudget: DEBATE_SEND_BUDGET, wrapNow: false, // the opening is the first counted send
       queue: [], forced: null, pendingNext: null, current: null, pauseAfter: false,
       openingGroup, topicBubble: null,
       tone: normalizeTone(state.debatePrefs.tone, state.debatePrefs.toneCustom),
@@ -1165,7 +1234,8 @@ export function installDebate(ctx) {
     // The room opens at its top — the cast line and the topic (#1818 ⑩); userBubble's pull to the end
     // is undone (its frame runs first), and the opening's bubbles do not pull (decorateTurn).
     userFollow = false;
-    ctx.raf(() => { timeline.scrollTop = 0; });
+    readerMoved = false;
+    ctx.raf(() => { lastTop = 0; timeline.scrollTop = 0; }); // lastTop first: this move up is the page's, not the reader's
     // The opening's slots are reserved in the cast's order (Codex D-risk 2): who finishes first
     // must not decide the order the others read them in.
     const slots = new Map();
@@ -1208,7 +1278,7 @@ export function installDebate(ctx) {
     d.transcript = d.transcript.filter((e) => e.seq !== d.current.seq);
     if (d.current.kind === PHASE_SPEAKING) d.turnsUsed = Math.max(0, d.turnsUsed - 1);
     d.sendsUsed = Math.max(1, d.sendsUsed - 1); // a refused round was never counted
-    if (d.current.wrapUp) d.wrapUpDone = false;
+    if (d.current.wrapUp) d.wrapNow = true; // 「결론 내기」 was refused: ▶ 계속 asks for the conclusion again
     if (d.current.kind === PHASE_SPEAKING && d.current.col) d.pendingNext = d.current.col; // the same speaker is still owed the floor
     d.current = null;
     d.phase = PHASE_PAUSED;
@@ -1268,9 +1338,10 @@ export function installDebate(ctx) {
             markAsked(turn);
             renderBar();
             track('debate_ask', { turns: d.turnsUsed, asks: d.asks });
-            // #1852: the answer box says what it is for (updateControls → placeholder), the question
-            // is brought into view and the cursor waits in the box.
-            follow(true);
+            // #1852: the answer box says what it is for (updateControls → placeholder) and the cursor
+            // waits in the box. The question comes into view like any new words — a reader scrolled up
+            // stays put and the 「↓」 pill lights (2026-09-28 user: no pull while reading).
+            follow();
             ctx.updateControls();
             // Never taken from a field the user is typing in (1R #1): the cursor moves only from nowhere.
             const box = ctx.doc && ctx.doc.getElementById('cmp-followup-input');
@@ -1387,11 +1458,17 @@ export function installDebate(ctx) {
     // The run's safeguards (plan §15.1): the tab hidden too long → wait for the user; the send budget
     // spent → stop; one send left with an AI moderator → it closes the debate.
     if (hiddenTooLong({ hidden: docHidden(), since: hiddenSince, now: ctx.clock.now(), limit: DEBATE_HIDDEN_PAUSE_MS })) { d.phase = PHASE_HIDDEN; track('debate_hidden_pause', { sends: d.sendsUsed }); renderBar(); return; }
-    const step = budgetStep({ used: d.sendsUsed, budget: d.sendBudget, aiModerator: d.modKind === MOD_AI && !!d.modCol, wrapUpDone: d.wrapUpDone, forced: !!(d.forced && d.eligible.has(d.forced)) });
-    if (step === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); renderBar(); return; }
+    // A spent budget stops and asks (renderBar: 「늘려서 계속」 / 「결론 내기」) — whoever is owed the floor
+    // (pendingNext, a LONG grant, the user's pick) is kept for 「늘려서 계속」.
+    if (budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); renderBar(); return; }
     d.phase = PHASE_SPEAKING;
-    // A LONG grant belongs to the owed turn it came with — dropped whenever that turn is (2R #1).
-    if (step === 'wrapup') { d.forced = null; d.pendingNext = null; d.longFor = null; d.wrapUpDone = true; moderate(true); return; }
+    // 「결론 내기」 (concludeNow): the moderator's wrap-up call. A LONG grant belongs to the owed turn it
+    // came with — dropped whenever that turn is (2R #1).
+    if (d.wrapNow) {
+      d.wrapNow = false;
+      // A debater the user named (a chip, @name) wins over a 「결론 내기」 still waiting (Codex 1R #2).
+      if (d.modKind === MOD_AI && d.modCol && !(d.forced && d.eligible.has(d.forced))) { d.forced = null; d.pendingNext = null; d.longFor = null; moderate(true); return; }
+    }
     // The user's pick goes first; the debater the moderator had just asked stays owed the floor (#1817 ③).
     if (d.forced && d.eligible.has(d.forced)) { const id = d.forced; d.forced = null; d.pendingNext = owedAfterForced(d.pendingNext, id); speak(id); return; }
     d.forced = null;
@@ -1492,11 +1569,26 @@ export function installDebate(ctx) {
     track('debate_resume', { turns: d.turnsUsed });
     advance();
   }
+  /**
+   * 「결론 내기」 at a spent budget (2026-09-28): one more send, for the AI moderator's conclusion. It goes
+   * through advance() — every safeguard (quota, a dead moderator, the hidden tab) still applies.
+   */
+  function concludeNow() {
+    const d = state.debate;
+    if (!d || d.phase !== PHASE_BUDGET || !canConclude(d)) return;
+    reopen(d);
+    d.sendBudget = d.sendsUsed + 1; // that one send only — no conclusion (no END) stops and asks again
+    d.wrapNow = true;
+    track('debate_resume', { turns: d.turnsUsed, conclude: true });
+    advance();
+  }
+  const canConclude = (d) => d.modKind === MOD_AI && !!d.modCol && !ctx.columnDead(colOf(d.modCol));
   /** Give the floor to `id` next (a pick chip, or `@name`): now when idle, after the current turn otherwise. */
   function pick(id) {
     const d = state.debate;
     if (!d || !d.eligible.has(id)) return;
     d.forced = id;
+    d.wrapNow = false; // naming a debater calls off a 「결론 내기」 still waiting (Codex 1R #2: after a refused one)
     reopen(d);
     track('debate_pick', {});
     advance();
@@ -1525,6 +1617,7 @@ export function installDebate(ctx) {
   /** The bar above the dock: the pick chips, what is happening, and 멈춤 / 계속. */
   function renderBar() {
     const d = state.debate;
+    syncJump();
     bar.hidden = !d || !state.sessionStarted && !(d && d.phase === PHASE_OPENING);
     if (!d) return;
     clear(barChips);
@@ -1555,7 +1648,7 @@ export function installDebate(ctx) {
     else if (cur) status = t('debate_status_speaking', nameOf(cur.col));
     else if (d.phase === PHASE_AWAIT) status = t('debate_status_await');
     else if (d.phase === PHASE_ASKED) status = t('debate_status_asked');
-    else if (d.phase === PHASE_BUDGET) status = t('debate_status_budget', d.sendsUsed, DEBATE_SEND_BUDGET);
+    else if (d.phase === PHASE_BUDGET) status = t(canConclude(d) ? 'debate_status_budget' : 'debate_status_budget_auto', d.sendsUsed, d.sendBudget);
     else if (d.phase === PHASE_HIDDEN) status = t('debate_status_hidden');
     // Point at the Conclusion card only when one is ON SCREEN — not when the log merely says so: a
     // record finished before the card existed has no `end`, and a marked turn evicted by the history
@@ -1573,7 +1666,9 @@ export function installDebate(ctx) {
     // The answer box's wording follows the phase wherever it changes (1R #2: ▶ 계속 with no compares
     // left went asked → paused without a controls pass, and 「진행자 질문에 답하기…」 stayed).
     if (typeof ctx.syncComposerPlaceholders === 'function') ctx.syncComposerPlaceholders();
-    pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t('debate_resume');
+    const budgetAsk = d.phase === PHASE_BUDGET && !cur;
+    pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t(budgetAsk ? 'debate_budget_more' : 'debate_resume');
+    concludeBtn.hidden = !(budgetAsk && canConclude(d));
     pauseBtn.disabled = d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
     pauseBtn.hidden = d.phase === PHASE_AWAIT;
   }
@@ -1629,7 +1724,7 @@ export function installDebate(ctx) {
       eligible: new Set(record.el), firstReplied: new Set(record.fr), modStarted: record.modStarted, modFails: 0,
       phase: PHASE_PAUSED, turnsUsed: record.turns,
       // A reloaded debate is stopped; 「계속」 starts a fresh run of the budget (like a spent one).
-      sendsUsed: 0, sendBudget: DEBATE_SEND_BUDGET, wrapUpDone: false,
+      sendsUsed: 0, sendBudget: DEBATE_SEND_BUDGET, wrapNow: false,
       queue: [], forced: null, pendingNext: null, current: null,
       openingGroup: el('div', 'cmp-debate-opening'), topicBubble: null,
       tone: record.tone,

@@ -298,7 +298,7 @@ const DEFAULT_ALIAS_RULES = {
     { tokens: ['thinking'], key: 'debate_alias_gemini_thinking', family: 'debate_family_thinking', emoji: '\u{1F9E0}', tier: TIER_REASONING }, // brain
     { tokens: ['flash', 'lite'], key: 'debate_alias_gemini_flash', family: 'debate_family_flash', emoji: '\u{26A1}', tier: TIER_LIGHT },       // lightning (flash)
     { tokens: ['pro', 'ultra'], key: 'debate_alias_gemini_pro', family: 'debate_family_pro', emoji: '\u{1F52C}', tier: TIER_HIGH },            // microscope (expert)
-    { tokens: null, key: 'debate_alias_gemini', family: null, emoji: '\u{264A}\u{FE0F}', tier: null },                                         // gemini sign (twins)
+    { tokens: null, key: 'debate_alias_gemini', family: null, emoji: '\u{1F39B}\u{FE0F}', tier: null },                                         // gemini sign (twins)
   ],
 };
 export const TIER_KEYS = [TIER_HIGH, TIER_REASONING, TIER_BALANCED, TIER_LIGHT];
@@ -894,15 +894,12 @@ export function owedAfterForced(pendingNext, forced) {
 }
 
 /**
- * What the budget allows next (plan §15.1 ①③): 'stop' when nothing is left, 'wrapup' when ONE send
- * is left and an AI moderator can use it to close the debate (not when the user just named someone —
- * their pick is honoured), 'go' otherwise.
+ * What the budget allows next (plan §15.1 ①): 'stop' when nothing is left, 'go' otherwise. There is no
+ * automatic wrap-up any more (2026-09-28): the last send went to the moderator's conclusion even when
+ * it had just asked a debater something — the stop asks the user instead (extend, or conclude).
  */
-export function budgetStep({ used, budget, aiModerator, wrapUpDone, forced }) {
-  const left = budget - used;
-  if (left <= 0) return 'stop';
-  if (left === 1 && aiModerator && !wrapUpDone && !forced) return 'wrapup';
-  return 'go';
+export function budgetStep({ used, budget }) {
+  return budget - used <= 0 ? 'stop' : 'go';
 }
 /** The tab has been hidden long enough that the next send should wait for the user (plan §15.1 ②). */
 export function hiddenTooLong({ hidden, since, now, limit }) {
