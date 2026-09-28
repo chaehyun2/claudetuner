@@ -561,7 +561,8 @@ export function _updateUICore(status) {
     // Display Privacy (grove_enabled)
     const privacyRow = document.getElementById('privacy-row');
     const privacyVal = document.getElementById('privacy-value');
-    if (s.grove_enabled === true) {
+    // A team-only account (no consumer workspace) has nothing this setting applies to (#1892).
+    if (s.grove_enabled === true && s.has_consumer_org !== false) {
       privacyVal.textContent = t('privacy_on');
       privacyVal.href = '#';
       privacyVal.onclick = (e) => { e.preventDefault(); chrome.tabs.create({ url: 'https://claude.ai/settings/data-privacy-controls' }); };

@@ -2,7 +2,7 @@ import { sendGAEvent } from './analytics.js';
 import { platformField } from './platform.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
-  HEARTBEAT_TIMEOUT_MS, SEAT_TIER_MAP, NON_PERSONAL_PLANS,
+  HEARTBEAT_TIMEOUT_MS, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
   DEFAULT_SERVER_URL,
 } from './constants.js';
@@ -15,7 +15,7 @@ import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
 import { updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, refreshRecNotice } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification, createCountedNotification } from './notifications.js';
 import {
-  detectPlan, refineTeamPlan, fetchSubscriptionInfo,
+  detectPlan, refineTeamPlan, planFromSeatTier, hasConsumerOrg, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
@@ -545,10 +545,6 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     }
 
     console.log(`[Claude Tuner] Primary org: ${bestOrg?.name} (${bestPlan}) [${selectionMethod}]`);
-    // Save auto-selected org info for options page display
-    if (bestOrg && selectionMethod !== 'manual') {
-      await chrome.storage.local.set({ autoSelectedOrg: { name: bestOrg.name, plan: bestPlan, uuid: bestOrg.uuid } });
-    }
 
     // Extract email: prefer org with email_address, fallback to parsing from org.name
     let userEmail = 'unknown';
@@ -578,6 +574,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // Fetch email + seat_tier from /api/account (cached 8 hours)
     // grove_enabled has separate cache (30 min) — may change more frequently
     let seatTier = null;
+    // seat_tier of bestOrg's OWN membership. `seatTier` may fall back to another org's (memberships[0]),
+    // which is tolerable for refining a Team label but not for turning a Pro into Team (#1891).
+    let bestOrgSeatTier = null;
+    // Every org's seat tier, set only where the cache/response is known to be this account's (#1892).
+    let orgSeatTiers = null;
     let groveEnabled = null;
     let groveDetected = false; // Whether grove_enabled was successfully read from the API
     {
@@ -617,6 +618,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // The previously observed label stays stored with its own timestamp and ages out on its
         // own; `undefined` means "no new observation", which is different from "no account".
         seatTier = cache.seatTier || null;
+        bestOrgSeatTier = cache.allSeatTiers?.[bestOrg?.uuid] || null;
+        orgSeatTiers = cache.allSeatTiers || {};
         console.log('[Claude Tuner] Account (cached):', cache.email, 'seat:', seatTier);
       } else {
         try {
@@ -636,7 +639,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // 🔴 A seat_tier the response did not carry is UNKNOWN — it is not "Team Standard" (#969).
           // Both readers of this cache collapse those two: refineTeamPlan() returns a bare 'Team',
           // which the server's normalizePlan() folds to 'Team Standard', and the primary path below
-          // does the same through `SEAT_TIER_MAP[x] || 'Team Standard'`. So losing a tier here
+          // does the same through planFromSeatTier()'s 'Team Standard' fallback. So losing a tier here
           // silently DOWNGRADES a Team Premium member.
           //
           // The loss was on WRITE, not on read: allSeatTiers was rebuilt from an empty object and
@@ -669,6 +672,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             const mOrgUuid = m.organization_uuid || m.organization?.uuid;
             if (mOrgUuid && m.seat_tier) allSeatTiers[mOrgUuid] = m.seat_tier;
           }
+          bestOrgSeatTier = allSeatTiers[bestOrgUuid] || null;
+          orgSeatTiers = allSeatTiers;
           // Same rule for the primary org's tier: same account AND same org.
           if (!seatTier && sameAccount && cache.seatTier && cache.orgUuid === bestOrgUuid) {
             seatTier = cache.seatTier;
@@ -693,6 +698,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           if (cache) {
             if (userEmail === 'unknown' && cache.email) userEmail = cache.email;
             seatTier = cache.seatTier || null;
+            // 🔴 This path is reached with NO ownership check (an expired cache, or one written by
+            // the previous account after a switch). A borrowed tier here would relabel a Pro org as
+            // Team, so only trust a cache positively tied to the current org-derived address (#1891).
+            if (cache.orgEmail && cache.orgEmail === orgDerivedEmail) bestOrgSeatTier = cache.allSeatTiers?.[bestOrg?.uuid] || null;
+            // Same ownership rule for the whole map (#1892).
+            if (cache.orgEmail && cache.orgEmail === orgDerivedEmail) orgSeatTiers = cache.allSeatTiers || {};
           }
         }
       }
@@ -783,17 +794,21 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       }
     }
 
-    // Refine plan based on seat tier
-    if (bestPlan === 'Team' && seatTier) {
-      // An unmapped tier (a new 'team_tier_N' Anthropic adds) would otherwise become Team Standard
-      // with no trace — the same silent downgrade as a missing tier, just from a different cause.
-      if (!SEAT_TIER_MAP[seatTier]) {
-        console.warn(`[Claude Tuner] unmapped seat_tier "${seatTier}" — falling back to Team Standard (#969)`);
-      }
-      bestPlan = SEAT_TIER_MAP[seatTier] || 'Team Standard';
-      console.log(`[Claude Tuner] Team seat_tier: ${seatTier} → ${bestPlan}`);
+    // Refine plan based on seat tier. A detected 'Team' keeps refining from `seatTier` as before;
+    // any other plan is only overridden by bestOrg's own seat (#1891 — see bestOrgSeatTier).
+    const planSeatTier = bestPlan === 'Team' ? seatTier : bestOrgSeatTier;
+    const refinedPlan = planFromSeatTier(bestPlan, planSeatTier);
+    if (refinedPlan !== bestPlan) {
+      console.log(`[Claude Tuner] seat_tier ${planSeatTier}: ${bestPlan} → ${refinedPlan}`);
+      bestPlan = refinedPlan;
     } else if (bestPlan === 'Enterprise' && seatTier) {
       console.log(`[Claude Tuner] Enterprise seat_tier: ${seatTier}`);
+    }
+
+    // Save auto-selected org info for options page display — AFTER the seat refinement above, so a
+    // variant Team org (nonprofit/labs) is not shown there as the 'Pro' capabilities suggest (#1891).
+    if (bestOrg && selectionMethod !== 'manual') {
+      await chrome.storage.local.set({ autoSelectedOrg: { name: bestOrg.name, plan: bestPlan, uuid: bestOrg.uuid } });
     }
 
     // Check for non-monitorable orgs (API-only)
@@ -914,6 +929,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       ...(claudeDriftRider ? { drift_obs: claudeDriftRider } : {}),
       grove_enabled: groveEnabled,
       grove_detected: groveDetected,
+      // Always sent. null = not observed this cycle (seat tiers unknown) — the server then CLEARS a
+      // stored team-only 0 so the raw setting shows again (safe direction). Absent key = keep (#1892).
+      has_consumer_org: hasConsumerOrg(orgList, orgSeatTiers),
       claude_org_uuid: bestOrg?.uuid || null,
       claude_org_name: bestOrg?.name || null,
       is_primary_org: !!config.selectedOrgId && config.selectedOrgId === bestOrg?.uuid,

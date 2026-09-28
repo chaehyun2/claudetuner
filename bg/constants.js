@@ -55,7 +55,13 @@ export const PLAN_API_MAP = {
   'Max 20x': 'max_20x_monthly',
 };
 
-export const SEAT_TIER_MAP = { 'team_standard': 'Team Standard', 'team_tier_1': 'Team Premium', 'team_tier_2': 'Team Tier 2' };
+// Variant Team seats (nonprofit, labs) are listed explicitly; planFromSeatTier() in bg/plan.js
+// folds any other `team_*_premium` / `team_*_standard` by suffix, so a new variant is not a Pro (#1891).
+export const SEAT_TIER_MAP = {
+  'team_standard': 'Team Standard', 'team_tier_1': 'Team Premium', 'team_tier_2': 'Team Tier 2',
+  'team_bendep_nonprofit_premium': 'Team Premium', 'team_bendep_nonprofit_standard': 'Team Standard',
+  'team_labs_premium': 'Team Premium', 'team_labs_standard': 'Team Standard',
+};
 
 // Display names for the three collected services. Was hand-copied in background.js and
 // ui/org-selector.js; a third copy (bg/notifications.js) is what prompted the merge. Not i18n keys

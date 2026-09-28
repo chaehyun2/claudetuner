@@ -22,7 +22,7 @@ import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { SEND_CODE_REASON, sendCodeReasonFromThrown } from './bg/send-code-error.js';
 import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification } from './bg/notifications.js';
 import {
-  detectPlan, executePlanChange, cancelDowngrade, downgradeTo,
+  detectPlan, refineTeamPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
@@ -1694,12 +1694,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'GET_ORGANIZATIONS') {
-    fetchClaudeApi('/api/organizations').then(orgList => {
+    fetchClaudeApi('/api/organizations').then(async orgList => {
       if (!Array.isArray(orgList)) { sendResponse({ success: false, error: 'Invalid response' }); return; }
-      // Exclude API only (Enterprise included)
-      const orgs = orgList
-        .map(o => ({ uuid: o.uuid, name: o.name || o.display_name || 'Unknown', plan: detectPlan(o) }))
-        .filter(o => o.plan !== 'API');
+      // Exclude API only (Enterprise included). Seat-refined like the popup chips, so a variant
+      // Team org is not listed as Pro here while the popup says Team (#1891).
+      const orgs = (await Promise.all(orgList.map(async o => ({
+        uuid: o.uuid, name: o.name || o.display_name || 'Unknown', plan: await refineTeamPlan(detectPlan(o), o.uuid),
+      })))).filter(o => o.plan !== 'API');
       sendResponse({ success: true, orgs });
     }).catch(err => {
       sendResponse({ success: false, error: err.message });

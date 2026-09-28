@@ -550,6 +550,16 @@ function codeBlock(token, d) {
 }
 
 /** Inline children of an `inline` token → nodes under `parent`. */
+// A code span that is NOTHING BUT a markdown link (2026-09-28 user: a Gemini debater wrapped its
+// sources as `` `[https://…](https://…)` `` and they showed as code): `[text](http…)` becomes the link it
+// spells. A bare URL in backticks stays code (an example endpoint is written that way on purpose —
+// compare-xss pins it), and so does anything else — a snippet that merely contains a link.
+const CODE_MD_LINK_RE = /^\[([^\[\]\n]{1,500})\]\((https?:\/\/[^\s()]+)\)$/i;
+function codeSpanLink(content) {
+  const m = CODE_MD_LINK_RE.exec(String(content || '').trim());
+  return m && isSafeLinkTarget(m[2]) ? { href: m[2], text: m[1] } : null;
+}
+
 function emitInline(children, parent, d) {
   const stack = [parent];
   const top = () => stack[stack.length - 1];
@@ -557,7 +567,13 @@ function emitInline(children, parent, d) {
     switch (c.type) {
       case 'text': appendText(top(), c.content, d); break;
       case 'softbreak': case 'hardbreak': top().appendChild(d.createElement('br')); break;
-      case 'code_inline': { const code = d.createElement('code'); code.textContent = unmarkBreaks(c.content); top().appendChild(code); break; }
+      case 'code_inline': {
+        // Never inside a link already (Codex 1R: [`[x](inner)`](outer) made an anchor in an anchor).
+        const inAnchor = stack.some((n) => n && String(n.tagName || '').toUpperCase() === 'A');
+        const link = inAnchor ? null : codeSpanLink(unmarkBreaks(c.content));
+        if (link) { const a = makeAnchor(link.href, d); a.textContent = link.text; top().appendChild(a); break; }
+        const code = d.createElement('code'); code.textContent = unmarkBreaks(c.content); top().appendChild(code); break;
+      }
       case 'link_open': {
         const href = unmarkHref(c.attrGet('href'));
         if (isSafeLinkTarget(href)) { const a = makeAnchor(href, d); top().appendChild(a); stack.push(a); } else stack.push(top());

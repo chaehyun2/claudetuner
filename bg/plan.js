@@ -125,18 +125,53 @@ export function detectPlan(org) {
   return plan;
 }
 
-// Team plan refinement: look up seat_tier from allSeatTiers cache
+// Plans a `team_*` seat must not override: Enterprise seats are reported as-is, and an API-only
+// org has no claude.ai seat to speak of.
+const SEAT_TIER_OVERRIDE_EXEMPT = ['Enterprise', 'API'];
+
+// Seat tier → plan label. A `team_*` seat outranks capabilities (#1891): variant Team orgs
+// (nonprofit, labs) carry capabilities containing "pro"/"max", so detectPlan() calls them Pro or
+// Max 5x, and the refinement that only ran for plan === 'Team' never got to see the seat.
+// 🔴 The caller must pass the seat tier of THIS org's membership. A tier borrowed from another org
+// (the memberships[0] fallback) would turn a personal Pro into Team.
+// No seat tier → plan unchanged, so a bare 'Team' stays bare: the caller has NOT observed Standard,
+// it has observed nothing, and keeping the two distinguishable is what lets #969 be fixed at the
+// source rather than guessed at downstream.
+export function planFromSeatTier(plan, seatTier) {
+  if (!seatTier) return plan;
+  const teamSeat = seatTier.startsWith('team_');
+  if (plan !== 'Team' && !(teamSeat && !SEAT_TIER_OVERRIDE_EXEMPT.includes(plan))) return plan;
+  if (SEAT_TIER_MAP[seatTier]) return SEAT_TIER_MAP[seatTier];
+  if (teamSeat && seatTier.endsWith('_premium')) return 'Team Premium';
+  if (teamSeat && seatTier.endsWith('_standard')) return 'Team Standard';
+  // An unmapped tier (a new 'team_tier_N' Anthropic adds) would otherwise become Team Standard
+  // with no trace — the same silent downgrade as a missing tier, just from a different cause.
+  console.warn(`[Claude Tuner] unmapped seat_tier "${seatTier}" — falling back to Team Standard (#969)`);
+  return 'Team Standard';
+}
+
+// Does this account hold a CONSUMER workspace (Free/Pro/Max)? The Grove "help improve Claude"
+// setting is account-level but only applies to consumer workspaces — Team/Enterprise run under
+// commercial terms. A team-only account (no personal workspace) was warned about, and mailed as a
+// violator for, a setting with nothing to apply to (#1892).
+//
+// `seatTiers` = allSeatTiers keyed by org uuid, and ONLY when it is known to belong to the current
+// account. null → we cannot tell a variant Team org (capabilities read as Pro, #1891) from a real
+// Pro one, so answer null ("not observed") rather than a guess.
+// 🔴 Conservative in one direction: any org we cannot positively call Team/Enterprise/API
+// ('unknown', 'Max (tier)', a Pro with no seat) counts as consumer, so a real personal workspace
+// is never hidden.
+const NON_CONSUMER_PLAN = /^(Team|Enterprise|API)\b/;
+export function hasConsumerOrg(orgList, seatTiers) {
+  if (!Array.isArray(orgList) || orgList.length === 0 || !seatTiers || typeof seatTiers !== 'object') return null;
+  return orgList.some((o) => !NON_CONSUMER_PLAN.test(planFromSeatTier(detectPlan(o), seatTiers[o?.uuid])));
+}
+
+// Per-org plan refinement: look up this org's seat_tier from the allSeatTiers cache
 export async function refineTeamPlan(plan, orgUuid) {
-  if (plan !== 'Team' || !orgUuid) return plan;
+  if (!orgUuid) return plan;
   const { accountCache } = await chrome.storage.local.get({ accountCache: null });
-  const st = accountCache?.allSeatTiers?.[orgUuid];
-  // Returning bare 'Team' when we have no tier is deliberate: the server folds it to Team Standard
-  // today, but the caller has NOT observed Standard — it has observed nothing. Keeping the two
-  // distinguishable here is what lets #969 be fixed at the source rather than guessed at downstream.
-  if (st && !SEAT_TIER_MAP[st]) {
-    console.warn(`[Claude Tuner] unmapped seat_tier "${st}" for org ${orgUuid} — falling back to Team Standard (#969)`);
-  }
-  return st ? (SEAT_TIER_MAP[st] || 'Team Standard') : plan;
+  return planFromSeatTier(plan, accountCache?.allSeatTiers?.[orgUuid]);
 }
 
 // === Report plan change order result ===

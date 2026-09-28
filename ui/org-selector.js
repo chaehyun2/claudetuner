@@ -472,7 +472,7 @@ export function selectOrg(orgId, container) {
     // === 6. Privacy — Claude only ===
 
     const privacyRow = document.getElementById('privacy-row');
-    if (isClaudeOrg && state.currentSnapshot?.grove_enabled === true) {
+    if (isClaudeOrg && state.currentSnapshot?.grove_enabled === true && state.currentSnapshot?.has_consumer_org !== false) {
       chrome.storage.local.get({ hiddenPrivacyBanner: false }, (s) => {
         if (privacyRow) privacyRow.classList.toggle('hidden', !!s.hiddenPrivacyBanner);
       });

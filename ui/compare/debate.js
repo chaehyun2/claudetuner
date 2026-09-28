@@ -346,6 +346,7 @@ export function installDebate(ctx) {
     gearBtn.hidden = tabs.hidden || currentMode() !== MODE_DEBATE;
     const locked = state.disabled || state.sending || state.sessionStarted;
     gearBtn.disabled = locked;
+    closeSettingsBtn.disabled = locked; // the same toggle as the ⚙, locked with it
     const tip = t(locked ? 'debate_settings_locked' : 'debate_settings_btn');
     if (gearBtn.title !== tip) gearBtn.title = tip;
     gearBtn.setAttribute('aria-expanded', state.debatePrefs.settingsOpen ? 'true' : 'false'); // the body's own state, locked or not (Codex U1 1R)
@@ -472,7 +473,17 @@ export function installDebate(ctx) {
   // Worded per moderation (#1818 ③) — renderSetup sets it.
   const budgetHint = el('p', 'cmp-debate-hint');
   budgetHint.id = 'cmp-debate-hint';
-  setupBody.appendChild(budgetHint);
+  // The open panel closes where the reader is — its foot — not only on the ⚙ above it (2026-09-28 user:
+  // 「다시 닫으려면 상단 옵션 버튼을 눌러야 해서 직관적이지 않아」).
+  const setupFoot = el('div', 'cmp-debate-setup-foot');
+  setupFoot.appendChild(budgetHint);
+  const closeSettingsBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-settings-close', t('debate_settings_close'));
+  closeSettingsBtn.type = 'button';
+  closeSettingsBtn.id = 'cmp-debate-settings-close';
+  closeSettingsBtn.setAttribute('aria-controls', 'cmp-debate-setup-body');
+  closeSettingsBtn.addEventListener('click', () => setSettingsOpen(false));
+  setupFoot.appendChild(closeSettingsBtn);
+  setupBody.appendChild(setupFoot);
   const summaryBtn = el('button', 'cmp-debate-summary');
   summaryBtn.type = 'button';
   summaryBtn.id = 'cmp-debate-summary';
