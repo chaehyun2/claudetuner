@@ -852,6 +852,21 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* The 「결론」 card's divider (#1817 ②): the bubble's colours, framed in the accent, so the end stands out. */
 .cmp-debate-divider.is-ask { font-weight: 700; color: var(--debate-bubble-fg); background: var(--debate-bubble-bg); border: 1.5px dashed var(--accent); }
 .cmp-debate-divider.is-conclusion { font-weight: 700; color: var(--debate-bubble-fg); background: var(--debate-bubble-bg); border: 1.5px solid var(--accent); }
+/* In the message column: the timeline centres its children (max 820px); the inset is the avatar + gap (36 + 8). */
+.cmp-debate-fb { box-sizing: border-box; width: 100%; padding-left: 44px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; color: var(--text-secondary); }
+.cmp-debate-fb-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.cmp-debate-fb-rate { font: inherit; font-size: 15px; line-height: 1; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-card); cursor: pointer; }
+.cmp-debate-fb-rate:hover { border-color: var(--border-strong); }
+.cmp-debate-fb-rate[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent); }
+.cmp-debate-fb-thanks { color: var(--text-secondary); }
+.cmp-debate-fb-more { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.cmp-debate-fb-reasons { display: flex; flex-wrap: wrap; gap: 6px; }
+.cmp-debate-fb-chip { font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; }
+.cmp-debate-fb-chip[aria-checked="true"] { border-color: var(--accent); background: var(--accent-light); color: var(--text-primary); }
+.cmp-debate-fb-note { font: inherit; font-size: 12.5px; width: 100%; box-sizing: border-box; resize: vertical; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-card); color: var(--text-primary); }
+.cmp-debate-fb-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.cmp-debate-fb-privacy { font-size: 11.5px; color: var(--text-secondary); }
+@media (max-width: 720px) { .cmp-debate-fb { padding-left: 0; } }
 
 /* Avatars: a squircle profile tile — the model's emoji on the service tint, the service mark as a
    corner badge on a light disc (debate.js avatar(), brand-marks.js). Decorative (aria-hidden). */

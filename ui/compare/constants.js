@@ -76,6 +76,14 @@ export const COPY_KIND_COLUMN = 'column';
 export const COPY_KIND_ALL = 'all';
 // The message type analytics ride on (contract E): the SW validates and forwards to GA4.
 export const EVENT_MSG_TYPE = 'COMPARE_EVENT';
+// #1917 debate feedback (👍/👎 under a live conclusion): its own message, NOT a COMPARE_EVENT — the user's note
+// is free text and must never reach the GA path. The SW posts it to /api/compare/feedback.
+export const FEEDBACK_MSG_TYPE = 'COMPARE_FEEDBACK';
+// The 👎 chips, in display order — the worker's FEEDBACK_REASONS (utils/compare-debate-stat.ts) is the same list (guard).
+export const DEBATE_FEEDBACK_REASONS = Object.freeze(['facts', 'nitpick', 'long', 'weak', 'slow', 'other']);
+export const DEBATE_FEEDBACK_NOTE_MAX = 500;
+// A feedback send with no answer by then is a failure (2R: a SW that never answered left 「보내는 중…」 forever).
+export const DEBATE_FEEDBACK_TIMEOUT_MS = 15000;
 // Beta usage stats (.omc/handoffs/cmp-beta-contract.md §3): every SEND / FOLLOWUP names what the
 // page is doing (`kind`) and the round it belongs to (`round`); the SW forwards both to
 // POST /api/compare/consume, where they become the compare_events row. The page decides the kind:

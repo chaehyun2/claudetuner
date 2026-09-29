@@ -166,7 +166,11 @@
 //              describe the question, and are one-way by construction (bucket / enum / boolean).
 //   outcome  — the consume 200 body's `event_id` (an integer, else "no event") names the round; the
 //              SW collects per-provider results while the fan-out runs (ok from DONE, code from
-//              ERROR, ttft_ms at the first CHUNK, total_ms at DONE/ERROR, model from MODEL / DONE)
+//              ERROR, ttft_ms at the first CHUNK, total_ms at DONE/ERROR, model from MODEL / DONE;
+//              #1897: chars = the answer's length at DONE (0 on every failure, failedOutcome), ib =
+//              Gemini's in-band status code (createStreamOutcome / inBandCodeOf — never parsed out of
+//              arbitrary error text), env/sr/end from Gemini's stream_done / stream_status stages of
+//              the attempt that ended the send — counts only, see OUTCOME_INT_KEYS)
 //              and, once the round has SETTLED — the ALL_DONE point of runSend, which a Stop and a
 //              lost port also reach once the aborted sends have landed — POSTs
 //              `/api/compare/outcome {event_id, results}` ONCE, fire-and-forget (errors swallowed,
@@ -354,6 +358,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // since 2026-09-26 but never listed here, so the SW dropped every one (found with plan §17 U1).
   'debate_settings', 'debate_start', 'debate_end', 'debate_pause', 'debate_resume', 'debate_pick', 'debate_user', 'debate_restore',
   'debate_budget', 'debate_hidden_pause', 'debate_mod_fallback', 'debate_tone', 'debate_alias', 'debate_ask', 'debate_finish',
+  // #1917: the rating and counts only (`rating`, `reasons` = how many chips, `note` = 0/1) — the note itself goes to our server, never GA.
+  'debate_feedback',
   // 「내 공유 링크」 opened from the history panel (manage mode, no params).
   'share_mine_open',
   // Share links (#1784 U3): kind / author mode / 0-1 flags only — never a title, a link or an id.
@@ -376,6 +382,12 @@ export const ROUND_MAX = 9999;
 export const EXT_VERSION_MAX = 16;
 export const OUTCOME_MODEL_MAX = 64;
 export const OUTCOME_CODE_MAX = 32;
+// The outcome's per-column counts (#1897 item 3): non-negative integers only, never text —
+// `chars` the answer's length (0 on failure), `ib` the provider's in-band status code behind a
+// failure, `env` / `sr` Gemini's stream envelopes and status rows. `end` (did the stream's end row
+// arrive) is a 0/1 flag beside them. The server re-bounds every one.
+export const OUTCOME_INT_KEYS = Object.freeze(['ttft_ms', 'total_ms', 'chars', 'ib', 'env', 'sr']);
+export const OUTCOME_FLAG_KEYS = Object.freeze(['end']);
 // The shape of a model id that may leave the browser (consume `models`, outcome `model`): every
 // catalog id is one of these — `claude-opus-4-8`, Gemini's hex hashes (`e051ce1aa80aa576`),
 // ChatGPT slugs with dots or hyphens (`gpt-5-5`, `gpt-5.5`) — and nothing a page, a storage row or
@@ -1327,7 +1339,8 @@ export function buildConsumeBody({ kind, followup, resumeAsked, src, session, re
 
 // The `results` half of the outcome body, bounded: colId keys only (≤ MAX_COLUMNS),
 // `ok` a boolean, `code` a cut string, `model` only when it has a model id's shape (MODEL_ID_RE —
-// omitted otherwise, never cut), the two durations non-negative integers. Anything
+// omitted otherwise, never cut), the OUTCOME_INT_KEYS non-negative integers, the OUTCOME_FLAG_KEYS
+// exactly 0 or 1. Anything
 // else is dropped rather than sent — the server refuses an unbounded body and an outcome is
 // telemetry, not the send.
 export function sanitizeOutcomeResults(results) {
@@ -1345,8 +1358,11 @@ export function sanitizeOutcomeResults(results) {
     if (typeof r.code === 'string' && r.code) clean.code = r.code.slice(0, OUTCOME_CODE_MAX);
     const model = wireModelId(r.model);
     if (model !== null) clean.model = model;
-    for (const k of ['ttft_ms', 'total_ms']) {
+    for (const k of OUTCOME_INT_KEYS) {
       if (typeof r[k] === 'number' && Number.isFinite(r[k]) && r[k] >= 0) clean[k] = Math.round(r[k]);
+    }
+    for (const k of OUTCOME_FLAG_KEYS) {
+      if (r[k] === 0 || r[k] === 1) clean[k] = r[k];
     }
     out[p] = clean;
   }
@@ -1378,8 +1394,35 @@ function stripStreamHead(detail) {
 // Gemini `in_band_error` (vendor-ai v0.20.0): the server's numeric code rides only in the
 // package's message (`… in-band code <n>`), so it is lifted here into a number the page can put
 // in its copy — the page never parses prose. Absent when the message does not carry one.
+// A KNOWN code (rate_limited, previous_turn_pending, …) rides the message as `<its fixed
+// sentence> (in-band <n>)`; that one is lifted only for the outcome's `ib`, never for the page's copy.
+// 🔴 Privacy (Codex telemetry 1R #1): other messages embed user text — a Claude upload error
+// carries the FILE NAME, so `medical (in-band 123456789).png` must never become a number on the
+// wire. So a code is read ONLY from a Gemini ClientError whose code the package derives from an
+// in-band status, and only from the package's exact, anchored message shapes
+// (vendor-ai/gemini-client.js `_inBandFailure` + IN_BAND_ERROR_CODES — pinned by
+// test/compare-privacy-guard.mjs [1]). Anything else answers null.
 export const IN_BAND_ERROR_CODE = 'in_band_error';
-const IN_BAND_CODE_RE = /in-band code (\d{1,9})\b/;
+const IN_BAND_PROVIDER = 'gemini';
+const IN_BAND_UNKNOWN_RE = /^Gemini answered with in-band code (\d{1,9})$/;
+// code → the package's fixed sentence(s) for it; the message is `${sentence} (in-band ${n})`.
+export const IN_BAND_KNOWN_MESSAGES = Object.freeze({
+  overloaded: ['Gemini is temporarily unavailable'],
+  rate_limited: ['Gemini usage limit reached', 'Google temporarily blocked the request'],
+  model_unavailable: ['the selected Gemini model is unavailable', 'the Gemini model configuration is invalid'],
+  previous_turn_pending: ['Gemini is still answering the previous turn of this conversation'],
+});
+const IN_BAND_KNOWN_SUFFIX_RE = / \(in-band (\d{1,9})\)$/;
+export function inBandCodeOf(e) {
+  if (!e || e.provider !== IN_BAND_PROVIDER || typeof e.code !== 'string' || typeof e.message !== 'string') return null;
+  if (e.code === IN_BAND_ERROR_CODE) {
+    const m = IN_BAND_UNKNOWN_RE.exec(e.message);
+    return m ? Number(m[1]) : null;
+  }
+  const sentences = Object.hasOwn(IN_BAND_KNOWN_MESSAGES, e.code) ? IN_BAND_KNOWN_MESSAGES[e.code] : null;
+  const m = sentences ? IN_BAND_KNOWN_SUFFIX_RE.exec(e.message) : null;
+  return m && sentences.includes(e.message.slice(0, m.index)) ? Number(m[1]) : null;
+}
 function errorExtras(e) {
   const out = {};
   if (typeof e?.reason === 'string' && e.reason) out.reason = e.reason;
@@ -1387,8 +1430,8 @@ function errorExtras(e) {
   const detail = stripStreamHead(raw);
   if (detail) out.detail = detail;
   if (e?.code === IN_BAND_ERROR_CODE) {
-    const m = IN_BAND_CODE_RE.exec(raw);
-    if (m) out.inBandCode = Number(m[1]);
+    const ib = inBandCodeOf(e);
+    if (ib !== null) out.inBandCode = ib;
   }
   if (typeof e?.diag === 'string' && e.diag) out.diag = e.diag.slice(0, ERROR_DIAG_MAX);
   return out;
@@ -1443,6 +1486,60 @@ export function imageForPage(ev) {
 // STREAM_STALL_MS — and the plain watchdog would cut the column into DONE{stalled} just before the
 // image it was waiting for. Repeats are harmless; `detail.at` is not read.
 export const STAGE_IMAGE_PENDING = 'image_pending';
+// Gemini's stream stages (vendor-ai v0.9.1 / v0.20.0) whose counts feed the outcome (#1897 item 3):
+// `stream_done` carries `detail.stream = {envelopes, end, statusRows, …}` on an answered send;
+// `stream_status` carries `{statusRows, inBandCodes}` on success AND failure when the stream said
+// anything about its status. Counts only — nothing here decides anything.
+export const STAGE_STREAM_DONE = 'stream_done';
+export const STAGE_STREAM_STATUS = 'stream_status';
+// The outcome's stream fields from one of those stages, or null: `env`, `end` (0/1), `sr`, and
+// `ib` = the first in-band code the stream reported. Non-numbers are omitted.
+export function streamOutcomeOf(ev) {
+  const d = ev?.detail;
+  if (!d || typeof d !== 'object') return null;
+  const out = {};
+  const num = (v) => Number.isSafeInteger(v) && v >= 0;
+  if (ev.stage === STAGE_STREAM_DONE && d.stream && typeof d.stream === 'object') {
+    if (num(d.stream.envelopes)) out.env = d.stream.envelopes;
+    if (typeof d.stream.end === 'boolean') out.end = d.stream.end ? 1 : 0;
+    if (num(d.stream.statusRows)) out.sr = d.stream.statusRows;
+  } else if (ev.stage === STAGE_STREAM_STATUS) {
+    if (num(d.statusRows)) out.sr = d.statusRows;
+    if (Array.isArray(d.inBandCodes) && num(d.inBandCodes[0])) out.ib = d.inBandCodes[0];
+  }
+  return Object.keys(out).length ? out : null;
+}
+// Gemini's 1097 wait (vendor-ai v0.20.0): emitted between attempts of ONE send while the previous
+// turn is still live server-side; the next attempt is a fresh request with its own stream.
+export const STAGE_PREVIOUS_TURN_WAIT = 'previous_turn_wait';
+export const PREVIOUS_TURN_IN_BAND_CODE = 1097;
+// One send's stream fields for the outcome, across the client's internal attempts (Codex telemetry
+// 1R follow-up #1): a 1097 wait starts a new attempt, so what the earlier attempt's stream said is
+// dropped there — the row describes the attempt that ended the send. `answered()` = the fields of an
+// ok row: env/end/sr, and `ib` ONLY as "this send waited out a 1097" (a code on an answered turn
+// means nothing else). `failed(e)` = the fields of a failure row: env/end/sr, and `ib` from the
+// final attempt's stream_status, else from the error itself (inBandCodeOf — the package's exact
+// shapes only).
+export function createStreamOutcome() {
+  let fields = {};
+  let waited = false;
+  const counts = () => { const { ib, ...rest } = fields; return rest; };
+  return {
+    onStage(ev) {
+      if (ev?.stage === STAGE_PREVIOUS_TURN_WAIT) { fields = {}; waited = true; return; }
+      const f = streamOutcomeOf(ev);
+      if (f) fields = { ...fields, ...f };
+    },
+    answered() { return { ...counts(), ...(waited ? { ib: PREVIOUS_TURN_IN_BAND_CODE } : {}) }; },
+    failed(e) {
+      const ib = fields.ib ?? inBandCodeOf(e);
+      return { ...counts(), ...(ib !== null && ib !== undefined ? { ib } : {}) };
+    },
+  };
+}
+// Every failure row has the same base: a failed column produced no answer, so `chars` is 0 — for a
+// client's ERROR, a Stop right after consume, and a column the round settled without asking alike.
+export const failedOutcome = (code) => ({ ok: false, code, chars: 0 });
 
 // The `model` object a client reports, in the shape the page renders: `{ id, label, source }`.
 function modelForPage(m) {
@@ -1710,6 +1807,21 @@ export function createCompareController({
       })
       .catch(() => { /* telemetry */ });
     return true;
+  }
+  // `POST /api/compare/feedback` (#1917) — the 👍/👎 under a debate's conclusion. Fire-and-forget; the server
+  // re-validates every field and bounds the note. Only the page's own feedback message calls it (never GA).
+  // Resolves to whether the SERVER stored it (1R #2: the page said 「고마워요」 for a write that failed) —
+  // a 404 (an older worker), `{ok:false}` (the table missing) and a network failure are all false.
+  async function postFeedback(payload) {
+    if (!payload || typeof payload !== 'object' || typeof payload.session_id !== 'string' || !Number.isSafeInteger(payload.run)) return false;
+    const body = JSON.stringify({ ...payload, ext_version: manifestVersion() });
+    try {
+      const config = await getConfig();
+      const res = await authedFetch(config, `${config.serverUrl}/api/compare/feedback`, { method: 'POST', headers: { ...JSON_HEADERS }, body });
+      if (!res || !res.ok) return false;
+      const json = await res.json().catch(() => null);
+      return !!(json && json.ok === true);
+    } catch { return false; }
   }
   // `POST /api/compare/outcome {event_id, results}` — fire-and-forget: not awaited by the send,
   // every failure swallowed (the round is over; nothing the page could do with it). Only ever
@@ -2380,6 +2492,11 @@ export function createCompareController({
     }
     // Usage analytics from the page (ux3 item 8): validated, then off to GA. Answered at once —
     // the page fires and forgets; `ok:false` only says the event was dropped.
+    // #1917: the debate feedback — its own message so the note never rides the GA path.
+    if (message.type === 'COMPARE_FEEDBACK') {
+      postFeedback(message.payload).then((ok) => { try { sendResponse({ ok }); } catch { /* page gone */ } }, () => { try { sendResponse({ ok: false }); } catch { /* page gone */ } });
+      return true;
+    }
     if (message.type === 'COMPARE_EVENT') {
       let ok = false;
       try { ok = emitEvent(message.name, message.params); } catch { ok = false; }
@@ -2684,7 +2801,7 @@ export function createCompareController({
     // reach too once the aborted sends have landed) and null in between rounds. One send at a
     // time per port (`running`), so one record is enough. Null = no outcome for this round:
     // consume refused, no event_id in its body, or nothing consumed at all.
-    let outcome = null; // { eventId, results: { [colId]: { ok, code?, ttft_ms?, total_ms?, model? } } }
+    let outcome = null; // { eventId, results: { [colId]: { ok, code?, ttft_ms?, total_ms?, model?, chars?, ib?, env?, sr?, end? } } }
     const recordOutcome = (colId, patch) => {
       if (!outcome) return;
       outcome.results[colId] = { ...(outcome.results[colId] || {}), ...patch };
@@ -2698,7 +2815,7 @@ export function createCompareController({
       outcome = null;
       if (!o) return;
       for (const id of readyIds) {
-        if (typeof o.results[id]?.ok !== 'boolean') o.results[id] = { ...(o.results[id] || {}), ok: false, code: SW_CODES.ABORTED };
+        if (typeof o.results[id]?.ok !== 'boolean') o.results[id] = { ...(o.results[id] || {}), ...failedOutcome(SW_CODES.ABORTED) };
       }
       postOutcome(o.eventId, o.results);
     }
@@ -2755,7 +2872,7 @@ export function createCompareController({
       logInfo(provider, 'ERROR', { col: col.id, code, reason: extras.reason ?? null, ...(extras.diag ? { diag: extras.diag } : {}), message: extras.detail ?? message });
       // A no-op before consume (no record yet): readiness failures are not part of the round the
       // debit bought. After it, every ERROR — a client's, a timeout, a Stop — is the column's outcome.
-      recordOutcome(col.id, { ok: false, code });
+      recordOutcome(col.id, failedOutcome(code));
       post({ type: PORT_MSG.ERROR, provider, col: col.id, code, ...extras, message });
     };
 
@@ -2853,16 +2970,18 @@ export function createCompareController({
       // LAST `at` wins here: the segments then describe the attempt that answered, `ms` the whole
       // send (send_start and first_chunk are reported once per send).
       const stages = {};
+      const streamOutcome = createStreamOutcome();
       const onStage = (ev) => {
         const at = ev?.detail?.at;
         if (typeof at !== 'number' || typeof ev.stage !== 'string') return;
         stages[ev.stage] = at;
-        if (ev.stage === 'first_chunk' || ev.stage === 'stream_done') {
+        streamOutcome.onStage(ev);
+        if (ev.stage === 'first_chunk' || ev.stage === STAGE_STREAM_DONE) {
           // The provider's own account of the stream rides `stream_done` (Gemini, vendor-ai v0.9.1):
           // `{envelopes, bytes, end, chars}`, where `end` is the batchexecute end row. It is the only
           // thing that could tell "the model finished" from "the connection closed while it was still
           // writing" — see #1642. Logged, never acted on, until a live capture says it is reliable.
-          const stream = ev.stage === 'stream_done' && ev.detail && ev.detail.stream;
+          const stream = ev.stage === STAGE_STREAM_DONE && ev.detail && ev.detail.stream;
           logInfo(provider, 'ttft', { col: colId, ...ttftSegments(stages), ...(stream ? { stream } : {}) });
         }
       };
@@ -2967,13 +3086,14 @@ export function createCompareController({
         // a follow-up here continues a thread that already contains it (#1651). Only the columns
         // that never got that far stay marked.
         linkPending.delete(colId);
+        const answerText = String(result?.text ?? '');
         recordOutcome(colId, {
-          ok: true, total_ms: elapsed(t0),
+          ok: true, total_ms: elapsed(t0), chars: answerText.length, ...streamOutcome.answered(),
           ...(cut ? { code: cut === CUT_STREAM_ERROR ? SW_CODES.CUT_ERROR : SW_CODES.STALLED } : {}),
           ...(served?.id ? { model: served.id } : {}),
         });
         post({
-          type: PORT_MSG.DONE, provider, col: colId, text: String(result?.text ?? ''), model: served,
+          type: PORT_MSG.DONE, provider, col: colId, text: answerText, model: served,
           ...(cut ? { stalled: true, cutReason: cut } : {}),
           ...(continuation && typeof continuation === 'object' ? { continuation } : {}),
         });
@@ -2983,7 +3103,7 @@ export function createCompareController({
         // lets the page add its note; the outcome keeps ok:true and names the cut in `code`.
         if (stalled) {
           const continuation = sessionSaveHistory === true && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
-          recordOutcome(colId, { ok: true, code: SW_CODES.STALLED, total_ms: elapsed(t0), ...(lastModel?.id ? { model: lastModel.id } : {}) });
+          recordOutcome(colId, { ok: true, code: SW_CODES.STALLED, total_ms: elapsed(t0), chars: streamed.length, ...streamOutcome.answered(), ...(lastModel?.id ? { model: lastModel.id } : {}) });
           post({
             type: PORT_MSG.DONE, provider, col: colId, text: streamed, model: lastModel, stalled: true,
             ...(continuation && typeof continuation === 'object' ? { continuation } : {}),
@@ -2992,7 +3112,8 @@ export function createCompareController({
         }
         const code = timedOut ? SW_CODES.TIMEOUT
           : (typeof e?.code === 'string' ? e.code : (e?.name === 'AbortError' ? SW_CODES.ABORTED : SW_CODES.UNKNOWN));
-        recordOutcome(colId, { total_ms: elapsed(t0) });
+        // ok/code/chars:0 come from postError (failedOutcome); the stream fields and `ib` from here.
+        recordOutcome(colId, { total_ms: elapsed(t0), ...streamOutcome.failed(e) });
         // A timeout names the budget it hit (the page's copy shows it, so a changed budget never
         // leaves a stale number in a string).
         postError(col, code, String(e?.message || e), e, timedOut ? { budgetMs: sendTimeoutMs } : null);

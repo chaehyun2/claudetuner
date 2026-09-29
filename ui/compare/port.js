@@ -264,7 +264,15 @@ export function installPort(ctx) {
         if (state.sessionSaveHistory === true && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
         {
           const ttft = ctx.ttftSeconds(col);
-          track('column_done', { provider: col.provider, col: ctx.gaCol(col), ttft_ms: ttft ? Math.round(Number(ttft.first) * MS_PER_SECOND) : -1, total_ms: ttft && ttft.total != null ? Math.round(Number(ttft.total) * MS_PER_SECOND) : -1, chars: turn.text.length, images: ctx.outImageCount(turn), model: ctx.servedModelId(col) });
+          // ttft_ms / total_ms / chars are GA custom METRICS (#1897 item 3): an unknown duration is
+          // OMITTED, never a -1 sentinel that would drag every average down.
+          const ttftMs = ttft ? Math.round(Number(ttft.first) * MS_PER_SECOND) : NaN;
+          const totalMs = ttft && ttft.total != null ? Math.round(Number(ttft.total) * MS_PER_SECOND) : NaN;
+          track('column_done', {
+            provider: col.provider, col: ctx.gaCol(col),
+            ...(Number.isFinite(ttftMs) ? { ttft_ms: ttftMs } : {}), ...(Number.isFinite(totalMs) ? { total_ms: totalMs } : {}),
+            chars: turn.text.length, images: ctx.outImageCount(turn), model: ctx.servedModelId(col),
+          });
         }
         return;
       }

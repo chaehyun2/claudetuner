@@ -18,7 +18,7 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import {
   MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCE_BASES, STANCE_ROLES, STANCE_NONE, STANCE_DEVIL, composeStance, splitStance, recordStance, recordPace, roleAllowed, stanceText, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
@@ -1149,6 +1149,138 @@ export function installDebate(ctx) {
     if (turn.root.parentNode) turn.root.parentNode.insertBefore(el('div', 'cmp-debate-divider is-conclusion', t('debate_conclusion')), turn.root);
   }
   /**
+   * #1917: 「이 토론, 도움이 됐나요? 👍 👎」 under a conclusion that happened LIVE on this page (a restored or shared
+   * debate is not asked about). The rating is sent on the click; a 👎 opens its reason chips, either opens an
+   * optional note, and 「보내기」 sends them — the same row (session · run · leg), the latest wins. 🔴 Nothing of
+   * the conversation is sent: the payload is the rating, the chips, the user's own note and the run's settings.
+   */
+  function offerFeedback(turn, concludedBy) {
+    const d = state.debate;
+    if (!d || !turn || !turn.root || !turn.root.parentNode || !state.sessionId || !Number.isFinite(d.run)) return;
+    d.fbLeg = Number.isInteger(d.fbLeg) ? d.fbLeg + 1 : 0;
+    const leg = d.fbLeg;
+    const run = d.run;
+    const box = el('div', 'cmp-debate-fb');
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', t('debate_fb_q'));
+    const row = el('div', 'cmp-debate-fb-row');
+    row.appendChild(el('span', 'cmp-debate-fb-q', t('debate_fb_q')));
+    const rateBtn = (rating, glyph) => {
+      const b = el('button', 'cmp-debate-fb-rate', glyph);
+      b.type = 'button';
+      b.setAttribute('data-rating', rating);
+      b.setAttribute('aria-pressed', 'false');
+      b.setAttribute('aria-label', t(`debate_fb_${rating}`));
+      b.title = t(`debate_fb_${rating}`);
+      return b;
+    };
+    const up = rateBtn('up', '\u{1F44D}');
+    const down = rateBtn('down', '\u{1F44E}');
+    row.appendChild(up);
+    row.appendChild(down);
+    const thanks = el('span', 'cmp-debate-fb-thanks', t('debate_fb_thanks'));
+    thanks.hidden = true;
+    row.appendChild(thanks);
+    box.appendChild(row);
+    const more = el('div', 'cmp-debate-fb-more');
+    more.hidden = true;
+    const chips = el('div', 'cmp-debate-fb-reasons');
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-label', t('debate_fb_reasons_label'));
+    const picked = new Set();
+    for (const r of DEBATE_FEEDBACK_REASONS) {
+      const c = el('button', 'cmp-debate-fb-chip', t(`debate_fb_reason_${r}`));
+      c.type = 'button';
+      c.setAttribute('role', 'checkbox');
+      c.setAttribute('aria-checked', 'false');
+      c.setAttribute('data-reason', r);
+      c.addEventListener('click', () => {
+        if (picked.has(r)) picked.delete(r); else picked.add(r);
+        c.setAttribute('aria-checked', picked.has(r) ? 'true' : 'false');
+      });
+      chips.appendChild(c);
+    }
+    more.appendChild(chips);
+    const note = el('textarea', 'cmp-debate-fb-note');
+    note.rows = 2;
+    note.maxLength = DEBATE_FEEDBACK_NOTE_MAX;
+    note.placeholder = t('debate_fb_note_placeholder');
+    note.setAttribute('aria-label', t('debate_fb_note_label'));
+    more.appendChild(note);
+    const foot = el('div', 'cmp-debate-fb-foot');
+    foot.appendChild(el('span', 'cmp-debate-fb-privacy', t('debate_fb_privacy')));
+    const send = el('button', 'cmp-btn cmp-btn-sm cmp-debate-fb-send', t('debate_fb_send'));
+    send.type = 'button';
+    foot.appendChild(send);
+    more.appendChild(foot);
+    box.appendChild(more);
+    let rating = null;
+    let seq = 0; // this row's send order — the server keeps the latest (1R #1)
+    // Once the reasons/note reached the server, a later rating click must carry them: the server upserts the whole row,
+    // so a bare rating would silently wipe the stored note while the box still shows it (1.48.0 batch review).
+    let detailsSent = false;
+    // The run's settings and cast at the conclusion — what the rating is ABOUT (never its words).
+    const facts = (() => {
+      const modC = d.modKind === MOD_AI && d.modCol ? colOf(d.modCol) : null;
+      const tierAt = (id) => { for (let i = d.transcript.length - 1; i >= 0; i--) { const e = d.transcript[i]; if (e.speaker === id && e.tierKey) return e.tierKey; } return colTier(id); };
+      return {
+        kind: 'debate', session_id: state.sessionId, run, leg, concluded_by: concludedBy,
+        pace: d.pace, length: d.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, n: d.debaters.length,
+        turns: Math.max(0, d.turnsUsed - d.turnsAtRun),
+        ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {}),
+        cast: d.debaters.map((id) => { const c = colOf(id); return { provider: c ? c.provider : '', tier: tierSlug(tierAt(id)) || 'unknown' }; }),
+      };
+    })();
+    // ONE rule for the form (3R — closed by narrowing, not by another round): it shows the LATEST send's latest known
+    // answer. `show(ok)` is called for a send only while it is the latest (seq); no answer within
+    // DEBATE_FEEDBACK_TIMEOUT_MS shows a failure for now, and a real answer arriving later still replaces it (a late
+    // success reads as a success). Choosing a rating starts the form over — no older send can hold its button.
+    const post = (withDetails, show) => {
+      const reasons = rating === 'down' ? DEBATE_FEEDBACK_REASONS.filter((r) => picked.has(r)) : [];
+      const text = withDetails ? note.value.trim().slice(0, DEBATE_FEEDBACK_NOTE_MAX) : '';
+      seq += 1;
+      const mine = seq;
+      const report = (ok) => { if (mine === seq) show(ok); };
+      const timer = setTimeout(() => report(false), DEBATE_FEEDBACK_TIMEOUT_MS);
+      const settle = (ok) => { clearTimeout(timer); report(ok); };
+      try {
+        const r = chrome.runtime.sendMessage({ type: FEEDBACK_MSG_TYPE, payload: { ...facts, seq: mine, rating, reasons, ...(text ? { note: text } : {}) } }, (res) => { void chrome.runtime.lastError; settle(!!(res && res.ok === true)); });
+        if (r && typeof r.catch === 'function') r.catch(() => settle(false));
+      } catch { settle(false); }
+      track('debate_feedback', { rating, reasons: reasons.length, note: text ? 1 : 0 });
+    };
+    const say = (key, failed) => { thanks.textContent = t(key); thanks.classList.toggle('is-failed', failed); thanks.hidden = false; };
+    const choose = (value) => {
+      // Re-pressing the selected rating is not a new answer — sending it again could only lose what was sent.
+      if (value === rating) return;
+      rating = value;
+      for (const b of [up, down]) b.setAttribute('aria-pressed', b.getAttribute('data-rating') === value ? 'true' : 'false');
+      chips.hidden = value !== 'down';
+      more.hidden = false;
+      thanks.hidden = true;
+      send.disabled = false;
+      send.textContent = t('debate_fb_send');
+      // The rating counts even if the note is never sent — and a rating the server did not store says so (2R).
+      post(detailsSent, (ok) => { if (!ok) say('debate_fb_failed', true); else if (thanks.classList.contains('is-failed')) thanks.hidden = true; });
+    };
+    up.addEventListener('click', () => choose('up'));
+    down.addEventListener('click', () => choose('down'));
+    send.addEventListener('click', () => {
+      if (!rating || send.disabled) return;
+      send.disabled = true;
+      send.textContent = t('debate_fb_sending');
+      thanks.hidden = true;
+      post(true, (ok) => {
+        send.disabled = false;
+        send.textContent = t(ok ? 'debate_fb_send' : 'debate_fb_retry');
+        if (ok) detailsSent = true;
+        say(ok ? 'debate_fb_thanks' : 'debate_fb_failed', !ok);
+        more.hidden = ok; // a failed send keeps the form (and the note) for 「다시 보내기」
+      });
+    });
+    turn.root.parentNode.insertBefore(box, turn.root.nextSibling);
+  }
+  /**
    * #1852: a moderator's question TO THE USER looks like one — a 「❓ 나에게 질문」 divider and a marked
    * bubble (the plain moderator bubble read like any other turn and was easy to miss).
    */
@@ -1406,7 +1538,7 @@ export function installDebate(ctx) {
           }
           // The wrap-up call MUST conclude: its answer is the conclusion even without the END line (Codex U2 1R #3 —
           // a wrap-up that came back as a NEXT slipped back into turns). Queued user words still come first.
-          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; markConclusion(turn); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
+          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; markConclusion(turn); offerFeedback(turn, 'moderator'); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
           d.pendingNext = pick.id;
           // 「NEXT: n LONG」: that speaker may answer at length this once (#1862).
           d.longFor = pick.long && pick.id ? pick.id : null;
@@ -1431,6 +1563,7 @@ export function installDebate(ctx) {
           if (cur.conclude) {
             if (entry) entry.conclusion = true;
             markConclusion(turn);
+            offerFeedback(turn, 'debater');
             d.legStart = d.turnsUsed;
             track('debate_end', { turns: d.turnsUsed, by: 'concluder' });
             // Words the user sent while the conclusion was being written are answered, not stranded (Codex U2
