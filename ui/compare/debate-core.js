@@ -12,7 +12,7 @@
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
 import { neutraliseQuoted } from './helpers.js';
-import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf } from './constants.js';
+import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
 // Characters an alias may not hold: line breaks / controls, and everything that is structure in a
@@ -43,7 +43,49 @@ export const STANCE_DEVIL = 'devil';
 // #1856 ③: a ROLE rather than a personality — research: among mixed-model debates the less agreeable
 // role scores best. The last debater asks for sources behind factual claims and checks them itself.
 export const STANCE_VERIFY = 'verify';
-export const STANCES = [STANCE_NONE, STANCE_PRO_CON, STANCE_DEVIL, STANCE_VERIFY];
+// Positions and roles are two settings (2026-09-29 user request: 「자유 토론에서도 반론·검증 담당을 따로
+// 고를 수 있어야」): a BASE — free or for/against — plus any of the ROLES, each given to one debater.
+// A run carries them as ONE value (records, the finish statistics, GA): the base, or the roles joined by
+// '+' after it — the single values of before keep their meaning ('devil' = free + contrarian). For/against
+// has no contrarian (half the table already argues against), so 'procon+devil' does not exist.
+export const STANCE_BASES = [STANCE_NONE, STANCE_PRO_CON];
+export const STANCE_ROLES = [STANCE_DEVIL, STANCE_VERIFY];
+export const STANCE_DEVIL_VERIFY = 'devil+verify';
+export const STANCE_PRO_CON_VERIFY = 'procon+verify';
+export const STANCES = [STANCE_NONE, STANCE_PRO_CON, STANCE_DEVIL, STANCE_VERIFY, STANCE_DEVIL_VERIFY, STANCE_PRO_CON_VERIFY];
+/** May `role` go with `base`? The contrarian only in a free debate. */
+export const roleAllowed = (base, role) => STANCE_ROLES.includes(role) && !(base === STANCE_PRO_CON && role === STANCE_DEVIL);
+/** A base + roles → the run's one stance value (unknown / disallowed roles dropped, the order fixed). */
+export function composeStance(base, roles) {
+  const b = STANCE_BASES.includes(base) ? base : STANCE_NONE;
+  const rs = STANCE_ROLES.filter((r) => Array.isArray(roles) && roles.includes(r) && roleAllowed(b, r));
+  if (!rs.length) return b;
+  return b === STANCE_NONE ? rs.join('+') : [b, ...rs].join('+');
+}
+/**
+ * The run's stance as a history record stores it: the verifier as `vf: true` beside a value a 1.42–1.46
+ * reader knows (none / procon / devil — it refuses others and drops the entry). readDebateRecord undoes it.
+ */
+export function recordStance(stance) {
+  const { base, roles } = splitStance(stance);
+  const kept = base === STANCE_NONE && roles.includes(STANCE_DEVIL) ? STANCE_DEVIL : base;
+  return roles.includes(STANCE_VERIFY) ? { stance: kept, vf: true } : { stance: kept };
+}
+/**
+ * The pace as a history record stores it (batch review 1.47.0): 「충분히」 is written as `deep` + `pb: true` —
+ * a 1.46 reader refuses an unknown pace, drops the entry and removes it on its next write (a rollback would
+ * lose every default-pace debate). It reads the run as 「깊게」; readDebateRecord undoes it.
+ */
+export function recordPace(pace) {
+  return pace === PACE_BALANCED ? { pace: PACE_DEEP, pb: true } : { pace };
+}
+/** The run's stance value → `{ base, roles }` (an unknown value reads as a free debate). */
+export function splitStance(stance) {
+  const v = STANCES.includes(stance) ? stance : STANCE_NONE;
+  const parts = v.split('+');
+  const base = parts[0] === STANCE_PRO_CON ? STANCE_PRO_CON : STANCE_NONE;
+  return { base, roles: STANCE_ROLES.filter((r) => parts.includes(r)) };
+}
 // Tone (plan §12): how the AIs talk — like close friends (the default, 2026-09-26 user request),
 // the calm debate wording of phases 1–2, or the user's own style line. Only the TASK sentences change
 // with the tone; the quoting rule, identity / stance lines and the moderator's control line never do.
@@ -52,12 +94,29 @@ export const TONE_CALM = 'calm';
 export const TONE_CUSTOM = 'custom';
 export const TONES = [TONE_FRIENDS, TONE_CALM, TONE_CUSTOM];
 export const DEBATE_TONE_MAX = 300;
-// Pace (#1843, user request 2026-09-27): 「깊게 파고들기」 (the default) — the AI moderator opens a new
-// angle every turn and ends only when the user asks; 「빠르게 결론」 — the earlier behaviour (it may
-// end once no new point comes up). Only an AI moderator reads it; the other kinds never end by themselves.
+// Pace (#1843, user request 2026-09-27): 「깊게 파고들기」 — the AI moderator opens a new angle every
+// turn and ends only when the user asks; 「빠르게 결론」 — the earlier behaviour (it may end once no new
+// point comes up). 「충분히 논의 후 결론」 (balanced, the default since 2026-09-29 — user request: the two
+// were far apart, ~8.5 turns vs. a debate only the user could end) raises new angles like 「깊게」, and
+// past DEBATE_BALANCED_MIN_TURNS may conclude on its own once what is left would not change the answer.
+// Only an AI moderator reads it; the other kinds never end by themselves. PACES is the panel's order.
 export const PACE_DEEP = 'deep';
+export const PACE_BALANCED = 'balanced';
 export const PACE_QUICK = 'quick';
-export const PACES = [PACE_DEEP, PACE_QUICK];
+export const PACES = [PACE_DEEP, PACE_BALANCED, PACE_QUICK];
+export const PACE_DEFAULT = PACE_BALANCED;
+// Without an AI moderator nobody ENDS a debate (#1909: a shared 「자동 순서」 debate ran 100 turns and the
+// user's 「결론 내봐」 changed nothing). Under 「자동 순서」 the pace is a TURN COUNT per leg (from the
+// start, a restore or the last conclusion): at it a debater writes the conclusion (pickConcluder) and the
+// run stops. 「깊게」 has none — it ends on 「🏁 결론 내기」 or the send limit, like an AI moderator's.
+const AUTO_WRAP_TURNS = { [PACE_QUICK]: 6, [PACE_BALANCED]: DEBATE_BALANCED_MIN_TURNS };
+/** The automatic-order turn count of a pace, or null (「깊게」 — no automatic conclusion). */
+export const autoWrapTurns = (pace) => (Number.isInteger(AUTO_WRAP_TURNS[pace]) ? AUTO_WRAP_TURNS[pace] : null);
+/** Has an automatic-order leg run long enough for its conclusion? `legTurns` = debater turns since the leg began. */
+export function autoWrapDue({ pace, modKind, legTurns }) {
+  const limit = AUTO_WRAP_TURNS[pace];
+  return modKind === MOD_AUTO && Number.isInteger(limit) && legTurns >= limit;
+}
 // Reply length (#1862, user request 2026-09-28): how much ONE turn says — independent of the pace (how
 // many turns). A flat cap ended many turns too short, a loose one made every turn long: the setting is
 // the base, a turn with evidence may go to twice it, and the moderator can grant a longer turn (LONG).
@@ -116,6 +175,7 @@ export function tabSwitchAction({ sessionStarted, sending, running, kept }) {
 // a changed setting never steers a debate unseen.
 export const SETTING_MODERATOR = 'moderator';
 export const SETTING_STANCE = 'stance';
+export const SETTING_ROLES = 'roles';
 export const SETTING_TONE = 'tone';
 export const SETTING_PACE = 'pace';
 export const SETTING_LENGTH = 'length';
@@ -130,8 +190,9 @@ export function changedSettings(prefs, def = { moderator: MOD_AUTO, modCol: null
   const mod = p.moderator || MOD_AUTO;
   if (mod !== def.moderator || (mod === MOD_AI && (p.modCol || null) !== (def.modCol || null))) out.push(SETTING_MODERATOR);
   if ((p.stance || STANCE_NONE) !== STANCE_NONE) out.push(SETTING_STANCE);
+  if (Array.isArray(p.roles) && p.roles.some((r) => roleAllowed(p.stance || STANCE_NONE, r))) out.push(SETTING_ROLES);
   if ((p.tone || TONE_FRIENDS) !== TONE_FRIENDS) out.push(SETTING_TONE);
-  if ((p.pace || PACE_DEEP) !== PACE_DEEP) out.push(SETTING_PACE);
+  if ((p.pace || PACE_DEFAULT) !== PACE_DEFAULT) out.push(SETTING_PACE);
   if ((p.length || LENGTH_NORMAL) !== LENGTH_NORMAL) out.push(SETTING_LENGTH);
   return out;
 }
@@ -151,10 +212,12 @@ export function problemInSettings(key) {
 // `NEXT:` line). Its service: a paid plan first, then this order (user decision, 2026-09-27).
 export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
 // Claude's moderator model by plan — asked for explicitly, so it is its own column beside the Claude
-// debater's `claude:auto`. Since vendor-ai v0.15.0 Auto resolves to Sonnet 5 on Free too (#1831);
-// the Free moderator stays on Sonnet 4.6 (free-tier in claude.ai's gate, fast) so the moderator and
-// the Free debater are different models and read as different voices.
-export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5';
+// debater's `claude:auto`. Paid: Sonnet 5.5 — vendor-ai's FAST_MODEL since v0.22.0 (claude.ai's
+// newest Sonnet, read off its bootstrap 2026-09-29; was Sonnet 5). Auto resolves to the same model on
+// a paid plan and, since vendor-ai v0.15.0, on Free too (#1831); the Free moderator stays on Sonnet
+// 4.6 (free-tier in claude.ai's gate, fast) so the moderator and the Free debater are different
+// models and read as different voices.
+export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5-5';
 export const CLAUDE_MODERATOR_FREE = 'claude-sonnet-4-6';
 /** A plan label (status.providers[p].plan) is a paid plan: present and not 「Free」 — renderPlan's `data-tier` rule. */
 export const isPaidPlan = (label) => typeof label === 'string' && !!label.trim() && !/^free$/i.test(label.trim());
@@ -163,8 +226,8 @@ const catalogIds = (list) => (Array.isArray(list) ? list.filter((m) => m && type
  * Where the default moderator sits, from the status (`providers[p]` = { loggedIn, permitted, plan },
  * `catalogs[p]` = the model list): `{ provider, model, debaterModel }` — `model` is always an
  * explicit id (an `auto` column takes the stored model seed, which may be a slow one — plan §18.9 ②);
- * `debaterModel` = the model the SAME service's debater then uses instead of Auto (ChatGPT: its
- * Auto IS the default Instant the moderator takes, so its debater moves to Thinking), else null.
+ * `debaterModel` = the model the SAME service's debater then uses instead of Auto (ChatGPT on a catalog
+ * whose default IS the Instant the moderator takes: its debater moves to Thinking), else null.
  * Null when no signed-in service offers a moderator model.
  */
 export function pickModeratorSeat({ providers, catalogs }) {
@@ -183,10 +246,15 @@ export function pickModeratorSeat({ providers, catalogs }) {
       const flash = list.find((m) => tierOfRow(m).family === 'debate_family_flash');
       if (flash) return { provider: p, model: flash.id, debaterModel: null };
     } else if (p === 'chatgpt') {
-      // The catalog's default row, only when it is the fast Instant; the debater takes the first Thinking row.
+      // The moderator is the fast Instant row. Its debater: Auto when the default is the Auto row (vendor-ai
+      // v0.23.0 — the site's own default slug, a model of its own, family-less); when the default IS that
+      // Instant (before v0.23.0, and whenever the site names no Auto) Auto would be the moderator's model
+      // twice, so the debater takes the first Thinking row. Any other default: skipped, as before.
       const def = list.find((m) => m.default);
+      const fast = list.find((m) => tierOfRow(m).family === 'debate_family_instant');
       const think = list.find((m) => tierOfRow(m).tier === TIER_REASONING);
-      if (def && tierOfRow(def).family === 'debate_family_instant' && think) return { provider: p, model: def.id, debaterModel: think.id };
+      if (def && fast && def.id === fast.id && think) return { provider: p, model: fast.id, debaterModel: think.id };
+      if (def && fast && def.id !== fast.id && tierOfRow(def).family === null) return { provider: p, model: fast.id, debaterModel: null };
     }
   }
   return null;
@@ -205,11 +273,28 @@ export function defaultDebateLayout(pick) {
 /**
  * The moderator a debate starts with when the user never chose one (`modChosen` false): the seat,
  * while it is among the targets with at least two debaters besides it (a service not signed in
- * leaves three — the seat still moderates rather than debating its own service); else the auto order.
+ * leaves three — the seat still moderates rather than debating its own service). Without the seat on
+ * the page but with 3+ AIs, one of them moderates (#1909, 2026-09-29 user decision: an unmoderated
+ * debate has nobody to check facts or conclude — a shared one ran 100 turns): fallbackModerator. Fewer → auto.
+ * `tierKeyOf(colId)` = a column's model-group key (for the fallback's pick), optional.
  */
-export function defaultModerator(seat, targets) {
+export function defaultModerator(seat, targets, tierKeyOf = null) {
   const list = Array.isArray(targets) ? targets : [];
-  return seat && list.includes(seat) && list.length >= DEFAULT_MOD_MIN_TARGETS ? { moderator: MOD_AI, modCol: seat } : { moderator: MOD_AUTO, modCol: null };
+  if (list.length < DEFAULT_MOD_MIN_TARGETS) return { moderator: MOD_AUTO, modCol: null };
+  if (seat && list.includes(seat)) return { moderator: MOD_AI, modCol: seat };
+  return { moderator: MOD_AI, modCol: fallbackModerator(list, tierKeyOf) };
+}
+/**
+ * Which of the page's own columns moderates when the seat is not there: a FAST one (the moderator
+ * speaks between every turn — not a high-end or reasoning model) of the first service in
+ * MODERATOR_RANK that has one; else the first column of that rank; else the last column.
+ */
+export function fallbackModerator(targets, tierKeyOf = null) {
+  const provOf = (id) => String(id).split(':')[0];
+  const slow = (id) => [TIER_HIGH, TIER_REASONING].includes(tierKeyOf ? tierKeyOf(id) : null);
+  for (const p of MODERATOR_RANK) { const fast = targets.find((id) => provOf(id) === p && !slow(id)); if (fast) return fast; }
+  for (const p of MODERATOR_RANK) { const any = targets.find((id) => provOf(id) === p); if (any) return any; }
+  return targets[targets.length - 1];
 }
 // Two debaters plus the seat — the same floor as a chosen AI moderator (planCast). A seat exists only
 // in the layout it was picked with (the default one, or a stored one saved with it — plan §18.9 ①).
@@ -607,14 +692,27 @@ function renderItems(items, t) {
 }
 
 // ── stances ──
-/** The stance i18n key of each debater (`ids` in speaking order) under `stance`; Map id → key | null. */
+/**
+ * The stance i18n keys of each debater (`ids` in speaking order) under the run's `stance` value; Map
+ * id → [key, …] | null. For/against alternates over everyone; the roles go from the end — the
+ * contrarian to the last debater, the verifier to the last one without a role (the last when alone, as
+ * before). A debater may hold a side AND a role (for/against + verifier). With more roles than
+ * debaters the extra role is left out.
+ */
 export function stancesOf(ids, stance) {
-  const out = new Map(ids.map((id) => [id, null]));
-  if (stance === STANCE_PRO_CON) ids.forEach((id, i) => out.set(id, i % 2 === 0 ? 'debate_stance_pro' : 'debate_stance_con'));
-  else if (stance === STANCE_DEVIL && ids.length) out.set(ids[ids.length - 1], 'debate_stance_devil');
-  else if (stance === STANCE_VERIFY && ids.length) out.set(ids[ids.length - 1], 'debate_stance_verify');
-  return out;
+  const { base, roles } = splitStance(stance);
+  const keys = new Map(ids.map((id) => [id, []]));
+  if (base === STANCE_PRO_CON) ids.forEach((id, i) => keys.get(id).push(i % 2 === 0 ? 'debate_stance_pro' : 'debate_stance_con'));
+  let seat = ids.length - 1;
+  for (const role of [STANCE_DEVIL, STANCE_VERIFY]) {
+    if (!roles.includes(role) || seat < 0) continue;
+    keys.get(ids[seat]).push(`debate_stance_${role}`);
+    seat -= 1;
+  }
+  return new Map([...keys].map(([id, ks]) => [id, ks.length ? ks : null]));
 }
+/** A debater's position line text: its stance keys (one key or a list) worded and joined. */
+export const stanceText = (t, keys) => (Array.isArray(keys) ? keys : [keys]).filter(Boolean).map((k) => t(k)).join('; ');
 
 // ── prompts ──
 // The user is NOT told to be nameless (2026-09-28 user decision, reverting #1851): an AI that knows the
@@ -630,6 +728,11 @@ export function stancesOf(ids, stance) {
 // et al., GPL-3.0 — debaters are told disagreement is fine because the aim is the best answer) and
 // the llm-council chairman's two-step synthesis (candidates first, then the call). The wording
 // itself lives in compare-i18n.js.
+// 2026-09-29 rework (#1909 — a shared 104-turn debate was nitpicking, unsourced and never concluded):
+// the reader is the USER, who wants an answer — rebut only what would change it (no nitpicks), concede
+// what is right, a point argued back and forth twice is left as 「where we differ」, a new point only if
+// it could change the conclusion, facts are searched and linked or said to be uncertain (never invented
+// names/figures — a light model made up three programme names), and the user's words come first.
 /**
  * The opening. Everyone answers blind (nobody has seen anyone else yet), which is the point of
  * opening simultaneously. `self` = `{ name, stanceKey }` of the debater this copy goes to (the SEND
@@ -641,8 +744,9 @@ export function stancesOf(ids, stance) {
 export function openingPrompt({ t, names, moderatorName, stanceLines, topic, tone, self = null, length = LENGTH_NORMAL }) {
   const lines = [t('debate_open_head', names.join(', ')), t('debate_call_full_name'), moderatorName ? t('debate_open_moderator', moderatorName) : t('debate_open_user_moderates')];
   if (stanceLines && stanceLines.length) lines.push(t('debate_open_stances'), ...stanceLines);
-  if (self && self.name) lines.push(t('debate_turn_you_are', self.name) + (self.stanceKey ? ` ${t('debate_turn_stance', t(self.stanceKey))}` : ''));
+  if (self && self.name) lines.push(t('debate_turn_you_are', self.name) + (self.stanceKey ? ` ${t('debate_turn_stance', stanceText(t, self.stanceKey))}` : ''));
   lines.push(t(friendly(tone) ? 'debate_open_task_friends' : 'debate_open_task'));
+  lines.push(t(friendly(tone) ? 'debate_fact_rule_friends' : 'debate_fact_rule'));
   lines.push(debaterLengthLine(t, 'open', length, tone));
   const style = styleLine(tone, t, false);
   if (style) lines.push(style);
@@ -654,14 +758,28 @@ export function openingPrompt({ t, names, moderatorName, stanceLines, topic, ton
  * = the moderator's question to it (or null); `firstReply` = its first turn after the opening —
  * the only place its own name is introduced (the opening could not: it was one text for all).
  */
-export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstReply, tone, length = LENGTH_NORMAL, long = false }) {
+export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstReply, tone, length = LENGTH_NORMAL, long = false, conclude = false }) {
   const lines = [];
-  if (firstReply) lines.push(t('debate_turn_you_are', selfName) + (stanceKey ? ` ${t('debate_turn_stance', t(stanceKey))}` : ''));
+  if (firstReply) lines.push(t('debate_turn_you_are', selfName) + (stanceKey ? ` ${t('debate_turn_stance', stanceText(t, stanceKey))}` : ''));
   lines.push(t('debate_turn_head'));
   if (delta.items.length) lines.push(renderItems(delta.items, t));
   if (delta.omitted) lines.push(t('debate_omitted', delta.omitted));
   if (instruction) lines.push(t('debate_turn_instruction', neutraliseQuoted(instruction)));
-  lines.push(t(friendly(tone) ? 'debate_turn_task_friends' : 'debate_turn_task'));
+  const f = friendly(tone);
+  // The conclusion (#1909 — no AI moderator): the whole debate, not this debater's side; no new facts.
+  if (conclude) {
+    lines.push(t(f ? 'debate_conclude_task_friends' : 'debate_conclude_task'));
+    lines.push(t('debate_call_full_name'));
+    const st = styleLine(tone, t, false);
+    if (st) lines.push(st);
+    return lines.join('\n');
+  }
+  lines.push(t(f ? 'debate_turn_task_friends' : 'debate_turn_task'));
+  lines.push(t(f ? 'debate_fact_rule_friends' : 'debate_fact_rule'));
+  // The user's words come first — and when they ask for a conclusion, the debater may give one: the 「no
+  // wrap-up」 line stays off that turn (#1909: 「그만들 하고 결론을 내봐」 was answered with 「아직 안 끝났으니
+  // 정리 없이」 on every turn after it).
+  lines.push(t(delta.items.some((i) => i.role === ROLE_USER) ? (f ? 'debate_turn_user_first_friends' : 'debate_turn_user_first') : (f ? 'debate_turn_no_wrap_friends' : 'debate_turn_no_wrap')));
   lines.push(debaterLengthLine(t, 'turn', length, tone));
   // The moderator's LONG — granted by the page, not left to the debater to notice (#1862). A user's 「자세히」
   // is in the delta above and the length line lets the debater act on it itself.
@@ -676,7 +794,7 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
  * its reply ends with a control line (MODERATOR_CONTROL_RE) the page parses and hides.
  * `first` = its first call (it has not seen the topic yet, so it gets it here).
  */
-export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false, pace = PACE_QUICK, canAsk = false, services = null, length = LENGTH_NORMAL }) {
+export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEnd, tone, wrapUp = false, freeStance = false, pace = PACE_QUICK, turnsUsed = 0, canAsk = false, services = null, length = LENGTH_NORMAL }) {
   const lines = [];
   if (first) lines.push(t(friendly(tone) ? 'debate_mod_intro_friends' : 'debate_mod_intro'), t('debate_topic_label'), neutraliseQuoted(String(topic || '').slice(0, DEBATE_TOPIC_MAX)));
   // Numbered (plan §14.2): the moderator names the next speaker by NUMBER — free-text names were
@@ -708,9 +826,8 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   // the verdict) a clash of FACTS gets its sources asked for; later a still-unsourced clash is handed
   // to another company's AI to check by search. Opinions are not the target. No extra call either way.
   if (!wrapUp) lines.push(t(first ? 'debate_mod_fact_check' : 'debate_mod_verify_rule'));
-  // 「깊게」 (#1843): not only picking up points the debaters raised — the moderator brings one of its own.
-  const deep = pace === PACE_DEEP;
-  if (deep && !wrapUp) lines.push(t(friendly(tone) ? 'debate_mod_deepen_friends' : 'debate_mod_deepen'));
+  // 「깊게」 (#1843) and 「충분히」: not only picking up points the debaters raised — the moderator brings one of its own.
+  if (pace !== PACE_QUICK && !wrapUp) lines.push(t(friendly(tone) ? 'debate_mod_deepen_friends' : 'debate_mod_deepen'));
   // What only the user knows (their situation, constraints, preferences) is asked, not guessed (#1843).
   if (canAsk && !wrapUp) lines.push(t('debate_mod_ask_rule'));
   lines.push(t('debate_call_full_name'));
@@ -720,25 +837,38 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   if (wrapUp) lines.push(t('debate_mod_wrapup'));
   else lines.push(t('debate_mod_long_rule'));
   // The control line instruction is ALWAYS the last thing the moderator reads, whatever the tone (§12.1 ①②).
-  lines.push(t(controlKey({ canEnd, wrapUp, deep, canAsk })));
+  lines.push(t(controlKey({ canEnd, wrapUp, end: endRule({ pace, turnsUsed }), canAsk })));
   return lines.join('\n');
 }
 
+// Who decides an AI moderator's END (the wrap-up aside, which must end): the moderator once no new point
+// comes up (「빠르게」), the moderator once the angles left would not change the answer (「충분히」 past its
+// minimum turns), or the USER only (「깊게」, and 「충분히」 before its minimum).
+export const END_SELF = 'self';
+export const END_ENOUGH = 'enough';
+export const END_ON_REQUEST = 'on_request';
+export function endRule({ pace, turnsUsed }) {
+  if (pace === PACE_QUICK) return END_SELF;
+  if (pace === PACE_BALANCED && turnsUsed >= DEBATE_BALANCED_MIN_TURNS) return END_ENOUGH;
+  return END_ON_REQUEST;
+}
 /**
  * Which control-line instruction the moderator reads last: the wrap-up MUST end; otherwise END is
- * offered only when the page would accept it (`canEnd`) — and under 「깊게」 only on the user's word —
+ * offered only when the page would accept it (`canEnd`), worded by who decides it (`end` — endRule),
  * and ASK only while the run has asks left.
  */
-export function controlKey({ canEnd, wrapUp, deep, canAsk }) {
+const CONTROL_BY_END = { [END_SELF]: 'debate_mod_control', [END_ENOUGH]: 'debate_mod_control_enough', [END_ON_REQUEST]: 'debate_mod_control_on_request' };
+export function controlKey({ canEnd, wrapUp, end, canAsk }) {
   if (wrapUp) return 'debate_mod_control';
-  const base = !canEnd ? 'debate_mod_control_no_end' : deep ? 'debate_mod_control_on_request' : 'debate_mod_control';
+  const base = !canEnd ? 'debate_mod_control_no_end' : CONTROL_BY_END[end] || CONTROL_BY_END[END_ON_REQUEST];
   return canAsk ? `${base}_ask` : base;
 }
 /**
  * May an AI moderator END now (the wrap-up aside)? After `minTurns` debater turns, never with the
- * user's words still queued — and under 「깊게」 only right after the USER spoke (#1843, 1R): the
- * prompt tells it to end only when the user asks, and the page holds it to that, so a moderator
- * that concludes on its own is read as no control (the rule picks the next speaker).
+ * user's words still queued — and while endRule says END_ON_REQUEST (「깊게」, 「충분히」 before its
+ * minimum) only right after the USER spoke (#1843, 1R): the prompt tells it to end only when the user
+ * asks, and the page holds it to that, so a moderator that concludes on its own is read as no control
+ * (the rule picks the next speaker).
  */
 /**
  * Has the user spoken since the moderator last ANSWERED (#1843)? Read backwards through the
@@ -756,7 +886,7 @@ export function userSpokeSince(transcript, skip = null) {
   return false;
 }
 export function moderatorCanEnd({ pace, turnsUsed, minTurns, queued, userSpoke }) {
-  return turnsUsed >= minTurns && !queued && (pace !== PACE_DEEP || !!userSpoke);
+  return turnsUsed >= minTurns && !queued && (endRule({ pace, turnsUsed }) !== END_ON_REQUEST || !!userSpoke);
 }
 
 // ── the moderator's control line ──
@@ -862,6 +992,22 @@ export function mentionOf(text, candidates) {
  * eligible debater who has gone longest without speaking, never `prev`; ties go to speaking order.
  * `lastSpoke` = Map id → seq of its last turn (absent = never). null when nobody is eligible.
  */
+// Who writes a conclusion when there is no AI moderator (#1909): the eligible debater of the strongest
+// model group, page order on a tie — a light model is the last choice (in the shared debate a light
+// model was the one inventing programme names). `tierKeyOf(id)` = its tier i18n key, or null (Auto / unknown).
+const CONCLUDER_RANK = { [TIER_HIGH]: 4, [TIER_REASONING]: 3, [TIER_BALANCED]: 2, [TIER_LIGHT]: 0 };
+const UNKNOWN_TIER_RANK = 1;
+export function pickConcluder({ order, eligible, tierKeyOf }) {
+  let best = null;
+  for (const id of order) {
+    if (!eligible.has(id)) continue;
+    const k = tierKeyOf(id);
+    const rank = Object.hasOwn(CONCLUDER_RANK, k) ? CONCLUDER_RANK[k] : UNKNOWN_TIER_RANK;
+    if (!best || rank > best.rank) best = { id, rank };
+  }
+  return best ? best.id : null;
+}
+
 export function autoNext({ order, eligible, prev, lastSpoke }) {
   let best = null;
   for (const id of order) {
@@ -976,6 +1122,7 @@ export function readDebateRecord(raw, colIds, textMax) {
   const inCast = (id) => cast.includes(id);
   const isDebater = (id) => debaters.includes(id);
   if (raw.pace !== undefined && !PACES.includes(raw.pace)) return undefined;
+  if (raw.pb !== undefined && typeof raw.pb !== 'boolean') return undefined;
   if (raw.vf !== undefined && typeof raw.vf !== 'boolean') return undefined;
   if (raw.length !== undefined && !LENGTHS.includes(raw.length)) return undefined;
   if (!STANCES.includes(raw.stance) || !plainObj(raw.tone) || typeof raw.tone.kind !== 'string' || (raw.tone.custom !== undefined && typeof raw.tone.custom !== 'string')) return undefined;
@@ -998,12 +1145,15 @@ export function readDebateRecord(raw, colIds, textMax) {
       continue;
     }
     if (!inCast(e.c) || !Number.isInteger(e.r)) return undefined;
-    for (const k of ['mod', 'o', 'end']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
-    if (e.end && !e.mod) return undefined; // only a moderator ends a debate
+    for (const k of ['mod', 'o', 'end', 'ce']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
+    if (e.end && !e.mod) return undefined; // a moderator's conclusion is `end`…
+    // …a debater's (#1909 — no AI moderator) is `ce`: a 1.42–1.47 reader refuses `end` on a debater and would
+    // drop the whole entry; it ignores `ce` and shows the turn as a plain one.
+    if (e.ce && e.mod) return undefined;
     if ((e.tk !== undefined && !TIER_KEYS.includes(e.tk)) || (e.s !== undefined && !(Number.isFinite(e.s) && e.s >= 0))) return undefined;
     // A moderator line is the moderator column's; a debater's is a debater's (the flag decides how the text is read).
     if ((e.mod === true) !== (e.c === modCol)) return undefined;
-    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.end ? { end: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
+    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.end ? { end: true } : {}), ...(e.ce ? { ce: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
   }
   const prev = raw.prev == null ? null : (isDebater(raw.prev) ? raw.prev : undefined);
   const fr = idList(raw.fr === undefined ? [] : raw.fr, isDebater);
@@ -1013,10 +1163,13 @@ export function readDebateRecord(raw, colIds, textMax) {
   if (prev === undefined || !fr || !el || !nonNegInt(turns)) return undefined;
   const tone = normalizeTone(raw.tone.kind, raw.tone.custom || '');
   // A record from before 「깊게」 (#1843) ran the quick way — it goes on as it was.
-  // The verifier is stored as `stance: 'none'` + `vf: true` (1R: a 1.42 reader refuses an unknown stance and
-  // then drops the whole entry — this way it reads a free debate). A normalised record may carry 'verify'.
-  const stance = raw.vf === true && raw.stance === STANCE_NONE ? STANCE_VERIFY : raw.stance;
-  return { debaters, modCol, modKind: raw.modKind, stance, pace: raw.pace || PACE_QUICK, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
+  // The verifier is stored as `vf: true` beside the rest of the stance (1R: a 1.42 reader refuses an unknown
+  // stance and then drops the whole entry — this way it reads the debate without the verifier). Since the
+  // roles split (2026-09-29) vf may ride on 'procon' / 'devil' too; a normalised record may carry the composite.
+  const st = splitStance(raw.stance);
+  const stance = raw.vf === true ? composeStance(st.base, [...st.roles, STANCE_VERIFY]) : raw.stance;
+  const pace = raw.pb === true && raw.pace === PACE_DEEP ? PACE_BALANCED : raw.pace || PACE_QUICK; // recordPace
+  return { debaters, modCol, modKind: raw.modKind, stance, pace, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
 }
 /**
  * The log cut to `max` entries for the record, oldest first — but never a line some speaker has
@@ -1104,7 +1257,7 @@ export function transcriptFromRecord(record, lookup) {
     if (e.u !== undefined) { transcript.push({ seq: e.q, speaker: SPEAKER_USER, role: ROLE_USER, text: e.u }); continue; }
     const raw = lookup(e.c, e.r);
     const text = raw ? (e.mod ? splitControl(raw).body : String(raw)) : '';
-    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.end ? { conclusion: true } : {}), ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
+    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.end || e.ce ? { conclusion: true } : {}), ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
     if (!e.mod && text.trim()) lastSpoke.set(e.c, e.q);
   }
   return { transcript, lastSpoke };

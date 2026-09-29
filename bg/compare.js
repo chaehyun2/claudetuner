@@ -285,6 +285,24 @@ export const LIST_MODELS_TIMEOUT_MS = 5000;
 // chrome.storage.sync key: { [provider]: string|null } — the model the user picked per provider.
 // Missing provider = null = the provider's Auto/default (see the package README "Models").
 export const COMPARE_MODELS_KEY = 'compareModels';
+// ChatGPT Auto (vendor-ai v0.23.0, 2026-09-29 user request 「ChatGPT는 Auto 선택이 안 돼?」 → Auto as the
+// default). Until then a ChatGPT column that picked nothing still SENT — and so stored under
+// COMPARE_MODELS_KEY — the fast stop (`gpt-5-6-instant`): the catalog had no Auto row to leave it null.
+// Nearly every stored ChatGPT choice is therefore an Instant nobody chose, and it would hold them on
+// Instant past the new default. Once per profile (this flag, beside the map in storage.sync) a stored
+// Chat Instant slug goes back to null = Auto. A user who really picked Instant sees Auto and picks it
+// again — the old storage cannot tell the two apart (the same trade-off as the debate pace default).
+export const COMPARE_MODELS_AUTO_KEY = 'compareModelsChatgptAuto';
+const CHATGPT_FAST_SEED_RE = /^gpt-[\w.-]*-instant$/;
+/**
+ * The stored choice map after the one-time ChatGPT Auto move (`done` = the flag was already set):
+ * `{ map, changed }`. Only a plain Chat Instant slug moves — a power stop (`…__standard`), a Work
+ * slug (`…-wm`), Auto (null) and every other provider stay as they are.
+ */
+export function migrateModelSeeds(map, done) {
+  if (done || !map || typeof map.chatgpt !== 'string' || !CHATGPT_FAST_SEED_RE.test(map.chatgpt)) return { map, changed: false };
+  return { map: { ...map, chatgpt: null }, changed: true };
+}
 // chrome.storage.sync key: boolean — the user's 「시크릿 대화」 opt-in (ux3, item 6): `true` = compare
 // conversations are temporary/hidden (the pre-ux3 AC23 behaviour), anything else = KEPT in the
 // user's own provider history (package `saveHistory: true`), which is now the default. The wire
@@ -1050,7 +1068,7 @@ export function resolveColumns(message, selectedModels = {}) {
       // 🔴 The page's `id` is AUTHORITATIVE (Codex integration #1): a column keeps its id for the
       // whole session while its MODEL may change (an in-session pick on `claude:auto` → sonnet must
       // reuse `claude:auto`'s client and conversation, and route its events under that id — never
-      // spawn a `claude:claude-sonnet-5` sibling or borrow one). `model` is a separate field used
+      // spawn a `claude:claude-sonnet-5-5` sibling or borrow one). `model` is a separate field used
       // only for the send. The id must have a colId's shape and name THIS provider; a mismatch is a
       // bad_request. Only an entry without an id (an older page) gets its id derived.
       let id = null;
@@ -1870,6 +1888,7 @@ export function createCompareController({
   let selectedLoad = null;    // the one read in flight, joined by concurrent callers
   let pending = {};           // overrides applied while no baseline exists yet
   let persistChain = Promise.resolve();
+  let autoMoved = false;      // the ChatGPT Auto move ran this worker life — every write carries its flag
 
   // Resolves to the shared map once a read has succeeded, else null. Each caller's wait is bounded
   // (SELECTED_MODELS_READ_TIMEOUT_MS); the read itself keeps going and, if it lands later, still
@@ -1880,9 +1899,12 @@ export function createCompareController({
     if (!selectedLoad) {
       selectedLoad = (async () => {
         try {
-          const stored = sanitizeModelMap((await storageSync.get(COMPARE_MODELS_KEY))?.[COMPARE_MODELS_KEY]);
-          selected = { ...fullMap(stored), ...pending };
-          if (Object.keys(pending).length) { pending = {}; queuePersist(); }
+          const got = await storageSync.get([COMPARE_MODELS_KEY, COMPARE_MODELS_AUTO_KEY]);
+          const moved = migrateModelSeeds(sanitizeModelMap(got?.[COMPARE_MODELS_KEY]), got?.[COMPARE_MODELS_AUTO_KEY] === true);
+          selected = { ...fullMap(moved.map), ...pending };
+          // The flag rides the same write as the moved map (queuePersist), so a failed write retries next start.
+          if (got?.[COMPARE_MODELS_AUTO_KEY] !== true) autoMoved = true;
+          if (Object.keys(pending).length || moved.changed || autoMoved) { pending = {}; queuePersist(); }
         } catch (e) {
           console.warn('[compare] could not read model choice:', e?.message || e);
         }
@@ -1911,7 +1933,7 @@ export function createCompareController({
   function queuePersist() {
     const snapshot = { ...selected };
     persistChain = persistChain
-      .then(() => storageSync.set({ [COMPARE_MODELS_KEY]: snapshot }))
+      .then(() => storageSync.set({ [COMPARE_MODELS_KEY]: snapshot, ...(autoMoved ? { [COMPARE_MODELS_AUTO_KEY]: true } : {}) }))
       .catch((e) => { console.warn('[compare] could not persist model choice:', e?.message || e); });
   }
 

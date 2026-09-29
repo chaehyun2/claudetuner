@@ -21,12 +21,12 @@
 import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import {
-  MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCES, STANCE_NONE, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
+  MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCE_BASES, STANCE_ROLES, STANCE_NONE, STANCE_DEVIL, composeStance, splitStance, recordStance, recordPace, roleAllowed, stanceText, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
   DEBATE_DELTA_MAX, DEBATE_TOPIC_MAX, DEBATE_ALIAS_MAX, cleanAlias, aliasProblem, resolveNames, deltaFor, fitDelta, stancesOf,
   openingPrompt, turnPrompt, moderatorPrompt, splitControl, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
-  unsearchedLinks, STANCE_VERIFY, SETTING_MODERATOR, SETTING_STANCE, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_DEEP, moderatorCanEnd, userSpokeSince, changedSettings, problemInSettings, defaultModerator, tierSlug,
+  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
 } from './debate-core.js';
 
 // #1862 fold heights (px of bubble) by reply length, and the slack a bubble may exceed them by unfolded
@@ -67,7 +67,7 @@ export function installDebate(ctx) {
   // `settingsOpen`: the ⚙ panel (plan §18) — closed until the user opens it once, then remembered.
   // `modChosen`: the user picked the moderator (the 「진행」 select) — until then the plan-picked seat
   // moderates by default (plan §18.8; `state.debateSeat` is set by compare.js with the debate layout).
-  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEEP, length: LENGTH_NORMAL, settingsOpen: false };
+  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, roles: [], tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEFAULT, paceChosen: false, length: LENGTH_NORMAL, settingsOpen: false };
   if (state.debateSeat === undefined) state.debateSeat = null;
   state.aliases = {};
   state.debate = null;
@@ -101,12 +101,18 @@ export function installDebate(ctx) {
               modCol: typeof p.modCol === 'string' ? p.modCol : null,
               // A value stored before `modChosen` existed that is not the old default WAS a choice (plan §18.9 ③).
               modChosen: p.modChosen === true || (p.modChosen === undefined && MODERATOR_KINDS.includes(p.moderator) && p.moderator !== MOD_AUTO),
-              stance: STANCES.includes(p.stance) ? p.stance : STANCE_NONE,
+              // Positions and roles split (2026-09-29): a stored single value — 'devil' / 'verify' of before —
+              // reads as a free debate with that role; `roles` stored since then is the list itself.
+              stance: splitStance(p.stance).base,
+              roles: Array.isArray(p.roles) ? STANCE_ROLES.filter((r) => p.roles.includes(r)) : splitStance(p.stance).roles,
               // No / unknown tone = friends (§12.1 ③ — nothing shipped used another default).
               tone: TONES.includes(p.tone) ? p.tone : TONE_FRIENDS,
               toneCustom: typeof p.toneCustom === 'string' ? cleanTone(p.toneCustom).slice(0, DEBATE_TONE_MAX * 2) : '',
-              // No / unknown pace = 「깊게」, the default (#1843) — the stored prefs predate it.
-              pace: PACES.includes(p.pace) ? p.pace : PACE_DEEP,
+              // The pace the user picked is kept (`paceChosen`). One stored before that flag existed was a
+              // pick only if it is 「빠르게」: 「깊게」 was the default until 2026-09-29, and every other
+              // setting's save wrote it along — so it moves to the new default, 「충분히」 (like modChosen, §18.9 ③).
+              pace: PACES.includes(p.pace) && (p.paceChosen === true || p.pace === PACE_QUICK) ? p.pace : PACE_DEFAULT,
+              paceChosen: PACES.includes(p.pace) && (p.paceChosen === true || p.pace === PACE_QUICK),
               length: LENGTHS.includes(p.length) ? p.length : LENGTH_NORMAL, // #1862
               settingsOpen: p.settingsOpen === true,
             };
@@ -133,10 +139,13 @@ export function installDebate(ctx) {
   /** The moderator in effect: the user's choice once made, else the default for this page (the seat — plan §18.8). */
   function modChoice(targets = reachable()) {
     const p = state.debatePrefs;
-    return p.modChosen ? { moderator: p.moderator, modCol: p.modCol } : defaultModerator(state.debateSeat, targets);
+    return p.modChosen ? { moderator: p.moderator, modCol: p.modCol } : defMod(targets);
   }
+  /** This page's default moderation (defaultModerator — the seat, or one of 3+ columns #1909). */
+  const colTier = (id) => { const c = colOf(id); return c ? tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) : null; };
+  const defMod = (targets) => defaultModerator(state.debateSeat, targets, colTier);
   /** The settings that differ from this page's defaults (the ⚙ dot, the summary line). */
-  const changedNow = (targets = reachable()) => changedSettings({ ...state.debatePrefs, ...modChoice(targets) }, defaultModerator(state.debateSeat, targets));
+  const changedNow = (targets = reachable()) => changedSettings({ ...state.debatePrefs, ...modChoice(targets) }, defMod(targets));
   /** The AI moderator column when that is the choice and it is reachable; else null. */
   function moderatorCol(targets = reachable()) {
     const m = modChoice(targets);
@@ -157,10 +166,18 @@ export function installDebate(ctx) {
     const debaters = targets.filter((id) => id !== modCol);
     return { debaters, cast: [...debaters, ...(modCol ? [modCol] : [])] };
   }
-  /** Each debater's side (i18n key or null) — the ONE assignment the cards preview and start() uses. */
-  const castStances = (plan) => stancesOf(plan.debaters, state.debatePrefs.stance);
-  /** The short badge of a side (the devil's prompt line is a sentence, not a badge). */
+  /** The run's one stance value from the ⚙ choices: the position plus the roles it allows. */
+  const runStance = () => composeStance(state.debatePrefs.stance, state.debatePrefs.roles);
+  /** Each debater's side and role (i18n keys or null) — the ONE assignment the cards preview and start() uses. */
+  const castStances = (plan) => stancesOf(plan.debaters, runStance());
+  /** The short badge of a side or role (the roles' prompt lines are sentences, not badges). */
   const stanceBadge = (key) => t(key === 'debate_stance_devil' ? 'debate_stance_badge_devil' : key === 'debate_stance_verify' ? 'debate_stance_badge_verify' : key);
+  /** One badge per key a debater holds (a side and a role may go together). */
+  function appendStanceBadges(parent, keys, cls) {
+    for (const k of keys || []) parent.appendChild(el('span', cls, stanceBadge(k)));
+  }
+  /** The run's stance as the room line names it: the position, then each role — 「자유 토론 + 검증 담당 1명」. */
+  const stanceLabel = (stance) => { const { base, roles } = splitStance(stance); return [base, ...roles].map((k) => t(`debate_stance_opt_${k}`)).join(' + '); };
   /** `{ debaters, modCol, names, conflicts, problem }` for the current setup (problem = i18n key or null). */
   function planCast() {
     const targets = reachable();
@@ -366,19 +383,20 @@ export function installDebate(ctx) {
   // their state changes on render, so a keystroke-driven renderSetup never drops their focus.
   const setupRow = el('div', 'cmp-debate-setup-row');
   /** A labelled radio group of option cards; `onPick(value)` writes the preference. */
-  function optGroup(id, labelKey, options, onPick) {
+  function optGroup(id, labelKey, options, onPick, multi = false) {
     const field = el('div', 'cmp-debate-field');
     const name = el('span', 'cmp-debate-field-name', t(labelKey));
     name.id = `${id}-label`;
     const group = el('div', 'cmp-debate-opts');
     group.id = id;
-    group.setAttribute('role', 'radiogroup');
+    // `multi` = independent on/off cards (the roles): checkboxes, each in the tab order, no arrow-key picking.
+    group.setAttribute('role', multi ? 'group' : 'radiogroup');
     group.setAttribute('aria-labelledby', name.id);
     const cards = new Map();
     for (const [value, titleKey, glyph] of options) {
       const card = el('button', 'cmp-debate-opt');
       card.type = 'button';
-      card.setAttribute('role', 'radio');
+      card.setAttribute('role', multi ? 'checkbox' : 'radio');
       card.setAttribute('data-value', value);
       const title = el('span', 'cmp-debate-opt-title');
       title.appendChild(el('span', 'cmp-debate-opt-glyph', glyph));
@@ -392,7 +410,7 @@ export function installDebate(ctx) {
     }
     // Arrow keys move AND pick, like native radios; a disabled card is skipped — stepping from the
     // card in focus in the whole order, so ← from a disabled card goes left (Codex §19 1R 후속).
-    group.addEventListener('keydown', (e) => {
+    if (!multi) group.addEventListener('keydown', (e) => {
       const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1, Home: 1, End: -1 };
       if (!(e.key in keys)) return;
       const all = [...cards.values()].map((c) => c.card);
@@ -411,13 +429,13 @@ export function installDebate(ctx) {
     });
     field.appendChild(name);
     field.appendChild(group);
-    return { field, group, cards };
+    return { field, group, cards, multi };
   }
-  /** Checked / disabled / descriptions of one group; exactly one card is in the tab order. */
+  /** Checked / disabled / descriptions of one group; a radio group has exactly one card in the tab order, a multi group all. */
   function paintGroup(g, checked, descOf, disabledOf = () => false) {
     let tabbed = null;
     for (const [value, { card, desc }] of g.cards) {
-      const on = value === checked;
+      const on = g.multi ? checked.includes(value) : value === checked;
       card.setAttribute('aria-checked', on ? 'true' : 'false');
       card.classList.toggle('is-checked', on);
       card.disabled = state.sending;
@@ -425,10 +443,10 @@ export function installDebate(ctx) {
       if (off) card.setAttribute('aria-disabled', 'true'); else card.removeAttribute('aria-disabled');
       const d = descOf(value);
       if (desc.textContent !== d) desc.textContent = d;
-      card.tabIndex = -1;
+      card.tabIndex = g.multi ? 0 : -1;
       if (on) tabbed = card;
     }
-    (tabbed || [...g.cards.values()][0].card).tabIndex = 0;
+    if (!g.multi) (tabbed || [...g.cards.values()][0].card).tabIndex = 0;
   }
   const modGroup = optGroup('cmp-debate-moderator', 'debate_mod_label', [
     [MOD_AUTO, 'debate_mod_auto', '\u{1F501}'], [MOD_AI, 'debate_mod_ai_card', '\u{1F399}\u{FE0F}'], [MOD_USER, 'debate_mod_user', '\u{1F64B}'],
@@ -440,9 +458,14 @@ export function installDebate(ctx) {
   modGroup.field.appendChild(modPicks);
   setupRow.appendChild(modGroup.field);
   const stanceGroup = optGroup('cmp-debate-stance', 'debate_stance_label', [
-    [STANCES[0], `debate_stance_opt_${STANCES[0]}`, '\u{1F4AC}'], [STANCES[1], `debate_stance_opt_${STANCES[1]}`, '\u{2696}\u{FE0F}'], [STANCES[2], `debate_stance_opt_${STANCES[2]}`, '\u{1F608}'], [STANCES[3], `debate_stance_opt_${STANCES[3]}`, '\u{1F50E}'],
+    [STANCE_BASES[0], `debate_stance_opt_${STANCE_BASES[0]}`, '\u{1F4AC}'], [STANCE_BASES[1], `debate_stance_opt_${STANCE_BASES[1]}`, '\u{2696}\u{FE0F}'],
   ], (v) => setStance(v));
   setupRow.appendChild(stanceGroup.field);
+  // 역할 추가 (2026-09-29): on top of the position, each role on or off — one debater each.
+  const rolesGroup = optGroup('cmp-debate-roles', 'debate_roles_label', [
+    [STANCE_ROLES[0], `debate_stance_opt_${STANCE_ROLES[0]}`, '\u{1F608}'], [STANCE_ROLES[1], `debate_stance_opt_${STANCE_ROLES[1]}`, '\u{1F50E}'],
+  ], (v) => toggleRole(v), true);
+  setupRow.appendChild(rolesGroup.field);
   // 말투 (§12): friends (default) / calm / custom — the custom line is a one-line input under the cards.
   const toneGroup = optGroup('cmp-debate-tone', 'debate_tone_label', [
     [TONES[0], `debate_tone_opt_${TONES[0]}`, '\u{1F604}'], [TONES[1], `debate_tone_opt_${TONES[1]}`, '\u{1F393}'], [TONES[2], `debate_tone_opt_${TONES[2]}`, '\u{270F}\u{FE0F}'],
@@ -456,9 +479,9 @@ export function installDebate(ctx) {
   toneInput.hidden = true;
   toneGroup.field.appendChild(toneInput);
   setupRow.appendChild(toneGroup.field);
-  // 토론 길이 (#1843): 「깊게 파고들기」 (default) / 「빠르게 결론」 — read by an AI moderator only.
+  // 토론 길이 (#1843): 「깊게 파고들기」 / 「충분히 논의 후 결론」 (default) / 「빠르게 결론」 — read by an AI moderator only.
   const paceGroup = optGroup('cmp-debate-pace', 'debate_pace_label', [
-    [PACES[0], `debate_pace_opt_${PACES[0]}`, '\u{1F50D}'], [PACES[1], `debate_pace_opt_${PACES[1]}`, '\u{23F1}\u{FE0F}'],
+    [PACES[0], `debate_pace_opt_${PACES[0]}`, '\u{1F50D}'], [PACES[1], `debate_pace_opt_${PACES[1]}`, '\u{1F9ED}'], [PACES[2], `debate_pace_opt_${PACES[2]}`, '\u{23F1}\u{FE0F}'],
   ], (v) => setPace(v));
   setupRow.appendChild(paceGroup.field);
   // 발언 길이 (#1862): how much one turn says — short / normal (default) / long. Every moderation kind.
@@ -475,14 +498,16 @@ export function installDebate(ctx) {
   budgetHint.id = 'cmp-debate-hint';
   // The open panel closes where the reader is — its foot — not only on the ⚙ above it (2026-09-28 user:
   // 「다시 닫으려면 상단 옵션 버튼을 눌러야 해서 직관적이지 않아」).
+  // The button leads the foot, on the left (2026-09-29 user): under the cards and the ⚙, where the eye already is —
+  // at the far right of a wide window it sat past the end of every card row.
   const setupFoot = el('div', 'cmp-debate-setup-foot');
-  setupFoot.appendChild(budgetHint);
   const closeSettingsBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-settings-close', t('debate_settings_close'));
   closeSettingsBtn.type = 'button';
   closeSettingsBtn.id = 'cmp-debate-settings-close';
   closeSettingsBtn.setAttribute('aria-controls', 'cmp-debate-setup-body');
   closeSettingsBtn.addEventListener('click', () => setSettingsOpen(false));
   setupFoot.appendChild(closeSettingsBtn);
+  setupFoot.appendChild(budgetHint);
   setupBody.appendChild(setupFoot);
   const summaryBtn = el('button', 'cmp-debate-summary');
   summaryBtn.type = 'button';
@@ -523,7 +548,7 @@ export function installDebate(ctx) {
     const targets = reachable();
     if (kind === MOD_AI) {
       const cur = modChoice(targets);
-      const seat = defaultModerator(state.debateSeat, targets);
+      const seat = defMod(targets);
       p.modCol = cur.modCol && targets.includes(cur.modCol) ? cur.modCol : seat.moderator === MOD_AI ? seat.modCol : null;
       p.moderator = MOD_AI;
     } else {
@@ -566,13 +591,24 @@ export function installDebate(ctx) {
     ctx.updateControls();
   }
   function setPace(pace) {
-    state.debatePrefs.pace = PACES.includes(pace) ? pace : PACE_DEEP;
+    state.debatePrefs.pace = PACES.includes(pace) ? pace : PACE_DEFAULT;
+    state.debatePrefs.paceChosen = true;
     savePrefs();
     renderSetup();
     ctx.updateControls();
   }
+  function toggleRole(role) {
+    if (!STANCE_ROLES.includes(role) || !roleAllowed(state.debatePrefs.stance, role)) return;
+    const on = state.debatePrefs.roles.includes(role);
+    state.debatePrefs.roles = STANCE_ROLES.filter((r) => (r === role ? !on : state.debatePrefs.roles.includes(r)));
+    savePrefs();
+    renderSetup(); // the ⚙ dot, the summary line and the cards' badges say it at once
+    ctx.updateControls();
+    const card = rolesGroup.cards.get(role);
+    if (card) { try { card.card.focus(); } catch { /* focus is a nicety */ } } // the row repainted under the click
+  }
   function setStance(stance) {
-    state.debatePrefs.stance = STANCES.includes(stance) ? stance : STANCE_NONE;
+    state.debatePrefs.stance = STANCE_BASES.includes(stance) ? stance : STANCE_NONE;
     savePrefs();
     renderSetup(); // the ⚙ dot, the summary line and the cards' side badges say it at once (plan §18.7 ③, §19)
     ctx.updateControls();
@@ -688,7 +724,7 @@ export function installDebate(ctx) {
       chip.appendChild(nameBtn);
     }
     if (isMod) chip.appendChild(el('span', 'cmp-debate-badge is-moderator', `\u{1F399}\u{FE0F} ${t('debate_role_moderator')}`));
-    else if (stance) chip.appendChild(el('span', 'cmp-debate-badge is-stance', stanceBadge(stance))); // the side it will take (plan §19)
+    else appendStanceBadges(chip, stance, 'cmp-debate-badge is-stance'); // the side / role it will take (plan §19)
     return chip;
   }
   /**
@@ -759,11 +795,16 @@ export function installDebate(ctx) {
     const need3 = targets.length < 3;
     paintGroup(modGroup, mod.moderator, (v) => t(v === MOD_AI && need3 ? 'debate_mod_desc_need3' : `debate_mod_desc_${v}`), (v) => v === MOD_AI && need3);
     paintGroup(stanceGroup, state.debatePrefs.stance, (v) => t(`debate_stance_desc_${v}`));
+    // Under for/against the contrarian is off (half the table already argues against): a stored choice stays
+    // shown as chosen and says it does not apply (plan §18.7 ①) — it comes back with a free debate.
+    const roleOff = (v) => !roleAllowed(state.debatePrefs.stance, v);
+    paintGroup(rolesGroup, state.debatePrefs.roles, (v) => t(roleOff(v) ? 'debate_role_desc_devil_procon' : `debate_stance_desc_${v}`), roleOff);
     paintGroup(toneGroup, state.debatePrefs.tone, (v) => t(`debate_tone_desc_${v}`));
-    // Only an AI moderator reads the pace: under the other kinds the choice stays shown, and says so.
-    const noAi = mod.moderator !== MOD_AI;
+    // The pace: an AI moderator reads it; 「자동 순서」 turns it into a turn count (#1909); only 「내가 진행」 has none.
+    const noAi = mod.moderator === MOD_USER;
+    const paceDesc = (v) => (mod.moderator === MOD_AUTO ? t(`debate_pace_desc_auto_${v}`, autoWrapTurns(v)) : t(`debate_pace_desc_${v}`));
     paintGroup(lengthGroup, state.debatePrefs.length, (v) => t(`debate_length_desc_${v}`));
-    paintGroup(paceGroup, state.debatePrefs.pace, (v) => t(noAi ? 'debate_pace_desc_needai' : `debate_pace_desc_${v}`), () => noAi);
+    paintGroup(paceGroup, state.debatePrefs.pace, (v) => (noAi ? t('debate_pace_desc_needai') : paceDesc(v)), () => noAi);
     renderModPicks(targets, mod, need3);
     toneInput.hidden = state.debatePrefs.tone !== TONE_CUSTOM;
     toneInput.disabled = state.sending;
@@ -784,6 +825,8 @@ export function installDebate(ctx) {
         parts.push(kind === MOD_AI ? (modName ? t('debate_mod_ai', modName) : t('debate_mod_ai_any')) : t(kind === MOD_USER ? 'debate_mod_user' : 'debate_mod_auto'));
       } else if (k === SETTING_STANCE) {
         parts.push(`${t('debate_stance_label')}: ${t(`debate_stance_opt_${p.stance}`)}`);
+      } else if (k === SETTING_ROLES) {
+        parts.push(`${t('debate_roles_label')}: ${splitStance(runStance()).roles.map((r) => t(`debate_stance_opt_${r}`)).join(', ')}`);
       } else if (k === SETTING_LENGTH) {
         parts.push(`${t('debate_length_label')}: ${t(`debate_length_opt_${p.length}`)}`);
       } else if (k === SETTING_PACE) {
@@ -848,7 +891,8 @@ export function installDebate(ctx) {
   bar.appendChild(barStatus);
   bar.appendChild(pauseBtn);
   // Shown only at a spent budget with an AI moderator (renderBar) — the other answer to 「늘릴까요?」.
-  const concludeBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-conclude', t('debate_budget_conclude'));
+  const concludeBtn = el('button', 'cmp-btn cmp-btn-sm cmp-debate-conclude', t('debate_conclude_now'));
+  concludeBtn.title = t('debate_conclude_tip');
   concludeBtn.id = 'cmp-debate-conclude';
   concludeBtn.type = 'button';
   concludeBtn.hidden = true;
@@ -961,8 +1005,7 @@ export function installDebate(ctx) {
     turn.debateSvc = el('span', 'cmp-debate-svc', ctx.colLabel(col));
     head.appendChild(turn.debateSvc);
     if (isMod) head.appendChild(el('span', 'cmp-debate-badge is-moderator', t('debate_role_moderator')));
-    const stance = d.stances.get(col.id);
-    if (stance) head.appendChild(el('span', 'cmp-debate-badge', stanceBadge(stance)));
+    appendStanceBadges(head, d.stances.get(col.id), 'cmp-debate-badge');
     turn.debateHead = head;
     turn.root.classList.add('cmp-debate-msg', 'is-typing');
     // 「입력이 끝나면 한 번에」 (plan §14 / §14.1 ①②): while the answer streams the row shows a typing
@@ -1129,7 +1172,7 @@ export function installDebate(ctx) {
     }
     head.appendChild(avas);
     const mod = d.modCol ? nameOf(d.modCol) : t(d.modKind === MOD_USER ? 'debate_mod_user' : 'debate_mod_auto');
-    head.appendChild(el('span', 'cmp-debate-room-line', t('debate_room_line', mod, t(`debate_stance_opt_${d.stance}`))));
+    head.appendChild(el('span', 'cmp-debate-room-line', t('debate_room_line', mod, stanceLabel(d.stance))));
     return head;
   }
   /**
@@ -1202,7 +1245,7 @@ export function installDebate(ctx) {
   function reopen(d) {
     d.pauseAfter = false; // moving again cancels a 「멈춤」 still waiting for the turn in flight
     if (!STOPPED.includes(d.phase) || d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) return;
-    if (d.sendsUsed >= d.sendBudget) d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET;
+    if (d.sendsUsed >= d.sendBudget) { d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET; d.wrapGranted = false; }
     hiddenSince = docHidden() ? ctx.clock.now() : null;
     d.phase = PHASE_SPEAKING;
   }
@@ -1222,8 +1265,8 @@ export function installDebate(ctx) {
     const stances = castStances(plan);
     const openingGroup = el('div', 'cmp-debate-opening');
     state.debate = {
-      topic, debaters, modCol, names, stances, stance: state.debatePrefs.stance, pace: state.debatePrefs.pace, length: state.debatePrefs.length || LENGTH_NORMAL, asks: 0, longFor: null,
-      run: ctx.clock.now(), userMsgs: 0, restored: false, reported: null, reportSeq: 0, turnsAtRun: 0, // #1842 finish statistics
+      topic, debaters, modCol, names, stances, stance: runStance(), pace: state.debatePrefs.pace, length: state.debatePrefs.length || LENGTH_NORMAL, asks: 0, longFor: null,
+      run: ctx.clock.now(), userMsgs: 0, restored: false, reported: null, reportSeq: 0, turnsAtRun: 0, legStart: 0, // #1842 finish statistics · legStart: #1909 automatic conclusion
       modKind: modCol ? MOD_AI : (modChoice().moderator === MOD_USER ? MOD_USER : MOD_AUTO),
       transcript: [], seq: 0,
       delivered: new Map(), lastSpoke: new Map(), prev: null,
@@ -1254,7 +1297,7 @@ export function installDebate(ctx) {
     d.current = { kind: PHASE_OPENING, slots };
     // The cast as the opening names it: alias (service model · model group) — no time yet (§13).
     const roster = debaters.map((id) => { const c = colOf(id); const m = metaLine({ label: ctx.colLabel(c), tierKey: tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) }, t); return m ? `${nameOf(id)} (${m})` : nameOf(id); });
-    const stanceLines = [...stances.entries()].filter(([, k]) => k).map(([id, k]) => `- ${nameOf(id)} (${ctx.colLabel(colOf(id))}): ${t(k)}`);
+    const stanceLines = [...stances.entries()].filter(([, k]) => k).map(([id, k]) => `- ${nameOf(id)} (${ctx.colLabel(colOf(id))}): ${stanceText(t, k)}`);
     const opening = { t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone, length: d.length };
     const text = openingPrompt(opening);
     // Each debater's own copy names it and its position (#1815); `text` stays the generic one.
@@ -1265,7 +1308,7 @@ export function installDebate(ctx) {
     // group, and whether it is the plan-picked default the page offered (the user never chose).
     const modC = modCol ? colOf(modCol) : null;
     const modMeta = modC ? { mod_provider: modC.provider, mod_model: modC.model || 'auto', mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {};
-    track('debate_start', { n: debaters.length, moderator: d.modKind, stance: state.debatePrefs.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
+    track('debate_start', { n: debaters.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
     state.question = topic;
     ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, texts);
     stampRound(d.transcript);
@@ -1287,10 +1330,10 @@ export function installDebate(ctx) {
       return;
     }
     d.transcript = d.transcript.filter((e) => e.seq !== d.current.seq);
-    if (d.current.kind === PHASE_SPEAKING) d.turnsUsed = Math.max(0, d.turnsUsed - 1);
+    if (d.current.kind === PHASE_SPEAKING && !d.current.conclude) d.turnsUsed = Math.max(0, d.turnsUsed - 1); // a conclusion is no debate turn
     d.sendsUsed = Math.max(1, d.sendsUsed - 1); // a refused round was never counted
-    if (d.current.wrapUp) d.wrapNow = true; // 「결론 내기」 was refused: ▶ 계속 asks for the conclusion again
-    if (d.current.kind === PHASE_SPEAKING && d.current.col) d.pendingNext = d.current.col; // the same speaker is still owed the floor
+    if (d.current.wrapUp || d.current.conclude) d.wrapNow = true; // 「결론 내기」 was refused: ▶ 계속 asks for the conclusion again
+    else if (d.current.kind === PHASE_SPEAKING && d.current.col) d.pendingNext = d.current.col; // the same speaker is still owed the floor
     d.current = null;
     d.phase = PHASE_PAUSED;
     renderBar();
@@ -1361,13 +1404,17 @@ export function installDebate(ctx) {
             if (box && ctx.focusQuietly && !typing) ctx.focusQuietly(box);
             return false;
           }
-          if (pick.end) { if (entry) entry.conclusion = true; markConclusion(turn); d.phase = PHASE_DONE; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
+          // The wrap-up call MUST conclude: its answer is the conclusion even without the END line (Codex U2 1R #3 —
+          // a wrap-up that came back as a NEXT slipped back into turns). Queued user words still come first.
+          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; markConclusion(turn); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
           d.pendingNext = pick.id;
           // 「NEXT: n LONG」: that speaker may answer at length this once (#1862).
           d.longFor = pick.long && pick.id ? pick.id : null;
           if (pick.fallback && turn && turn.debateHead) turn.debateHead.appendChild(el('span', 'cmp-debate-badge is-auto', t('debate_auto_pick')));
         } else {
           d.modFails += 1;
+          // A wrap-up that failed is asked for again — by the moderator, or a debater once it falls back (Codex U2 1R #3).
+          if (cur.wrapUp) d.wrapNow = true;
           if (col && col.status === 'error' && col.errorCode === CODE_ABORTED) { d.phase = PHASE_PAUSED; renderBar(); return false; }
           if (d.modFails >= 2) { d.modKind = MOD_AUTO; ctx.showNotice('warn', [t('debate_mod_fallback')]); track('debate_mod_fallback', {}); }
         }
@@ -1379,6 +1426,32 @@ export function installDebate(ctx) {
           d.lastSpoke.set(cur.col, cur.seq);
           d.prev = cur.col;
           d.firstReplied.add(cur.col);
+          // A debater's conclusion (#1909 — no AI moderator) closes the run like a moderator's END; the next
+          // leg (the user speaks again) gets its own automatic-order turn count.
+          if (cur.conclude) {
+            if (entry) entry.conclusion = true;
+            markConclusion(turn);
+            d.legStart = d.turnsUsed;
+            track('debate_end', { turns: d.turnsUsed, by: 'concluder' });
+            // Words the user sent while the conclusion was being written are answered, not stranded (Codex U2
+            // 1R #1): the debate goes on into a new leg, like the user speaking after the end.
+            if (d.queue.length) {
+              // …unless ⏸ 멈춤 was pressed meanwhile: it stops here, the words wait for ▶ 계속 (Codex U2 2R #1).
+              if (d.pauseAfter) { d.pauseAfter = false; d.phase = PHASE_PAUSED; renderBar(); return false; }
+              return true;
+            }
+            d.phase = PHASE_DONE;
+            renderBar();
+            reportFinish('moderator');
+            return false;
+          }
+        } else if (cur.conclude) {
+          // A conclusion that failed is asked for again on ▶ 계속 — the debate does not slip back into turns.
+          if (col && col.status !== 'error') dropIfDead(cur.col, col);
+          d.wrapNow = true;
+          d.phase = PHASE_PAUSED;
+          renderBar();
+          return false;
         } else {
           if (col && col.status === 'error' && col.errorCode === CODE_ABORTED) { d.phase = PHASE_PAUSED; renderBar(); return false; }
           dropIfDead(cur.col, col);
@@ -1471,14 +1544,25 @@ export function installDebate(ctx) {
     if (hiddenTooLong({ hidden: docHidden(), since: hiddenSince, now: ctx.clock.now(), limit: DEBATE_HIDDEN_PAUSE_MS })) { d.phase = PHASE_HIDDEN; track('debate_hidden_pause', { sends: d.sendsUsed }); renderBar(); return; }
     // A spent budget stops and asks (renderBar: 「늘려서 계속」 / 「결론 내기」) — whoever is owed the floor
     // (pendingNext, a LONG grant, the user's pick) is kept for 「늘려서 계속」.
+    // A conclusion already asked for is the one send past a spent budget (Codex U2 1R #2 — pressed during the
+    // 50th send, it was stopped by the limit and its button hidden).
+    // Once per spent budget (Codex U2 2R #2): a conclusion that FAILED at that extra send stops at the limit
+    // and asks, instead of granting itself send after send.
+    if (d.wrapNow && !d.wrapGranted && budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.sendBudget = d.sendsUsed + 1; d.wrapGranted = true; }
     if (budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); renderBar(); return; }
     d.phase = PHASE_SPEAKING;
-    // 「결론 내기」 (concludeNow): the moderator's wrap-up call. A LONG grant belongs to the owed turn it
-    // came with — dropped whenever that turn is (2R #1).
+    // 「자동 순서」 has nobody to END it (#1909): at the pace's turn count a debater concludes.
+    if (!d.wrapNow && autoWrapDue({ pace: d.pace, modKind: d.modKind, legTurns: d.turnsUsed - d.legStart })) d.wrapNow = true;
+    // 「결론 내기」 (concludeNow, or the automatic one above): the AI moderator's wrap-up call, else a debater's
+    // conclusion (pickConcluder). A LONG grant belongs to the owed turn it came with — dropped whenever that turn is (2R #1).
     if (d.wrapNow) {
       d.wrapNow = false;
       // A debater the user named (a chip, @name) wins over a 「결론 내기」 still waiting (Codex 1R #2).
-      if (d.modKind === MOD_AI && d.modCol && !(d.forced && d.eligible.has(d.forced))) { d.forced = null; d.pendingNext = null; d.longFor = null; moderate(true); return; }
+      if (!(d.forced && d.eligible.has(d.forced))) {
+        if (d.modKind === MOD_AI && d.modCol) { d.forced = null; d.pendingNext = null; d.longFor = null; moderate(true); return; }
+        const id = concluderOf(d);
+        if (id) { d.forced = null; d.pendingNext = null; d.longFor = null; speak(id, true); return; }
+      }
     }
     // The user's pick goes first; the debater the moderator had just asked stays owed the floor (#1817 ③).
     if (d.forced && d.eligible.has(d.forced)) { const id = d.forced; d.forced = null; d.pendingNext = owedAfterForced(d.pendingNext, id); speak(id); return; }
@@ -1499,26 +1583,26 @@ export function installDebate(ctx) {
     const since = d.delivered.has(id) ? d.delivered.get(id) : 0;
     return { delta: fitDelta(deltaFor(d.transcript, id, since), DEBATE_DELTA_MAX - PROMPT_OVERHEAD), covered: lastSeq() };
   }
-  function speak(id) {
+  function speak(id, conclude = false) {
     const d = state.debate;
     const { delta, covered } = pendingFor(id);
     // A longer turn this once (#1862): the moderator's LONG for this speaker — spent only by the turn it is
     // for (1R #2: the user's pick speaking first kept A's grant for A). A user's 「자세히」 the debater reads itself.
     const long = d.longFor === id;
     if (long) d.longFor = null;
-    const text = turnPrompt({ t, selfName: nameOf(id), stanceKey: d.stances.get(id), delta, instruction: null, firstReply: !d.firstReplied.has(id), tone: d.tone, length: d.length, long });
+    const text = turnPrompt({ t, selfName: nameOf(id), stanceKey: d.stances.get(id), delta, instruction: null, firstReply: !d.firstReplied.has(id), tone: d.tone, length: d.length, long, conclude });
     d.seq += 1;
     d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_PARTICIPANT, name: nameOf(id), text: '', pending: true });
-    d.current = { kind: PHASE_SPEAKING, col: id, seq: d.seq, covered };
-    d.turnsUsed += 1;
+    d.current = { kind: PHASE_SPEAKING, col: id, seq: d.seq, covered, ...(conclude ? { conclude: true } : {}) };
+    if (!conclude) d.turnsUsed += 1; // a conclusion is no debate turn (the automatic-order count)
     d.sendsUsed += 1;
     ctx.beginSend(text, [id], 'FOLLOWUP', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE);
     stampRound([d.transcript[d.transcript.length - 1]]);
     renderBar();
   }
   /**
-   * May the AI moderator END now — under 「깊게」 only when the user has spoken since its last answered
-   * call (#1843). Read off the transcript, not kept as a flag (2R: a flag did not survive a history
+   * May the AI moderator END now — while endRule says on-request (「깊게」, 「충분히」 before its minimum)
+   * only when the user has spoken since its last answered call (#1843). Read off the transcript, not kept as a flag (2R: a flag did not survive a history
    * restore, so a 「마무리해 줘」 stored before a reload was refused). `skip` = the call being judged.
    */
   const mayEnd = (d, skip = null) => moderatorCanEnd({ pace: d.pace, turnsUsed: d.turnsUsed, minTurns: DEBATE_MIN_TURNS_TO_END, queued: d.queue.length, userSpoke: userSpokeSince(d.transcript, skip) });
@@ -1527,6 +1611,11 @@ export function installDebate(ctx) {
    * conclude), not past the run's cap, and not while the user's own words wait in the queue — they
    * already answered, and asking again would strand them like an early END would.
    */
+  /**
+   * Are the sides free — may the moderator hand someone the other side when the openings all agree (#1817 ④)?
+   * A free debate without a contrarian: for/against assigned them, and a contrarian already argues against.
+   */
+  const freeSides = (stance) => { const { base, roles } = splitStance(stance); return base === STANCE_NONE && !roles.includes(STANCE_DEVIL); };
   const mayAsk = (d, cur) => !(cur && cur.wrapUp) && d.asks < DEBATE_MAX_ASKS && !d.queue.length;
   function moderate(wrapUp = false) {
     const d = state.debate;
@@ -1535,7 +1624,7 @@ export function installDebate(ctx) {
     const order = d.debaters.filter((x) => d.eligible.has(x));
     const names = order.map(nameOf);
     const services = order.map((x) => { const c = colOf(x); return c && PROVIDER_META[c.provider] ? PROVIDER_META[c.provider].label : ''; });
-    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: mayEnd(d), tone: d.tone, wrapUp, freeStance: d.stance === STANCE_NONE, pace: d.pace, canAsk: mayAsk(d, { wrapUp }), services, length: d.length });
+    const text = moderatorPrompt({ t, names, lastName: d.prev ? nameOf(d.prev) : null, delta, first: !d.modStarted, topic: d.topic, canEnd: mayEnd(d), tone: d.tone, wrapUp, freeStance: freeSides(d.stance), pace: d.pace, turnsUsed: d.turnsUsed, canAsk: mayAsk(d, { wrapUp }), services, length: d.length });
     d.seq += 1;
     d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_MODERATOR, name: nameOf(id), text: '', pending: true });
     // The PHASE stays 「speaking」 (the debate is running); what is in flight is `current.kind` — a
@@ -1581,19 +1670,50 @@ export function installDebate(ctx) {
     advance();
   }
   /**
-   * 「결론 내기」 at a spent budget (2026-09-28): one more send, for the AI moderator's conclusion. It goes
-   * through advance() — every safeguard (quota, a dead moderator, the hidden tab) still applies.
+   * 「🏁 결론 내기」 (2026-09-28 at a spent budget; #1909 at any time, in every moderation): the AI moderator's
+   * conclusion, else a debater's (pickConcluder). With a turn in flight it comes right after that turn;
+   * stopped, it goes now. At a spent budget it is that one send only — a conclusion that does not come
+   * stops and asks again. It goes through advance(): every safeguard (quota, the hidden tab) still applies.
    */
   function concludeNow() {
     const d = state.debate;
-    if (!d || d.phase !== PHASE_BUDGET || !canConclude(d)) return;
-    reopen(d);
-    d.sendBudget = d.sendsUsed + 1; // that one send only — no conclusion (no END) stops and asks again
+    if (!d || !conclusionOffered(d)) return;
     d.wrapNow = true;
+    // The LATER press wins (Codex U2 4R #1, 5R #1): a chip pick — or an @mention in words still queued —
+    // waiting on the turn in flight is called off here, as a chip or @mention sent AFTER 「결론 내기」 calls
+    // the conclusion off. The queued words themselves stay: the conclusion's writer reads them.
+    d.forced = null;
+    for (const q of d.queue) q.mention = null;
     track('debate_resume', { turns: d.turnsUsed, conclude: true });
+    if (d.current) { d.pauseAfter = false; renderBar(); return; } // after the turn in flight (recordRound → advance)
+    // Spent by the COUNT, not the phase (Codex U2 3R): after a failed conclusion at the limit the run is PAUSED,
+    // and reopen() would otherwise buy a whole new budget for what is one send.
+    const spent = d.sendsUsed >= d.sendBudget;
+    reopen(d);
+    if (spent) { d.sendBudget = d.sendsUsed + 1; d.wrapGranted = true; } // the user's own one send past the limit
     advance();
   }
-  const canConclude = (d) => d.modKind === MOD_AI && !!d.modCol && !ctx.columnDead(colOf(d.modCol));
+  /**
+   * The debater who would write a conclusion now (no AI moderator), or null. Its model group is the one its
+   * turns were shown with (turnMeta — an Auto column's SERVED model, e.g. Sonnet 5.5), else the column's own.
+   */
+  function concluderOf(d) {
+    const tierKeyOf = (id) => {
+      for (let i = d.transcript.length - 1; i >= 0; i--) { const e = d.transcript[i]; if (e.speaker === id && e.tierKey) return e.tierKey; }
+      return colTier(id);
+    };
+    return pickConcluder({ order: d.debaters, eligible: d.eligible, tierKeyOf });
+  }
+  /** Is there anyone to write the conclusion — a live AI moderator, or an eligible debater? */
+  const canConclude = (d) => (d.modKind === MOD_AI && !!d.modCol && !ctx.columnDead(colOf(d.modCol))) || !!concluderOf(d);
+  /** Is 「🏁 결론 내기」 offered right now: a debate past its opening, not finished, not already concluding. */
+  function conclusionOffered(d) {
+    // A conclusion waiting on the turn in flight hides it; one that failed and stopped offers it again.
+    if (!d || (d.wrapNow && d.current) || [PHASE_DONE, PHASE_DEAD, PHASE_TOO_FEW, PHASE_OPENING].includes(d.phase)) return false;
+    const cur = d.current;
+    if (cur && (cur.kind === PHASE_OPENING || cur.wrapUp || cur.conclude)) return false;
+    return canConclude(d);
+  }
   /** Give the floor to `id` next (a pick chip, or `@name`): now when idle, after the current turn otherwise. */
   function pick(id) {
     const d = state.debate;
@@ -1670,6 +1790,7 @@ export function installDebate(ctx) {
     else if (d.phase === PHASE_PAUSED) status = t('debate_status_paused');
     else status = '';
     if (cur && d.pauseAfter) status = [status, t('debate_status_pausing')].filter(Boolean).join(' \u00B7 ');
+    if (cur && d.wrapNow) status = [status, t('debate_status_wrap_pending')].filter(Boolean).join(' \u00B7 ');
     const running = isRunning();
     // While it runs, how much of this run's send budget is used (plan §15 — the debate goes on by itself).
     if (running && d.sendsUsed) status = [status, t('debate_status_sends', d.sendsUsed, d.sendBudget)].filter(Boolean).join(' \u00B7 ');
@@ -1679,7 +1800,8 @@ export function installDebate(ctx) {
     if (typeof ctx.syncComposerPlaceholders === 'function') ctx.syncComposerPlaceholders();
     const budgetAsk = d.phase === PHASE_BUDGET && !cur;
     pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t(budgetAsk ? 'debate_budget_more' : 'debate_resume');
-    concludeBtn.hidden = !(budgetAsk && canConclude(d));
+    // 「🏁 결론 내기」 (#1909): whenever a conclusion can be asked for — not only at a spent budget.
+    concludeBtn.hidden = !conclusionOffered(d);
     pauseBtn.disabled = d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
     pauseBtn.hidden = d.phase === PHASE_AWAIT;
   }
@@ -1698,15 +1820,15 @@ export function installDebate(ctx) {
     for (const e of d.transcript) {
       if (e.speaker === SPEAKER_USER) { log.push({ q: e.seq, u: clipText(e.text) }); continue; }
       if (!Number.isInteger(e.round)) continue; // never went out (a refused round is removed; this is a guard)
-      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.conclusion ? { end: true } : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
+      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.conclusion ? (e.role === ROLE_MODERATOR ? { end: true } : { ce: true }) : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
     }
     let q = d.seq;
     for (const item of d.queue) log.push({ q: ++q, u: clipText(item.text) });
     const aliases = {};
     for (const [id, info] of d.names) if (info && info.custom) aliases[id] = info.name;
     return {
-      // 🔎 verifier: written as 'none' + vf so an older reader keeps the entry (see readDebateRecord).
-      debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, stance: d.stance === STANCE_VERIFY ? STANCE_NONE : d.stance, ...(d.stance === STANCE_VERIFY ? { vf: true } : {}), pace: d.pace, length: d.length, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
+      // 🔎 verifier: written as vf beside a stance an older reader knows, so it keeps the entry (recordStance).
+      debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, ...recordStance(d.stance), ...recordPace(d.pace), length: d.length, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
       log: trimRecordLog(log, d.delivered, DEBATE_RECORD_LOG_MAX), dl: Object.fromEntries(d.delivered), prev: d.prev, fr: [...d.firstReplied], el: [...d.eligible],
       turns: d.turnsUsed, modStarted: d.modStarted, ...(d.phase === PHASE_DONE ? { done: true } : {}),
     };
@@ -1728,7 +1850,7 @@ export function installDebate(ctx) {
     state.debate = {
       topic: state.question, debaters: record.debaters.slice(), modCol: record.modCol, names, stances: stancesOf(record.debaters, record.stance), stance: record.stance, pace: record.pace, length: record.length, asks: 0, longFor: null,
       // A restore's 「계속」 is a new run (#1842); its turn count starts where the record left off (1R).
-      run: ctx.clock.now(), userMsgs: 0, restored: true, reported: null, reportSeq: 0, turnsAtRun: record.turns,
+      run: ctx.clock.now(), userMsgs: 0, restored: true, reported: null, reportSeq: 0, turnsAtRun: record.turns, legStart: record.turns,
       modKind: record.modKind,
       transcript: [], seq: 0,
       delivered: new Map(), lastSpoke: new Map(), prev: record.prev,

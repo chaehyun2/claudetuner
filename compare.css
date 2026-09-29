@@ -835,7 +835,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-summary:hover { color: var(--accent); }
 .cmp-debate-summary-glyph { font-size: 13px; line-height: 1; }
 .cmp-debate-hint { margin: 0; font-size: 12px; color: var(--text-secondary); }
-.cmp-debate-setup-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.cmp-debate-setup-foot { display: flex; align-items: center; justify-content: flex-start; gap: 8px 12px; flex-wrap: wrap; }
 .cmp-debate-settings-close { flex-shrink: 0; }
 
 .cmp-debate-timeline { flex: 1 1 auto; min-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px 18px; line-height: 1.45; background: var(--debate-room-bg); border-radius: var(--radius-card); }

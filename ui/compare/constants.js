@@ -441,6 +441,10 @@ export const TURN_KIND_DEBATE = 'debate';
 export const DEBATE_SEND_BUDGET = 50; // 2026-09-28 user: stays 50 now that a spent budget asks before going on
 export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
+// Under 「충분히 논의 후 결론」 (the balanced pace, 2026-09-29 user request) the moderator concludes on its
+// own only after this many debater turns — before it, like 「깊게」, only on the user's word. Between the
+// measured runs (D1 compare_debates, 2026-09-29): 「빠르게」 ended at ~8.5 turns, 「깊게」's median user-ended run at ~23.
+export const DEBATE_BALANCED_MIN_TURNS = 12;
 // How often an AI moderator may stop the debate to ask the USER something (#1843) — one run's cap:
 // past it an ASK is read as no control (the rule picks the next speaker), so it cannot stall the run.
 export const DEBATE_MAX_ASKS = 2;
