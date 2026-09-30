@@ -327,14 +327,19 @@ export function formatDuration(ms) {
 }
 
 // Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases
-// ("Prolite" = Pro 5x tier, "Pro" = Pro 20x tier); remap them to the user-facing
+// ("Prolite" = the $100 tier, "Pro" = the $200 tier); remap them to the user-facing
 // names so the popup matches the dashboard's planDisplayName(). Other tiers
 // (Plus/Go/Free/Team) and Claude/Gemini plans are already readable → pass through.
+// 🔴 DISPLAY ONLY. OpenAI renamed the Pro tiers by price (Pro 100 / Pro 200 / Pro 500, 2026-09), but
+// the STORED labels stay 'Pro 5x' / 'Pro 20x' / 'Pro 25x' everywhere (snapshots, multipliers,
+// canonicalPlanKey, rec engine). Never feed this function's output back into planToMultiplier() or a
+// plan table — 'Pro 200' would score 1x there, and substring ladders would read its '20'/'5'.
 export function planDisplayName(plan, provider) {
   const p = (plan || '').trim().toLowerCase();
   if (provider === 'chatgpt') {
-    if (p === 'prolite' || p === 'pro 5x') return 'Pro 5x';
-    if (p === 'pro' || p === 'pro 20x') return 'Pro 20x';
+    if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
+    if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
+    if (p === 'pro 25x') return 'Pro 500';
   }
   return plan || '';
 }
@@ -360,14 +365,16 @@ export function planToMultiplier(plan, provider, win) {
     if (p === 'go') return 0.4;
     if (p === 'pro' || p === 'pro 20x') return 20;
     if (p === 'pro 5x' || p === 'prolite') return 5;
+    if (p === 'pro 25x') return 25; // $500 Pro tier (25x Plus quota; no parser emits it yet)
     if (p === 'team') return 1.25;
     return 1; // plus, education, business, unknown
   }
   if (provider === 'gemini') {
     if (p === 'free') return 0.25;
     if (p.includes('ultra')) return p.includes('20') ? 20 : 5;
-    if (p === 'ai plus') return 0.5;
-    return 1; // AI Pro/Advanced, Business, unknown
+    // 'advanced' ≡ AI Plus (0.5): 'Advanced' is the planId-4 fallback label and every classifiable Gemini 'Advanced' row in AE claude_gemini_signals (92 days to 2026-09-30, before and after the 2026-08-09 policy rename) has full 7d quota 24,192 = AI Plus.
+    if (p === 'ai plus' || p === 'advanced') return 0.5;
+    return 1; // AI Pro, Business, unknown
   }
   // Claude (default): original substring logic
   if (!plan) return 1;
@@ -393,12 +400,16 @@ export function planLimitTiers(provider, currentMult, win) {
   if (provider === 'chatgpt') {
     return [
       { mult: 1, label: 'Plus', color: '#22c55e' },
-      { mult: 5, label: 'Pro 5x', color: '#f97316' },
-      { mult: 20, label: 'Pro 20x', color: '#ef4444' },
+      { mult: 5, label: 'Pro 100', color: '#f97316' },
+      { mult: 20, label: 'Pro 200', color: '#ef4444' },
+      { mult: 25, label: 'Pro 500', color: '#a21caf' },
     ];
   }
   if (provider === 'gemini') {
+    // AI Plus (0.5) must be a rung: 'Advanced' now scores 0.5 too (≡ AI Plus, #1928), and a plan
+    // with no rung of its own gets no 100% line on its chart (1.49.0 batch review).
     return [
+      { mult: 0.5, label: 'AI Plus', color: '#84cc16' },
       { mult: 1, label: 'AI Pro', color: '#22c55e' },
       { mult: 5, label: 'Ultra 5x', color: '#f97316' },
       { mult: 20, label: 'Ultra 20x', color: '#ef4444' },

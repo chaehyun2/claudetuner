@@ -370,6 +370,15 @@ export function installModelPicker(ctx) {
         if (keep != null) { kept = keep; value = keep; }
       }
     }
+    // 🔴 In session a Gemini thread keeps its own model when a refreshed list no longer names it
+    // (#1929, Codex ext 1R): the static list is swapped for the account's picker after the first
+    // send, and an id the account's menu lacks would otherwise fall to Auto — the follow-up answered
+    // by another model with nobody told. The id is kept as an option; gemini.google.com substitutes
+    // it server-side as it did for the first turn, and the served model is reported per turn.
+    if (kept == null && state.sessionStarted && col.provider === 'gemini' && current != null && !known.has(toValue(current))) {
+      kept = toValue(current);
+      value = kept;
+    }
     clear(sel);
     for (const m of list) {
       const o = el('option', null, modelOptionText(m, t) + (isLocked(m) ? lockedSuffix(m, t) : ''));

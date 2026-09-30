@@ -91,8 +91,10 @@
 // pending, the SW re-runs `providerModels` for those providers only, OFF the send path (not
 // awaited; LIST_MODELS_TIMEOUT_MS cap; one refresh at a time, a retry asked for meanwhile runs
 // after it) and posts MODELS{models, modelsSource, modelsPending} with the refreshed providers —
-// the page then updates what it holds. Nothing is posted when nothing was pending. Claude/Gemini
-// are static by design (`liveCatalog: false`): never pending, whatever the page says.
+// the page then updates what it holds. Nothing is posted when nothing was pending. Claude is
+// static by design (`liveCatalog: false`): never pending, whatever the page says. Gemini is live
+// since package v0.24.0 (#1929): its picker is the account's own menu rows (`picker`), read the
+// same way through an open gemini.google.com tab, so a newly released model (3.8 Flash) appears.
 //
 // History + web search (2026-09-17, package v0.3.1, multiai-ux items 2/3): the vendored clients
 // gained two options. `saveHistory` (all three providers, package default false) keeps the
@@ -565,7 +567,7 @@ export const PIN_DISABLED_KEY = 'ctcmp_pin_disabled';
 // test/compare-send-order-guard.mjs pins the copy against the real classes.
 export const PROVIDER_SITES = Object.freeze({
   claude: { origin: 'https://claude.ai', relayFile: 'vendor-ai/bridge/claude-relay.js', optionalHost: false, liveCatalog: false, uploads: true },
-  gemini: { origin: 'https://gemini.google.com', relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: false, uploads: true },
+  gemini: { origin: 'https://gemini.google.com', relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
   chatgpt: { origin: 'https://chatgpt.com', relayFile: 'vendor-ai/bridge/chatgpt-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
 });
 
@@ -869,8 +871,9 @@ export function normalizeSendAttachments(list) {
 // Where a provider's picker list came from (COMPARE_STATUS `modelsSource[p]`, MODELS): the package's
 // `models_listed` diag sources, plus `none` for an empty list.
 // `versions` (package v0.11.0): ChatGPT's current picker, the `latest` version's power stops.
-export const MODELS_SOURCE = Object.freeze({ VERSIONS: 'versions', CATEGORIES: 'categories', MODELS: 'models', STATIC: 'static', NONE: 'none' });
-const LIVE_SOURCES = new Set([MODELS_SOURCE.VERSIONS, MODELS_SOURCE.CATEGORIES, MODELS_SOURCE.MODELS]);
+// `picker` = Gemini's account menu rows (package v0.24.0, #1929).
+export const MODELS_SOURCE = Object.freeze({ VERSIONS: 'versions', CATEGORIES: 'categories', MODELS: 'models', PICKER: 'picker', STATIC: 'static', NONE: 'none' });
+const LIVE_SOURCES = new Set([MODELS_SOURCE.VERSIONS, MODELS_SOURCE.CATEGORIES, MODELS_SOURCE.MODELS, MODELS_SOURCE.PICKER]);
 /** A provider whose list should be asked for again once a tab exists. */
 function catalogPending(provider, source) {
   return PROVIDER_SITES[provider].liveCatalog === true && !LIVE_SOURCES.has(source);
@@ -2141,8 +2144,8 @@ export function createCompareController({
   }
 
   // One provider's picker list for COMPARE_STATUS. A throwaway client — the ChatGPT list needs a
-  // client because it asks chatgpt.com through an OPEN tab's bridge (never opens one); Claude and
-  // Gemini answer their static catalogs. Capped here (listModelsTimeoutMs) regardless of the package's own cap; the
+  // client because it asks chatgpt.com through an OPEN tab's bridge (never opens one), as Gemini's
+  // does gemini.google.com (package v0.24.0); Claude answers its static catalog (plus the plan gate). Capped here (listModelsTimeoutMs) regardless of the package's own cap; the
   // client is disposed afterwards (it opened nothing, so that closes nothing) so its timers and
   // listeners cannot outlive the probe.
   // Returns `{ list, source }` — `source` per MODELS_SOURCE: the package's `models_listed` diag when

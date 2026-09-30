@@ -18,7 +18,7 @@ const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_
 // with Claude, which is harmless: both sides of a comparison always come from the same org, so a
 // ChatGPT 'Pro' is only ever compared against another ChatGPT plan.
 const _KNOWN_PLANS = ['Free', 'Pro', 'Team Standard', 'Team Premium', 'Max 5x', 'Max 20x', 'Enterprise',
-  'Go', 'Plus', 'Pro 5x', 'Pro 20x', 'Team', 'Business'];
+  'Go', 'Plus', 'Pro 5x', 'Pro 20x', 'Pro 25x', 'Team', 'Business'];
 const _canonPlan = (p) => {
   if (p == null) return null;
   const v = _planApiToLabel[p] || p;

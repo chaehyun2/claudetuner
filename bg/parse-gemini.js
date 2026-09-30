@@ -15,52 +15,17 @@
 // awaits they cost.
 //
 // 🔴 KEEP THIS FILE IMPORTABLE UNDER PLAIN NODE. It may depend on bg/api.js's pure
-// normalizeResetTime and nothing else — an import that touches chrome.* at module scope puts these
-// functions back out of the contract runner's reach.
+// normalizeResetTime and the zero-import bg/gemini-plan-labels.js, nothing else — an import that
+// touches chrome.* at module scope puts these functions back out of the contract runner's reach.
 //
 // Extracted from bg/collect-gemini.js with no behaviour change.
 import { normalizeResetTime } from './api.js';
+import {
+  GEMINI_PLAN_MAP, GEMINI_POLICY_LABEL, geminiPolicyTierWord,
+} from './gemini-plan-labels.js';
 
-// Gemini plan ID mapping (from jSf9Qc response first field).
-// FALLBACK ONLY: planId is unreliable (observed 2=Workspace, 4=AI Plus, null=AI Pro —
-// see docs/DESIGN-gemini-policy-detection.md). The authoritative tier signal is the
-// otAQ7b `v3p2_<tier>_policy` string (GEMINI_POLICY_LABEL below). This map is used only
-// when the otAQ7b policy RPC fails.
-const GEMINI_PLAN_MAP = {
-  // Numeric planId (jSf9Qc response)
-  1: 'Free',
-  2: 'Work',       // Google Workspace seat (Google's own UI labels it "Work"; covers Business Standard/Plus/Enterprise — planId can't distinguish them)
-  3: 'AI Plus',    // $7.99/mo — entry-level paid tier (post I/O 2026)
-  4: 'Advanced',   // Google One AI Premium (legacy Gemini Advanced)
-  5: 'AI Pro',     // $19.99/mo — full Gemini 3.1 Pro, 1M context
-  6: 'AI Ultra',   // $99.99/mo — 5x Pro usage, developer tier
-  // String variants (planId may arrive as string from some API paths)
-  '1': 'Free',
-  '2': 'Work',
-  '3': 'AI Plus',
-  '4': 'Advanced',
-  '5': 'AI Pro',
-  '6': 'AI Ultra',
-  // Policy/label names (otAQ7b or alternative response formats)
-  'Free': 'Free',
-  'Plus': 'AI Pro',
-  'Advanced': 'Advanced',
-  'Business': 'Work',
-  'Ultra': 'AI Ultra',
-};
-
-// Authoritative tier signal: otAQ7b returns a "v3p2_<tier>_policy" string. Maps the tier
-// word → plan label. Unknown tier words fall back to a title-cased label so a NEW tier
-// (e.g. an Ultra variant) surfaces in the data without a code change. Workspace seats
-// return NO policy (empty) and are labeled 'Work'. See docs/DESIGN-gemini-policy-detection.md.
-const GEMINI_POLICY_LABEL = {
-  free: 'Free',
-  basic: 'Free',   // Free/entry tier — confirmed 2026-07-09 (known free acct: planId=1, v3p2_basic_policy). Maps to Free so planMultiplier() = 0.25x (was 1x via title-case fallback).
-  plus: 'AI Plus',
-  pro: 'AI Pro',
-  ultra: 'AI Ultra',
-  business: 'Work',
-};
+// Plan vocabulary (planId map, tier-word labels, the policy→tier table) lives in
+// bg/gemini-plan-labels.js — shared verbatim with the Worker's ingest-time correction.
 
 // Recursively collect every "v3p2_<tier>_policy" (or any "*_policy") string in a nested
 // otAQ7b response into acc (deduped, order-preserving).
@@ -77,7 +42,7 @@ export function extractGeminiPolicies(node, acc) {
 // tier constant; its ratio to Pro is the capacity multiplier. See docs/DESIGN §13–14.
 const GEMINI_PRO_QUOTA = { d7: 48384, h5: 2400 };
 
-// AI Ultra 5x and 20x share ONE policy (v3p2_ultra_policy) — only the quota tells them apart.
+// AI Ultra 5x and 20x share ONE policy (v3p2_ultra_policy, since 2026-08-09 neon_policy) — only the quota tells them apart.
 // Returns 'AI Ultra 5x' / 'AI Ultra 20x' from the capacity ratio, or null (unknown → keep base
 // 'AI Ultra'). Prefers the 7d window; both windows yield the same ratio.
 export function geminiUltraSubTier(rem7d, pct7d, rem5h, pct5h) {
@@ -156,11 +121,20 @@ export function parseGeminiWindows(data) {
  */
 export function parseGeminiPolicy(otResponse, otOk) {
   const policies = otOk ? extractGeminiPolicies(otResponse, []) : [];
-  // Prefer the tier-bearing v3p2 policy; fall back to the first policy string for the
-  // raw value sent to AE.
-  const tierPolicy = policies.find(p => /v3p2_(\w+)_policy/.test(p)) || null;
+  // Prefer a tier-bearing policy — a v3p2_<tier>_policy OR a post-2026-08-09 alias
+  // (GEMINI_POLICY_ALIAS; 🔴 note `plus_policy` is the PRO tier) — over unrecognized ones; fall back
+  // to the first policy string for the raw value sent to AE. geminiPolicy stays the RAW string.
+  // A policy whose tier word we KNOW (a GEMINI_POLICY_LABEL key) beats one whose word we merely
+  // read off a v3p2 name: `v3p2_default_policy` yields 'default', which would otherwise win by
+  // position over a later plus_policy and label a Pro account 'Default'. An unknown v3p2 word is
+  // still used when nothing better exists, so a NEW tier keeps surfacing in the data.
+  const knownTier = (p) => {
+    const w = geminiPolicyTierWord(p);
+    return w !== null && Object.prototype.hasOwnProperty.call(GEMINI_POLICY_LABEL, w);
+  };
+  const tierPolicy = policies.find(knownTier) || policies.find(p => geminiPolicyTierWord(p) !== null) || null;
   const geminiPolicy = tierPolicy || policies[0] || '';   // raw policy string collected into AE
-  const tierWord = tierPolicy ? tierPolicy.match(/v3p2_(\w+)_policy/)[1] : null;
+  const tierWord = tierPolicy ? geminiPolicyTierWord(tierPolicy) : null;
   return { policies, tierPolicy, geminiPolicy, tierWord };
 }
 
@@ -179,8 +153,8 @@ export function parseGeminiPolicy(otResponse, otOk) {
 export function resolveGeminiPlan({ policies, tierWord, planId, otOk }) {
   if (policies.length > 0) {
     // A policy is present → metered consumer account (NEVER Workspace, even if the tier
-    // word is unrecognized). Label from the v3p2 tier word (unknown → title-cased so it
-    // surfaces in data); if a policy exists but names no v3p2 tier, use the planId label.
+    // word is unrecognized). Label from the tier word (unknown → title-cased so it surfaces in
+    // data); if a policy exists but names no recognized tier, use the planId label.
     const plan = tierWord
       ? (GEMINI_POLICY_LABEL[tierWord] || (tierWord.charAt(0).toUpperCase() + tierWord.slice(1)))
       : (GEMINI_PLAN_MAP[planId] || 'Gemini');

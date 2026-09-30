@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
+import { escHtml, planDisplayName, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
@@ -12,11 +12,13 @@ import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS } from '../bg/constants.js';
 
 // Human-readable label for a provider org, provider-qualified across all providers
-// (e.g. "Claude Max 20x", "ChatGPT Pro 5x", "Gemini Advanced"). Provider defaults to
+// (e.g. "Claude Max 20x", "ChatGPT Pro 100", "Gemini Advanced"). Provider defaults to
 // 'claude' when absent (Claude orgs may omit the field), matching the chip's `pv` default.
 export function _providerOrgLabel(org) {
   if (!org) return '';
-  return [PROVIDER_LABELS[org.provider || 'claude'] || '', org.plan || ''].filter(Boolean).join(' ').trim();
+  const provider = org.provider || 'claude';
+  // Display name (ChatGPT stored 'Pro 5x' → 'Pro 100'); this label is never parsed back into a plan.
+  return [PROVIDER_LABELS[provider] || '', planDisplayName(org.plan, provider)].filter(Boolean).join(' ').trim();
 }
 
 export function loadOrgSelector() {
@@ -509,7 +511,7 @@ export function selectOrg(orgId, container) {
       // Two consequences. The guide lines were always wrong for a non-Claude org — a ChatGPT org
       // drew Pro/Max 5x/Max 20x instead of Plus/Pro 5x/Pro 20x. And the multiplier fell through to
       // Claude's substring ladder, which agrees with the ChatGPT tiers only by coincidence: the
-      // display names 'Pro 20x'/'Pro 5x' happen to match its includes('20')/includes('5x') arms,
+      // stored labels 'Pro 20x'/'Pro 5x' happen to match its includes('20')/includes('5x') arms,
       // but ChatGPT Free (0.2) and Go (0.4) both scored 1x, as did Gemini Free (0.25), AI Plus
       // (0.5) and a bare 'Ultra' (5). Cross-plan history normalization used those numbers.
       provider: orgData.provider || 'claude',

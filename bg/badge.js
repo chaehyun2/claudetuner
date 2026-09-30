@@ -2,6 +2,7 @@ import { isUpgradeBlocked } from './upgrade-gate.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, computeRecNotice } from './rec-notice.js';
 import { composeToolbarTitle, formatUsage, pickNotice } from './toolbar-title.js';
 import { bt } from './i18n.js';
+import { planDisplayName } from '../ui/util.js';
 
 // Get usage data for the PINNED (primary) org. The toolbar badge follows the
 // pinned org, NOT the transient popup selection — selecting a chip only changes
@@ -263,7 +264,9 @@ export async function refreshToolbarTip() {
     // the popup — the surface the tooltip exists to shortcut.
     const rec = recNotice ? lastStatus?.recommendation : null;
     const recLine = rec
-      ? await bt('tip_rec', rec.from_plan || rec.fromPlan || '', rec.to_plan || rec.toPlan || '')
+      // Display names (ChatGPT stored 'Pro 5x' reads 'Pro 100'); Claude labels pass through.
+      ? await bt('tip_rec', planDisplayName(rec.from_plan || rec.fromPlan || '', rec.provider || 'claude'),
+        planDisplayName(rec.to_plan || rec.toPlan || '', rec.provider || 'claude'))
       : null;
 
     await chrome.storage.local.set({
