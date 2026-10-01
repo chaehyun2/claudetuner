@@ -500,27 +500,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Show current status
   loadStatus();
 
-  // Review banner
-  chrome.storage.local.get({ ct_review_nudge: null }, (store) => {
-    const rn = store.ct_review_nudge;
-    if (!rn) return;
-    if (rn.clicked) return;
-    if ((rn.dismiss_count || 0) >= 5) return;
-    if (rn.last_dismissed && Date.now() - new Date(rn.last_dismissed + 'Z').getTime() < 14 * 86400000) return;
-    if (rn.first_seen_at) {
-      const age = (Date.now() - new Date(rn.first_seen_at + 'Z').getTime()) / 86400000;
-      if (age < 3) return;
-    }
-    document.getElementById('review-banner').style.display = 'flex';
-  });
-  document.querySelector('.review-banner-btn').addEventListener('click', () => {
-    sendReviewNudgeAction('clicked');
-    if (typeof sendGAEvent === 'function') sendGAEvent('review_nudge_clicked', { source: 'options' });
-  });
+  // Review banner — the gates and the click / dismiss record are bg/review-nudge.js (shared with
+  // the popup and the cross-check page). A classic script, so the module comes in through a
+  // dynamic import; no utilization gate here (this page holds no snapshot).
+  const reviewNudge = import('./bg/review-nudge.js');
+  const reviewBanner = document.getElementById('review-banner');
+  reviewNudge.then((m) => chrome.storage.local.get({ [m.REVIEW_NUDGE_KEY]: null }, (store) => {
+    if (m.reviewNudgeDue(store[m.REVIEW_NUDGE_KEY])) reviewBanner.style.display = 'flex';
+  })).catch(() => {});
+  // `pick(m)` → [action, GA event] from the module's constants.
+  const recordReview = (pick) => reviewNudge.then((m) => {
+    const [action, event] = pick(m);
+    m.recordReviewNudgeAction(action, {
+      storage: chrome.storage.local,
+      getConfig: () => new Promise((r) =>
+        chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)),
+      authedFetch: _authedFetch,
+    });
+    if (typeof sendGAEvent === 'function') sendGAEvent(event, { source: 'options' });
+  }).catch(() => {});
+  document.querySelector('.review-banner-btn').addEventListener('click', () => recordReview((m) => [m.REVIEW_ACTION_CLICKED, m.REVIEW_EVENT_CLICKED]));
   document.getElementById('review-dismiss').addEventListener('click', () => {
-    document.getElementById('review-banner').style.display = 'none';
-    sendReviewNudgeAction('dismissed');
-    if (typeof sendGAEvent === 'function') sendGAEvent('review_nudge_dismissed', { source: 'options' });
+    reviewBanner.style.display = 'none';
+    recordReview((m) => [m.REVIEW_ACTION_DISMISSED, m.REVIEW_EVENT_DISMISSED]);
   });
 
   // Data reset button
@@ -590,23 +592,6 @@ function _scrollToDeepLink(hash, startDelayMs, waitMs) {
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
     timer = setTimeout(stop, waitMs);
   }, startDelayMs);
-}
-
-async function sendReviewNudgeAction(action) {
-  try {
-    const status = await new Promise(r => chrome.storage.local.get({ lastStatus: null }, r));
-    const email = status.lastStatus?.snapshot?.user_email;
-    if (!email) return;
-    const cfg = await new Promise(r =>
-      chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
-    );
-    if (!cfg.serverUrl) return;
-    _authedFetch(cfg, cfg.serverUrl + '/api/snapshots/review-nudge', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_email: email, action }),
-    });
-  } catch (e) { /* silent */ }
 }
 
 // 「현재 상태」 rows: plan + last collection per provider. Claude reads lastStatus (GET_STATUS, the

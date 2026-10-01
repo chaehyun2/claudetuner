@@ -8,11 +8,12 @@
 // they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract is
 // written up in history.js.
 
-import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
-import { autoGrow, sendableTargets } from './helpers.js';
+import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
+import { autoGrow, sendableTargets, answeredTurn } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 import { isImageType } from './attach-types.js';
 import { linkErrorText } from './link.js';
+import { REVIEW_SOURCE_COMPARE } from './review-nudge.js';
 
 /** Installs the port / streaming slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installPort(ctx) {
@@ -250,6 +251,12 @@ export function installPort(ctx) {
         if (msg.stalled === true) {
           turn.stalled = true;
           if (msg.cutReason === CUT_STREAM_ERROR) turn.cutError = true;
+          // The provider took its answer back: what it wrote first stays, its replacement is quoted
+          // under it (plain text — cutNote → a text node; bounded again here, the SW is not trusted twice).
+          if (msg.cutReason === CUT_RETRACTED) {
+            turn.retracted = true;
+            if (typeof msg.retraction === 'string' && msg.retraction) turn.retraction = msg.retraction.slice(0, RETRACTION_MAX);
+          }
         }
         col.status = 'done';
         turn.node.classList.remove('is-streaming');
@@ -397,6 +404,8 @@ export function installPort(ctx) {
         if (live.length) {
           const skipped = [...state.columns.values()].filter((c) => !c.node.hidden && !state.roundTargets.includes(c.id) && c.turns.length && c.turns[c.turns.length - 1].role === 'skipped').length;
           track('round_done', { ok_n: live.filter((c) => c.status === 'done').length, err_n: live.filter((c) => c.status === 'error').length, skipped_n: skipped, ms: state.roundStartedAt == null ? -1 : Math.max(0, clock.now() - state.roundStartedAt) });
+          // #1966: every column this cross-check round asked answered — the moment to ask for a review.
+          if (CROSSCHECK_SEND_KINDS.includes(state.roundKind) && live.every((c) => answeredTurn(c, ctx.lastAssistantTurn(c)))) ctx.reviewMoment(REVIEW_SOURCE_COMPARE);
         }
         finishSend();
         return;
@@ -748,6 +757,7 @@ export function installPort(ctx) {
     // Beta stats (cmp-beta-contract §3 / §5): the kind, the round, the validated source provider
     // (omitted when the page was opened without one) and the session id, on every wire message.
     msg.kind = sendKind;
+    state.roundKind = sendKind; // what ALL_DONE reads (the review banner's cross-check moment)
     msg.round = round;
     // The round's image (#1617), `{name, type, data}` as bg/compare.js normalizes it — `bytes` is
     // the page's own bookkeeping for the chip and has no meaning on the other side. The key is

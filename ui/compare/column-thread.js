@@ -110,7 +110,7 @@ export function installColumnThread(ctx) {
         turn.node.appendChild(wrap);
       }
     }
-    if (turn.stalled) turn.node.appendChild(el('p', 'cmp-col-stalled', cutNote(turn)));
+    if (turn.stalled) turn.node.appendChild(el('p', 'cmp-col-stalled', cutNote(turn, col)));
     maybeFollowStream(col, turn);
   }
 
@@ -471,9 +471,16 @@ export function installColumnThread(ctx) {
   /**
    * The sentence for an answer that did not finish. ONE chooser, used by all three places that
    * say it (the note under the answer, the badge title, the summary attachment) — three copies of
-   * this ternary is how the two cases drift apart.
+   * this ternary is how the two cases drift apart. A retracted answer names its provider (`col`)
+   * and quotes the replacement; the quote is the LAST argument, so nothing in it is substituted.
    */
-  function cutNote(turn) { return t(turn && turn.cutError === true ? 'answer_cut_error' : 'answer_stalled'); }
+  function cutNote(turn, col) {
+    if (turn && turn.retracted === true) {
+      const label = (col && PROVIDER_META[col.provider] && PROVIDER_META[col.provider].label) || t('answer_retracted_who');
+      return turn.retraction ? t('answer_retracted', label, turn.retraction) : t('answer_retracted_plain', label);
+    }
+    return t(turn && turn.cutError === true ? 'answer_cut_error' : 'answer_stalled');
+  }
 
   /** The column's last answer is a stalled one (its retry is offered, see renderColumnActions). */
   function stalledRetryable(col) {

@@ -73,7 +73,7 @@ const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, reserveAttachments, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix } from './ui/compare/helpers.js';
-import { NARROW_MEDIA } from './ui/compare/constants.js';
+import { NARROW_MEDIA, REDUCED_MOTION_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
 import { installColumnGate } from './ui/compare/column-gate.js';
@@ -85,6 +85,7 @@ import { installPort } from './ui/compare/port.js';
 import { installOutputImages } from './ui/compare/output-images.js';
 import { installDebate } from './ui/compare/debate.js';
 import { installShare } from './ui/compare/share.js';
+import { installReviewNudge } from './ui/compare/review-nudge.js';
 // The public surface stays on compare.js (test/compare-page-flow-guard.mjs imports it from here).
 export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, MODEL_AUTO_ID, colIdOf, parseColId, normalizeColId, PROVIDER_META, LOGIN_URL, PRO_URL, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS } from './ui/compare/constants.js';
 export { listenEmbedTheme, sendableTargets, localHHMM } from './ui/compare/helpers.js';
@@ -196,6 +197,7 @@ export function mountComparePage(deps) {
     pendingFollowupCol: null, // colId whose column composer sent the follow-up in flight (null = the dock) — a CONSUME_FAIL hands the draft back to that column's input
     question: '',         // the first-round text as sent (snapshot at click; the card freezes to it on CONSUME_OK)
     pendingFollowup: '',  // follow-up text in flight, restored to the input on CONSUME_FAIL
+    roundKind: null,      // the in-flight / last round's send kind (beginSend) — ALL_DONE offers the review banner after a cross-check one
     roundTargets: [],     // colIds the in-flight / last round was sent to (col.round is the rollback snapshot and dies at CONSUME_OK)
     rounds: 0,            // rounds accepted (CONSUME_OK) in this session — analytics `send.round`
     sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
@@ -392,7 +394,7 @@ export function mountComparePage(deps) {
   // The previews of the images this page sends (2026-09-26): shown on the turns, kept with the
   // history. Injectable — the guard passes one over fakes (mini-dom has no IndexedDB or canvas).
   const imageStore = deps.imageStore || createImageStore({ backend: typeof indexedDB !== 'undefined' ? idbBackend(indexedDB) : null });
-  const ctx = { chrome, doc, win, location, lang, t, state, clock, nav, con, syncStorage, random, raf, root, params, src, q, embedHost, track, el, clear, link, dot, deps, imageStore };
+  const ctx = { chrome, doc, win, location, lang, t, state, clock, nav, con, syncStorage, localStorageArea: accountStorage, random, raf, root, params, src, q, embedHost, track, el, clear, link, dot, deps, imageStore };
   Object.assign(ctx, {
     // stays in compare.js
     openInExtensionTab, openImageViewer, closeViewer, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
@@ -418,6 +420,7 @@ export function mountComparePage(deps) {
   installPort(ctx);
   installDebate(ctx);
   installShare(ctx);
+  installReviewNudge(ctx);
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
   const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
   const { closePicker, togglePicker, toggleServicePicker, syncServiceButton, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
@@ -886,11 +889,12 @@ export function mountComparePage(deps) {
    * is at zero, exactly as the text does (updateControls).
    */
   function attachLocked() {
-    // The debate tab takes no files (its rounds never carry the tray — plan §17.4): a drop / paste
-    // there is refused like one mid-send, and the tray a cross-check left is kept, hidden.
-    return state.sending || state.disabled || debateTab();
+    // The debate tab before its session takes files like the cross-check (#1961 — plan §17.4): they
+    // ride the opening only. Once a debate exists (started, or reopened from the history) nothing
+    // more is taken — none of its later rounds would carry it.
+    return state.sending || state.disabled || ctx.debateActive();
   }
-  /** The debate tab before its session: the opening is being set up (the tray, the link offer and 원본 제외 are not this room's). */
+  /** The debate tab before its session: the opening is being set up (the link offer and 원본 제외 are not this room's; the tray is — #1961). */
   function debateTab() {
     return !state.sessionStarted && ctx.debateChosen();
   }
@@ -913,9 +917,13 @@ export function mountComparePage(deps) {
   function readyAttachments() {
     return state.attachItems.filter((i) => !i.reading);
   }
-  /** The columns this round would go to right now — the question composer's before the session, the follow-up's after. */
+  /**
+   * The columns this round would go to right now — the question composer's before the session, the
+   * follow-up's after; on the debate tab the opening's debaters (#1961 — the moderator gets no file).
+   */
   function roundTargetsNow() {
-    return state.sessionStarted ? followupPlan().targets : currentTargets();
+    if (state.sessionStarted) return followupPlan().targets;
+    return debateTab() ? ctx.debateOpeningTargets() : currentTargets();
   }
   /**
    * The tray's file types, without repeats (#1944) — every item's, a read still running included
@@ -1074,9 +1082,11 @@ export function mountComparePage(deps) {
     clear(attachChips);
     for (const a of state.attachItems) attachChips.appendChild(makeChip(a, a.reading));
     const any = state.attachItems.length > 0;
-    // The debate tab keeps a cross-check's files but shows none of the tray (plan §17.11 ⑥) — only
-    // the link row, whose ✕ is how a held link (which blocks the opening) is let go.
-    const trayShown = !debateTab();
+    // The debate tab shows the tray like the cross-check (#1961): its opening carries it. Once a
+    // debate exists (running, or opened from the history) the tray is KEPT and hidden: none of its
+    // rounds takes a file, and what the user left there waits for the next conversation
+    // (resetSession keeps it — a file the user put in the tray never goes away unseen).
+    const trayShown = !ctx.debateActive();
     attachChips.hidden = !any || !trayShown;
     // Which columns this round would leave behind — computed from the targets as they stand, so
     // unticking a column in the follow-up boxes makes the line go away by itself.
@@ -1105,7 +1115,7 @@ export function mountComparePage(deps) {
   /** The 「질문을 입력해 주세요」 line: files in the tray, nothing typed in the composer face that is showing. */
   function syncAttachNeedText() {
     const draft = state.sessionStarted ? String(followup.input.value || '').trim() : currentQuestion();
-    attachNeedText.hidden = !state.attachItems.length || draft.length > 0 || debateTab();
+    attachNeedText.hidden = !state.attachItems.length || draft.length > 0 || ctx.debateActive();
   }
   /**
    * The link row (#1651): at most one of offer / reading / receipt / refusal, because at most one
@@ -2394,10 +2404,18 @@ export function mountComparePage(deps) {
     revealNode(col.node);
     track('column_add', { col: gaCol(col), n: state.columnIds.length });
   }
-  /** Scrolls a node into view when it is not (nearest edge, no jump when it already is); no-op without a layout engine. */
+  /**
+   * Scrolls a node into view when it is not (nearest edge, no jump when it already is); no-op without a layout engine.
+   * 🔴 For what the USER just made appear (a column added, the feedback form a 👍/👎 opened, the review banner after
+   * a 👍) — never for what appears on its own (an answer, the review banner after a round): that would yank the page
+   * from under someone reading. scrollIntoView moves every scroll container between the node and the page (the
+   * debate timeline, a column body, the document at ≤720px) — only as far as needed. Smooth unless reduced motion.
+   */
   function revealNode(node) {
     if (!node || typeof node.scrollIntoView !== 'function') return;
-    try { node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* no layout engine */ }
+    let reduce = false;
+    try { reduce = !!(win && typeof win.matchMedia === 'function' && win.matchMedia(REDUCED_MOTION_MEDIA).matches); } catch { /* no matchMedia (tests) */ }
+    try { node.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: reduce ? 'auto' : 'smooth' }); } catch { /* no layout engine */ }
   }
   ctx.revealNode = revealNode;
   /**
@@ -2817,8 +2835,8 @@ export function mountComparePage(deps) {
     // still being read asked all three columns the question WITHOUT the context — the round that
     // the chip promised would continue a conversation was a plain one, and the late LINK_OK then
     // built a receipt for a session already under way.
-    // The debate tab's opening never carries the tray (SEND_VIA_DEBATE), so the tray's gates — a read
-    // in flight, a column that takes files — are not its (plan §17.11 ②); its own reasons are.
+    // The debate tab's opening carries the tray (#1961), so the tray's gates — a read in flight, a
+    // column that takes files — are its too, beside its own reasons (debateStartProblem).
     const inDebateTab = debateTab();
     const debateHeld = inDebateTab && !!ctx.debateStartProblem();
     // #1838: a column still waiting on site access counts as a target for the BUTTON — pressing it
@@ -2829,7 +2847,7 @@ export function mountComparePage(deps) {
     const pendingProviders = inDebateTab ? [] : ctx.permissionPendingProviders();
     const pendingCols = ctx.allColumns().filter((c) => pendingProviders.includes(c.provider) && !c.closed).map((c) => c.id);
     const permissionPending = attachableTargets(pendingCols).length > 0;
-    const trayOk = inDebateTab ? currentTargets().length > 0 : !attachBusy() && (attachableTargets(currentTargets()).length > 0 || permissionPending);
+    const trayOk = !attachBusy() && (attachableTargets(roundTargetsNow()).length > 0 || permissionPending);
     const canSend = !state.sending && !state.permissionAsking && !state.sessionStarted && !exhausted && !state.linkReading && !debateHeld && currentQuestion().length > 0 && trayOk;
     sendBtn.disabled = !canSend;
     sendBtn.textContent = state.sending ? t('sending') : t(inDebateTab ? 'debate_start_btn' : 'send');
@@ -2923,8 +2941,8 @@ export function mountComparePage(deps) {
       }
     }
     // 「토론 모드」 (#1769): the setup block before the session; in a debate session the dock is the
-    // debate's — no routing boxes (the orchestrator picks the column), no 📎 (a debate round never
-    // carries the tray), no 「요약·비교」 (it compares one round's answers), and the send stays
+    // debate's — no routing boxes (the orchestrator picks the column), no 📎 (only the opening
+    // carries the tray, #1961), no 「요약·비교」 (it compares one round's answers), and the send stays
     // enabled while an AI speaks (the words are queued for after its turn).
     ctx.renderDebateSetup();
     const debating = ctx.debateActive();
@@ -2941,7 +2959,6 @@ export function mountComparePage(deps) {
       }
     }
     if (debating || inDebateTab) summaryBtn.hidden = true;
-    qAttachBtn.hidden = inDebateTab; // the opening never carries the tray either
     ctx.renderDebateBar();
     ctx.renderModeTabs();
     syncModeHeading();
@@ -2954,7 +2971,7 @@ export function mountComparePage(deps) {
    * The page's tab changed (debate.js applyMode / followEntry, plan §17): what differs between the
    * rooms before a session — the empty state, 원본 제외 (a debate has no 「original」: a column it
    * hid would silently leave the cast, so it is let go), a link OFFER (never consent) — then the
-   * controls. The tray itself is kept and only hidden (renderAttachment).
+   * controls. The tray is kept and shown in both rooms (#1961 — the debate's opening carries it).
    */
   function modeChanged() {
     if (debateTab()) {
@@ -2992,6 +3009,10 @@ export function mountComparePage(deps) {
     track('new_chat', { rounds: state.rounds, resumable: canResume() });
     if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* port already gone */ } }
     closePort();
+    // A debate took no file after its opening (attachLocked), so a tray still holding one is what the
+    // user left before it — or before opening it from the history — and it outlives the debate
+    // (#1961). A cross-check session's tray is its own and goes with it, as it always has.
+    const keepTray = ctx.debateActive();
     ctx.debateReset(); // before anything re-renders: the page is the columns again
     state.debateDefault = null; // the next conversation's default layout is picked afresh (plans / catalogs may have arrived)
     state.sending = false;
@@ -3027,8 +3048,10 @@ export function mountComparePage(deps) {
     releasePrompt();
     clearCopyFeedback();
     for (const c of composers) { c.input.value = ''; autoGrow(c.input); }
-    state.attachError = null;
-    clearAttachment(); // 새 대화 starts empty in every sense — the file belonged to the session that just ended
+    if (!keepTray) {
+      state.attachError = null;
+      clearAttachment(); // 새 대화 starts empty in every sense — the file belonged to the session that just ended
+    }
     clearNotice();
     stopBtn.disabled = true;
     syncWaitTimer();
@@ -3463,9 +3486,9 @@ export function mountComparePage(deps) {
     // nothing (#1617).
     if (state.disabled || state.sending || state.sessionStarted || !text || quotaExhausted()) return;
     if (ctx.debateChosen()) {
-      // 「토론」 tab: the orchestrator composes the opening and sends it (debate.js start). The tray
-      // is not its gate — the opening goes out SEND_VIA_DEBATE, which carries no file (plan §17.11 ②).
-      if (!targets.length || ctx.debateStartProblem() || state.link || state.linkReading) return;
+      // 「토론」 tab: the orchestrator composes the opening and sends it (debate.js start). The opening
+      // carries the tray (#1961), so it waits on the same tray gates as the cross-check's SEND.
+      if (!targets.length || !attachableTargets(ctx.debateOpeningTargets()).length || attachBusy() || ctx.debateStartProblem() || state.link || state.linkReading) return;
       state.sessionSaveHistory = !!state.saveHistory;
       if (!ctx.debateStart(text)) state.sessionSaveHistory = null;
       return;

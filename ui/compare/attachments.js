@@ -11,7 +11,7 @@
 // `data` base64, at most ATTACH_MAX_FILES of them. `bytes` travels with it on the page only, to
 // draw the chip.
 
-import { ATTACH_MAX_BYTES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, ATTACH_ERR_COUNT, ATTACH_ERR_TOTAL, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, SEND_VIA_DEBATE } from './constants.js';
+import { ATTACH_MAX_BYTES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, ATTACH_ERR_COUNT, ATTACH_ERR_TOTAL, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_DEBATE, SEND_VIA_COLUMN, SEND_VIA_DEBATE } from './constants.js';
 import { attachTypeOf, providerTakesTypes } from './attach-types.js';
 
 /**
@@ -210,7 +210,19 @@ export function formatBytes(bytes) {
  * nothing: clearing on every CONSUME_OK would let them wipe a notice they know nothing about.
  */
 export function roundOwnsTray(sendKind, via) {
-  return sendKind !== SEND_KIND_SUMMARY && sendKind !== SEND_KIND_RETRY && via !== SEND_VIA_COLUMN && via !== SEND_VIA_DEBATE;
+  if (via === SEND_VIA_DEBATE) return debateOpening(sendKind, via);
+  return sendKind !== SEND_KIND_SUMMARY && sendKind !== SEND_KIND_RETRY && via !== SEND_VIA_COLUMN;
+}
+
+/**
+ * The debate's OPENING (#1961): the one round the orchestrator composes FROM the dock's composer —
+ * the topic the user typed above the tray. Its wire kind says so on its own (sendKindFor: a debate
+ * SEND is the opening; every later debate round is a FOLLOWUP, kind debate_turn / debate_mod, a
+ * retry included), so no flag of its own is needed. The later rounds are the same conversations,
+ * so the debaters keep the opening's files without them being sent again.
+ */
+function debateOpening(sendKind, via) {
+  return via === SEND_VIA_DEBATE && sendKind === SEND_KIND_DEBATE;
 }
 
 export function attachmentsForRound(state, sendKind, via) {
@@ -228,8 +240,10 @@ export function attachmentsForRound(state, sendKind, via) {
   // worse click, and an invariant small enough to be right.
   if (sendKind === SEND_KIND_SUMMARY || sendKind === SEND_KIND_RETRY) return [];
   // Outside those, the file rides only the DOCK's composer. A column's own follow-up is a round
-  // the user did not choose it for — nor is a round the debate orchestrator composed (#1769).
-  return via === SEND_VIA_COLUMN || via === SEND_VIA_DEBATE ? [] : ready;
+  // the user did not choose it for — nor is a round the debate orchestrator composed (#1769),
+  // except its opening, which is the dock's question in the debate's words (#1961).
+  if (via === SEND_VIA_DEBATE) return debateOpening(sendKind, via) ? ready : [];
+  return via === SEND_VIA_COLUMN ? [] : ready;
 }
 
 /**

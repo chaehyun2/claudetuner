@@ -11,7 +11,7 @@
 // deltas small. When a delta still runs over DEBATE_DELTA_MAX the newest items stay whole and the
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
-import { neutraliseQuoted } from './helpers.js';
+import { neutraliseQuoted, mdInlineText } from './helpers.js';
 import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
@@ -517,7 +517,7 @@ export function debateMarkdown({ topic, entries }, t) {
     if (e.conclusion) blocks.push('---', `## ${t('debate_conclusion')}`);
     blocks.push(`**${name}**${e.meta ? ` \u00B7 ${e.meta}` : ''}`);
     if (text.trim()) blocks.push(text);
-    if (note) blocks.push(`_${note}_`);
+    if (note) blocks.push(`_${mdInlineText(note)}_`);
   }
   return blocks.join('\n\n');
 }

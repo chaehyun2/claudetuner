@@ -7,6 +7,7 @@ import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util
 import { _authedFetch } from './auth.js';
 import { isServerSyncStalled } from '../bg/server-reach.js';
 import { recDismissActive } from '../bg/rec-dismiss.js';
+import { REVIEW_NUDGE_KEY, REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, reviewNudgeDue, recordReviewNudgeAction } from '../bg/review-nudge.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 
@@ -174,59 +175,34 @@ export async function loadFitnessMatrix() {
 }
 
 export function checkReviewNudge() {
-  chrome.storage.local.get({ ct_review_nudge: null }, (store) => {
-    const rn = store.ct_review_nudge;
-    if (!rn) return;
-    if (rn.clicked) return;
-    if ((rn.dismiss_count || 0) >= 5) return;
-    if (rn.last_dismissed && Date.now() - new Date(rn.last_dismissed + 'Z').getTime() < 14 * 86400000) return;
-    if (rn.first_seen_at) {
-      const age = (Date.now() - new Date(rn.first_seen_at + 'Z').getTime()) / 86400000;
-      if (age < 3) return;
-    }
-
-    // Don't show review nudge when utilization >= 80%
-    if (state.currentSnapshot) {
-      const maxUtil = Math.max(
-        state.currentSnapshot.five_hour?.utilization ?? 0,
-        state.currentSnapshot.seven_day?.utilization ?? 0
-      );
-      if (maxUtil >= 80) return;
-    }
+  chrome.storage.local.get({ [REVIEW_NUDGE_KEY]: null }, (store) => {
+    if (!reviewNudgeDue(store[REVIEW_NUDGE_KEY], { snapshot: state.currentSnapshot })) return;
 
     const el = document.getElementById('review-nudge');
     el.style.display = 'flex';
     document.getElementById('review-nudge-text').textContent = t('review_nudge_text');
     document.getElementById('review-nudge-link').textContent = t('review_nudge_cta');
-    sendGAEvent('review_nudge_shown', { source: 'popup' });
+    sendGAEvent(REVIEW_EVENT_SHOWN, { source: 'popup' });
 
     document.getElementById('review-nudge-link').addEventListener('click', () => {
-      sendReviewNudgeAction('clicked');
-      sendGAEvent('review_nudge_clicked', { source: 'popup' });
+      sendReviewNudgeAction(REVIEW_ACTION_CLICKED);
+      sendGAEvent(REVIEW_EVENT_CLICKED, { source: 'popup' });
     });
     document.getElementById('review-nudge-close').addEventListener('click', () => {
       el.style.display = 'none';
-      sendReviewNudgeAction('dismissed');
-      sendGAEvent('review_nudge_dismissed', { source: 'popup' });
+      sendReviewNudgeAction(REVIEW_ACTION_DISMISSED);
+      sendGAEvent(REVIEW_EVENT_DISMISSED, { source: 'popup' });
     });
   });
 }
 
-async function sendReviewNudgeAction(action) {
-  try {
-    const status = await new Promise(r => chrome.storage.local.get({ lastStatus: null }, r));
-    const email = status.lastStatus?.snapshot?.user_email;
-    if (!email) return;
-    const cfg = await new Promise(r =>
-      chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)
-    );
-    if (!cfg.serverUrl) return;
-    _authedFetch(cfg, cfg.serverUrl + '/api/snapshots/review-nudge', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_email: email, action }),
-    });
-  } catch (e) { /* silent */ }
+function sendReviewNudgeAction(action) {
+  recordReviewNudgeAction(action, {
+    storage: chrome.storage.local,
+    getConfig: () => new Promise((r) =>
+      chrome.storage.sync.get({ serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY }, r)),
+    authedFetch: _authedFetch,
+  });
 }
 
 export function showRecFeedback(recType) {
@@ -499,7 +475,7 @@ export async function maybeShowDashNudge() {
     if (!srv.neverVisited) { chrome.storage.local.set({ dashNudge: { ...st, done: true } }); return; }
 
     const now = Date.now();
-    // 🔴 The trailing 'Z' is required, same as checkReviewNudge above: D1 `datetime()` renders UTC
+    // 🔴 The trailing 'Z' is required, same as reviewNudgeDue (bg/review-nudge.js): D1 `datetime()` renders UTC
     // with no timezone marker, so parsing it bare reads as LOCAL time and skews the age gate by up
     // to a day depending on the user's offset.
     const firstSeen = srv.firstSeenAt ? new Date(srv.firstSeenAt + 'Z').getTime() : 0;

@@ -100,6 +100,9 @@ export const SEND_KIND_DEBATE = 'debate';
 export const SEND_KIND_DEBATE_TURN = 'debate_turn';
 // A debate send to its AI moderator (§18.8): the server counts which model moderates by it.
 export const SEND_KIND_DEBATE_MOD = 'debate_mod';
+// The cross-check's own rounds (every kind but a debate's): a round of these that every column
+// answered is the cross-check's 「satisfying moment」 for the CWS review banner (#1966).
+export const CROSSCHECK_SEND_KINDS = Object.freeze([SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME]);
 // Beta reset (same contract): while status.betaReset is true a counted quota at 0 offers
 // 「오늘 횟수 초기화」 instead of the Pro CTA — this message asks the SW (→ POST /api/compare/reset)
 // and its answer `{ok, quota}` is applied as a fresh status quota.
@@ -204,6 +207,12 @@ export const FOLLOW_ANCHOR_TOP_PX = 16;  // where the overflowing answer's start
 // compare.css's `@media (max-width: 720px)` blocks are the same number (pinned by test:compare-share-dialog-probe).
 export const NARROW_MAX_PX = 720;
 export const NARROW_MEDIA = `(max-width: ${NARROW_MAX_PX}px)`;
+// revealNode scrolls without the smooth animation when the user asked for less motion.
+export const REDUCED_MOTION_MEDIA = '(prefers-reduced-motion: reduce)';
+// The user moving the page themselves (wheel, touch, a key, a press on a scrollbar or anywhere): a reveal that
+// lands after one of these must not pull them back (#1966 Codex 2R). Input, not `scroll` — our own smooth reveal
+// scrolls too, and must not read as the user's move.
+export const USER_MOVE_EVENTS = Object.freeze(['wheel', 'touchstart', 'keydown', 'mousedown']);
 // Usage gauge window labels (windowText): a span under a day reads in hours, else in days.
 export const SECONDS_PER_HOUR = 3600;
 export const SECONDS_PER_DAY = 86400;
@@ -269,8 +278,8 @@ export const LINK_ORIGINS = Object.freeze({
   'https://gemini.google.com': 'gemini',
 });
 // DONE{stalled:true} has TWO sources and one meaning — "this answer did not finish" (#1527):
-// the stall watchdog below, and a cut the CLIENT reported (`DONE.cutReason`, two values: 'stalled'
-// or 'stream_error', the latter = the provider failed mid-answer). Same badge, same retry, same
+// the stall watchdog below, and a cut the CLIENT reported (`DONE.cutReason`, three values: 'stalled',
+// 'stream_error' = the provider failed mid-answer, 'retracted' = it replaced it). Same badge, same retry, same
 // history; only the sentence differs, and `cutNote()` is the one place that picks it.
 // DONE{stalled:true} (#1519, bg/compare.js stall watchdog): the provider went silent after the
 // answer text started, so the SW settled the column with what arrived. The page treats it as a
@@ -280,8 +289,13 @@ export const LINK_ORIGINS = Object.freeze({
 export const BADGE_STALLED_CLS = 'is-stalled';
 // The SW's bounded cut vocabulary (bg/compare.js CUT_STREAM_ERROR). Repeated, not imported:
 // this file is a classic script in the page world and the SW is an ES module — the two cannot
-// share a symbol. test/compare-send-order-guard.mjs pins that the two spellings agree.
+// share a symbol. test/compare-privacy-guard.mjs pins that the two spellings agree.
 export const CUT_STREAM_ERROR = 'stream_error';
+// The provider wrote an answer and then REPLACED it (bg/compare.js CUT_RETRACTED): DONE also carries
+// `retraction`, the replacement sentence, which the cut note quotes (cutNote). Same pin as above.
+export const CUT_RETRACTED = 'retracted';
+// The page's own bound on that sentence (the SW's RETRACTION_MAX) — on DONE and on a restored entry.
+export const RETRACTION_MAX = 300;
 // 🔴 MV3 service-worker lifetime (Chrome 110+): the extension SW is killed after ~30 s with no
 // EVENTS; an open runtime.connect port does NOT keep it alive — only a message arriving on it
 // (an onMessage event) resets the idle timer. The session's clients live in that SW, so a page
@@ -341,8 +355,8 @@ export const USAGE_FULL_PCT = 100;
 // follow-up sent from a column's own composer reports `send.via = 'column'` (the same event name,
 // one more param — the SW allowlist is untouched); the Auto retry's model_change keeps the value.
 export const SEND_VIA_COLUMN = 'column';
-// A round the 「토론 모드」 orchestrator sent (ui/compare/debate.js, #1769): never carries the dock's
-// attachment tray (roundOwnsTray), and says so in GA like SEND_VIA_COLUMN.
+// A round the 「토론 모드」 orchestrator sent (ui/compare/debate.js, #1769): carries the dock's
+// attachment tray only on its opening (#1961 — roundOwnsTray), and says so in GA like SEND_VIA_COLUMN.
 export const SEND_VIA_DEBATE = 'debate';
 // Timed send-path stages (bg/compare.js, package v0.3.0) the badge reads: DIAG{stage, detail.at}.
 // first_chunk − send_start = time to first token; stream_done − send_start = the whole answer.

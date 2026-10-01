@@ -5,7 +5,7 @@
 // Bodies are exactly as they were in compare.js; ctx contract: see ui/compare/history.js.
 
 import { PROVIDER_META, COPY_FEEDBACK_MS, SVG_NS, TURN_KIND_SUMMARY } from './constants.js';
-import { modelOptionText } from './helpers.js';
+import { modelOptionText, mdInlineText } from './helpers.js';
 
 /** Installs the export slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installExport(ctx) {
@@ -214,7 +214,7 @@ export function installExport(ctx) {
           // Images in the answer (#1684) are not text: the export says they were there.
           if (ctx.outImageCount(turn)) blocks.push(`_[${t('out_image_md', ctx.outImageCount(turn))}]_`);
           if (turn.errorText) blocks.push(`_${turn.errorText}_`);
-          if (turn.stalled) blocks.push(`_${ctx.cutNote(turn)}_`);
+          if (turn.stalled) blocks.push(`_${mdInlineText(ctx.cutNote(turn, col))}_`);
         }
       }
     }

@@ -27,7 +27,7 @@
 //                         COMPARE_SHARE{op: create|update|delete|list|image|password, …} → {ok, …} | {ok:false, status, code} (compare page only — see shareRequest)
 //   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryOnce? (the boolean is this session's only — not stored as the preference), resume?, kind?, round?, src?, session?, attachments?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
-//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
+//                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?, cutReason?, retraction?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
 //   Output images (#1684, package v0.13.0): IMAGE{provider, col, mime, data, width, height, alt} or
 //   IMAGE{provider, col, error, width, height, alt} — an image the provider GENERATED, bytes as
 //   base64 (never a provider URL), validated by imageForPage and always posted BEFORE that
@@ -200,6 +200,7 @@
 // the client accepted. A pure module (no browser global), safe for the Node guard.
 import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
 import { PROVIDER_LABELS } from './constants.js';
+import { REVIEW_EVENTS, REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './review-nudge.js';
 import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
@@ -374,8 +375,14 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'share_password',
   // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
   'share_import',
+  // The CWS review banner (#1966): `source` (compare | debate) only. Sent WITHOUT the prefix — see below.
+  ...REVIEW_EVENTS,
 ]);
 export const COMPARE_EVENT_PREFIX = 'cmp_';
+// Extension-wide events the page reports under their OWN name: the review nudge's three are the
+// popup's and the options page's too (bg/review-nudge.js), told apart by `source` — one GA report,
+// not a `cmp_` twin of it.
+export const COMPARE_EVENT_UNPREFIXED = Object.freeze([...REVIEW_EVENTS]);
 
 // Usage stats (cmp-beta contract §1/§2): what a consume says it is. The page decides; anything
 // outside this list — or an older page that says nothing — is derived in runSend.
@@ -966,6 +973,7 @@ export const SW_CODES = Object.freeze({
   TIMEOUT: 'timeout',               // per-provider budget exhausted
   STALLED: 'stalled',               // outcome `code` on a DONE{stalled:true} column (ok stays true — the text arrived)
   CUT_ERROR: 'stream_error',        // same, but the PROVIDER said it failed mid-answer (package `partial`) — see cutKindOf
+  RETRACTED: 'retracted',           // same, but the provider took the answer back and replaced it (CUT_RETRACTED)
   ABORTED: 'aborted',
   UNKNOWN: 'unknown',
   BAD_REQUEST: 'bad_request',       // LINK_FAIL: the pasted link is nobody's conversation (#1651)
@@ -986,10 +994,21 @@ export const SW_CODES = Object.freeze({
 // 🔴 The free text never leaves this worker. It is not something to paint (length, language and
 // trustworthiness are all unguaranteed) and not something to put in an outcome row (`code` is a
 // closed vocabulary the server groups on). It goes to this worker's console and nowhere else.
+// (A retraction's REPLACEMENT is a different field — what the site itself would have shown the
+// user — and is quoted to the page, bounded: retractionForPage. Never in an outcome row either.)
 // How much of the provider's own message the console keeps. Diagnostics only.
 const CUT_REASON_LOG_MAX = 200;
 export const CUT_STALLED = 'stalled';
 export const CUT_STREAM_ERROR = 'stream_error';
+// The provider wrote an answer and then REPLACED it with something short (Gemini, live 2026-10-01:
+// 730 chars, then a canned "beyond my abilities" line). Package v0.30.3: `partial` + this exact
+// `cutReason` + `retraction` (the replacement). What was written before stays the answer; the
+// replacement is quoted under it (`DONE.retraction`, retractionForPage) — page only, never the server.
+export const CUT_RETRACTED = 'retracted';
+// How much of the replacement the page may quote. The package already caps it (300); this is ours.
+export const RETRACTION_MAX = 300;
+// Control characters (C0 + DEL + C1) never reach the page's sentence; whitespace runs fold to one space.
+const RETRACTION_CTRL_RE = /[\u0000-\u001f\u007f-\u009f]+/g;
 // The package's diag for a stream it ended early; `detail.reason` is its free-text cut reason.
 export const STAGE_STREAM_CUT = 'stream_cut';
 
@@ -1007,13 +1026,33 @@ export const STAGE_STREAM_CUT = 'stream_cut';
 export function pageSafeDiag(stage, detail) {
   if (stage !== STAGE_STREAM_CUT) return detail;
   const raw = String(detail?.reason || '');
-  return { ...detail, reason: raw.startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED };
+  return { ...detail, reason: cutKindOfReason(raw) };
+}
+
+// The bounded kind of a package cut reason. `retracted` is matched EXACTLY (the package's constant,
+// not free text): anything merely starting with it is still an unexplained stop.
+function cutKindOfReason(raw) {
+  if (raw === CUT_RETRACTED) return CUT_RETRACTED;
+  return raw.startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED;
 }
 
 export function cutKindOf(result) {
   if (!result || result.partial !== true) return null;
-  return String(result.cutReason || '').startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED;
+  return cutKindOfReason(String(result.cutReason || ''));
 }
+
+/**
+ * The provider's replacement sentence for a retracted answer, as the page may quote it: plain
+ * text, control characters folded to spaces, trimmed, at most RETRACTION_MAX characters. '' for
+ * anything else (no retraction, not a string, nothing left) — the page then keeps its plain note.
+ */
+export function retractionForPage(result) {
+  if (cutKindOf(result) !== CUT_RETRACTED || typeof result.retraction !== 'string') return '';
+  return Array.from(result.retraction.replace(RETRACTION_CTRL_RE, ' ').replace(/\s+/g, ' ').trim()).slice(0, RETRACTION_MAX).join('').trim();
+}
+
+// The outcome `code` of a cut (closed vocabulary, see SW_CODES).
+const CUT_OUTCOME_CODE = Object.freeze({ [CUT_STALLED]: SW_CODES.STALLED, [CUT_STREAM_ERROR]: SW_CODES.CUT_ERROR, [CUT_RETRACTED]: SW_CODES.RETRACTED });
 
 /**
  * Late Stop (2026-10-01): a Stop — the user's, the send budget's, the stall watchdog's — that lands
@@ -1240,7 +1279,7 @@ export function sanitizeCompareEvent(name, params) {
     if (typeof v === 'string') clean[k] = v.slice(0, COMPARE_EVENT_MAX_STRING);
     else if ((typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean') clean[k] = v;
   }
-  return { name: COMPARE_EVENT_PREFIX + name, params: clean };
+  return { name: COMPARE_EVENT_UNPREFIXED.includes(name) ? name : COMPARE_EVENT_PREFIX + name, params: clean };
 }
 
 // ── Question signals (#1562) ────────────────────────────────────────────────────────────
@@ -2662,6 +2701,14 @@ export function createCompareController({
       resetQuota().then(sendResponse, (e) => sendResponse({ ok: false, code: SW_CODES.UNKNOWN, message: String(e?.message || e) }));
       return true;
     }
+    // The CWS review banner's click / dismiss (#1966): the local state + PATCH /api/snapshots/review-nudge
+    // through the shared recorder — here, because the token lives in the SW. The compare page only.
+    if (message.type === REVIEW_NUDGE_MSG_TYPE) {
+      const answer = (ok) => { try { sendResponse({ ok }); } catch { /* page gone */ } };
+      if (!fromSharePage(_sender)) { answer(false); return true; }
+      recordReviewNudgeAction(message.action, { storage, getConfig, authedFetch, now }).then(answer, () => answer(false));
+      return true;
+    }
     // Share links (#1784 U3): see shareRequest — the compare page only.
     if (message.type === 'COMPARE_SHARE') {
       shareRequest(message, _sender).then(sendResponse, () => sendResponse({ ok: false, status: 0, code: SW_CODES.UNKNOWN }));
@@ -3297,15 +3344,18 @@ export function createCompareController({
         // that never got that far stay marked.
         linkPending.delete(colId);
         const answerText = String(result?.text ?? '');
+        // 🔴 Page only: the outcome row carries the KIND (`code`), never the sentence.
+        const retraction = retractionForPage(result);
         recordOutcome(colId, {
           ok: true, total_ms: elapsed(t0), chars: answerText.length, ...streamOutcome.answered(),
-          ...(cut ? { code: cut === CUT_STREAM_ERROR ? SW_CODES.CUT_ERROR : SW_CODES.STALLED } : {}),
+          ...(cut ? { code: CUT_OUTCOME_CODE[cut] } : {}),
           ...(served?.id ? { model: served.id } : {}),
           ls: lateStop ? 1 : 0,
         });
         post({
           type: PORT_MSG.DONE, provider, col: colId, text: answerText, model: served,
           ...(cut ? { stalled: true, cutReason: cut } : {}),
+          ...(retraction ? { retraction } : {}),
           ...(continuation && typeof continuation === 'object' ? { continuation } : {}),
         });
       } catch (e) {

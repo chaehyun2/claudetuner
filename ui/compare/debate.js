@@ -20,6 +20,7 @@
 
 import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_SKIP_MS, DEBATE_SLOW_SHARE_PCT, DEBATE_SLOW_SKIP_FIRST_MS, DEBATE_SLOW_SHARE_FIRST_PCT, MS_PER_SECOND, WAIT_TICK_MS } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
+import { answeredTurn } from './helpers.js';
 import {
   MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCE_BASES, STANCE_ROLES, STANCE_NONE, STANCE_DEVIL, composeStance, splitStance, recordStance, recordPace, roleAllowed, stanceText, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
   DEBATE_DELTA_MAX, DEBATE_TOPIC_MAX, DEBATE_ALIAS_MAX, cleanAlias, aliasProblem, resolveNames, deltaFor, fitDelta, stancesOf,
@@ -28,6 +29,7 @@ import {
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
   unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
 } from './debate-core.js';
+import { REVIEW_SOURCE_DEBATE } from './review-nudge.js';
 
 // #1862 fold heights (px of bubble) by reply length, and the slack a bubble may exceed them by unfolded
 // (a bubble a few px over the line is not worth a button).
@@ -190,8 +192,8 @@ export function installDebate(ctx) {
     else if (conflicts.length) problem = 'debate_alias_err_conflict';
     else if (state.debatePrefs.tone === TONE_CUSTOM && toneProblem(state.debatePrefs.toneCustom)) problem = `debate_tone_err_${toneProblem(state.debatePrefs.toneCustom)}`;
     // A held conversation link (#1651) cannot open a debate (sendInitial refuses it) — said here, so
-    // the start button is not dead for no stated reason. The tray is not a problem: the debate tab
-    // hides it and the opening never carries it (plan §17.11 ②).
+    // the start button is not dead for no stated reason. The tray is not a problem: the opening
+    // carries it like a cross-check's SEND (#1961, plan §17.4).
     else if (state.link || state.linkReading) problem = 'debate_no_link';
     return { debaters, modCol, names, conflicts, problem };
   }
@@ -857,6 +859,8 @@ export function installDebate(ctx) {
   /** The `{0}` of a problem sentence: the clashing names, or the tone limit. */
   const problemArg = (plan) => (plan.problem === 'debate_tone_err_long' ? DEBATE_TONE_MAX : plan.conflicts.map((id) => plan.names.get(id).name).join(', '));
   /** Why the debate cannot start right now (an i18n'd sentence), or '' — the send button reads it. */
+  /** Who the opening goes to — the debaters planCast() names, the moderator never (#1961: the tray's gates ask about them). */
+  const openingTargets = () => planCast().debaters;
   function startProblem() {
     if (!debateChosen()) return '';
     const plan = planCast();
@@ -1396,12 +1400,16 @@ export function installDebate(ctx) {
       chips.hidden = value !== 'down';
       more.hidden = false;
       thanks.hidden = true;
+      // A click opened the form under the row (chips on 👎, the note, 보내기): bring it into view (revealNode — user-made only).
+      ctx.revealNode(more);
       send.disabled = false;
       send.textContent = t('debate_fb_send');
       // The rating counts even if the note is never sent — and a rating the server did not store says so (2R).
       post(detailsSent, (ok) => { if (!ok) say('debate_fb_failed', true); else if (thanks.classList.contains('is-failed')) thanks.hidden = true; });
     };
-    up.addEventListener('click', () => choose('up'));
+    // #1966: a 👍 on the conclusion is the debate's moment for the CWS review banner (the page's foot) — never
+    // the conclusion alone (two asks at once) and never a 👎.
+    up.addEventListener('click', () => { choose('up'); ctx.reviewMoment(REVIEW_SOURCE_DEBATE, { reveal: true, keepInView: more }); });
     down.addEventListener('click', () => choose('down'));
     send.addEventListener('click', () => {
       if (!rating || send.disabled) return;
@@ -1524,6 +1532,15 @@ export function installDebate(ctx) {
   const lastSeq = () => (state.debate.transcript.length ? state.debate.transcript[state.debate.transcript.length - 1].seq : 0);
 
   /**
+   * The files the opening carried (#1961), on the topic bubble — the debate's question card, as the
+   * cross-check's first question shows its own (renderQuestionBubbles). The marker is the entry's
+   * (state.questionImg), so a debate opened from the history shows it the same way.
+   */
+  function markTopic(d) {
+    const bubble = state.questionImg && d.topicBubble && d.topicBubble.querySelector('.cmp-debate-ububble');
+    if (bubble) bubble.appendChild(ctx.attachMark(state.questionImg));
+  }
+  /**
    * The first send of a debate session (sendInitial routes here when the toggle is on). Returns
    * false when it cannot start — the send button already says why (startProblem).
    */
@@ -1581,6 +1598,7 @@ export function installDebate(ctx) {
     track('debate_start', { n: debaters.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
     state.question = topic;
     ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, texts);
+    markTopic(d); // after beginSend: it decides what the opening carries (state.questionImg)
     stampRound(d.transcript);
     renderBar();
     return true;
@@ -1633,7 +1651,7 @@ export function installDebate(ctx) {
         const col = colOf(id);
         const turn = col && ctx.lastAssistantTurn(col);
         const entry = d.transcript.find((e) => e.seq === seq);
-        const ok = !!(col && col.status === 'done' && turn && turn.text.trim());
+        const ok = answeredTurn(col, turn);
         entry.text = ok ? turn.text : '';
         entry.pending = false;
         if (col) { const info = turnMeta(col, turn, ok, false); keepMeta(entry, info); if (turn) turn.debateInfo = info; if (ok) showMeta(turn, info); }
@@ -1645,7 +1663,7 @@ export function installDebate(ctx) {
       const col = colOf(cur.col);
       const turn = col && ctx.lastAssistantTurn(col);
       const entry = d.transcript.find((e) => e.seq === cur.seq);
-      const answered = !!(col && col.status === 'done' && turn && turn.text.trim());
+      const answered = answeredTurn(col, turn);
       if (cur.kind === PHASE_MODERATING) {
         const { body, control } = splitControl(answered ? turn.text : '');
         if (entry) { entry.text = body; entry.pending = false; if (col) entry.meta = turnMeta(col, turn, answered, true).meta; }
@@ -2179,6 +2197,7 @@ export function installDebate(ctx) {
     timeline.appendChild(hiddenHolder);
     timeline.appendChild(roomHead(d));
     d.topicBubble = userBubble(d.topic, false, '');
+    markTopic(d);
     if (transcript.some((e) => e.opening)) {
       timeline.appendChild(el('div', 'cmp-debate-divider', t('debate_opening_divider')));
       timeline.appendChild(d.openingGroup);
@@ -2238,7 +2257,7 @@ export function installDebate(ctx) {
         // turn that never settled into one gets the column's label + what its name line shows.
         meta: info.meta || metaLine(turn.debateRole === ROLE_MODERATOR ? { label: ctx.colLabel(col) } : { label: ctx.colLabel(col), tierKey: info.tierKey || null, secs: info.secs }, t),
         ...(turn.debateConclusion ? { conclusion: true } : {}),
-        text: displayText(turn), note: turn.errorText || (turn.stalled ? ctx.cutNote(turn) : ''),
+        text: displayText(turn), note: turn.errorText || (turn.stalled ? ctx.cutNote(turn, col) : ''),
       });
     };
     for (const node of timeline.children) {
@@ -2290,7 +2309,7 @@ export function installDebate(ctx) {
 
   Object.assign(ctx, {
     debateReveal: reveal, debateFirstText: firstText,
-    debateOn, debateActive, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
+    debateOn, debateActive, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem, debateOpeningTargets: openingTargets,
     debateStart: start, debateRoundRefused: onRoundRefused, debateRoundSettled: onRoundSettled, debateUserMessage: userMessage,
     debatePause: pause, debateResume: resume, debatePick: pick, renderDebateBar: renderBar, debateReset: reset,
     debateSnapshot: snapshot, debateMarkdown: markdown, debateRestoreBegin: restoreBegin, debateRestoreFinish: restoreFinish,

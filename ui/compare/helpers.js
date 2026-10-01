@@ -26,6 +26,18 @@ export function sendMessage(chrome, msg) {
   });
 }
 
+/** storage.get as a promise, whether the fake/real area answers via callback or promise; null on failure. */
+export function storageGet(chrome, storage, keys) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v || null); } };
+    try {
+      const r = storage.get(keys, (res) => { void (chrome && chrome.runtime && chrome.runtime.lastError); done(res); });
+      if (r && typeof r.then === 'function') r.then(done, () => done(null));
+    } catch { done(null); }
+  });
+}
+
 /** Local HH:MM for an ISO timestamp; '' when unparseable. */
 export function localHHMM(iso) {
   const d = new Date(iso);
@@ -267,4 +279,26 @@ export function lockedSuffix(m, tr) {
   if (!modelLocked(m) || typeof m.minimumTier !== 'string' || !m.minimumTier) return '';
   const tier = m.minimumTier.charAt(0).toUpperCase() + m.minimumTier.slice(1);
   return ` · ${tr('model_tier_needed', tier)}`;
+}
+
+/**
+ * Text that must stay PLAIN inside markdown we hand out (copy export, debate markdown): every
+ * markdown/HTML-significant character is backslash-escaped, so a provider's sentence quoted in a
+ * note (e.g. a retraction, 1.49.x) cannot become a link, emphasis or an HTML tag in the copied text.
+ */
+const MD_INLINE_SPECIALS_RE = /[\\`*_[\]<>&~!]/g;
+export function mdInlineText(text) {
+  return String(text == null ? '' : text).replace(/[\r\n]+/g, ' ').replace(MD_INLINE_SPECIALS_RE, (c) => `\\${c}`);
+}
+
+/**
+ * Whether a column's turn is a usable ANSWER: the column settled `done`, the turn has text, and the
+ * provider did not RETRACT it (#1973 — Gemini can replace an answer it was writing with a fixed refusal;
+ * the page shows the retraction, but the words that streamed are not an answer). One definition for the
+ * debate transcript, the conclusion feedback and the review-banner "every column answered" moment
+ * (1.49.3 batch review: a retracted Gemini opening was recorded as a normal debate turn and fed to the
+ * next speaker).
+ */
+export function answeredTurn(col, turn) {
+  return !!(col && col.status === 'done' && turn && !turn.retracted && typeof turn.text === 'string' && turn.text.trim());
 }
