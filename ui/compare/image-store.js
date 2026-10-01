@@ -35,6 +35,15 @@ export function imageIdsOf(v, max) {
 }
 
 /**
+ * How many of a marker's files were DOCUMENTS (#1944) — a whole number from 1 to `max`, else 0
+ * (an older marker, or a round of images only, has none). Kept beside the image ids because it is
+ * what tells the two apart: the round's files are `1 + more`, its images are that minus this.
+ */
+export function docCountOf(v, max) {
+  return Number.isInteger(v) && v > 0 && v <= max ? v : 0;
+}
+
+/**
  * The preview of an image Blob: decoded, scaled so its long edge is at most
  * IMAGE_PREVIEW_MAX_EDGE, re-encoded. null when this browser cannot decode it — the turn then
  * shows the file's name, as it always did.

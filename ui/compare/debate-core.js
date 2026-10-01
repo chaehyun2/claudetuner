@@ -214,9 +214,10 @@ export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
 // Claude's moderator model by plan — asked for explicitly, so it is its own column beside the Claude
 // debater's `claude:auto`. Paid: Sonnet 5.5 — vendor-ai's FAST_MODEL since v0.22.0 (claude.ai's
 // newest Sonnet, read off its bootstrap 2026-09-29; was Sonnet 5). Auto resolves to the same model on
-// a paid plan and, since vendor-ai v0.15.0, on Free too (#1831); the Free moderator stays on Sonnet
-// 4.6 (free-tier in claude.ai's gate, fast) so the moderator and the Free debater are different
-// models and read as different voices.
+// a paid plan; on a measured Free plan Auto is Sonnet 5 (vendor-ai v0.25.0 — Sonnet 5.5 was measured
+// ~5x slower to first text on Free, 2026-09-30). The Free moderator stays on Sonnet 4.6 (free-tier in
+// claude.ai's gate, fast) so the moderator and the Free debater are different models and read as
+// different voices.
 export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5-5';
 export const CLAUDE_MODERATOR_FREE = 'claude-sonnet-4-6';
 /** A plan label (status.providers[p].plan) is a paid plan: present and not 「Free」 — renderPlan's `data-tier` rule. */
@@ -551,6 +552,12 @@ function styleLine(tone, t, forModerator) {
   return t(forModerator ? 'debate_style_line_mod' : 'debate_style_line', neutraliseQuoted(cleanTone(tone.custom)));
 }
 const friendly = (tone) => !tone || tone.kind === TONE_FRIENDS;
+/**
+ * The conclusion's shape (2026-09-30 user): bold labels + short bullets (결론 / 합의된 점 / 남은 쟁점 /
+ * 판단 근거 / 판단이 바뀔 조건 / 직접 확인할 사실), not prose and not `#` headings — a heading renders
+ * too large in a chat bubble. One text for a debater's conclusion and the moderator's.
+ */
+const conclusionFormat = (t, tone) => t(friendly(tone) ? 'debate_conclusion_format_friends' : 'debate_conclusion_format');
 
 /** A user-typed alias, trimmed and whitespace-collapsed; '' stays '' (= use the default). */
 export function cleanAlias(raw) {
@@ -772,6 +779,8 @@ export function turnPrompt({ t, selfName, stanceKey, delta, instruction, firstRe
     lines.push(t('debate_call_full_name'));
     const st = styleLine(tone, t, false);
     if (st) lines.push(st);
+    // Last: the format overrides any 「no lists」 / length words above it — a user's own tone line included.
+    lines.push(conclusionFormat(t, tone));
     return lines.join('\n');
   }
   lines.push(t(f ? 'debate_turn_task_friends' : 'debate_turn_task'));
@@ -836,6 +845,9 @@ export function moderatorPrompt({ t, names, lastName, delta, first, topic, canEn
   // The last send of the budget: the moderator closes the debate (plan §15.1 ③).
   if (wrapUp) lines.push(t('debate_mod_wrapup'));
   else lines.push(t('debate_mod_long_rule'));
+  // A call that may (or must) END reads the conclusion's format right above the control line, whose END
+  // branch points at it — the control line itself stays the last thing read.
+  if (wrapUp || canEnd) lines.push(conclusionFormat(t, tone));
   // The control line instruction is ALWAYS the last thing the moderator reads, whatever the tone (§12.1 ①②).
   lines.push(t(controlKey({ canEnd, wrapUp, end: endRule({ pace, turnsUsed }), canAsk })));
   return lines.join('\n');
@@ -897,6 +909,41 @@ const CONTROL_END_RE = /^\s*[*_`]*\s*(?:END|\uB05D|\uC885\uB8CC)\s*[.!]?\s*[*_`]
 // ASK / 질문 (#1843): the moderator asks the user — the body is the question.
 const LONG_TAIL_RE = /\s+(?:LONG|\uAE38\uAC8C)\s*$/i; // LONG / 길게 at the end of a NEXT
 const CONTROL_ASK_RE = /^\s*[*_`]*\s*(?:ASK|\uC9C8\uBB38)\s*[.!?]?\s*[*_`]*\s*$/i;
+// A label line of the conclusion format (`**합의된 점**`), a code fence opener, list items and table rows.
+const FORMAT_LABEL_RE = /^\*\*([^*\n]+)\*\*/gm;
+const ANY_FENCE_RE = /^ {0,3}(?:```|~~~)/m;
+const BULLET_LINE_RE = /^[-*+][ \t]+\S/;
+const NOT_PARAGRAPH_RE = /^(?:\s|\d+[.)][ \t]|[#>|])|\|/;
+const escapeRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * The section labels a conclusion-format text asks for (`debate_conclusion_format`) — read off the format
+ * itself, so the labels tightenConclusion looks for can never drift from the ones the model is shown.
+ */
+export function conclusionLabels(formatText) {
+  return [...new Set([...String(formatText || '').matchAll(FORMAT_LABEL_RE)].map((m) => m[1]))];
+}
+/**
+ * A conclusion with a blank line put back before a format label glued to the line above. The format asks
+ * for blank lines, but a model that drops them writes `- bullet\n**남은 쟁점**` — a lazy continuation that
+ * pulls the label into the bullet. ONLY that case (Codex 2R·3R): the line must be one of `labels` alone or
+ * followed by `:` (a label that starts a sentence — `**Why** it matters` — is prose) and the line above an unordered bullet or a plain paragraph line — never a table row or a
+ * numbered item. A text with any code fence is returned as is (a conclusion has no code; fences are not
+ * worth parsing here). A text that needs nothing comes back as the same string.
+ */
+export function tightenConclusion(text, labels) {
+  const src = String(text || '');
+  const names = (labels || []).filter(Boolean);
+  if (!names.length || ANY_FENCE_RE.test(src)) return src;
+  const labelRe = new RegExp(`^\\*\\*(?:${names.map(escapeRe).join('|')})\\*\\*[ \\t]*(?::|$)`);
+  const lines = src.split('\n');
+  const out = [];
+  for (const line of lines) {
+    const prev = out.length ? out[out.length - 1] : '';
+    if (labelRe.test(line) && prev.trim() && (BULLET_LINE_RE.test(prev) || !NOT_PARAGRAPH_RE.test(prev))) out.push('');
+    out.push(line);
+  }
+  return out.length === lines.length ? src : out.join('\n');
+}
 /**
  * `{ body, control }` of a moderator reply: `control` = `{ kind: 'next', name }` | `{ kind: 'end' }`
  * | `{ kind: 'ask' }` | null, `body` = the text without the control line (what the timeline shows and the debaters get).

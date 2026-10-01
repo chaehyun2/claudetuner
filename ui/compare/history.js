@@ -17,7 +17,7 @@
 //     the install block. A `let` shared across files goes through a ctx field (ctx.pendingLoad)
 //     or a setter registered by its owner (ctx.bumpStatusEpoch).
 
-import { imageIdsOf } from './image-store.js';
+import { imageIdsOf, docCountOf } from './image-store.js';
 import { createEntryStore } from './history-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED } from './constants.js';
@@ -221,6 +221,8 @@ export function installHistory(ctx) {
       ...(Number.isFinite(img.more) && img.more > 0 ? { more: img.more } : {}),
       // The image ids (2026-09-26) — the pictures are in the image store, not the entry.
       ...(imageIdsOf(img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(img.ids, ATTACH_MAX_FILES) } : {}),
+      // How many were documents (#1944) — omitted for images only, as `more` is for one file.
+      ...(docCountOf(img.docs, ATTACH_MAX_FILES) ? { docs: docCountOf(img.docs, ATTACH_MAX_FILES) } : {}),
     };
   }
   /**
@@ -556,7 +558,10 @@ export function installHistory(ctx) {
       // `ids` are optional and only ever filtered (an entry from before them has none, and a bad id
       // costs the thumbnail, never the entry).
       const ids = imageIdsOf(v.ids, ATTACH_MAX_FILES);
-      return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}), ...(ids.length ? { ids } : {}) };
+      // `docs` (#1944) likewise: a count that could not be this marker's (more documents than
+      // files) is dropped, never trusted — it only decides what a share card calls the files.
+      const docs = docCountOf(v.docs, 1 + more);
+      return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}), ...(ids.length ? { ids } : {}), ...(docs ? { docs } : {}) };
     };
     const questionImg = entry.questionImg === undefined ? null : readImg(entry.questionImg);
     if (questionImg === undefined) return null;

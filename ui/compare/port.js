@@ -11,6 +11,7 @@
 import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
 import { autoGrow, sendableTargets } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
+import { isImageType } from './attach-types.js';
 import { linkErrorText } from './link.js';
 
 /** Installs the port / streaming slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
@@ -210,7 +211,7 @@ export function installPort(ctx) {
         turn.text += String(msg.delta || '');
         ctx.setBadge(col, 'col_streaming', 'is-streaming');
         ctx.scheduleRender(col);
-        if (!hadText && turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); } // the first text on the page enables 「전체 복사」; the process folds under the answer
+        if (!hadText && turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); if (ctx.debateFirstText) ctx.debateFirstText(turn); } // the first text on the page enables 「전체 복사」; the process folds under the answer; a debate turn is no longer slow (debate.js)
         return;
       }
       case 'IMAGE': {
@@ -225,7 +226,7 @@ export function installPort(ctx) {
         ctx.setBadge(col, 'col_streaming', 'is-streaming');
         ctx.scheduleRender(col);
         // An answer that is only a picture is still an answer: 「전체 복사」 and the folded process follow it like the first text.
-        if (first && !turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); }
+        if (first && !turn.text) { ctx.syncCopyAll(); ctx.foldActivity(turn); if (ctx.debateFirstText) ctx.debateFirstText(turn); }
         return;
       }
       case 'MODEL': {
@@ -287,7 +288,7 @@ export function installPort(ctx) {
         turn.node.classList.add('is-error');
         // Keep whatever streamed before the failure, then the reason underneath it (and the raw
         // cause in its title).
-        turn.errorText = ctx.errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs, msg.inBandCode);
+        turn.errorText = ctx.errorText(col.provider, col.errorCode, typeof msg.reason === 'string' ? msg.reason : '', msg.budgetMs, msg.inBandCode, typeof msg.attachment === 'string' ? msg.attachment : '');
         // A lost tab gets a direct 「탭 열기」 link under its line (paintAssistant) — kept in history too.
         turn.openTabLink = col.errorCode === CODE_NO_TAB;
         // C3: a provider-side limit with the 5h gauge full — the line also says when it resets.
@@ -673,8 +674,11 @@ export function installPort(ctx) {
     // `ids` (2026-09-26): one per image, so the turn can SHOW them again — the pictures live in the
     // image store (a preview started at attach, written to disk only by the history write), not here.
     // The id (and the preview) came with the attachment — see attachFile.
-    const imgIds = roundAtts.map((a) => a.imageId || ctx.newSessionId());
-    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}), ids: imgIds } : null;
+    // #1944: ids for the IMAGES only (a document has no picture to show again), and `docs` says how
+    // many of the round's files were documents — the share card counts images from it.
+    const imgIds = roundAtts.filter((a) => a.imageId).map((a) => a.imageId);
+    const docs = roundAtts.filter((a) => !a.imageId).length;
+    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}), ids: imgIds, ...(docs ? { docs } : {}) } : null;
     if (type === 'SEND') state.questionImg = imgMark; // the first round's question is the bubble, not a turn
     // The session id exists from the FIRST message out (it rides the wire, §5) — the same id the
     // history entry gets at CONSUME_OK; 새 대화 drops it and the next first SEND mints a new one.
@@ -770,7 +774,8 @@ export function installPort(ctx) {
     const models = ctx.modelsFor(targets);
     // `models` = ids only (never labels), one `provider:id|auto` per target, in target order.
     // GA `targets` stays the PROVIDER list (a colId carries the model id, which only `models` puts on the wire — validated); `targets_n` counts columns.
-    track('send', { round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: type === 'SEND' ? !!state.saveHistory : state.sessionSaveHistory === true, followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), has_img: carries, ...(via ? { via } : {}) });
+    // `has_img` / `has_doc` (#1944): whether the round carried an image / a document — booleans only, never a name or a byte.
+    track('send', { round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: type === 'SEND' ? !!state.saveHistory : state.sessionSaveHistory === true, followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), has_img: roundAtts.some((a) => isImageType(a.type)), has_doc: roundAtts.some((a) => !isImageType(a.type)), ...(via ? { via } : {}) });
     // The pickers this page still shows as static/none (#1452 refresh): the SW re-lists exactly these
     // once the tabs exist and answers with MODELS, which updates this list.
     const targetProviders = new Set(targets.map((id) => (state.columns.get(id) || {}).provider));

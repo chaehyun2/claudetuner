@@ -34,10 +34,11 @@
 //   column's DONE. An answer that is only images is a DONE with text ''.
 //   Attachments (#1616): `attachments: [{name, type, data}]`, `data` BASE64 — a Port message is
 //   JSON, so a Blob/ArrayBuffer cannot cross this hop. Bounded by SEND_MAX_ATTACHMENTS /
-//   SEND_MAX_ATTACHMENT_BYTES / SEND_ATTACHMENT_TYPES (one PNG/JPEG/GIF/WebP, ≤ 10 MB) and validated BEFORE
+//   SEND_MAX_ATTACHMENT_BYTES / SEND_ATTACHMENT_TYPES (any type some provider takes, ≤ 10 MB) and validated BEFORE
 //   readiness: a refused shape is CONSUME_FAIL{bad_request} with nothing prepared and nothing
-//   debited. A round that carries one is sent only to columns whose provider has an upload path
-//   (PROVIDER_SITES.uploads); the others get ERROR{code:'unsupported'} in the readiness pass and
+//   debited. A round that carries files is sent only to columns whose provider has an upload path
+//   (PROVIDER_SITES.uploads) AND takes every one of their types (#1944 — the vendored client's
+//   ATTACHMENT_TYPES); the others get ERROR{code:'unsupported'} in the readiness pass and
 //   are not part of the debit.
 //   Columns (cmp-columns contract §2, 2026-09-20): a COLUMN is `provider + model`, id `colId` =
 //   `${provider}:${modelId || 'auto'}`, at most MAX_COLUMNS per round. SEND/FOLLOWUP carry
@@ -171,8 +172,10 @@
 //              ERROR, ttft_ms at the first CHUNK, total_ms at DONE/ERROR, model from MODEL / DONE;
 //              #1897: chars = the answer's length at DONE (0 on every failure, failedOutcome), ib =
 //              Gemini's in-band status code (createStreamOutcome / inBandCodeOf — never parsed out of
-//              arbitrary error text), env/sr/end from Gemini's stream_done / stream_status stages of
-//              the attempt that ended the send — counts only, see OUTCOME_INT_KEYS)
+//              arbitrary error text), env/sr/end/ka from Gemini's stream_done / stream_failed /
+//              stream_status stages of the attempt that ended the send, stg = the furthest send-path
+//              stage (OUTCOME_STAGES), fz/act = the provider tab frozen/active at tab_ready — counts and
+//              flags only, see OUTCOME_INT_KEYS / OUTCOME_FLAG_KEYS)
 //              and, once the round has SETTLED — the ALL_DONE point of runSend, which a Stop and a
 //              lost port also reach once the aborted sends have landed — POSTs
 //              `/api/compare/outcome {event_id, results}` ONCE, fire-and-forget (errors swallowed,
@@ -197,6 +200,7 @@
 // the client accepted. A pure module (no browser global), safe for the Node guard.
 import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
 import { PROVIDER_LABELS } from './constants.js';
+import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
@@ -388,8 +392,40 @@ export const OUTCOME_CODE_MAX = 32;
 // `chars` the answer's length (0 on failure), `ib` the provider's in-band status code behind a
 // failure, `env` / `sr` Gemini's stream envelopes and status rows. `end` (did the stream's end row
 // arrive) is a 0/1 flag beside them. The server re-bounds every one.
-export const OUTCOME_INT_KEYS = Object.freeze(['ttft_ms', 'total_ms', 'chars', 'ib', 'env', 'sr']);
-export const OUTCOME_FLAG_KEYS = Object.freeze(['end']);
+// 2026-09-30 (Gemini hang diagnosis, vendor-ai v0.26.0) — on failed rows too, so a turn aborted with no
+// text says where it stopped: `ka` the keepalive envelopes (no ids, no candidate) in the stream, `stg` the
+// furthest send-path stage reached (OUTCOME_STAGES index), and the provider tab at send time as two
+// flags — `fz` (Chrome reported it frozen) and `act` (it was the active tab of its window).
+// 2026-10-01 (#1945 item 2) — a column that failed READINESS (before consume) is recorded too, as
+// `pre: 1`, with the provider's last readiness tab lookup (readinessOutcome): `st` the tab's status
+// (OUTCOME_TAB_STATUSES index), `c` the candidate tabs, `pin` / `own` (pinned / opened by us), and
+// `rl` why readiness reloaded it (OUTCOME_RELOAD_REASONS index) — and `nr` a `no_tab`'s reason
+// (OUTCOME_NO_TAB_REASONS index: `load_timeout` and `not_found` are one code, two different stories).
+// The same readiness facts ride the columns that PASSED readiness too (the baseline), plus — both ways — `nw`
+// (readiness opened the tab: `tab_created`), `wt` the wait for the tab to load (`tab_loaded` waitedMs; on a
+// failed readiness with no tab_loaded, from the lookup that started the wait to the failure), `rdy` the whole readiness in ms, and on a failed one `fst` the tab's status read right after it
+// failed (OUTCOME_TAB_STATUSES index — "still loading at 30 s" vs "complete, but late").
+// 2026-10-01 (vendor-ai v0.27.0/v0.28.0, #1943 item 1 / #1945): `gs` 0/1 on an answered Gemini row — the turn
+// settled on the answer-complete envelope before the body closed (`stream_done` complete && !closed: the
+// package's grace ran out, or an exit landed after the answer was complete); `la` 0/1 on a readiness-bound
+// column — the tab was accepted while still `loading` because it already answered (`tab_loaded` answered).
+// 2026-10-01 (late Stop): `ls` 0/1 on a row the send itself answered — 1 = the answer came off a Stop that landed
+// after it was complete (the package's `aborted` carrying `answered`, answeredFromAbort), 0 = the client resolved.
+export const OUTCOME_INT_KEYS = Object.freeze(['ttft_ms', 'total_ms', 'chars', 'ib', 'env', 'sr', 'ka', 'stg', 'st', 'c', 'rl', 'nr', 'wt', 'rdy', 'fst']);
+export const OUTCOME_FLAG_KEYS = Object.freeze(['end', 'fz', 'act', 'pre', 'pin', 'own', 'nw', 'gs', 'la', 'ls']);
+// 🔴 Append only — the index is what D1 stores (like OUTCOME_STAGES). `st` = Chrome's `tab.status`.
+export const OUTCOME_TAB_STATUSES = Object.freeze(['loading', 'complete', 'unloaded']);
+// `rl`: 0/1 the package's `tab_reloaded` reason (a discarded / frozen tab), 2 a stale page script it reloaded
+// (`tab_reloaded` stale_page_script, or `page_stale` reloaded), 3 a stale one it could not reload because a
+// request was in flight on it (`page_stale` reason busy), 4 a stale one it left alone (not ours / may not open).
+export const OUTCOME_RELOAD_REASONS = Object.freeze(['discarded', 'frozen', 'stale', 'stale_busy', 'stale_skipped']);
+// `nr`: the package's NO_TAB_REASONS values (vendor-ai errors.js), in this module's own append-only order.
+export const OUTCOME_NO_TAB_REASONS = Object.freeze(['load_timeout', 'changed_during_verify', 'closed_while_loading', 'not_found', 'stale_page_script', 'open_not_allowed', 'discarded', 'cors', 'conversation_mode', 'plan_tier']);
+// `stg` = the index of the furthest of these a send reported: 0 the send started · 1 its tab was ready ·
+// 2 the page acked the request · 3 the page's fetch left · 4 the first envelope arrived (Gemini) · 5 the
+// first answer text. 🔴 Append only — the index is what D1 stores (docs/DATABASE.md compare_events).
+export const OUTCOME_STAGES = Object.freeze(['send_start', 'tab_ready', 'bridge_connected', 'request_sent', 'first_envelope', 'first_chunk']);
+const STG_TAB_READY = OUTCOME_STAGES.indexOf('tab_ready');
 // The shape of a model id that may leave the browser (consume `models`, outcome `model`): every
 // catalog id is one of these — `claude-opus-4-8`, Gemini's hex hashes (`e051ce1aa80aa576`),
 // ChatGPT slugs with dots or hyphens (`gpt-5-5`, `gpt-5.5`) — and nothing a page, a storage row or
@@ -791,26 +827,23 @@ export const SEND_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
  */
 export const SEND_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 /**
- * The only `type`s this build accepts — NOT `image/*` (Codex 1R blocker).
+ * The only `type`s this build accepts — NOT `image/*` (Codex 1R blocker), and not a list of ours
+ * (#1944): every type at least one vendored client takes (`ui/compare/attach-types.js`, which
+ * reads the package's per-provider ATTACHMENT_TYPES — the types each site's upload path was
+ * verified live for). A type no provider takes can never work and fails HERE, where failing is
+ * free, not after the debit.
  *
- * 🔴 The set is the package's `image-meta.js` raster walk: PNG, GIF87a/89a, WebP and JPEG. It is
- * not a taste question. chatgpt.com's message part must DECLARE the pixel size, so the client
- * reads it out of the file's own header and rejects — locally, deterministically, with
- * `attachment_failed` — anything it cannot read. `image/*` let a perfectly valid SVG through this
- * gate and through readiness, and the round was DEBITED before the package refused it: a quota
- * unit spent on a question nobody was asked. A format that can never work must fail here, where
- * failing is free, not there.
- *
- * Narrower than it strictly has to be for Claude, which needs no declared size and would take an
- * SVG. Widening it is therefore possible — but it would mean a per-provider type gate beside
- * `uploads`, and one image that half the board refuses. One rule for the board until a user asks.
+ * 🔴 The per-provider half matters as much: chatgpt.com's message part must DECLARE an image's
+ * pixel size, and a site may take a round's images and not its PDF. A column whose provider does
+ * not take every type in the round is refused in the readiness pass (`skipReadiness`), undebited —
+ * one rule, the package's, rather than a narrower board-wide set.
  *
  * Residual, on purpose: the declared type is a PROXY for the bytes. A file called `image/png`
  * whose bytes are SVG still reaches the package, which reads magic bytes and refuses it. That is
  * a malformed caller, not a user path, and a second byte-sniffer here would be a weaker opinion
  * than the one the package already holds.
  */
-export const SEND_ATTACHMENT_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+export const SEND_ATTACHMENT_TYPES = ATTACH_TYPES;
 /** Filenames are shown, never resolved; this only stops an unbounded string riding the wire. */
 const SEND_ATTACHMENT_NAME_MAX = 200;
 // `=` is excluded from the class on purpose, so padding can only be trailing.
@@ -860,10 +893,15 @@ export function normalizeSendAttachments(list) {
     total += bytes;
     if (total > SEND_MAX_TOTAL_BYTES) return null;
     if (!SEND_ATTACHMENT_B64_RE.test(data)) return null;
-    const type = typeof a.type === 'string' ? a.type.trim().toLowerCase() : '';
-    if (!SEND_ATTACHMENT_TYPES.includes(type)) return null;
-    const name = typeof a.name === 'string' ? a.name.trim().slice(0, SEND_ATTACHMENT_NAME_MAX) : '';
-    out.push({ name: name || 'image', type, bytes, data });
+    const fullName = typeof a.name === 'string' ? a.name.trim() : '';
+    const name = fullName.slice(0, SEND_ATTACHMENT_NAME_MAX);
+    // The page's own rule, re-applied (#1944 1R): a known extension decides the type, so a stale
+    // or wrong page cannot send `report.pdf` as an image. The type the file travels as is this one.
+    // 🔴 Decided on the FULL name (#1944 2R): the cap cuts the extension off a long name, and the
+    // page — which never truncates — would then disagree with us about the same file.
+    const type = attachTypeOf({ name: fullName, type: a.type });
+    if (!type) return null;
+    out.push({ name: name || 'file', type, bytes, data });
   }
   return out;
 }
@@ -952,6 +990,8 @@ export const SW_CODES = Object.freeze({
 const CUT_REASON_LOG_MAX = 200;
 export const CUT_STALLED = 'stalled';
 export const CUT_STREAM_ERROR = 'stream_error';
+// The package's diag for a stream it ended early; `detail.reason` is its free-text cut reason.
+export const STAGE_STREAM_CUT = 'stream_cut';
 
 /**
  * Which cut, if any, the CLIENT reported on a completed send — `null` when the answer is whole.
@@ -965,7 +1005,7 @@ export const CUT_STREAM_ERROR = 'stream_error';
  * carries; the SW console keeps the raw line (see onDiag).
  */
 export function pageSafeDiag(stage, detail) {
-  if (stage !== 'stream_cut') return detail;
+  if (stage !== STAGE_STREAM_CUT) return detail;
   const raw = String(detail?.reason || '');
   return { ...detail, reason: raw.startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED };
 }
@@ -973,6 +1013,26 @@ export function pageSafeDiag(stage, detail) {
 export function cutKindOf(result) {
   if (!result || result.partial !== true) return null;
   return String(result.cutReason || '').startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED;
+}
+
+/**
+ * Late Stop (2026-10-01): a Stop — the user's, the send budget's, the stall watchdog's — that lands
+ * AFTER the answer was complete (`stream_done`, e.g. inside Gemini's 1.5 s grace) is rejected by the
+ * package as `aborted`, but it commits the conversation and hands the answer over on the error as
+ * `err.answered` (same fields as the success result). That answer becomes the send's result, so the
+ * page, the transcript and the server agree on what was said. Returns null for anything else (no
+ * `answered` = an older package, or an abort before the answer was complete): the ERROR stays.
+ *
+ * 🔴 Never cleaner than what happened: a cut the package reported (`partial` / `cutReason`), a
+ * `stream_cut` stage of this send (`streamCut`, its raw reason) or this module's own watchdog firing
+ * (`stalled`) all keep the answer cut — `cutKindOf` then reads it like any other cut.
+ */
+export function answeredFromAbort(e, { streamCut = null, stalled = false } = {}) {
+  if (!e || e.code !== SW_CODES.ABORTED) return null;
+  const a = e.answered;
+  if (!a || typeof a !== 'object' || typeof a.text !== 'string') return null;
+  const cutReason = (typeof a.cutReason === 'string' && a.cutReason) || streamCut || (stalled || a.partial === true ? CUT_STALLED : '');
+  return { ...a, partial: !!cutReason, ...(cutReason ? { cutReason } : {}) };
 }
 
 // The one status that releases a send (contract: "after POST /api/compare/consume returned 200").
@@ -1426,7 +1486,7 @@ export function inBandCodeOf(e) {
   const m = sentences ? IN_BAND_KNOWN_SUFFIX_RE.exec(e.message) : null;
   return m && sentences.includes(e.message.slice(0, m.index)) ? Number(m[1]) : null;
 }
-function errorExtras(e) {
+export function errorExtras(e) {
   const out = {};
   if (typeof e?.reason === 'string' && e.reason) out.reason = e.reason;
   const raw = typeof e?.message === 'string' ? e.message : (e == null ? '' : String(e));
@@ -1437,6 +1497,10 @@ function errorExtras(e) {
     if (ib !== null) out.inBandCode = ib;
   }
   if (typeof e?.diag === 'string' && e.diag) out.diag = e.diag.slice(0, ERROR_DIAG_MAX);
+  // Which file the provider did not take (#1951: `attachment_failed` read 「알 수 없는 오류」). The
+  // user's own file name, for the user's own screen — the page shows it; it is never part of an
+  // outcome, a consume body or a GA event (those carry `code` / `reason` only).
+  if (typeof e?.attachment === 'string' && e.attachment.trim()) out.attachment = e.attachment.trim().slice(0, SEND_ATTACHMENT_NAME_MAX);
   return out;
 }
 
@@ -1495,17 +1559,25 @@ export const STAGE_IMAGE_PENDING = 'image_pending';
 // anything about its status. Counts only — nothing here decides anything.
 export const STAGE_STREAM_DONE = 'stream_done';
 export const STAGE_STREAM_STATUS = 'stream_status';
-// The outcome's stream fields from one of those stages, or null: `env`, `end` (0/1), `sr`, and
-// `ib` = the first in-band code the stream reported. Non-numbers are omitted.
+// …and `stream_failed` (vendor-ai v0.26.0): the same `detail.stream` counts on every failure of a send.
+export const STAGE_STREAM_FAILED = 'stream_failed';
+// The outcome's stream fields from one of those stages, or null: `env`, `end` (0/1), `sr`, `ka`, and
+// `ib` = the first in-band code the stream reported. Non-numbers are omitted. `gs` (0/1, stream_done only,
+// vendor-ai v0.27.0): settled on the answer-complete envelope with the body still open — only when the
+// package reports both `complete` and `closed` (an older package: omitted, never guessed).
 export function streamOutcomeOf(ev) {
   const d = ev?.detail;
   if (!d || typeof d !== 'object') return null;
   const out = {};
   const num = (v) => Number.isSafeInteger(v) && v >= 0;
-  if (ev.stage === STAGE_STREAM_DONE && d.stream && typeof d.stream === 'object') {
+  if ((ev.stage === STAGE_STREAM_DONE || ev.stage === STAGE_STREAM_FAILED) && d.stream && typeof d.stream === 'object') {
     if (num(d.stream.envelopes)) out.env = d.stream.envelopes;
     if (typeof d.stream.end === 'boolean') out.end = d.stream.end ? 1 : 0;
     if (num(d.stream.statusRows)) out.sr = d.stream.statusRows;
+    if (num(d.stream.keepalives)) out.ka = d.stream.keepalives;
+    if (ev.stage === STAGE_STREAM_DONE && typeof d.stream.complete === 'boolean' && typeof d.stream.closed === 'boolean') {
+      out.gs = d.stream.complete && !d.stream.closed ? 1 : 0;
+    }
   } else if (ev.stage === STAGE_STREAM_STATUS) {
     if (num(d.statusRows)) out.sr = d.statusRows;
     if (Array.isArray(d.inBandCodes) && num(d.inBandCodes[0])) out.ib = d.inBandCodes[0];
@@ -1515,6 +1587,8 @@ export function streamOutcomeOf(ev) {
 // Gemini's 1097 wait (vendor-ai v0.20.0): emitted between attempts of ONE send while the previous
 // turn is still live server-side; the next attempt is a fresh request with its own stream.
 export const STAGE_PREVIOUS_TURN_WAIT = 'previous_turn_wait';
+// The package's `tab_ready` (v0.3.0): `detail.tabId` is the tab the send is about to use.
+export const STAGE_TAB_READY = 'tab_ready';
 export const PREVIOUS_TURN_IN_BAND_CODE = 1097;
 // One send's stream fields for the outcome, across the client's internal attempts (Codex telemetry
 // 1R follow-up #1): a 1097 wait starts a new attempt, so what the earlier attempt's stream said is
@@ -1523,15 +1597,26 @@ export const PREVIOUS_TURN_IN_BAND_CODE = 1097;
 // means nothing else). `failed(e)` = the fields of a failure row: env/end/sr, and `ib` from the
 // final attempt's stream_status, else from the error itself (inBandCodeOf — the package's exact
 // shapes only).
+// `stg` (OUTCOME_STAGES) is the furthest stage of the attempt that ended the send — a 1097 re-send starts
+// again from its ready tab — and `fz`/`act` the tab as `noteTab` last read it (the SW reads it at tab_ready).
 export function createStreamOutcome() {
   let fields = {};
   let waited = false;
-  const counts = () => { const { ib, ...rest } = fields; return rest; };
+  let stg = -1;
+  let tab = {};
+  const counts = () => { const { ib, ...rest } = fields; return { ...rest, ...(stg >= 0 ? { stg } : {}), ...tab }; };
   return {
     onStage(ev) {
-      if (ev?.stage === STAGE_PREVIOUS_TURN_WAIT) { fields = {}; waited = true; return; }
+      if (ev?.stage === STAGE_PREVIOUS_TURN_WAIT) { fields = {}; waited = true; stg = Math.min(stg, STG_TAB_READY); return; }
+      stg = Math.max(stg, OUTCOME_STAGES.indexOf(ev?.stage));
       const f = streamOutcomeOf(ev);
       if (f) fields = { ...fields, ...f };
+    },
+    /** The provider tab as `tabs.get` answered at send time: `frozen` / `active` as 0/1 (anything else omitted). */
+    noteTab(t) {
+      tab = {};
+      if (typeof t?.frozen === 'boolean') tab.fz = t.frozen ? 1 : 0;
+      if (typeof t?.active === 'boolean') tab.act = t.active ? 1 : 0;
     },
     answered() { return { ...counts(), ...(waited ? { ib: PREVIOUS_TURN_IN_BAND_CODE } : {}) }; },
     failed(e) {
@@ -1543,6 +1628,71 @@ export function createStreamOutcome() {
 // Every failure row has the same base: a failed column produced no answer, so `chars` is 0 — for a
 // client's ERROR, a Stop right after consume, and a column the round settled without asking alike.
 export const failedOutcome = (code) => ({ ok: false, code, chars: 0 });
+
+// The readiness tab lookup (#1945 item 2), folded from the package's diags into outcome fields: `prev`
+// with this event applied, or `prev` itself for any other stage. A later `tab_found` (the lookup after a
+// reload) replaces the tab's facts and keeps `rl`. Numbers and 0/1 only — never the tab id, never a URL.
+const TAB_RELOAD_STAGE_REASONS = Object.freeze({ discarded: 'discarded', frozen: 'frozen', stale_page_script: 'stale' });
+const omitKey = (o, key) => { const { [key]: _drop, ...rest } = o || {}; return rest; };
+export function readinessTabOf(ev, prev = null) {
+  const d = ev?.detail && typeof ev.detail === 'object' ? ev.detail : {};
+  // `{ [key]: index }` when `v` is one of `list`, else nothing (an unknown value is omitted, never guessed).
+  const indexed = (key, list, v) => (list.includes(v) ? { [key]: list.indexOf(v) } : {});
+  if (ev?.stage === 'tab_found') {
+    return {
+      ...(prev && prev.rl !== undefined ? { rl: prev.rl } : {}),
+      nw: 0,
+      ...indexed('st', OUTCOME_TAB_STATUSES, d.status),
+      ...(Number.isSafeInteger(d.candidates) && d.candidates >= 0 ? { c: d.candidates } : {}),
+      ...(typeof d.pinned === 'boolean' ? { pin: d.pinned ? 1 : 0 } : {}),
+      ...(typeof d.owned === 'boolean' ? { own: d.owned ? 1 : 0 } : {}),
+    };
+  }
+  // A tab readiness opened: nothing to report of it yet but that it is new (a fresh lookup, like tab_found).
+  if (ev?.stage === 'tab_created') return { ...(prev && prev.rl !== undefined ? { rl: prev.rl } : {}), nw: 1 };
+  // `la` (vendor-ai v0.28.0): the wait ended because the tab ANSWERED while still `loading`, not on `complete`.
+  // The v0.28.0 package puts `answered: true` only on a wait its probe ended; no `answered` = readied on
+  // `complete` (0). Any other value is not the package's shape: omitted, never guessed (Codex vendor-028 1R).
+  if (ev?.stage === 'tab_loaded') {
+    if (!(Number.isSafeInteger(d.waitedMs) && d.waitedMs >= 0)) return prev;
+    const la = d.answered === true ? { la: 1 } : d.answered === undefined ? { la: 0 } : {};
+    return { ...omitKey(prev, 'la'), wt: d.waitedMs, ...la };
+  }
+  // A reload starts a new load wait: the earlier one's `wt` / `la` are not this tab's any more.
+  if (ev?.stage === 'tab_reloaded') return { ...omitKey(omitKey(prev, 'wt'), 'la'), ...indexed('rl', OUTCOME_RELOAD_REASONS, TAB_RELOAD_STAGE_REASONS[d.reason]) };
+  if (ev?.stage === 'page_stale') {
+    const reason = d.reloaded === true ? 'stale' : d.reason === 'busy' ? 'stale_busy' : 'stale_skipped';
+    return { ...(prev || {}), ...indexed('rl', OUTCOME_RELOAD_REASONS, reason) };
+  }
+  return prev;
+}
+// Readiness stages whose `detail.tabId` names the tab the facts are about (kept in the SW, never sent).
+const READINESS_TAB_ID_STAGES = Object.freeze(['tab_found', 'tab_created', 'tab_reloaded']);
+// Whether this readiness diag starts a load wait the package then sits in (the `wt` clock of a failed readiness):
+// a tab it opened, a tab it reloaded, or a tab it found not yet `complete`. A tab found `complete` does not.
+export function loadWaitStarts(ev) {
+  if (ev?.stage === 'tab_created' || ev?.stage === 'tab_reloaded') return true;
+  return ev?.stage === 'tab_found' && ev.detail?.status !== 'complete';
+}
+// The bound on the one `tabs.get` after a failed readiness (fst): a Chrome read is milliseconds.
+export const READINESS_TAB_READ_MS = 1000;
+// A tab's status (OUTCOME_TAB_STATUSES index) read once, or null. NEVER throws and never waits past `ms`:
+// a closed tab (`tabs.get` rejects), a throwing or missing API, a status outside the enum → null.
+export async function readTabStatus(tabs, tabId, ms) {
+  try {
+    const t = await withTimeout(Promise.resolve().then(() => tabs.get(tabId)), ms, null);
+    const i = OUTCOME_TAB_STATUSES.indexOf(t?.status);
+    return i === -1 ? null : i;
+  } catch { return null; }
+}
+// A column readiness refused, recorded after consume: the failure base, `pre: 1`, its provider's tab facts
+// and — for a `no_tab` — the package's reason (`e.reason`), as an index; an unknown reason is omitted.
+export function readinessOutcome(code, tab, e = null) {
+  try {
+    const nr = code === 'no_tab' ? OUTCOME_NO_TAB_REASONS.indexOf(e?.reason) : -1;
+    return { ...failedOutcome(code), pre: 1, ...(tab || {}), ...(nr === -1 ? {} : { nr }) };
+  } catch { return { ...failedOutcome(code), pre: 1 }; }   // an error whose `reason` getter throws — never the send's problem
+}
 
 // The `model` object a client reports, in the shape the page renders: `{ id, label, source }`.
 function modelForPage(m) {
@@ -2848,10 +2998,29 @@ export function createCompareController({
     // The clients' readiness diagnostics (`{type:'diag', provider, stage, detail}`, package v0.2.3):
     // one line in the SW console and one DIAG port message each. Never throws (a listener that
     // throws would be logged by the client, but the send is not the place to find out).
+    // The round's readiness tab facts per provider (#1945 item 2, readinessTabOf) — cleared when a round's
+    // readiness starts, read after consume for the columns readiness refused.
+    const readinessTabs = new Map();
+    // …and the tab those facts are about, kept HERE (never in the outcome) for the read after a failure, with
+    // when it was found / opened / reloaded — the start of the package's load wait (its diag is synchronous).
+    const readinessTabIds = new Map();
+    const readinessTabAt = new Map();
+    const noteReadinessTab = (provider, patch) => readinessTabs.set(provider, { ...(readinessTabs.get(provider) || {}), ...patch });
     const onDiag = (provider, col) => (ev) => {
       if (ev?.type !== 'diag') return;
       const stage = typeof ev.stage === 'string' ? ev.stage : 'unknown';
       const detail = ev.detail && typeof ev.detail === 'object' ? ev.detail : {};
+      // 🔴 Diagnostics never break a send (Codex #1945 1R): whatever this bookkeeping meets, the event goes on.
+      try {
+        const tab = readinessTabOf(ev, readinessTabs.get(provider) || null);
+        if (tab) readinessTabs.set(provider, tab);
+        if (READINESS_TAB_ID_STAGES.includes(stage) && Number.isInteger(detail.tabId)) {
+          readinessTabIds.set(provider, detail.tabId);
+          // Only a lookup the package then WAITS on starts the clock (Codex #1945 2R): a tab found already
+          // `complete` skips the load wait, and a later failure (the session check) is not a load time.
+          if (loadWaitStarts(ev)) readinessTabAt.set(provider, now()); else readinessTabAt.delete(provider);
+        }
+      } catch { /* the outcome loses a fact, nothing else */ }
       // 🔴 The console gets the detail RAW; the page gets it projected. `stream_cut` carries the
       // package's free-text reason, whose error form ends in the PROVIDER's own message — the same
       // string `cutKindOf` exists to keep off the wire (#1527). Bounding it on DONE and then
@@ -2903,14 +3072,31 @@ export function createCompareController({
       }
       // Every await above and below is a point where the port may have gone or Stop been pressed.
       if (torndown || signal.aborted) return { code: SW_CODES.ABORTED, error: null };
+      const t0 = now();
       try {
         // `model` (package v0.3.0): what THIS send will pass to sendMessage, so Claude's pre-created
         // conversation is on the right model (a mismatch would cost a fresh create).
         await clientFor(col).prepare({ mayOpenTab: mayOpenTab === true, signal, onEvent: onDiag(provider, col.id), model });
       } catch (e) {
+        // 🔴 Diagnostics never break a send (Codex #1945 1R): the verdict below is returned whatever happens here.
+        try {
+          noteReadinessTab(provider, { rdy: elapsed(t0) });
+          // No tab_loaded = the wait never finished (a load_timeout, a tab closed while loading): `wt` is then the
+          // wait up to this failure, from the lookup that started it.
+          const waitFrom = readinessTabAt.get(provider);
+          if (readinessTabs.get(provider)?.wt === undefined && waitFrom !== undefined) noteReadinessTab(provider, { wt: elapsed(waitFrom) });
+          // The tab as it is NOW (#1945 item 2): a load_timeout on a tab that reads `complete` a moment later is
+          // a different failure from one still `loading`. Bounded — the round's other providers wait on this.
+          const tabId = readinessTabIds.get(provider);
+          if (!(torndown || signal.aborted) && tabId !== undefined) {
+            const fst = await readTabStatus(tabs, tabId, READINESS_TAB_READ_MS);
+            if (fst !== null) noteReadinessTab(provider, { fst });
+          }
+        } catch { /* the outcome loses a fact, nothing else */ }
         if (torndown || signal.aborted) return { code: SW_CODES.ABORTED, error: null };
         return { code: typeof e?.code === 'string' ? e.code : SW_CODES.UNKNOWN, error: e };
       }
+      try { noteReadinessTab(provider, { rdy: elapsed(t0) }); } catch { /* diagnostics never break a send */ }
       if (torndown || signal.aborted) return { code: SW_CODES.ABORTED, error: null };
       return null;
     }
@@ -2974,7 +3160,10 @@ export function createCompareController({
       // send (send_start and first_chunk are reported once per send).
       const stages = {};
       const streamOutcome = createStreamOutcome();
+      // The raw reason of a `stream_cut` this send reported, for a late Stop's answer (answeredFromAbort).
+      let streamCut = null;
       const onStage = (ev) => {
+        if (ev?.stage === STAGE_STREAM_CUT) streamCut = String(ev.detail?.reason || CUT_STALLED);
         const at = ev?.detail?.at;
         if (typeof at !== 'number' || typeof ev.stage !== 'string') return;
         stages[ev.stage] = at;
@@ -3023,8 +3212,13 @@ export function createCompareController({
       // phase, which has no stall clock.
       const touchIfStreaming = () => { if (lastInbound !== null) touch(); };
       let client = null; // in scope for the stall branch of the catch
+      // The answer came from a late Stop (answeredFromAbort) — the outcome's `ls`.
+      let lateStop = false;
       try {
         client = clientFor(col);
+        // 🔴 Only the CLIENT's rejection can be a late Stop (`.catch` on its promise): an error the
+        // code below throws lands in the catch as before — never turned into an answer, never a second
+        // DONE (the DONE is this block's last statement, and `post` never throws).
         const result = await client.sendMessage(
           text,
           (delta) => {
@@ -3050,7 +3244,13 @@ export function createCompareController({
               // picture announces it before its first chunk, and a picture that never comes would
               // otherwise leave no watchdog at all — only the 10-minute budget.
               if (ev?.type === 'diag' && ev.stage === STAGE_IMAGE_PENDING) { imageWait = true; touch(); } else touchIfStreaming(); // anything the client surfaces proves the stream is alive
-              if (ev?.type === 'diag') { onDiag(provider, colId)(ev); onStage(ev); return; }
+              if (ev?.type === 'diag') {
+                // The tab this send rides, as Chrome sees it now (frozen / active) — for the outcome only; never awaited.
+                if (ev.stage === STAGE_TAB_READY && Number.isInteger(ev.detail?.tabId) && typeof tabs?.get === 'function') {
+                  Promise.resolve().then(() => tabs.get(ev.detail.tabId)).then((t) => { if (!settled) streamOutcome.noteTab(t); }, () => {});
+                }
+                onDiag(provider, colId)(ev); onStage(ev); return;
+              }
               if (ev?.type === 'image') {
                 if (imagesPosted >= MAX_OUTPUT_IMAGES) return;
                 const img = imageForPage(ev);
@@ -3072,13 +3272,20 @@ export function createCompareController({
               }
             },
           },
-        );
+        ).catch((e) => {
+          const answered = answeredFromAbort(e, { streamCut, stalled });
+          if (!answered) throw e;
+          lateStop = true;
+          logInfo(provider, 'late_stop', { col: colId, chars: answered.text.length, cut: cutKindOf(answered), ...(stalled ? { stalled: true } : {}), ...(timedOut ? { timedOut: true } : {}) });
+          return answered;
+        });
         // `continuation` (package v0.4.0): what would resume this provider's conversation on a
         // fresh client — ONLY for a kept session, and only when the client hands one out (it
         // answers null for anything it will still clean up). Omitted otherwise, never null: an
         // incognito session's conversations are gone at dispose, so there is nothing to offer.
         const continuation = sessionSaveHistory === true && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
-        const served = modelForPage(result?.model);
+        // A late Stop's answer may not name its model: the one reported during the stream stands in.
+        const served = modelForPage(result?.model) || (lateStop ? lastModel : null);
         // 🔴 A cut the CLIENT reported (package v0.5.5) is still a DONE: what arrived IS the answer,
         // exactly as it is for the stall watchdog below. It rides the SAME `stalled` flag on purpose
         // — the page already has four surfaces for "this answer is not complete" and a second flag
@@ -3094,6 +3301,7 @@ export function createCompareController({
           ok: true, total_ms: elapsed(t0), chars: answerText.length, ...streamOutcome.answered(),
           ...(cut ? { code: cut === CUT_STREAM_ERROR ? SW_CODES.CUT_ERROR : SW_CODES.STALLED } : {}),
           ...(served?.id ? { model: served.id } : {}),
+          ls: lateStop ? 1 : 0,
         });
         post({
           type: PORT_MSG.DONE, provider, col: colId, text: answerText, model: served,
@@ -3313,12 +3521,16 @@ export function createCompareController({
         // (a) readiness, ONCE per provider (on its first column), in parallel; a failed provider
         // is reported on each of its columns and skipped, not fatal.
         const firstOf = new Map();
-        // A provider this round cannot use (no upload path, and there is a file) is not prepared at
-        // all: preparing it would open its tab, and a tab that is slow to load would spend the
-        // readiness budget — up to TAB_LOAD_TIMEOUT_MS — on a column that is refused either way.
-        // Its verdict is the `uploads` branch below, which does not need a client.
-        const skipReadiness = (col) => attachments.length > 0 && PROVIDER_SITES[col.provider].uploads !== true;
+        // A provider this round cannot use (no upload path, or a file type it does not take — #1944)
+        // is not prepared at all: preparing it would open its tab, and a tab that is slow to load
+        // would spend the readiness budget — up to TAB_LOAD_TIMEOUT_MS — on a column that is
+        // refused either way. Its verdict is the branch below, which does not need a client.
+        const roundTypes = attachments.map((a) => a.type);
+        const skipReadiness = (col) => attachments.length > 0 && (PROVIDER_SITES[col.provider].uploads !== true || !providerTakesTypes(col.provider, roundTypes));
         for (const col of columns) if (!skipReadiness(col) && !firstOf.has(col.provider)) firstOf.set(col.provider, col);
+        readinessTabs.clear();
+        readinessTabIds.clear();
+        readinessTabAt.clear();
         const verdicts = new Map(await Promise.all([...firstOf.values()].map(async (col) => [col.provider, await readiness(col, mayOpenTab, send.signal)])));
         // A Stop before the debit is free; the page hears it as a failed consume.
         if (torndown) return;
@@ -3326,16 +3538,23 @@ export function createCompareController({
           post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.ABORTED });
           return;
         }
+        // The columns refused here, for the outcome (#1945 item 2): postError cannot record them — there is
+        // no record before consume — so they are written into it right after consume, as `pre: 1`.
+        const notReady = [];
         for (const col of columns) {
           const verdict = verdicts.get(col.provider);
-          if (verdict) postError(col, verdict.code, `not ready: ${verdict.code}`, verdict.error);
+          if (verdict) {
+            postError(col, verdict.code, `not ready: ${verdict.code}`, verdict.error);
+            notReady.push([col.id, readinessOutcome(verdict.code, readinessTabs.get(col.provider), verdict.error)]);
+          }
           // A file on a provider with no upload path (#1616) — the columns readiness above skipped.
           // The package would reject this send itself (`unsupported`, before any tab work) but only
           // AFTER the debit, which would charge the round for a column that was never going to
           // answer. Same code, same place as every other "cannot be asked" verdict: out of `ready`,
           // so out of the consume body.
           else if (skipReadiness(col)) {
-            postError(col, 'unsupported', `${col.provider} has no upload path yet (${attachments.length} attached)`, null);
+            postError(col, 'unsupported', `${col.provider} does not take this round's files (${[...new Set(roundTypes)].join(', ')})`, null);
+            notReady.push([col.id, readinessOutcome('unsupported', null)]);
           } else ready.push(col);
         }
         if (!ready.length) {
@@ -3359,6 +3578,13 @@ export function createCompareController({
         }
         // The round's usage record exists from here — and only with the server's event_id.
         outcome = c.eventId ? { eventId: c.eventId, results: {} } : null;
+        // 🔴 Recorded, not in `targets`: the row's results can name a column its targets do not (docs/DATABASE.md).
+        // The columns that passed carry the same readiness facts (no `pre`) — the baseline, e.g. how long a new tab took.
+        // 🔴 Diagnostics never break a send: CONSUME_OK and the fan-out below follow whatever this meets.
+        try {
+          for (const [id, rec] of notReady) recordOutcome(id, rec);
+          for (const col of ready) { const tab = readinessTabs.get(col.provider); if (tab) recordOutcome(col.id, tab); }
+        } catch { /* the outcome loses facts, nothing else */ }
         post({ type: PORT_MSG.CONSUME_OK, remaining: c.remaining, limit: c.limit, resetsAt: c.resetsAt });
         if (torndown) return;
         // The tabs exist now (readiness opened them): a picker that was static for lack of a tab

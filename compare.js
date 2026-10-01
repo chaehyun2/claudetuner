@@ -60,7 +60,8 @@
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, FOLLOWUP_RESEND_CODES, CODE_ABORTED, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
-import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_TYPES, ATTACH_ERR_READ } from './ui/compare/constants.js';
+import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_ERR_READ, ATTACH_ERR_TYPE, ATTACH_ERR_COUNT } from './ui/compare/constants.js';
+import { ATTACH_ACCEPT, ATTACH_FORMATS_LABEL, attachTypeOf, isImageType } from './ui/compare/attach-types.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
 import { PROFILE_PHOTO_KEY, profilePhotoFor } from './bg/profile-photo.js';
 import { MODE_DEBATE, MODE_CROSSCHECK, pickModeratorSeat, defaultDebateLayout } from './ui/compare/debate-core.js';
@@ -69,7 +70,7 @@ const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_D
 // The debate layout's moderator seat (plan §18.8/§18.9 ①): a colId written WITH `debateColumns`, so a
 // stored layout keeps the column that moderates even when the plans read later would pick another.
 const DEBATE_SEAT_KEY = 'debateSeat';
-import { readAttachment, pickAttachableAll, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
+import { readAttachment, pickAttachableAll, reserveAttachments, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix } from './ui/compare/helpers.js';
 import { NARROW_MEDIA } from './ui/compare/constants.js';
@@ -857,7 +858,7 @@ export function mountComparePage(deps) {
   const attachInput = el('input');
   attachInput.type = 'file';
   attachInput.id = 'cmp-attach-input';
-  attachInput.accept = ATTACH_TYPES.join(',');
+  attachInput.accept = ATTACH_ACCEPT;
   attachInput.multiple = true; // #1634 — the OS dialog offers several at once
   attachInput.hidden = true;
   attachBox.appendChild(attachInput);
@@ -870,7 +871,7 @@ export function mountComparePage(deps) {
     const b = el('button', 'cmp-btn cmp-attach-btn', '📎');
     b.id = id;
     b.type = 'button';
-    b.title = `${t('attach')} — ${t('attach_limit', 'PNG · JPEG · GIF · WebP', formatBytes(ATTACH_MAX_TOTAL_BYTES), ATTACH_MAX_FILES)}`;
+    b.title = `${t('attach')} — ${t('attach_limit', ATTACH_FORMATS_LABEL, formatBytes(ATTACH_MAX_TOTAL_BYTES), ATTACH_MAX_FILES)}`;
     b.setAttribute('aria-label', t('attach'));
     b.addEventListener('click', () => { if (!attachLocked()) attachInput.click(); });
     return b;
@@ -916,9 +917,24 @@ export function mountComparePage(deps) {
   function roundTargetsNow() {
     return state.sessionStarted ? followupPlan().targets : currentTargets();
   }
+  /**
+   * The tray's file types, without repeats (#1944) — every item's, a read still running included
+   * (its type is known from the moment it was chosen), so the "left out" line is right at once.
+   */
+  function trayTypes() {
+    return [...new Set(state.attachItems.map((a) => a.type).filter(Boolean))];
+  }
   /** The targets a round with files can actually reach (the rest are refused by the SW, undebited). */
   function attachableTargets(targets) {
-    return state.attachItems.length ? targetsTakingFiles(targets, (id) => state.columns.get(id)) : targets;
+    return state.attachItems.length ? targetsTakingFiles(targets, (id) => state.columns.get(id), trayTypes()) : targets;
+  }
+  /** Whether this provider takes every file in the tray — port.js asks it per column at CONSUME_OK. */
+  function providerTakesTray(provider) {
+    return providerTakesFiles(provider, trayTypes());
+  }
+  /** The refusal line's argument: the accepted formats for a type refusal, the size cap otherwise. */
+  function attachErrorArg(error) {
+    return error === ATTACH_ERR_TYPE ? ATTACH_FORMATS_LABEL : formatBytes(ATTACH_MAX_BYTES);
   }
   function setAttachError(key, arg) {
     state.attachError = key ? { key, arg } : null;
@@ -998,8 +1014,9 @@ export function mountComparePage(deps) {
       return;
     }
     if (!slot()) return;
-    // The TOTAL is re-checked HERE, not only when the file was picked: the reads land
-    // independently, so the one that tips the round over is only knowable now.
+    // 「What was it REALLY」 (#1647): room was reserved by `File.size` before the read
+    // (reserveAttachments); this checks the bytes that actually came back, for a file whose
+    // content turned out larger than its size said. Not a second 「is there room」.
     if (attachedBytes() + next.bytes > ATTACH_MAX_TOTAL_BYTES) {
       removeAttachment(id);
       setAttachError('attach_err_total', formatBytes(ATTACH_MAX_TOTAL_BYTES));
@@ -1009,10 +1026,12 @@ export function mountComparePage(deps) {
     // `imageId` (2026-09-26): the image's id from the moment it is ATTACHED, and its preview is
     // started now — so it is ready long before the round's history write, the only moment it can
     // reach the disk (image-store `ready`).
-    const imageId = ctx.newSessionId();
-    imageStore.add(imageId, ok);
+    // A document has neither (#1944): no picture to keep, and its chip is an icon, not a thumbnail.
+    const image = isImageType(next.type);
+    const imageId = image ? ctx.newSessionId() : null;
+    if (image) imageStore.add(imageId, ok);
     Object.assign(item, next, { reading: false, preview: '', imageId });   // fills ITS slot — the order is the user's
-    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    if (image && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
       try { item.preview = URL.createObjectURL(ok); } catch { item.preview = ''; }
     }
     // 🔴 The batch's refusal is NOT cleared here (1R #1). One file landing says nothing about the
@@ -1032,18 +1051,18 @@ export function mountComparePage(deps) {
     const { usable, error } = pickAttachableAll(files);
     if (!usable.length && !error) return false;
     state.attachError = null;   // a NEW attempt: the previous refusal is answered by this one
-    if (error && !usable.length) { setAttachError(`attach_err_${error}`, formatBytes(ATTACH_MAX_BYTES)); return true; }
-    const room = ATTACH_MAX_FILES - state.attachItems.length;
-    if (room <= 0) { setAttachError('attach_err_count', ATTACH_MAX_FILES); return true; }
-    // Slots are reserved NOW, in the order the user chose, and each read fills its own.
-    for (const f of usable.slice(0, room)) {
+    if (error && !usable.length) { setAttachError(`attach_err_${error}`, attachErrorArg(error)); return true; }
+    // Slots are reserved NOW, in the order the user chose, and each read fills its own — and only
+    // for files the count AND the total have room for, by `File.size`, before a byte is read (#1647).
+    const { take, error: roomError } = reserveAttachments(state.attachItems, usable, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES);
+    for (const f of take) {
       const id = ++state.attachSeq;
-      state.attachItems.push({ id, name: typeof f.name === 'string' && f.name.trim() ? f.name.trim() : 'image', reading: true });
+      state.attachItems.push({ id, name: typeof f.name === 'string' && f.name.trim() ? f.name.trim() : 'file', type: attachTypeOf(f), size: f.size, reading: true });
       attachFile(f, id);
     }
     updateControls();
-    if (usable.length > room) setAttachError('attach_err_count', ATTACH_MAX_FILES);
-    else if (error) setAttachError(`attach_err_${error}`, formatBytes(ATTACH_MAX_BYTES));
+    if (roomError) setAttachError(`attach_err_${roomError}`, roomError === ATTACH_ERR_COUNT ? ATTACH_MAX_FILES : formatBytes(ATTACH_MAX_TOTAL_BYTES));
+    else if (error) setAttachError(`attach_err_${error}`, attachErrorArg(error));
     return true;
   }
   /**
@@ -1061,7 +1080,7 @@ export function mountComparePage(deps) {
     attachChips.hidden = !any || !trayShown;
     // Which columns this round would leave behind — computed from the targets as they stand, so
     // unticking a column in the follow-up boxes makes the line go away by itself.
-    const left = any ? unsupportedProviders(roundTargetsNow(), (id) => state.columns.get(id)) : [];
+    const left = any ? unsupportedProviders(roundTargetsNow(), (id) => state.columns.get(id), trayTypes()) : [];
     const none = any && roundTargetsNow().length > 0 && attachableTargets(roundTargetsNow()).length === 0;
     attachNote.hidden = !left.length || !trayShown;
     attachNote.classList.toggle('is-blocking', none); // outside the branch: a note that stops being blocking must lose the class even as it hides
@@ -1220,6 +1239,11 @@ export function mountComparePage(deps) {
   Object.assign(ctx, { clearLink, renderLink });
 
   /** One chip: thumbnail, name, size (or 「읽는 중…」), ×. */
+  /** 「PDF」 — a document chip's format badge, from its name's extension (upper-cased). */
+  function docLabel(att) {
+    const dot = att.name.lastIndexOf('.');
+    return dot >= 0 && dot < att.name.length - 1 ? att.name.slice(dot + 1).toUpperCase() : '📄';
+  }
   function makeChip(att, reading) {
     const chip = el('div', 'cmp-attach-chip');
     chip.classList.toggle('is-reading', reading);
@@ -1228,6 +1252,9 @@ export function mountComparePage(deps) {
     thumb.hidden = reading || !att.preview;
     if (!reading && att.preview) thumb.src = att.preview;
     chip.appendChild(thumb);
+    // A document (#1944): its format where an image shows its picture — known from the pick, so a
+    // chip still reading already says what it is.
+    if (att.type && !isImageType(att.type)) chip.appendChild(el('span', 'cmp-attach-doc', docLabel(att)));
     const name = el('span', 'cmp-attach-name', att.name);
     name.title = att.name;
     chip.appendChild(name);
@@ -1259,7 +1286,7 @@ export function mountComparePage(deps) {
     col.actionHint.textContent = t('retry_needs_image');
     col.actionHint.hidden = false;
   }
-  Object.assign(ctx, { clearAttachment, consumeAttachment, attachableTargets, renderAttachment, takeFiles, attachLocked, attachMark, roundHadImage, showRetryNeedsImage, removeAttachment, providerTakesFiles });
+  Object.assign(ctx, { clearAttachment, consumeAttachment, attachableTargets, renderAttachment, takeFiles, attachLocked, attachMark, roundHadImage, showRetryNeedsImage, removeAttachment, providerTakesFiles: providerTakesTray });
 
   // Empty state (chathub batch 1, C1): a page opened without `?q` — the web shell's plain entry —
   // showed one placeholder line and nothing else. Directly above the composer, inside the dock

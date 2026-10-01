@@ -331,6 +331,8 @@ export const CODE_MODEL_UNAVAILABLE = 'model_unavailable';
 export const CODE_OVERLOADED = 'overloaded';
 // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; ERROR.inBandCode carries the number.
 export const CODE_IN_BAND_ERROR = 'in_band_error';
+// A provider refused one of the round's files (package `attachment_failed`); ERROR.attachment names it (#1951).
+export const CODE_ATTACHMENT_FAILED = 'attachment_failed';
 export const GATE_CODES = new Set([CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED]);
 export const PROVIDER_BUSY_CODES = new Set([CODE_RATE_LIMITED, CODE_OVERLOADED]);
 // A 5h gauge at this utilisation explains a provider-side limit: the error line then carries the reset countdown.
@@ -449,6 +451,23 @@ export const TURN_KIND_DEBATE = 'debate';
 export const DEBATE_SEND_BUDGET = 50; // 2026-09-28 user: stays 50 now that a spent budget asks before going on
 export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
+// A debate turn with no answer text yet (2026-09-30 user decision): at DEBATE_SLOW_NOTE_MS from its send the
+// pending bubble offers 「이번 차례 건너뛰기」; at DEBATE_SLOW_SKIP_MS the turn is skipped by itself (aborted,
+// the debate moves on). Only while no text has arrived — a pause mid-answer is the SW's stall watchdog.
+export const DEBATE_SLOW_NOTE_MS = 30 * 1000;
+export const DEBATE_SLOW_SKIP_MS = 60 * 1000;
+// The note's 「약 8%」: the share of answered Gemini debate turns whose first text took longer than
+// DEBATE_SLOW_NOTE_MS (prod, measured 2026-09-30, n=464: p50 4.6 s, p90 26.7 s, >60 s 1.9%). Re-measure when
+// the timing moves.
+export const DEBATE_SLOW_SHARE_PCT = 8;
+// …but a column's FIRST turn of the session (the opening, or the moderator's first call — a new conversation on
+// that AI, with the longest prompt of the run) is routinely slower, so it gets DEBATE_SLOW_SKIP_FIRST_MS before
+// the auto-skip (2026-09-30, worker-slowgem): Gemini debate openings p90 43 s, cross-check first questions p90
+// 88 s, and 58–123 s openings that did answer; later debate turns p90 4–22 s whatever the idle gap before them.
+// Its note quotes DEBATE_SLOW_SHARE_FIRST_PCT: the share of Gemini openings with no text after
+// DEBATE_SLOW_NOTE_MS (prod 1.43+, 9 of 42). The note time stays DEBATE_SLOW_NOTE_MS.
+export const DEBATE_SLOW_SKIP_FIRST_MS = 120 * 1000;
+export const DEBATE_SLOW_SHARE_FIRST_PCT = 21;
 // Under 「충분히 논의 후 결론」 (the balanced pace, 2026-09-29 user request) the moderator concludes on its
 // own only after this many debater turns — before it, like 「깊게」, only on the user's word. Between the
 // measured runs (D1 compare_debates, 2026-09-29): 「빠르게」 ended at ~8.5 turns, 「깊게」's median user-ended run at ~23.
@@ -490,11 +509,10 @@ export const ERROR_TITLE_MAX = 300;
 export const EMBED_THEME_LIGHT = 'light';
 export const EMBED_THEME_DARK = 'dark';
 // ── Attachments the composer may carry (#1617, page side of the #1616 wire) ────────────────────
-// 🔴 A MIRROR of bg/compare.js's SEND_MAX_ATTACHMENTS / SEND_MAX_ATTACHMENT_BYTES /
-// SEND_ATTACHMENT_TYPES, and of which PROVIDER_SITES entries have `uploads`. Not an import: the SW
-// module is 2,500 lines with no bundler between us, so importing it for four values would ship the
-// whole worker to the page. The copy is pinned to the original by the drift check in
-// test/compare-page-flow-guard.mjs — change one side and that guard fails.
+// 🔴 A MIRROR of bg/compare.js's SEND_MAX_ATTACHMENTS / SEND_MAX_ATTACHMENT_BYTES, and of which
+// PROVIDER_SITES entries have `uploads`. Not an import: the SW module is 2,500 lines with no
+// bundler between us, so importing it for four values would ship the whole worker to the page.
+// The TYPES are not mirrored — both sides import ui/compare/attach-types.js (#1944).
 //
 // The page repeats the bounds so a file that cannot work is refused where refusing is FREE: in the
 // composer, with a line saying why, before a port message exists. The SW's own copy stays the
@@ -513,7 +531,6 @@ export const ATTACH_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 // 2026-09-24). Writing the two characters anywhere below — even inside a line comment describing
 // this trap — is enough to trip it.
 export const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
-export const ATTACH_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 // Providers with an upload path. The others cannot be asked with a file and are said so BEFORE the send.
 export const ATTACH_PROVIDERS = Object.freeze(['claude', 'chatgpt', 'gemini']);
 // Why a file was refused — the suffix of the `attach_err_<reason>` copy.

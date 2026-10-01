@@ -18,12 +18,12 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_SKIP_MS, DEBATE_SLOW_SHARE_PCT, DEBATE_SLOW_SKIP_FIRST_MS, DEBATE_SLOW_SHARE_FIRST_PCT, MS_PER_SECOND, WAIT_TICK_MS } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import {
   MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCE_BASES, STANCE_ROLES, STANCE_NONE, STANCE_DEVIL, composeStance, splitStance, recordStance, recordPace, roleAllowed, stanceText, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
   DEBATE_DELTA_MAX, DEBATE_TOPIC_MAX, DEBATE_ALIAS_MAX, cleanAlias, aliasProblem, resolveNames, deltaFor, fitDelta, stancesOf,
-  openingPrompt, turnPrompt, moderatorPrompt, splitControl, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
+  openingPrompt, turnPrompt, moderatorPrompt, splitControl, tightenConclusion, conclusionLabels, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
   unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
@@ -1019,6 +1019,7 @@ export function installDebate(ctx) {
     if (isMod) turn.root.classList.add('is-moderator');
     turn.root.insertBefore(head, turn.root.firstChild);
     turn.root.insertBefore(ava, head);
+    if (!d.restoring) watchSlow(col, turn);
     // A new speaker is followed only by a reader already at the end (2026-09-28 user: 「ChatGPT처럼」 —
     // it used to pull everyone down at every turn; a reader scrolled up gets the 「↓ 새 발언」 pill).
     // During the opening start() shows the room from the top (#1818 ⑩) and nothing pulls (§11.4 ⑤);
@@ -1119,6 +1120,8 @@ export function installDebate(ctx) {
   function reveal(turn) {
     const d = state.debate;
     if (!turn || !turn.root || !turn.root.classList.contains('is-typing')) return;
+    unwatchSlow(turn);
+    if (turn.debateSkipped) showSkipped(turn);
     turn.root.classList.remove('is-typing');
     turn.root.classList.add('is-revealed');
     turn.node.removeAttribute('aria-hidden');
@@ -1135,13 +1138,148 @@ export function installDebate(ctx) {
       turn.debateSide = side;
     }
     if (d) d.typing.delete(turn);
+    // A turn left waiting in the opening may now be the only one the round waits for (holdsRound) —
+    // looked at once this settle's own handler is through (a skip posts ABORT, which settles the round).
+    if (d && d.typing.size) Promise.resolve().then(() => { for (const other of [...d.typing]) checkSlow(other); });
     follow();
+  }
+
+  // ── slow turns (2026-09-30 user decision) ──
+  // A turn with no answer text DEBATE_SLOW_NOTE_MS after its send offers 「이번 차례 건너뛰기」; at
+  // DEBATE_SLOW_SKIP_MS (a column's first turn: DEBATE_SLOW_SKIP_FIRST_MS) it is skipped by itself. A skip is the page's one Stop (ABORT) — so it is only
+  // offered while this turn is all the round waits for: the opening's other debaters still writing
+  // would be aborted with it. Every exit clears the timers: the first words (firstText), the turn
+  // settling (reveal), a refused round, 새 대화 / a history load (reset), the page closing.
+  const SLOW_NOTE = 1;
+  const SLOW_SKIP = 2;
+  const slowTurns = new Set(); // turns whose slow timers are live
+  const secsOf = (ms) => Math.round(ms / MS_PER_SECOND);
+  /**
+   * The column's first turn of the session: nothing it said before has any words (the opening, the
+   * moderator's first call, or a turn after a first one that was skipped). A new conversation on that AI with
+   * the run's longest prompt — it gets DEBATE_SLOW_SKIP_FIRST_MS (see constants).
+   */
+  const isFirstTurn = (col, turn) => !(col.turns || []).some((x) => x !== turn && x.role === 'assistant' && x.text);
+  function watchSlow(col, turn) {
+    turn.debateCol = col;
+    turn.debateSentAt = ctx.clock.now();
+    turn.debateFirst = isFirstTurn(col, turn);
+    turn.debateSkipMs = turn.debateFirst ? DEBATE_SLOW_SKIP_FIRST_MS : DEBATE_SLOW_SKIP_MS;
+    // When the auto-skip is due, from the send — moved later if the round gets under way late (checkSlow).
+    turn.debateSkipAt = turn.debateSentAt + turn.debateSkipMs;
+    const at = (stage, ms) => ctx.clock.setTimeout(() => { turn.debateSlowStage = stage; checkSlow(turn); }, ms);
+    turn.debateSlowTimers = [at(SLOW_NOTE, DEBATE_SLOW_NOTE_MS), at(SLOW_SKIP, turn.debateSkipMs)];
+    slowTurns.add(turn);
+  }
+  function unwatchSlow(turn) {
+    if (!turn || !slowTurns.has(turn)) return;
+    for (const id of turn.debateSlowTimers || []) ctx.clock.clearTimeout(id);
+    turn.debateSlowTimers = null;
+    slowTurns.delete(turn);
+    dropNote(turn);
+  }
+  const clearSlow = () => { for (const turn of [...slowTurns]) unwatchSlow(turn); };
+  const dropNote = (turn) => { if (turn.debateSlowNote) { turn.debateSlowNote.remove(); turn.debateSlowNote = null; } };
+  /**
+   * A turn's first words (or image) arrived (port.js CHUNK / IMAGE): it is no longer slow. In the opening
+   * the others' offer goes too — skipping them now would abort this answer (it comes back when this one settles).
+   */
+  function firstText(turn) {
+    unwatchSlow(turn);
+    const held = state.debate ? waitingOn() : null;
+    if (!held || held.length !== 1) for (const other of slowTurns) dropNote(other);
+  }
+  /** Nothing has arrived for this turn yet — no words, no image. */
+  const silent = (turn) => !turn.text && !(ctx.outImageCount && ctx.outImageCount(turn));
+  /** The turns the round in flight still waits for — null when any of them has started answering. */
+  function waitingOn() {
+    const d = state.debate;
+    const out = [];
+    for (const id of state.roundTargets || []) {
+      const col = colOf(id);
+      if (!col || col.status !== 'streaming') continue;
+      const turn = ctx.lastAssistantTurn(col);
+      if (!turn || !slowTurns.has(turn) || !d.typing.has(turn) || !silent(turn)) return null;
+      out.push(turn);
+    }
+    return out;
+  }
+  /** A timer fired, or another turn of the round settled: note, skip, or nothing. */
+  function checkSlow(turn) {
+    const d = state.debate;
+    if (!slowTurns.has(turn)) return;
+    if (!d || !d.typing.has(turn) || !turn.root.isConnected || !silent(turn)) { unwatchSlow(turn); return; }
+    if (!turn.debateSlowStage || !state.sending) return;
+    // Before CONSUME_OK there is no Stop (the SW is still preparing — an ABORT then is a refused round
+    // that pauses the debate): looked at again each tick until the round is under way.
+    if (!ctx.stopBtn || ctx.stopBtn.disabled) { turn.debateHeldBack = true; turn.debateSlowTimers.push(ctx.clock.setTimeout(() => checkSlow(turn), WAIT_TICK_MS)); return; }
+    // Under way only after a stage was due: the auto-skip waits the note's own lead (skip − note) from here —
+    // the least a turn gets once its round is under way (Codex 1R #1: a prepare that took 60 s must not be skipped
+    // the moment the model is asked). The note then quotes that moved deadline, not the planned one.
+    if (turn.debateHeldBack) {
+      const lead = turn.debateSkipMs - DEBATE_SLOW_NOTE_MS;
+      turn.debateHeldBack = false; turn.debateLate = true; turn.debateWasLate = true;
+      turn.debateSkipAt = Math.max(turn.debateSkipAt, ctx.clock.now() + lead);
+      turn.debateSlowTimers.push(ctx.clock.setTimeout(() => { turn.debateLate = false; checkSlow(turn); }, lead));
+    }
+    const held = waitingOn();
+    if (!held || !held.includes(turn)) return;
+    // At 60 s every turn still silent goes (several only in an opening where none has answered).
+    if (held.every((x) => x.debateSlowStage >= SLOW_SKIP && !x.debateLate)) { skipTurns(held, secsOf(turn.debateWasLate ? ctx.clock.now() - turn.debateSentAt : turn.debateSkipMs)); return; }
+    // The button skips one speaker: offered only on the one turn the round is left waiting for.
+    if (held.length !== 1 || turn.debateSlowNote) return;
+    const box = el('div', 'cmp-debate-slow');
+    box.appendChild(el('p', 'cmp-debate-slow-text', t('debate_slow_note', secsOf(DEBATE_SLOW_NOTE_MS), turn.debateFirst ? DEBATE_SLOW_SHARE_FIRST_PCT : DEBATE_SLOW_SHARE_PCT, secsOf(turn.debateSkipAt - turn.debateSentAt))));
+    const btn = el('button', 'cmp-debate-slow-skip', t('debate_slow_skip'));
+    btn.type = 'button';
+    btn.addEventListener('click', () => { const now = waitingOn(); if (now && now.length === 1 && now[0] === turn) skipTurns(now, secsOf(ctx.clock.now() - turn.debateSentAt)); });
+    box.appendChild(btn);
+    turn.root.appendChild(box);
+    turn.debateSlowNote = box;
+    follow();
+  }
+  /**
+   * Skip the turns the round waits for: the round's Stop (the same ABORT as 「중지」 — the SW aborts only
+   * what has not settled), marked so recordRound moves on instead of pausing. Once per round.
+   */
+  function skipTurns(turns, secs) {
+    const d = state.debate;
+    if (!d || !d.current || d.current.skipped || !state.sending || !state.port || !ctx.stopBtn || ctx.stopBtn.disabled) return;
+    d.current.skipped = true;
+    for (const turn of turns) {
+      const name = nameOf(turn.debateCol.id);
+      turn.debateSkipped = t('debate_slow_skipped', name, subjectParticle(name), secs);
+      unwatchSlow(turn);
+    }
+    try { state.port.postMessage({ type: 'ABORT' }); } catch { /* the port is gone; the round settles on its own */ }
+  }
+  /** A skipped turn settles as its line, never as 「중지됐어요」 or whatever slipped in before the abort landed. */
+  function showSkipped(turn) {
+    turn.text = '';
+    turn.outImages = null; // an image that slipped in before the abort landed (Codex 1R #2)
+    turn.errorText = turn.debateSkipped;
+    turn.root.classList.add('is-skipped');
+    if (turn.debateCol) ctx.paintAssistant(turn.debateCol);
   }
   /**
    * The moderator's closing message becomes the 「결론」 card (#1817 ②): a divider above it and the
    * card's own emphasis. Screen and 「전체 복사」 only — the transcript, the prompts and the share
    * snapshot keep it a plain moderator line.
    */
+  /**
+   * A live conclusion's missing blank lines put back (tightenConclusion) — in the turn's text, so the card,
+   * 「전체 복사」, the history and the transcript entry all read the same thing. Repainted when it is still
+   * the column's last turn (it is: this runs right as the conclusion settles).
+   */
+  function tightenConclusionTurn(turn, entry) {
+    if (!turn) return;
+    const tight = tightenConclusion(turn.text, conclusionLabels(`${t('debate_conclusion_format')}\n${t('debate_conclusion_format_friends')}`));
+    if (tight === turn.text) return;
+    turn.text = tight;
+    if (entry) entry.text = turn.debateRole === ROLE_MODERATOR ? splitControl(tight).body : tight;
+    const col = turn.debateCol;
+    if (col && col.turns[col.turns.length - 1] === turn) ctx.paintAssistant(col);
+  }
   function markConclusion(turn) {
     if (!turn || !turn.root || turn.debateConclusion) return;
     turn.debateConclusion = true;
@@ -1368,7 +1506,7 @@ export function installDebate(ctx) {
   if (ctx.doc && typeof ctx.doc.addEventListener === 'function') {
     ctx.doc.addEventListener('visibilitychange', () => { hiddenSince = docHidden() ? ctx.clock.now() : null; });
     // #1842: closing the page ends the run as 「left」 (reportFinish skips a run that already reported its end).
-    if (ctx.win && typeof ctx.win.addEventListener === 'function') ctx.win.addEventListener('pagehide', () => reportFinish('left'));
+    if (ctx.win && typeof ctx.win.addEventListener === 'function') ctx.win.addEventListener('pagehide', () => { clearSlow(); reportFinish('left'); });
   }
   /**
    * A stopped debate starts moving again (▶ 계속, a pick chip, the user speaking): a spent budget
@@ -1452,6 +1590,7 @@ export function installDebate(ctx) {
   function onRoundRefused() {
     const d = state.debate;
     if (!d || !d.current) return;
+    clearSlow(); // the round's turns are rolled back
     if (d.current.kind === PHASE_OPENING) {
       state.debate = null;
       ctx.root.classList.remove(DEBATE_CLASS);
@@ -1520,10 +1659,13 @@ export function installDebate(ctx) {
           const pick = chooseAfterModerator({ control, candidates: candidates(), order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke, numbered: cur.numbered, canEnd: cur.wrapUp ? moderatorMayEnd({ turnsUsed: Infinity, minTurns: 0, queued: d.queue.length }) : mayEnd(d, cur.seq), canAsk: mayAsk(d, cur) });
           if (pick.ask) {
             d.asks += 1;
-            d.phase = PHASE_ASKED;
             markAsked(turn);
-            renderBar();
             track('debate_ask', { turns: d.turnsUsed, asks: d.asks });
+            // 🔴 「중지」 landed after this answer was complete (late Stop, 2026-10-01 — the SW then sends it as a
+            // DONE): the question is recorded and shown, but the user's stop stands — no 「asked」 phase, no pull to the box.
+            if (d.phase === PHASE_PAUSED) { renderBar(); return false; }
+            d.phase = PHASE_ASKED;
+            renderBar();
             // #1852: the answer box says what it is for (updateControls → placeholder) and the cursor
             // waits in the box. The question comes into view like any new words — a reader scrolled up
             // stays put and the 「↓」 pill lights (2026-09-28 user: no pull while reading).
@@ -1538,7 +1680,7 @@ export function installDebate(ctx) {
           }
           // The wrap-up call MUST conclude: its answer is the conclusion even without the END line (Codex U2 1R #3 —
           // a wrap-up that came back as a NEXT slipped back into turns). Queued user words still come first.
-          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; markConclusion(turn); offerFeedback(turn, 'moderator'); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
+          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; tightenConclusionTurn(turn, entry); markConclusion(turn); offerFeedback(turn, 'moderator'); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
           d.pendingNext = pick.id;
           // 「NEXT: n LONG」: that speaker may answer at length this once (#1862).
           d.longFor = pick.long && pick.id ? pick.id : null;
@@ -1547,7 +1689,8 @@ export function installDebate(ctx) {
           d.modFails += 1;
           // A wrap-up that failed is asked for again — by the moderator, or a debater once it falls back (Codex U2 1R #3).
           if (cur.wrapUp) d.wrapNow = true;
-          if (col && col.status === 'error' && col.errorCode === CODE_ABORTED) { d.phase = PHASE_PAUSED; renderBar(); return false; }
+          // A skipped call (no words in time) is a failed one, not the user's Stop: the loop goes on.
+          if (col && col.status === 'error' && col.errorCode === CODE_ABORTED && !cur.skipped) { d.phase = PHASE_PAUSED; renderBar(); return false; }
           if (d.modFails >= 2) { d.modKind = MOD_AUTO; ctx.showNotice('warn', [t('debate_mod_fallback')]); track('debate_mod_fallback', {}); }
         }
       } else {
@@ -1562,6 +1705,7 @@ export function installDebate(ctx) {
           // leg (the user speaks again) gets its own automatic-order turn count.
           if (cur.conclude) {
             if (entry) entry.conclusion = true;
+            tightenConclusionTurn(turn, entry);
             markConclusion(turn);
             offerFeedback(turn, 'debater');
             d.legStart = d.turnsUsed;
@@ -1570,7 +1714,9 @@ export function installDebate(ctx) {
             // 1R #1): the debate goes on into a new leg, like the user speaking after the end.
             if (d.queue.length) {
               // …unless ⏸ 멈춤 was pressed meanwhile: it stops here, the words wait for ▶ 계속 (Codex U2 2R #1).
-              if (d.pauseAfter) { d.pauseAfter = false; d.phase = PHASE_PAUSED; renderBar(); return false; }
+              // 「중지」 too: a Stop that lands after the conclusion was complete comes back answered (#1954 late
+              // stop) with the debate already PAUSED — the queued words must not go out on their own (1.49.1 batch).
+              if (d.pauseAfter || d.phase === PHASE_PAUSED) { d.pauseAfter = false; d.phase = PHASE_PAUSED; renderBar(); return false; }
               return true;
             }
             d.phase = PHASE_DONE;
@@ -1586,7 +1732,7 @@ export function installDebate(ctx) {
           renderBar();
           return false;
         } else {
-          if (col && col.status === 'error' && col.errorCode === CODE_ABORTED) { d.phase = PHASE_PAUSED; renderBar(); return false; }
+          if (col && col.status === 'error' && col.errorCode === CODE_ABORTED && !cur.skipped) { d.phase = PHASE_PAUSED; renderBar(); return false; }
           dropIfDead(cur.col, col);
           d.prev = cur.col; // a failed speaker is not asked again straight away
         }
@@ -2124,6 +2270,7 @@ export function installDebate(ctx) {
   /** 새 대화 / a history load: the debate (if any) is over; the page is the columns again. */
   function reset() {
     reportFinish('left');
+    clearSlow();
     for (const o of foldObservers) o.disconnect();
     foldObservers.clear();
     state.debate = null;
@@ -2138,7 +2285,7 @@ export function installDebate(ctx) {
   }
 
   Object.assign(ctx, {
-    debateReveal: reveal,
+    debateReveal: reveal, debateFirstText: firstText,
     debateOn, debateActive, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem,
     debateStart: start, debateRoundRefused: onRoundRefused, debateRoundSettled: onRoundSettled, debateUserMessage: userMessage,
     debatePause: pause, debateResume: resume, debatePick: pick, renderDebateBar: renderBar, debateReset: reset,

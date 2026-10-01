@@ -5,10 +5,10 @@
 // pair and the error copy. Bodies are exactly as they were in compare.js
 // (test/mutants/compare-page.json anchors on them). The ctx contract is written up in history.js.
 
-import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, CODE_IN_BAND_ERROR, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
+import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, CODE_IN_BAND_ERROR, CODE_ATTACHMENT_FAILED, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { retryNeedsAttachment } from './attachments.js';
-import { imageIdsOf } from './image-store.js';
+import { imageIdsOf, docCountOf } from './image-store.js';
 import { renderAnswer } from '../md-render.js';
 import { COMPARE_I18N } from '../compare-i18n.js';
 
@@ -209,6 +209,7 @@ export function installColumnThread(ctx) {
         bytes: Number.isFinite(extra.img.bytes) ? extra.img.bytes : 0,
         ...(Number.isFinite(extra.img.more) && extra.img.more > 0 ? { more: extra.img.more } : {}),
         ...(imageIdsOf(extra.img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(extra.img.ids, ATTACH_MAX_FILES) } : {}),
+        ...(docCountOf(extra.img.docs, ATTACH_MAX_FILES) ? { docs: docCountOf(extra.img.docs, ATTACH_MAX_FILES) } : {}),
       };
     }
     return out;
@@ -533,8 +534,10 @@ export function installColumnThread(ctx) {
     ctx.setBadge(col, null, '');
   }
 
-  function errorText(provider, code, reason, budgetMs, inBandCode) {
+  function errorText(provider, code, reason, budgetMs, inBandCode, attachment) {
     const label = PROVIDER_META[provider].label;
+    // The file the provider did not take, by name (#1951) — ERROR.attachment, the user's own file.
+    if (code === CODE_ATTACHMENT_FAILED && typeof attachment === 'string' && attachment) return t('err_attachment_failed_file', label, attachment);
     if (code === CODE_RATE_LIMITED) return t(PROVIDER_RATE_LIMIT_KEY, label);
     // The server's own number, when the SW could lift one (ERROR.inBandCode); '?' otherwise.
     if (code === CODE_IN_BAND_ERROR) return t('err_in_band_error', label, Number.isInteger(inBandCode) ? inBandCode : '?');

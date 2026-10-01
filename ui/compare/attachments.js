@@ -1,4 +1,4 @@
-// ui/compare/attachments.js — the composer's image attachment (#1617), everything about it that
+// ui/compare/attachments.js — the composer's attachments (#1617 images, #1944 documents), everything about them that
 // is not DOM: what a file must be to be sent, how its bytes become the base64 the port carries,
 // and which columns of a round can be asked with one.
 //
@@ -11,7 +11,8 @@
 // `data` base64, at most ATTACH_MAX_FILES of them. `bytes` travels with it on the page only, to
 // draw the chip.
 
-import { ATTACH_MAX_BYTES, ATTACH_TYPES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, SEND_VIA_DEBATE } from './constants.js';
+import { ATTACH_MAX_BYTES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, ATTACH_ERR_COUNT, ATTACH_ERR_TOTAL, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_VIA_COLUMN, SEND_VIA_DEBATE } from './constants.js';
+import { attachTypeOf, providerTakesTypes } from './attach-types.js';
 
 /**
  * base64 of these bytes, built in chunks.
@@ -29,16 +30,15 @@ export function bytesToBase64(u8) {
 }
 
 /**
- * Why this file cannot be attached, or null when it can: ATTACH_ERR_TYPE (not one of the four
- * raster formats the vendored clients can declare a pixel size for) or ATTACH_ERR_SIZE.
+ * Why this file cannot be attached, or null when it can: ATTACH_ERR_TYPE (no provider takes its
+ * type — attach-types.js) or ATTACH_ERR_SIZE.
  *
  * Type first, then size: a 40 MB video is refused for being a video, which is the thing about it
  * the user can act on — telling them to shrink it would be advice toward a file that would still
- * be refused. `size` 0 is a directory or an unreadable entry, not an image.
+ * be refused. `size` 0 is a directory or an unreadable entry, not a file.
  */
 export function attachmentError(file) {
-  const type = file && typeof file.type === 'string' ? file.type.trim().toLowerCase() : '';
-  if (!ATTACH_TYPES.includes(type)) return ATTACH_ERR_TYPE;
+  if (!attachTypeOf(file)) return ATTACH_ERR_TYPE;
   const size = file && Number.isFinite(file.size) ? file.size : 0;
   if (size <= 0 || size > ATTACH_MAX_BYTES) return ATTACH_ERR_SIZE;
   return null;
@@ -53,40 +53,46 @@ export async function readAttachment(file) {
   const buf = await file.arrayBuffer();
   const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   return {
-    name: typeof file.name === 'string' && file.name.trim() ? file.name.trim() : 'image',
-    type: file.type.trim().toLowerCase(),
+    name: typeof file.name === 'string' && file.name.trim() ? file.name.trim() : 'file',
+    // The type it TRAVELS as — an .md whose `File.type` was empty goes as text/markdown.
+    type: attachTypeOf(file),
     bytes: u8.length,
     data: bytesToBase64(u8),
   };
 }
 
-/** Can a round carrying a file be sent to this provider at all? (PROVIDER_SITES.uploads, page side.) */
-export function providerTakesFiles(provider) {
-  return ATTACH_PROVIDERS.includes(provider);
+/**
+ * Can a round carrying files of `types` be sent to this provider? (PROVIDER_SITES.uploads plus the
+ * provider's own type set, page side — the SW asks the same of the same module.) #1944: a site can
+ * take the images of a round and not its PDF, so the answer depends on what is in the tray.
+ */
+export function providerTakesFiles(provider, types) {
+  return ATTACH_PROVIDERS.includes(provider) && providerTakesTypes(provider, types);
 }
 
 /**
- * The providers among `colIds` that CANNOT take a file, in page order and without repeats — the
- * columns the SW will refuse with `unsupported` if this round goes out with one.
+ * The providers among `colIds` that CANNOT take this round's files, in page order and without
+ * repeats — the columns the SW will refuse with `unsupported` if this round goes out with them.
  *
  * Providers rather than columns on purpose: two Gemini columns are one sentence to write
- * (「Gemini」), and it is the SITE that has no upload path, not the model.
+ * (「Gemini」), and it is the SITE that does not take the file, not the model.
  * @param {string[]} colIds
  * @param {(id: string) => ({provider?: string} | undefined)} columnOf
+ * @param {string[]} types — the tray's file types
  */
-export function unsupportedProviders(colIds, columnOf) {
+export function unsupportedProviders(colIds, columnOf, types) {
   const out = [];
   for (const id of colIds) {
     const provider = (columnOf(id) || {}).provider;
-    if (!provider || providerTakesFiles(provider) || out.includes(provider)) continue;
+    if (!provider || providerTakesFiles(provider, types) || out.includes(provider)) continue;
     out.push(provider);
   }
   return out;
 }
 
-/** The targets left once the columns that cannot take a file are dropped. */
-export function targetsTakingFiles(colIds, columnOf) {
-  return colIds.filter((id) => providerTakesFiles((columnOf(id) || {}).provider));
+/** The targets left once the columns that cannot take this round's files are dropped. */
+export function targetsTakingFiles(colIds, columnOf, types) {
+  return colIds.filter((id) => providerTakesFiles((columnOf(id) || {}).provider, types));
 }
 
 /**
@@ -131,6 +137,37 @@ export function pickAttachable(files) {
     if (!firstError) firstError = err;
   }
   return { file: null, error: firstError };
+}
+
+/**
+ * Which of `files` (already attachable, in the order chosen) get a slot in a tray holding
+ * `items` — decided from `File.size` BEFORE anything is read (#1647). Reading first and summing
+ * after meant five 10 MiB drops were all read and base64-encoded (~67 MB of string) only for four
+ * to be refused.
+ *
+ * 🔴 ONE QUESTION EACH, so the two checks never answer the same thing twice (#1634's lesson):
+ * this is 「is there ROOM」 — a slot still reading holds its `size` (what `File.size` promised),
+ * a filled one its `bytes`; `attachFile`'s check after the read is 「what was it REALLY」, for a
+ * file whose bytes turned out larger than its size said.
+ *
+ * A file that does not fit the total is skipped, not the end of the batch: a smaller one after it
+ * may still fit. `error` is the reason to show — the count, when files were left over for want of
+ * a slot, else the total when any was skipped for size, else null.
+ * @returns {{take: File[], error: string|null}}
+ */
+export function reserveAttachments(items, files, maxFiles, maxTotal) {
+  const room = maxFiles - items.length;
+  let held = items.reduce((n, a) => n + (a.reading ? (Number.isFinite(a.size) ? a.size : 0) : a.bytes), 0);
+  const take = [];
+  let overCount = false;
+  let overTotal = false;
+  for (const f of files) {
+    if (take.length >= room) { overCount = true; break; }
+    if (held + f.size > maxTotal) { overTotal = true; continue; }
+    held += f.size;
+    take.push(f);
+  }
+  return { take, error: overCount ? ATTACH_ERR_COUNT : overTotal ? ATTACH_ERR_TOTAL : null };
 }
 
 /** `13.1 MB` / `842 KB` — the chip's size, in the units the limit is quoted in. */

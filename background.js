@@ -42,6 +42,9 @@ import { isGeminiLoggedIn } from './bg/api-gemini.js';
 import { createCompareController, COMPARE_PORT_NAME } from './bg/compare.js';
 import { createEntitlementCache } from './bg/entitlement-cache.js';
 import { createClient as createAiWebClient, listModels as listAiWebModels, drainPendingHides } from './vendor-ai/index.js';
+// The whole module too, for an export an older vendored package does not have (a named import of a missing
+// export fails the SW's module load): `forgetOwnedTabs` (vendor-ai v0.30.0+ contract), read off it at startup.
+import * as aiWebPackage from './vendor-ai/index.js';
 // ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
@@ -764,7 +767,17 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   }
 });
 
+// Tab ids are reused after a browser restart: the tabs the ai-web-clients package recorded as its own (pinned,
+// opened for the AI Cross-Check) are forgotten before anything can mistake a new tab for one of them. Skipped
+// on a vendored package without the export; detached and never throws (startup must not wait on it).
+function forgetOwnedAiTabs() {
+  const forget = aiWebPackage.forgetOwnedTabs;
+  if (typeof forget !== 'function') return;
+  Promise.resolve().then(() => forget(chrome.storage.local)).catch((e) => console.warn('[compare] forgetOwnedTabs failed', e?.message || e));
+}
+
 chrome.runtime.onStartup.addListener(async () => {
+  forgetOwnedAiTabs();
   await setupAlarm();
   checkPromoPush(); // server-signaled push, independent of collection success (best-effort)
   // Rides the once-per-browser-start event rather than a new one: it samples EVERY install,

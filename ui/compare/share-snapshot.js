@@ -27,7 +27,8 @@
 // Never sent: errorText, model ids, continuation, attachment names/bytes/ids, generated images,
 // the summary's attachments, composed debate prompts, control lines, the session id, `src`.
 
-import { TURN_KIND_SUMMARY } from './constants.js';
+import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES } from './constants.js';
+import { docCountOf } from './image-store.js';
 import { transcriptFromRecord, SPEAKER_USER, ROLE_MODERATOR, servedModelText, defaultAliasOf } from './debate-core.js';
 
 export const SHARE_SNAPSHOT_VERSION = 1;
@@ -87,8 +88,11 @@ const cut = (s) => {
 };
 /** An answer's state: failed (error line) > cut short (stalled / cut error) > complete. */
 const stateOf = (turn) => (turn.errorText ? 'error' : turn.stalled || turn.cutError ? 'partial' : 'ok');
-/** How many images a stored marker stands for (the first plus `more`). */
-const imageCount = (img) => (img ? Math.min(SHARE_Q_IMAGES_MAX, 1 + (Number.isInteger(img.more) ? img.more : 0)) : 0);
+/**
+ * How many IMAGES a stored marker stands for: its files (the first plus `more`) less its documents
+ * (#1944 `docs`). A document is not counted as an image on a public card; its name is never sent.
+ */
+const imageCount = (img) => (img ? Math.min(SHARE_Q_IMAGES_MAX, Math.max(0, 1 + (Number.isInteger(img.more) ? img.more : 0) - docCountOf(img.docs, ATTACH_MAX_FILES))) : 0);
 const roundKey = (turn) => (Number.isInteger(turn.round) ? turn.round : null);
 
 /**

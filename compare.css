@@ -626,6 +626,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cmp-attach-chip { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; max-width: 100%; padding: 6px 8px 6px 6px; border: 1px solid var(--border); border-radius: var(--radius-ctl); background: var(--bg-subtle); }
 .cmp-attach-thumb { width: 32px; height: 32px; object-fit: cover; border-radius: 6px; background: var(--bg-card); flex: 0 0 auto; }
+/* A document's format where an image shows its picture (#1944) — the thumbnail's size, so chips line up. */
+.cmp-attach-doc { width: 32px; height: 32px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: var(--bg-card); color: var(--text-secondary); font-size: 9.5px; font-weight: 600; letter-spacing: .02em; overflow: hidden; }
 .cmp-attach-name { font-size: 12.5px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-attach-size { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
 /* While the bytes are being read: the chip is there and named, but nothing can be sent with it yet. */
@@ -920,6 +922,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note] { min-width: max-content; overflow: visible; }
 .cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note]::before { content: attr(data-typing-note); position: static; border: 0; display: inline-block; padding: 0 2px 0 40px; font-size: 12px; line-height: 18px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; animation: cmp-fade-in .2s ease-out both; }
 @media (prefers-reduced-motion: reduce) { .cmp-debate-msg.is-typing > .cmp-turn-assistant[data-typing-note]::before { animation: none; } }
+/* A turn with no words DEBATE_SLOW_NOTE_MS after its send (2026-09-30): the note and 「이번 차례 건너뛰기」 under the dots. */
+.cmp-debate-slow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; max-width: 520px; }
+.cmp-debate-slow-text { margin: 0; font-size: 12px; line-height: 1.45; color: var(--debate-room-fg); }
+.cmp-debate-slow-skip { height: 24px; padding: 0 10px; border: 1px solid var(--debate-room-fg); border-radius: var(--radius-pill); background: transparent; color: var(--debate-room-fg); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.cmp-debate-slow-skip:hover { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); }
 @keyframes cmp-typing {
   0%, 100% { background: var(--text-secondary); box-shadow: 10px 0 var(--border-strong), 20px 0 var(--border-strong); }
   33% { background: var(--border-strong); box-shadow: 10px 0 var(--text-secondary), 20px 0 var(--border-strong); }
@@ -945,6 +952,17 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-msg.is-moderator .cmp-debate-badge { background: var(--debate-notice-bg); color: var(--debate-notice-fg); }
 .cmp-debate-msg.is-moderator.is-ask > .cmp-turn-assistant { border: 2px dashed var(--accent); }
 .cmp-debate-msg.is-moderator.is-conclusion > .cmp-turn-assistant { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); border: 2px solid var(--accent); font-size: 14px; }
+/* The structured conclusion (2026-09-30): `**결론**: …` first, then `**label**` + short bullets per section.
+   Scoped to the conclusion card (a moderator's or a debater's) — every other bubble keeps the answer styles. */
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant { padding: 10px 14px; line-height: 1.5; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > p { margin: 0 0 3px; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > p > strong:first-child { color: var(--accent); font-size: 12.5px; letter-spacing: .01em; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > p:first-child { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 600; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > p:first-child > strong:first-child { font-size: 15px; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > ul, .cmp-debate-msg.is-conclusion > .cmp-turn-assistant > ol { margin: 0 0 10px; padding-left: 18px; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant li { margin: 2px 0; padding-left: 2px; }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant li::marker { color: var(--accent); }
+.cmp-debate-msg.is-conclusion > .cmp-turn-assistant > :last-child { margin-bottom: 0; }
 
 /* The user's words: right, yellow bubble with its tail, the time on its left. */
 .cmp-debate-user { display: flex; flex-direction: row-reverse; align-items: flex-end; gap: 6px; }
