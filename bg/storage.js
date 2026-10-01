@@ -1,6 +1,7 @@
 import { extTokenScope, extTokenEmail, extTokenEmailRaw, extTokenSrc } from './ext-token-claims.js';
-import { DEFAULT_INTERVAL_MINUTES, HISTORY_MAX_AGE_MS, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME, AUTH_BLOCK_BACKOFF_BASE_MS, AUTH_BLOCK_BACKOFF_CAP_MS, TOKEN_RETRY_BASE_MS, TOKEN_RETRY_MAX_ATTEMPTS, TOKEN_RETRY_COOLDOWN_MS } from './constants.js';
+import { DEFAULT_INTERVAL_MINUTES, DEFAULT_SERVER_URL, DEFAULT_API_KEY, ALARM_NAME, AUTH_BLOCK_BACKOFF_BASE_MS, AUTH_BLOCK_BACKOFF_CAP_MS, TOKEN_RETRY_BASE_MS, TOKEN_RETRY_MAX_ATTEMPTS, TOKEN_RETRY_COOLDOWN_MS } from './constants.js';
 import { withStorageLock } from './serialize.js';
+import { appendPoint, readHistory, HISTORY_UPDATED } from './usage-history-db.js';
 import { noteServerFailure, noteServerSuccess } from './send-gate.js';
 import { noteUpgradeRequired, isUpgradePostSuppressed, isUpgradeBlocked, clearUpgradeBlocked } from './upgrade-gate.js';
 // badge.js does NOT import this module (it pulls only upgrade-gate + i18n), so this direction
@@ -151,18 +152,13 @@ function _recMatchesPlan(rec, livePlan) {
 }
 // === EXT REC INVALIDATION: END ===
 
-// Usage history (kept for 30 days; sparkline only shows 24h)
+// Usage history (kept for 30 days; sparkline only shows 24h). Lives in IndexedDB since #1957 — see
+// bg/usage-history-db.js for why it left chrome.storage.local.
 export async function appendUsageHistory(point) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get({ usageHistory: [] }, (result) => {
-      const history = result.usageHistory;
-      history.push(point);
-      // Remove data older than retention period
-      const cutoff = Date.now() - HISTORY_MAX_AGE_MS;
-      const trimmed = history.filter((p) => p.t > cutoff);
-      chrome.storage.local.set({ usageHistory: trimmed }, resolve);
-    });
-  });
+  if (!(await appendPoint(point))) return;
+  // The popup used to redraw on the storage write; IndexedDB fires no event, so say it. No open
+  // page is the normal case (sendMessage rejects then), never an error.
+  try { chrome.runtime.sendMessage({ type: HISTORY_UPDATED })?.catch?.(() => {}); } catch { /* no listener */ }
 }
 
 // RETIRED (2026-09-01, #1081): mergeServerSnapshots lived here and merged server snapshot rows
@@ -171,11 +167,7 @@ export async function appendUsageHistory(point) {
 // reviving it was rejected on measurement rather than taste.
 
 export async function getUsageHistory() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get({ usageHistory: [] }, (result) => {
-      resolve(result.usageHistory);
-    });
-  });
+  return readHistory();
 }
 
 // --- Gemini metered-usage stickiness ---

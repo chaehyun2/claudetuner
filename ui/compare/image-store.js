@@ -23,6 +23,7 @@ import {
   IMAGE_PREVIEW_MAX_EDGE, IMAGE_PREVIEW_TYPE, IMAGE_PREVIEW_QUALITY,
   IMAGE_ID_RE, IMAGE_ORPHAN_MIN_AGE_MS,
 } from './constants.js';
+import { reqPromise, txDone } from '../idb.js';
 
 /** An id this page could have minted — the only kind ever looked up or stored. */
 export function isImageId(v) {
@@ -65,16 +66,6 @@ export async function makePreviewBlob(blob, { createImageBitmap: decode = global
     try { bmp?.close?.(); } catch { /* already released */ }
   }
 }
-
-const reqPromise = (req) => new Promise((resolve, reject) => {
-  req.onsuccess = () => resolve(req.result);
-  req.onerror = () => reject(req.error);
-});
-const txDone = (tx) => new Promise((resolve, reject) => {
-  tx.oncomplete = () => resolve();
-  tx.onerror = () => reject(tx.error);
-  tx.onabort = () => reject(tx.error);
-});
 
 /**
  * The IndexedDB backend: one object store of `{ id, session, blob, at }`, keyed by `id`, indexed by

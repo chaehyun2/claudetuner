@@ -529,10 +529,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // `historyEmptyUntil` is no longer listed here: history backfill is retired (#1081), so
     // nothing reads that key and clearing it would be a no-op. The key is left in users' storage
     // on purpose — removing code is reversible, wiping storage is not.
-    chrome.storage.local.remove(['usageHistory', 'optimizationState', 'lastStatus', 'alertState'], () => {
-      showToast(t('reset_done'));
-      document.getElementById('history-count').textContent = '0';
-      document.getElementById('last-collected').textContent = '-';
+    // The usage history lives in IndexedDB (#1957); its module also drops the legacy storage key.
+    // A classic script, so the module comes in through a dynamic import. 🔴 Its result decides the
+    // toast: a history that could not be emptied (IndexedDB unavailable) must not read as reset.
+    const historyCleared = import('./bg/usage-history-db.js').then((m) => m.clearHistory()).catch(() => false);
+    chrome.storage.local.remove(['optimizationState', 'lastStatus', 'alertState'], () => {
+      historyCleared.then((cleared) => {
+        if (!cleared) { showToast(t('reset_failed'), true); return; }
+        showToast(t('reset_done'));
+        document.getElementById('history-count').textContent = '0';
+        document.getElementById('last-collected').textContent = '-';
+      });
     });
   });
 

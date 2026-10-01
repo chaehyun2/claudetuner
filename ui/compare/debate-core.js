@@ -12,7 +12,7 @@
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
 import { neutraliseQuoted } from './helpers.js';
-import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS } from './constants.js';
+import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
 // Characters an alias may not hold: line breaks / controls, and everything that is structure in a
@@ -1192,7 +1192,7 @@ export function readDebateRecord(raw, colIds, textMax) {
       continue;
     }
     if (!inCast(e.c) || !Number.isInteger(e.r)) return undefined;
-    for (const k of ['mod', 'o', 'end', 'ce']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
+    for (const k of ['mod', 'o', 'end', 'ce', 'ask']) if (e[k] !== undefined && typeof e[k] !== 'boolean') return undefined;
     if (e.end && !e.mod) return undefined; // a moderator's conclusion is `end`…
     // …a debater's (#1909 — no AI moderator) is `ce`: a 1.42–1.47 reader refuses `end` on a debater and would
     // drop the whole entry; it ignores `ce` and shows the turn as a plain one.
@@ -1200,7 +1200,9 @@ export function readDebateRecord(raw, colIds, textMax) {
     if ((e.tk !== undefined && !TIER_KEYS.includes(e.tk)) || (e.s !== undefined && !(Number.isFinite(e.s) && e.s >= 0))) return undefined;
     // A moderator line is the moderator column's; a debater's is a debater's (the flag decides how the text is read).
     if ((e.mod === true) !== (e.c === modCol)) return undefined;
-    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.end ? { end: true } : {}), ...(e.ce ? { ce: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
+    // `ask` (the moderator asked the user): a 1.49.1-and-earlier reader ignores it (the question shows as a plain
+    // moderator line). Only a moderator asks — on any other line it is ignored, never a reason to drop the entry.
+    log.push({ q: e.q, c: e.c, r: e.r, ...(e.mod ? { mod: true } : {}), ...(e.end ? { end: true } : {}), ...(e.ce ? { ce: true } : {}), ...(e.mod && e.ask ? { ask: true } : {}), ...(e.o ? { o: true } : {}), ...(e.tk ? { tk: e.tk } : {}), ...(e.s !== undefined ? { s: e.s } : {}) });
   }
   const prev = raw.prev == null ? null : (isDebater(raw.prev) ? raw.prev : undefined);
   const fr = idList(raw.fr === undefined ? [] : raw.fr, isDebater);
@@ -1208,6 +1210,9 @@ export function readDebateRecord(raw, colIds, textMax) {
   const turns = raw.turns === undefined ? 0 : raw.turns;
   for (const k of ['modStarted', 'done', 'legacy']) if (raw[k] !== undefined && typeof raw[k] !== 'boolean') return undefined;
   if (prev === undefined || !fr || !el || !nonNegInt(turns)) return undefined;
+  // `asks` = the run's question count, kept beside the log (whose oldest lines the bound may cut). A 1.49.1 reader
+  // ignores the unknown key. Capped: nothing past DEBATE_MAX_ASKS changes what the moderator may do.
+  if (raw.asks !== undefined && !nonNegInt(raw.asks)) return undefined;
   const tone = normalizeTone(raw.tone.kind, raw.tone.custom || '');
   // A record from before 「깊게」 (#1843) ran the quick way — it goes on as it was.
   // The verifier is stored as `vf: true` beside the rest of the stance (1R: a 1.42 reader refuses an unknown
@@ -1216,7 +1221,7 @@ export function readDebateRecord(raw, colIds, textMax) {
   const st = splitStance(raw.stance);
   const stance = raw.vf === true ? composeStance(st.base, [...st.roles, STANCE_VERIFY]) : raw.stance;
   const pace = raw.pb === true && raw.pace === PACE_DEEP ? PACE_BALANCED : raw.pace || PACE_QUICK; // recordPace
-  return { debaters, modCol, modKind: raw.modKind, stance, pace, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.legacy === true ? { legacy: true } : {}) };
+  return { debaters, modCol, modKind: raw.modKind, stance, pace, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.asks ? { asks: Math.min(raw.asks, DEBATE_MAX_ASKS) } : {}), ...(raw.legacy === true ? { legacy: true } : {}) };
 }
 /**
  * The log cut to `max` entries for the record, oldest first — but never a line some speaker has
@@ -1304,7 +1309,7 @@ export function transcriptFromRecord(record, lookup) {
     if (e.u !== undefined) { transcript.push({ seq: e.q, speaker: SPEAKER_USER, role: ROLE_USER, text: e.u }); continue; }
     const raw = lookup(e.c, e.r);
     const text = raw ? (e.mod ? splitControl(raw).body : String(raw)) : '';
-    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.end || e.ce ? { conclusion: true } : {}), ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
+    transcript.push({ seq: e.q, speaker: e.c, role: e.mod ? ROLE_MODERATOR : ROLE_PARTICIPANT, text, round: e.r, ...(e.ask ? { ask: true } : {}), ...(e.end || e.ce ? { conclusion: true } : {}), ...(e.o ? { opening: true } : {}), ...(e.tk ? { tierKey: e.tk } : {}), ...(e.s !== undefined ? { secs: e.s } : {}) });
     if (!e.mod && text.trim()) lastSpoke.set(e.c, e.q);
   }
   return { transcript, lastSpoke };

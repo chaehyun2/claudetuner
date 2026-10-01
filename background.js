@@ -48,6 +48,7 @@ import * as aiWebPackage from './vendor-ai/index.js';
 // ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
+import { readLast } from './bg/usage-history-db.js';
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -1140,10 +1141,8 @@ chrome.webRequest.onCompleted.addListener(
 async function evaluateBoost(snapshot) {
   if (snapshot?.five_hour?.utilization == null) return;
   const util5h = snapshot.five_hour.utilization;
-  const { usageHistory = [] } = await chrome.storage.local.get({ usageHistory: [] });
-
   // Determine if usage is rising based on the last 2 data points
-  const recent = usageHistory.filter(p => p.h5 != null).slice(-2);
+  const recent = await readLast(2, p => p.h5 != null);
   const isRising = recent.length >= 2 && recent[1].h5 > recent[0].h5;
 
   const shouldBoost = util5h >= 50 && isRising;

@@ -1,6 +1,7 @@
 import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL } from './constants.js';
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
+import { readHistory } from './usage-history-db.js';
 
 /**
  * The services this install actually collects, as "Claude/ChatGPT/Gemini", for the auth-blocked
@@ -893,9 +894,7 @@ export async function sendWeeklyReport() {
   const { notifyWeeklyReport = true } = await chrome.storage.sync.get({ notifyWeeklyReport: true });
   if (!notifyWeeklyReport) return;
 
-  const { usageHistory = [] } = await new Promise((resolve) =>
-    chrome.storage.local.get({ usageHistory: [] }, resolve)
-  );
+  const usageHistory = await readHistory();
 
   if (usageHistory.length < 10) return;
 

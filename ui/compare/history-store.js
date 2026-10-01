@@ -19,19 +19,10 @@
 // not re-inflate twenty long debates. The legacy keys are moved over once, on the first read.
 
 import { HISTORY_KEY_PREFIX, HISTORY_ENTRY_MAX_BYTES, HISTORY_ENTRY_MAX_BYTES_IDB, HISTORY_DB_NAME, HISTORY_DB_VERSION, HISTORY_STORE_MARK_KEY } from './constants.js';
+import { reqPromise, txDone } from '../idb.js';
 
 const META = 'meta';
 const BODY = 'body';
-
-const reqPromise = (req) => new Promise((resolve, reject) => {
-  req.onsuccess = () => resolve(req.result);
-  req.onerror = () => reject(req.error);
-});
-const txDone = (tx) => new Promise((resolve, reject) => {
-  tx.oncomplete = () => resolve();
-  tx.onerror = () => reject(tx.error);
-  tx.onabort = () => reject(tx.error);
-});
 
 /** deflate-raw of a string, or of bytes back to the string — the platform's own streams. */
 export function zipCodec({ CS = globalThis.CompressionStream, DS = globalThis.DecompressionStream, BlobC = globalThis.Blob, ResponseC = globalThis.Response } = {}) {

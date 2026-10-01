@@ -24,6 +24,7 @@ import { renderSyncPause } from './ui/sync-pause.js';
 import { renderReauth } from './ui/reauth.js';
 import { renderClaimSwitch } from './ui/claim-switch.js';
 import { renderLoginCta } from './ui/login-cta.js';
+import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
 
 // How long the width has to hold still before the detail charts re-rasterise to it. Long enough
 // that dragging the side panel divider settles into a single redraw, short enough that the
@@ -34,6 +35,16 @@ const RESIZE_REDRAW_MS = 120;
 // authoritative. The startup storage read then leaves it alone — the two are independent async
 // operations and the read can return an OLDER token after a rotation has already been notified.
 let _syncEmailLive = false;
+
+// chrome.storage.local.get(defaults) plus the usage history, which lives in IndexedDB since #1957.
+// The history lands in state before `cb` runs, so every reader below sees both from one moment.
+function getLocalWithHistory(defaults, cb) {
+  Promise.all([new Promise((resolve) => chrome.storage.local.get(defaults, resolve)), readHistory()]).then(([r, history]) => {
+    state.usageHistory = history;
+    state.historyLoaded = true;
+    cb(r);
+  });
+}
 
 
 
@@ -636,9 +647,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const s = _pendingStatus;
       _pendingStatus = null;
       if (!s) return;
-      chrome.storage.local.get({ usageHistory: [], collectedOrgs: [] }, (r) => {
-        state.usageHistory = r.usageHistory || [];
-        state.historyLoaded = true;
+      getLocalWithHistory({ collectedOrgs: [] }, (r) => {
         state.collectedOrgs = r.collectedOrgs || [];
         updateUI(s);
         state.currentPlan = s?.snapshot?.plan || null;
@@ -653,6 +662,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     });
   }
+
+  // A history append writes no storage key any more (#1957), so the service worker says so. lastStatus
+  // is written BEFORE the append, so the render above ran one point short — this redraws with it.
+  // Coalesced per frame like queueStatusRender: a run appends one point per org. Routed like the
+  // resize handler: selectOrg() for a selected org (it builds that org's snapshot), else redrawDetail().
+  let _historyRenderQueued = false;
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type !== HISTORY_UPDATED || _historyRenderQueued) return;
+    _historyRenderQueued = true;
+    requestAnimationFrame(() => {
+      _historyRenderQueued = false;
+      readHistory().then((history) => {
+        state.usageHistory = history;
+        state.historyLoaded = true;
+        if (isOverviewActive()) { if (!isDragging()) renderOverview(); return; }
+        if (isDetailHidden()) return;
+        if (state.selectedOrgId) selectOrg(state.selectedOrgId);
+        else redrawDetail();
+      });
+    });
+  });
 
   function tryDrawCharts() {
     if (!_statusReady || !_historyReady) return;
@@ -670,15 +700,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
+    getLocalWithHistory({ lastStatus: null, collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
       state.providerEmail = result.accountCache?.email || null;
       // Which Tuner account this install actually syncs into (see bg/ext-token-claims.js).
       // Skipped once the onChanged listener has already reported a token: this read was issued
       // earlier, so applying it now would replace a newer token with an older one.
       if (!_syncEmailLive) state.syncEmail = extTokenEmail(result.extToken);
       state.onboardOrgName = result.onboardOrgName || null;
-      state.usageHistory = result.usageHistory || [];
-      state.historyLoaded = true;
       state.claudeNoticeDismissed = result.claudeNoticeDismissed || false;
       state.lastView = result.lastView || 'overview';
       state.overviewHintDismissed = !!result.overviewHintDismissed;
@@ -788,9 +816,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // lastStatus, so their note would keep the previous language until some other event.
       renderSyncAccountNote();
       // Full UI re-render including dynamically generated text
-      chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
-        state.usageHistory = r.usageHistory || [];
-        state.historyLoaded = true;
+      getLocalWithHistory({ lastStatus: null, collectedOrgs: [] }, (r) => {
         if (r.lastStatus) {
           // Keep the currently-viewed org if it still exists (preserve a non-primary
           // detail target across a language change); otherwise fall back to primary.
@@ -964,9 +990,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       // Update UI with saved lastStatus — single callback to avoid race conditions
-      chrome.storage.local.get({ lastStatus: null, usageHistory: [], collectedOrgs: [] }, (r) => {
-        state.usageHistory = r.usageHistory || [];
-        state.historyLoaded = true;
+      getLocalWithHistory({ lastStatus: null, collectedOrgs: [] }, (r) => {
         state.collectedOrgs = r.collectedOrgs || [];
         const s = r.lastStatus;
         if (s) {

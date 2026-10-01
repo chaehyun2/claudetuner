@@ -1659,6 +1659,7 @@ export function installDebate(ctx) {
           const pick = chooseAfterModerator({ control, candidates: candidates(), order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke, numbered: cur.numbered, canEnd: cur.wrapUp ? moderatorMayEnd({ turnsUsed: Infinity, minTurns: 0, queued: d.queue.length }) : mayEnd(d, cur.seq), canAsk: mayAsk(d, cur) });
           if (pick.ask) {
             d.asks += 1;
+            if (entry) entry.ask = true; // the record keeps it (snapshot → `ask`): a reload redraws the question and its count
             markAsked(turn);
             track('debate_ask', { turns: d.turnsUsed, asks: d.asks });
             // 🔴 「중지」 landed after this answer was complete (late Stop, 2026-10-01 — the SW then sends it as a
@@ -2099,7 +2100,7 @@ export function installDebate(ctx) {
     for (const e of d.transcript) {
       if (e.speaker === SPEAKER_USER) { log.push({ q: e.seq, u: clipText(e.text) }); continue; }
       if (!Number.isInteger(e.round)) continue; // never went out (a refused round is removed; this is a guard)
-      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.conclusion ? (e.role === ROLE_MODERATOR ? { end: true } : { ce: true }) : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
+      log.push({ q: e.seq, c: e.speaker, r: e.round, ...(e.role === ROLE_MODERATOR ? { mod: true } : {}), ...(e.ask ? { ask: true } : {}), ...(e.conclusion ? (e.role === ROLE_MODERATOR ? { end: true } : { ce: true }) : {}), ...(e.opening ? { o: true } : {}), ...(e.tierKey ? { tk: e.tierKey } : {}), ...(Number.isFinite(e.secs) ? { s: e.secs } : {}) });
     }
     let q = d.seq;
     for (const item of d.queue) log.push({ q: ++q, u: clipText(item.text) });
@@ -2109,7 +2110,7 @@ export function installDebate(ctx) {
       // 🔎 verifier: written as vf beside a stance an older reader knows, so it keeps the entry (recordStance).
       debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, ...recordStance(d.stance), ...recordPace(d.pace), length: d.length, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
       log: trimRecordLog(log, d.delivered, DEBATE_RECORD_LOG_MAX), dl: Object.fromEntries(d.delivered), prev: d.prev, fr: [...d.firstReplied], el: [...d.eligible],
-      turns: d.turnsUsed, modStarted: d.modStarted, ...(d.phase === PHASE_DONE ? { done: true } : {}),
+      turns: d.turnsUsed, modStarted: d.modStarted, ...(d.phase === PHASE_DONE ? { done: true } : {}), ...(d.asks ? { asks: d.asks } : {}),
     };
   }
   /**
@@ -2171,6 +2172,8 @@ export function installDebate(ctx) {
     d.seq = transcript.length ? transcript[transcript.length - 1].seq : 0;
     d.lastSpoke = lastSpoke;
     d.delivered = new Map(Object.entries(record.dl));
+    // DEBATE_MAX_ASKS holds across a reload: the stored count, or the log's when it says more (a log cut by its bound undercounts).
+    d.asks = Math.max(record.asks || 0, transcript.filter((e) => e.ask).length);
     // The DOM, in the record's order (the turns were drawn column by column).
     clear(timeline);
     timeline.appendChild(hiddenHolder);
@@ -2188,6 +2191,7 @@ export function installDebate(ctx) {
       placed.add(turn);
       (e.opening ? d.openingGroup : timeline).appendChild(turn.root);
       if (e.conclusion) markConclusion(turn);
+      if (e.ask) markAsked(turn);
       turn.debateInfo = { meta: e.meta }; // 「전체 복사」
       if (e.role !== ROLE_MODERATOR && e.text.trim()) showMeta(turn, { meta: e.meta, tierKey: e.tierKey || null, secs: e.secs });
     }
