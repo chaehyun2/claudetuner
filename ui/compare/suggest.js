@@ -3,15 +3,17 @@
 // Two sources, two rows of chips under the footer's buttons, both behind `compare_suggest`
 // (COMPARE_STATUS.suggestOn — on the footer, so also behind `compare_round_footer`):
 //
-// 1. 「💬 이어서 물어보기」 — once a round the user asked settles, ONE hidden FOLLOWUP goes to the column
-//    that finished first, in its own conversation: "this question went to <the others> too; give N
-//    follow-ups whose answers would differ, as a JSON array". Only that column's own context is spent —
-//    no other answer is pasted (2026-10-02 user decision). The send is NOT a page round: no turn is
-//    drawn, nothing reaches the history entry / export / share, the composer stays usable, `rounds`
-//    and the active round do not move. Its port messages are routed here (onSuggestMessage) and read
-//    as text. The user's own send always wins: beginSend queues behind it, ABORTs it and goes out
-//    when it settles (preemptSuggest). It lands in the user's provider history and spends one
-//    compare unit and the provider's usage (accepted by the user, 2026-10-02).
+// 1. 「💬 이어서 물어보기」 — once a round the user asked settles, ONE hidden FOLLOWUP{fresh} goes to the
+//    service of the column that finished first, in a THROWAWAY TEMPORARY conversation of its own (the SW's
+//    freshClients — bg/compare.js): the round's question and that column's answer are quoted in it, then
+//    "this question went to <the others> too; give N follow-ups whose answers would differ, as a JSON
+//    array". 🔴 Never the column's own conversation (2026-10-03 user: asked there, the request became
+//    context for the next real question), and nothing of it stays in the user's provider history. The
+//    send is NOT a page round: no turn is drawn, nothing reaches the history entry / export / share, the
+//    composer stays usable, `rounds` and the active round do not move. Its port messages are routed here
+//    (onSuggestMessage) and read as text. The user's own send always wins: beginSend queues behind it,
+//    ABORTs it and goes out when it settles (preemptSuggest). It spends one compare unit and the
+//    provider's usage (accepted by the user, 2026-10-02).
 // 2. 「🔀 비교에서 나온 질문」 — the 「요약·비교」 prompt (summary.js) asks the judge to end its verdict
 //    with SUGGEST markers + questions on where the answers ACTUALLY differ; they are read from the
 //    verdict (questionsFromVerdict) and offered
@@ -23,16 +25,25 @@
 // follow-up and a button label (textContent), never markup.
 
 import { COMPARE_I18N } from '../compare-i18n.js';
-import { SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SESSION_ID_RE } from './constants.js';
-import { keptFor } from './save-mode.js';
+import { SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SESSION_ID_RE, SUMMARY_FENCE_OPEN, SUMMARY_FENCE_CLOSE } from './constants.js';
+
+/** The user's switch (options page, chrome.storage.sync — bg/compare.js COMPARE_SUGGEST_ENABLED_KEY; absent = on). */
+export const SUGGEST_ENABLED_KEY = 'compareSuggestEnabled';
 
 /** How many questions each row asks for / shows at most. */
 export const SUGGEST_COUNT = 5; // 2026-10-02 user: five (was four) — the list folds to SUGGEST_VISIBLE anyway
 /** A question's length bounds (characters): shorter is noise, longer is not a chip. */
 export const SUGGEST_Q_MIN = 4;
 export const SUGGEST_Q_MAX = 140;
-/** Lines shown before 「더 보기」 (one question per line, full width — 2026-10-02 UI). */
-export const SUGGEST_VISIBLE = 2;
+/**
+ * Questions shown folded: ONE, on the footer's button line right after 「토론 붙이기」, with 「질문 더 보기 (n)」
+ * beside it (2026-10-03 user: the two full-width lines + their title line ate the narrow page). Opened, the
+ * list takes a line of its own under the buttons, one question per line.
+ */
+export const SUGGEST_VISIBLE = 1;
+/** How much of the round's question / the asked column's answer the throwaway conversation is shown (characters). */
+export const SUGGEST_QUESTION_MAX = 1000;
+export const SUGGEST_ANSWER_MAX = 6000;
 /** The hidden send gives up (ABORT) after this long without settling — the row falls back to nothing. */
 export const SUGGEST_TIMEOUT_MS = 90000;
 /**
@@ -155,13 +166,47 @@ export function installSuggest(ctx) {
   state.suggestTried = new Set(); // rounds row 1 was attempted for (once each)
   let rows = null;
 
-  const on = () => !!(state.status && state.status.suggestOn === true);
+  // The status says whether the feature is on (flag + the user's setting at the read). A change of the setting while the page
+  // is open (options page) applies at once: `prefNow` overrides it, within what the flag allows (`suggestAvailable`).
+  let prefNow = null;
+  const on = () => {
+    const st = state.status;
+    if (!st) return false;
+    if (prefNow === null) return st.suggestOn === true;
+    return prefNow && (st.suggestAvailable === true || st.suggestOn === true);
+  };
+  const storageEvents = ctx.chrome && ctx.chrome.storage && ctx.chrome.storage.onChanged;
+  if (storageEvents && typeof storageEvents.addListener === 'function') {
+    storageEvents.addListener((changes, area) => {
+      if (area !== 'sync' || !changes || !(SUGGEST_ENABLED_KEY in changes)) return;
+      prefNow = changes[SUGGEST_ENABLED_KEY].newValue !== false;
+      // Turned off with a hidden send out: it is stopped (nothing waits on it unless a user send queued behind it — that one goes on).
+      if (!prefNow && state.suggestInFlight) abortSuggest();
+      ctx.renderRoundFooter();
+    });
+  }
   const busy = () => !!state.suggestInFlight;
 
-  /** The page language's prompt naming the OTHER columns that answered. */
-  function suggestPrompt(col, others) {
+  /**
+   * The page language's prompt for the throwaway conversation, which knows nothing of the round: the
+   * round's question (quoted) and the asked column's answer (fenced as material, never instructions —
+   * summary.js's neutraliseAttachment), each bounded, then the request naming the OTHER columns.
+   */
+  function suggestPrompt(col, others, round) {
     const names = others.map((c) => ctx.colLabel(c)).join(', ');
-    return t('suggest_prompt', names || t('suggest_prompt_others'), SUGGEST_COUNT);
+    const clip = (s, max) => (s.length > max ? `${s.slice(0, max)}…` : s);
+    const question = clip(String(ctx.roundQuestion(round) || ''), SUGGEST_QUESTION_MAX);
+    const a = ctx.answerInRound(col, round);
+    const answer = ctx.neutraliseAttachment(clip(a ? String(a.text) : '', SUGGEST_ANSWER_MAX));
+    return [
+      t('suggest_prompt_context'),
+      ctx.quoteLines(question),
+      SUMMARY_FENCE_OPEN(1, ctx.colLabel(col)),
+      answer,
+      SUMMARY_FENCE_CLOSE(1),
+      '',
+      t('suggest_prompt', names || t('suggest_prompt_others'), SUGGEST_COUNT),
+    ].join('\n');
   }
 
   /** After a settle (round-footer.js settleRoundFooter, after the automatic summary had its turn). */
@@ -182,9 +227,10 @@ export function installSuggest(ctx) {
   function startSuggest(col, others, round) {
     const port = state.port;
     if (!port) return;
-    const text = suggestPrompt(col, others);
+    const text = suggestPrompt(col, others, round);
     const wire = ++state.roundSeq; // a round id of its own for the SW / server statistics — no turn ever carries it
-    const msg = { type: 'FOLLOWUP', text, targets: [col.id], kind: SEND_KIND_SUGGEST, round: wire, columns: ctx.columnsFor([col.id]) };
+    // `fresh`: the SW asks in a throwaway temporary conversation, never the column's own (see the header).
+    const msg = { type: 'FOLLOWUP', text, targets: [col.id], kind: SEND_KIND_SUGGEST, fresh: true, round: wire, columns: ctx.columnsFor([col.id]) };
     if (ctx.src) msg.src = ctx.src;
     if (typeof state.sessionId === 'string' && SESSION_ID_RE.test(state.sessionId)) msg.session = state.sessionId;
     state.suggest = { round, colId: col.id, provider: col.provider, status: SUGGEST_LOADING, questions: [] };
@@ -214,8 +260,6 @@ export function installSuggest(ctx) {
     state.suggestInFlight = null;
     if (f.timer != null) clock.clearTimeout(f.timer);
     if (f.graceTimer != null) clock.clearTimeout(f.graceTimer);
-    // The asked column's conversation moved on (DONE's continuation): the local history entry follows (kept sessions only).
-    if (f.done) ctx.persistSession();
     if (state.suggest && state.suggest.round === f.round && state.suggest.status === SUGGEST_LOADING) {
       const qs = answered ? parseSuggestions(f.text) : [];
       state.suggest.status = qs.length ? SUGGEST_READY : SUGGEST_FAILED;
@@ -239,7 +283,6 @@ export function installSuggest(ctx) {
   function onSuggestMessage(msg) {
     const f = state.suggestInFlight;
     if (!f || !ROUND_MSG_TYPES.has(msg.type)) return false;
-    const col = state.columns.get(f.colId);
     switch (msg.type) {
       case 'CONSUME_OK':
         // The server counted it: the quota line re-reads (a counted account's number moved).
@@ -250,9 +293,8 @@ export function installSuggest(ctx) {
         if (!f.aborting) f.text += String(msg.delta || '');
         return true;
       case 'DONE':
+        // 🔴 Its text only: the throwaway conversation is no column's — a continuation (none is sent for it) is never taken.
         if (typeof msg.text === 'string' && msg.text && !f.aborting) f.text = msg.text;
-        // The conversation moved on in the SW; the page's copy follows (D3 resume, 「열기 ↗」) — kept services only, like any DONE.
-        if (col && keptFor(state.sessionSaveBy, col.provider) && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
         f.done = true;
         return true;
       case 'ERROR':
@@ -315,9 +357,9 @@ export function installSuggest(ctx) {
     return dropQueued ? null : queued;
   }
 
-  // ── the list (2026-10-02 UI): one question per line, full width; the first SUGGEST_VISIBLE show, 「더 보기」 opens the rest ──
-  // Row 1 and row 2 are one list (row 2's lines carry a 「비교」 tag); each keeps its own group node so the round footer's
-  // tests and the provenance stay per source.
+  // ── the list (2026-10-03 UI): folded = the first SUGGEST_VISIBLE question inline on the button line + 「질문 더 보기」;
+  // opened (`is-open`) = a line of its own under the buttons, one question per line. Row 1 and row 2 are one list (row 2's
+  // lines carry a 「비교」 tag); each keeps its own group node so the round footer's tests and the provenance stay per source.
   let box = null;
   let moreBtn = null;
   let expandedRound = null; // the footer round whose list the user opened (a new round starts folded)
@@ -325,9 +367,14 @@ export function installSuggest(ctx) {
   function buildSuggestRows(bar, before) {
     box = el('div', 'cmp-suggest');
     box.hidden = true;
-    const head = el('div', 'cmp-suggest-head');
-    head.appendChild(el('span', 'cmp-suggest-title', t('suggest_row_own')));
-    box.appendChild(head);
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', t('suggest_row_own'));
+    // Folded: an icon before the one question (its words are the title / label); opened: the title line of the list.
+    const title = el('span', 'cmp-suggest-title');
+    title.appendChild(el('span', 'cmp-suggest-icon', '💬'));
+    title.appendChild(el('span', 'cmp-suggest-title-text', t('suggest_row_own')));
+    title.title = t('suggest_row_own');
+    box.appendChild(title);
     rows = { own: makeRow('cmp-suggest-row-own', t('suggest_row_own')), cmp: makeRow('cmp-suggest-row-cmp', t('suggest_row_cmp')) };
     box.appendChild(rows.own.node);
     box.appendChild(rows.cmp.node);
@@ -335,8 +382,9 @@ export function installSuggest(ctx) {
     moreBtn.type = 'button';
     moreBtn.hidden = true;
     moreBtn.addEventListener('click', () => { expandedRound = expandedRound === state.footerRound ? null : state.footerRound; renderSuggestRows(state.footerRound, lastVerdict, lastEnabled); });
-    head.appendChild(moreBtn); // on the header line, right after the title (not the far right of a wide window) — no line of its own
-    bar.insertBefore(box, before);
+    // Folded: right after the one question; opened: CSS puts it on the title line (order), not under the list.
+    box.appendChild(moreBtn);
+    bar.insertBefore(box, before); // after 「토론 붙이기」 on the button line (round-footer.js: `before` = the note line)
   }
   function makeRow(cls, label) {
     const node = el('div', `cmp-suggest-row ${cls}`);
@@ -385,7 +433,8 @@ export function installSuggest(ctx) {
     box.hidden = rows.own.node.hidden && rows.cmp.node.hidden;
     // Folded: the first SUGGEST_VISIBLE lines (row 1 first); the rest behind 「더 보기 (n)」.
     const all = [...a, ...b];
-    const open = expandedRound === round;
+    const open = expandedRound === round && all.length > SUGGEST_VISIBLE;
+    box.classList.toggle('is-open', open);
     all.forEach((btn, i) => { btn.hidden = !open && i >= SUGGEST_VISIBLE; });
     const extra = all.length - SUGGEST_VISIBLE;
     moreBtn.hidden = extra <= 0;

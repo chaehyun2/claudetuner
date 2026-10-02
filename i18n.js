@@ -315,6 +315,8 @@ const TRANSLATIONS = {
     'compare_enabled_hint': '같은 질문을 로그인된 다른 AI에게도 보내 답변을 나란히 놓고 교차 검증합니다. (Claude·ChatGPT·Gemini 페이지)',
     'compare_msg_btn_desc': '질문 말풍선 아래에도 버튼 표시 (claude.ai·ChatGPT)',
     'compare_msg_btn_hint': '끄면 입력창 옆 버튼만 남습니다.',
+    'compare_suggest_desc': '답이 끝나면 AI에게 후속 질문 추천받기',
+    'compare_suggest_hint': '가장 먼저 답한 AI에게 별도 임시 대화로 물어봐요(대화 기록에 남지 않음). 끄면 「이어서 물어보기」 질문이 나오지 않습니다.',
     // Popup feature row + options card link to the /multiai page (2026-09-22)
     'compare_entry_title': 'AI 크로스체크',
     'compare_entry_sub': '같은 질문을 Claude·ChatGPT·Gemini에 한 번에',
@@ -1024,6 +1026,8 @@ const TRANSLATIONS = {
     'compare_enabled_hint': 'Sends the same question to the other AIs you are signed in to and shows the answers side by side so you can cross-check them. (Claude, ChatGPT and Gemini pages)',
     'compare_msg_btn_desc': 'Also show the button under each question (claude.ai·ChatGPT)',
     'compare_msg_btn_hint': 'Off leaves only the button next to the composer.',
+    'compare_suggest_desc': 'Ask an AI for follow-up questions when the answers are in',
+    'compare_suggest_hint': 'The AI that answered first is asked in a separate temporary chat (nothing kept in your history). Off: no 「Ask next」 questions.',
     // Popup feature row + options card link to the /multiai page (2026-09-22)
     'compare_entry_title': 'AI Cross-Check',
     'compare_entry_sub': 'One question to Claude, ChatGPT and Gemini at once',

@@ -420,6 +420,8 @@ export const COMPARE_EVENT_UNPREFIXED = Object.freeze([...REVIEW_EVENTS]);
 export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume', 'debate', 'debate_turn', 'debate_mod', 'suggest']);
 // Kinds whose text the PAGE composed (a summary request, a debate's prompts): no question signals.
 const COMPOSED_KINDS = Object.freeze(['summary', 'debate', 'debate_turn', 'debate_mod', 'suggest']);
+// The only kind a FOLLOWUP{fresh} may carry (runSend): the suggested-question send asks in a throwaway conversation.
+export const FRESH_KIND = 'suggest';
 // Bounds on what the consume / outcome bodies carry (the server validates the same caps; a body
 // that exceeds them would be refused, and a refused consume is a send that never happens).
 export const ROUND_MAX = 9999;
@@ -525,6 +527,9 @@ export const COMPARE_FACT_CHIP_FLAG_FIELD = 'compare_fact_chip';
 // #2026: the suggested-question chips (COMPARE_STATUS.suggestOn) — the hidden 「what to ask next」 send to the
 // fastest column and the questions the 「요약·비교」 verdict ends with. Lives on the round footer, like the fact chip.
 export const COMPARE_SUGGEST_FLAG_FIELD = 'compare_suggest';
+// The user's own switch for them (options page 「AI 크로스체크」 card, chrome.storage.sync — options.js saves it with the
+// rest of the config): absent = ON (2026-10-03 user: on by default, can be turned off). Off = no hidden send, no rows.
+export const COMPARE_SUGGEST_ENABLED_KEY = 'compareSuggestEnabled';
 // Share links (#1784 U3) — the wire of runtime message COMPARE_SHARE (see shareRequest). The limits
 // mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
 export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list', 'image', 'password']);
@@ -2471,7 +2476,12 @@ export function createCompareController({
     const shareOn = flagOn && flags.share === true; // 「공유」 (#1784 U3), same shape
     const roundFooterOn = flagOn && flags.footer === true; // round footer (#1976), same shape
     const factChipOn = roundFooterOn && flags.factChip === true; // its 「확인이 필요한 사실」 chip lives on the footer
-    const suggestOn = roundFooterOn && flags.suggest === true; // #2026: the suggested-question chips, on the footer too
+    // #2026: the suggested-question chips, on the footer too — and only while the user's setting is on (unread / a failed read = on).
+    // Started now, awaited at the answer (Codex toggle 1R 후속): a storage that hangs costs no extra wait beyond the reads below.
+    const suggestAvailable = roundFooterOn && flags.suggest === true; // without the user's setting: the page follows a change to it live (suggest.js)
+    const suggestPrefP = suggestAvailable
+      ? withTimeout(Promise.resolve().then(() => storageSync.get(COMPARE_SUGGEST_ENABLED_KEY)).then((r) => r?.[COMPARE_SUGGEST_ENABLED_KEY] !== false, () => true), SELECTED_MODELS_READ_TIMEOUT_MS, true)
+      : Promise.resolve(false);
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
@@ -2511,7 +2521,8 @@ export function createCompareController({
     const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
     let examples = null;
     try { examples = await examplesPending; } catch { examples = null; }
-    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, suggestOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
+    const suggestOn = suggestAvailable && (await suggestPrefP);
+    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, suggestOn, suggestAvailable, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
   }
 
   // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders
@@ -3014,6 +3025,12 @@ export function createCompareController({
   // ── Streaming session: one Port = one session = one client per provider ──────────────────
   function createSession(port) {
     const clients = new Map();   // colId → vendored client INSTANCE (kept for follow-ups; cmp-columns)
+    // colId → a THROWAWAY temporary client for the round in flight only (a `fresh` FOLLOWUP — the
+    // suggested-question send, ui/compare/suggest.js): it asks in a conversation of its own, never the
+    // column's, and is disposed when that round ends. While it is here clientFor answers it, not the
+    // column's client, so nothing of that send reaches the column's conversation (2026-10-03 user: the
+    // hidden request in the same conversation became context for the next real question).
+    const freshClients = new Map();
     const inflight = new Set();  // AbortController per in-flight provider send
     let running = false;         // one send at a time per port
     let torndown = false;
@@ -3120,6 +3137,8 @@ export function createCompareController({
       // 🔴 After teardown there is nobody left to dispose a new client (the map was snapshot and
       // cleared), so a readiness step that resumes late must not create one (Codex blocker).
       if (torndown) throw abortedError('session torn down');
+      const fresh = freshClients.get(col.id);
+      if (fresh) return fresh;
       let client = clients.get(col.id);
       if (!client) {
         const kept = sessionKept(col.provider);
@@ -3420,7 +3439,7 @@ export function createCompareController({
         // fresh client — ONLY for a kept session, and only when the client hands one out (it
         // answers null for anything it will still clean up). Omitted otherwise, never null: an
         // incognito session's conversations are gone at dispose, so there is nothing to offer.
-        const continuation = sessionKept(provider) && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
+        const continuation = sessionKept(provider) && !freshClients.has(colId) && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
         // A late Stop's answer may not name its model: the one reported during the stream stands in.
         const served = modelForPage(result?.model) || (lateStop ? lastModel : null);
         // 🔴 A cut the CLIENT reported (package v0.5.5) is still a DONE: what arrived IS the answer,
@@ -3432,7 +3451,7 @@ export function createCompareController({
         // This column answered, so whatever context the round carried is now in ITS conversation —
         // a follow-up here continues a thread that already contains it (#1651). Only the columns
         // that never got that far stay marked.
-        linkPending.delete(colId);
+        if (!freshClients.has(colId)) linkPending.delete(colId); // a throwaway conversation holds none of it
         const answerText = String(result?.text ?? '');
         // 🔴 Page only: the outcome row carries the KIND (`code`), never the sentence.
         const retraction = retractionForPage(result);
@@ -3453,7 +3472,7 @@ export function createCompareController({
         // the client's rejection here is the abort the watchdog itself requested. `stalled:true`
         // lets the page add its note; the outcome keeps ok:true and names the cut in `code`.
         if (stalled) {
-          const continuation = sessionKept(provider) && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
+          const continuation = sessionKept(provider) && !freshClients.has(colId) && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
           recordOutcome(colId, { ok: true, code: SW_CODES.STALLED, total_ms: elapsed(t0), chars: streamed.length, ...streamOutcome.answered(), ...(lastModel?.id ? { model: lastModel.id } : {}) });
           post({
             type: PORT_MSG.DONE, provider, col: colId, text: streamed, model: lastModel, stalled: true,
@@ -3563,6 +3582,16 @@ export function createCompareController({
         if (!text.trim() || !columns.length) {
           post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.NO_TARGETS });
           return;
+        }
+        // A `fresh` FOLLOWUP (the suggested-question send — its kind only, one column) rides a throwaway
+        // TEMPORARY client of its own (see freshClients): the column's conversation never sees it, and the
+        // user's provider history keeps nothing of it (saveHistory false = the provider's temporary chat).
+        if (followup && message.fresh === true) {
+          if (message.kind !== FRESH_KIND || columns.length !== 1) {
+            post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: 'bad_request' });
+            return;
+          }
+          for (const col of columns) freshClients.set(col.id, createClient(col.provider, clientDeps, clientOptions(col.provider, false)));
         }
         // History (package v0.3.1): a SEND's boolean is persisted — ONE write per SEND that carries
         // one — and becomes the current preference; the session's flag is fixed by the FIRST SEND
@@ -3753,6 +3782,13 @@ export function createCompareController({
         // aborted sends landed as ERRORs before ALL_DONE), a lost port (same, ALL_DONE unposted),
         // a return right after CONSUME_OK. Nothing to send when consume never released the round.
         settleOutcome(readyIds());
+        // The throwaway clients go with their round (not awaited: their cleanup deletes a temporary
+        // conversation — nothing the next round waits on, and dispose never throws).
+        if (freshClients.size) {
+          const gone = [...freshClients.values()];
+          freshClients.clear();
+          for (const c of gone) Promise.resolve().then(() => c.dispose()).catch(() => {});
+        }
         if (currentSend === send) currentSend = null;
         running = false;
         roundsInFlight--;
@@ -3773,8 +3809,9 @@ export function createCompareController({
       if (torndown) return;
       torndown = true;
       abortAll();
-      const all = [...clients.values()];
+      const all = [...clients.values(), ...freshClients.values()];
       clients.clear();
+      freshClients.clear();
       // A read in flight is one of this session's clients too, even though it never entered the
       // map (it belongs to no column).
       if (linkClient) { all.push(linkClient); linkClient = null; }

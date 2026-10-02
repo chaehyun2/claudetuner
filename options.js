@@ -208,8 +208,10 @@ function updateNotifyExamples() {
 // kept, so switching the master back on restores the previous choice) while the master is off.
 function syncCompareMsgButtonRow() {
   const master = document.getElementById('compare-enabled');
-  const sub = document.getElementById('compare-msg-button-enabled');
-  if (master && sub) sub.disabled = !master.checked;
+  for (const id of ['compare-msg-button-enabled', 'compare-suggest-enabled']) {
+    const sub = document.getElementById(id);
+    if (master && sub) sub.disabled = !master.checked;
+  }
 }
 
 function autoSave() {
@@ -246,6 +248,7 @@ function doSave() {
   const geminiInputUsageEnabled = document.getElementById('gemini-input-usage-enabled').checked;
   const compareEnabled = document.getElementById('compare-enabled').checked;
   const compareMsgButtonEnabled = document.getElementById('compare-msg-button-enabled').checked;
+  const compareSuggestEnabled = document.getElementById('compare-suggest-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
@@ -256,7 +259,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
 
   // Sync plan change request settings to server
   const autoApproveVal = optimizationMode === 'auto';
@@ -371,7 +374,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, compareSuggestEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -419,6 +422,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('gemini-input-usage-enabled').checked = config.geminiInputUsageEnabled !== false;
       document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
       document.getElementById('compare-msg-button-enabled').checked = config.compareMsgButtonEnabled !== false;
+      document.getElementById('compare-suggest-enabled').checked = config.compareSuggestEnabled !== false;
       syncCompareMsgButtonRow();
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
@@ -473,6 +477,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('gemini-input-usage-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-enabled').addEventListener('change', () => { syncCompareMsgButtonRow(); autoSave(); });
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
+  document.getElementById('compare-suggest-enabled').addEventListener('change', autoSave);
   // AI Cross-Check page link (2026-09-22): the SW builds the shell URL (src-less OPEN_COMPARE,
   // placement `options`) so the utm/GA shape stays in bg/compare.js; nothing is saved here.
   const compareOpenLink = document.getElementById('compare-open-link');
