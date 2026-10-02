@@ -9,11 +9,12 @@
 // written up in history.js.
 
 import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
-import { autoGrow, sendableTargets, answeredTurn } from './helpers.js';
+import { autoGrow, sendableTargets, answeredTurn, exampleSentCode } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 import { isImageType } from './attach-types.js';
 import { linkErrorText } from './link.js';
 import { REVIEW_SOURCE_COMPARE } from './review-nudge.js';
+import { keptFor, foldSaveBy, legacySaveHistory, SAVE_MODE_KEPT } from './save-mode.js';
 
 /** Installs the port / streaming slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installPort(ctx) {
@@ -62,6 +63,8 @@ export function installPort(ctx) {
         // A summary (or its retry) is ABOUT a comparison, not a new one: it leaves the active round
         // where it is — the next summary still speaks of the round the user is working on (5R gap a).
         if (Number.isFinite(state.roundInFlight) && !state.summaryPending) state.activeRound = state.roundInFlight;
+        // The round now on the wire was ACCEPTED (#1976 R5): only such a round, once it settles, may be summarised automatically.
+        state.acceptedRound = state.roundInFlight;
         // A SEND{resume} was accepted (D3): the new port carries the session again — the lost
         // one is history, the keepalive below runs for this one.
         if (state.resuming) { state.resuming = false; state.resumed = true; state.sessionEnded = false; state.idleEnded = false; }
@@ -196,7 +199,8 @@ export function installPort(ctx) {
         // of a second SEND on a port that already saw one (Codex #4). A failed SEND{resume} drops
         // its fresh port for the same reason — the session stays lost-but-resumable (D3), and the
         // next attempt is again a first-message SEND{resume}.
-        if (!state.sessionStarted) closePort();
+        // The chips hid at the attempt (beginSend); a refused FIRST send puts the empty state back as it was before it.
+        if (!state.sessionStarted) { closePort(); ctx.examples.hidden = state.examplesHiddenBefore === true; }
         if (state.resuming) { state.resuming = false; closePort(); }
         // A debate round that was refused gives back what it reserved BEFORE finishSend's settle
         // hook runs (debate.js onRoundRefused / onRoundSettled).
@@ -266,10 +270,12 @@ export function installPort(ctx) {
         ctx.renderColumnActions(col);
         if (msg.model) ctx.setServedModel(col, msg.model);
         ctx.setBadge(col, 'col_done', 'is-done');
-        // The continuation (D3) is remembered ONLY for a kept session: an incognito session's
-        // conversations are deleted / hidden at dispose, so there is nothing to resume — and the
-        // guard pins that such a session never sends `resume`, whatever DONE carried.
-        if (state.sessionSaveHistory === true && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
+        // The continuation (D3) is remembered ONLY for a kept PROVIDER (#1985 — per column's service): an
+        // incognito conversation is deleted / hidden at dispose, so there is nothing to resume — and the
+        // guard pins that such a column never sends `resume`, whatever DONE carried.
+        if (keptFor(state.sessionSaveBy, col.provider) && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
+        // After the continuation, not at settle above: the first answer only now has a conversation to open (#1978).
+        ctx.syncOpenButtons();
         {
           const ttft = ctx.ttftSeconds(col);
           // ttft_ms / total_ms / chars are GA custom METRICS (#1897 item 3): an unknown duration is
@@ -657,7 +663,14 @@ export function installPort(ctx) {
   // `via` (chat layout): SEND_VIA_COLUMN when the text came from a column's own composer — analytics only.
   // `texts` (#1815): a SEND's per-column text, colId → string (the debate opening names each debater
   // and its position); a column it does not name gets `text`.
-  function beginSend(text, targets, type, skipped = [], kind = null, summary = null, round = null, retry = false, via = null, texts = null) {
+  // `provenance` (#1985 §3.4.2): the services whose WORDS this send carries besides the user's (a summary's
+  // attachments, a verdict's fact, a debate turn's delta). 🔴 THE gate: while a (incognito → kept) pair of
+  // them is not agreed to, NOTHING is sent or drawn and `{ consent: pairs }` comes back — the caller asks.
+  function beginSend(text, targets, type, skipped = [], kind = null, summary = null, round = null, retry = false, via = null, texts = null, provenance = null) {
+    if (Array.isArray(provenance)) {
+      const pairs = ctx.crossPendingFor(provenance, targets);
+      if (pairs.length) return { consent: pairs };
+    }
     ctx.clearNotice();
     state.sending = true;
     state.roundTargets = targets.slice();
@@ -670,8 +683,13 @@ export function installPort(ctx) {
     // else it is; a summary is a summary even on a fresh port; the rest is the composer's SEND
     // (resume when it rides SEND{resume}) or FOLLOWUP.
     const sendKind = ctx.sendKindFor(type, kind, retry, resume, targets);
+    // Set before the first updateControls below: the round footer reads it to tell a summary in flight from any other send (#1976).
+    state.roundKind = sendKind;
+    state.acceptedRound = null; // nothing of this send is accepted yet (CONSUME_OK sets it; a refused send leaves it null)
+    state.roundVia = via; // the auto summary (round-footer.js, #1976 R5) never runs after a chip round
     // The first round fixes the routing set at 「전체」 (every participant); C's checkboxes prune it.
-    if (type === 'SEND') { state.followupTargets = new Set(targets); ctx.examples.hidden = true; }
+    // The empty state hides at the attempt; its PRIOR state is kept so a refused first send restores exactly that (a page opened with ?q never showed it).
+    if (type === 'SEND') { state.followupTargets = new Set(targets); state.examplesHiddenBefore = ctx.examples.hidden; ctx.examples.hidden = true; }
     // 🔴 The SAME predicate the wire uses below (`carries`), needed here because the turns are
     // drawn before the message is built. Kept as one expression in `attachmentForRound` so the
     // two can never disagree — a marker on a round that sent no file is a lie, and a round that
@@ -732,7 +750,8 @@ export function installPort(ctx) {
     }
     let msg;
     if (type === 'SEND') {
-      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: !!state.saveHistory };
+      // #1985: the per-service map, and beside it the privacy-first fold for an old SW (all kept → true).
+      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: legacySaveHistory(state.saveBy), saveHistoryBy: { ...state.saveBy } };
       if (texts) msg.texts = texts;
       // The pasted conversation this round continues (#1651). The worker holds both halves — the
       // continuation for the link's own column and the transcript for the others — so the page says
@@ -741,23 +760,31 @@ export function installPort(ctx) {
       // 🔴 A link turned 「시크릿 대화」 off FOR this session only (clearLink puts it back): the SW
       // must not keep that as the user's preference (1.35.0 batch review — #1655 × #1661: a user who
       // browses incognito by default lost that default to one pasted link).
-      if (state.linkHistoryForced) msg.saveHistoryOnce = true;
+      // A bridged debate's first SEND (#1976 R6) is the same: the map is the cross-check's, not a new preference.
+      if (state.linkHistoryForced || state.saveByOnce) msg.saveHistoryOnce = true;
+      // #1985 (Codex stage 3 2R): what the user CHOSE while a link forced its provider on — the link
+      // provider's own value as before the link — is still their preference: it is stored, the session
+      // map is not (a choice made on this page must survive a reload).
+      if (state.linkHistoryForced && state.linkPrevSave && state.linkPrevSave.touched) {
+        const p = state.linkPrevSave.provider;
+        msg.saveHistoryPrefBy = { ...state.saveBy, [p]: keptFor(state.linkPrevSave.saveBy, p) };
+      }
     }
     else if (resume) {
       // EVERY continuation the page holds, not just the targets': the SW keeps the unused seeds
       // until each provider's client is constructed, so a column first asked in a LATER
-      // follow-up still continues its own conversation (batch-3 Codex #1). saveHistory is
-      // true by construction — only a kept session is resumable.
+      // follow-up still continues its own conversation (batch-3 Codex #1).
+      // 🔴 #1985: the SESSION's map, never `true` for all — a column of an incognito provider built
+      // after the resume (a debate moderator, a column first asked now) must stay incognito.
       const cont = {};
       for (const c of ctx.liveColumns()) if (c.continuation) cont[c.id] = c.continuation;
-      // saveHistoryOnce: the `true` is this resumed session's (only a kept one resumes), not a new
-      // preference — same defect as the link's, reached by continuing a history entry.
-      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: true, saveHistoryOnce: true, resume: cont };
+      // saveHistoryOnce: the map is this resumed session's, not a new preference — same defect as
+      // the link's, reached by continuing a history entry.
+      msg = { type: 'SEND', text, targets, mayOpenTab: true, saveHistory: legacySaveHistory(state.sessionSaveBy), saveHistoryBy: { ...state.sessionSaveBy }, saveHistoryOnce: true, resume: cont };
     } else msg = { type: 'FOLLOWUP', text, targets };
     // Beta stats (cmp-beta-contract §3 / §5): the kind, the round, the validated source provider
     // (omitted when the page was opened without one) and the session id, on every wire message.
     msg.kind = sendKind;
-    state.roundKind = sendKind; // what ALL_DONE reads (the review banner's cross-check moment)
     msg.round = round;
     // The round's image (#1617), `{name, type, data}` as bg/compare.js normalizes it — `bytes` is
     // the page's own bookkeeping for the chip and has no meaning on the other side. The key is
@@ -785,7 +812,10 @@ export function installPort(ctx) {
     // `models` = ids only (never labels), one `provider:id|auto` per target, in target order.
     // GA `targets` stays the PROVIDER list (a colId carries the model id, which only `models` puts on the wire — validated); `targets_n` counts columns.
     // `has_img` / `has_doc` (#1944): whether the round carried an image / a document — booleans only, never a name or a byte.
-    track('send', { round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: type === 'SEND' ? !!state.saveHistory : state.sessionSaveHistory === true, followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), has_img: roundAtts.some((a) => isImageType(a.type)), has_doc: roundAtts.some((a) => !isImageType(a.type)), ...(via ? { via } : {}) });
+    // `code` (2026-10-02): the example chip this first question came from, sent unedited (exampleSentCode).
+    // Kept until the send is accepted (commitPrompt): a refused attempt and its resend both carry it.
+    const exCode = type === 'SEND' && sendKind === 'send' ? exampleSentCode(state.exampleClick, text, 'compare') : null;
+    track('send', { ...(exCode ? { code: exCode } : {}), round: state.rounds + 1, targets_n: targets.length, targets: targets.map((id) => (state.columns.get(id) || {}).provider || id).join(','), save_history: legacySaveHistory(type === 'SEND' ? state.saveBy : state.sessionSaveBy), save_mode: foldSaveBy(type === 'SEND' ? state.saveBy : state.sessionSaveBy), followup: type !== 'SEND', resume, kind: sendKind, models: ctx.modelsCsv(targets, models), has_img: roundAtts.some((a) => isImageType(a.type)), has_doc: roundAtts.some((a) => !isImageType(a.type)), ...(via ? { via } : {}) });
     // The pickers this page still shows as static/none (#1452 refresh): the SW re-lists exactly these
     // once the tabs exist and answers with MODELS, which updates this list.
     const targetProviders = new Set(targets.map((id) => (state.columns.get(id) || {}).provider));
@@ -804,6 +834,7 @@ export function installPort(ctx) {
     lastActivityAt = clock.now(); // the idle countdown starts when the round settles, not when it began
     ctx.stopBtn.disabled = true;
     ctx.syncWaitTimer();
+    ctx.settleRoundFooter(); // #1976 R1: the round footer is judged here, at the settle, and nowhere else
     ctx.updateControls();
     ctx.persistSession(); // every settled round updates the local history entry (kept sessions only)
     // 「토론 모드」 (#1769): the orchestrator reads what the round produced and takes the next step.

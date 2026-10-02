@@ -168,6 +168,13 @@ export function notifCategoryFromId(notifId) {
   if (id.startsWith('reset-soon-')) return 'reset-soon';
   if (id.startsWith('reset-done-')) return 'reset-done';
   if (id.startsWith('weekly-report-')) return 'weekly-report';
+  // #1971 debate cards (bg/debate-notify.js, `debate-<kind>-<tabId>-<run>`): one bucket per kind.
+  if (id.startsWith('debate-done-')) return 'debate-done';
+  if (id.startsWith('debate-asked-')) return 'debate-asked';
+  if (id.startsWith('debate-budget-')) return 'debate-budget';
+  if (id.startsWith('debate-cap-')) return 'debate-cap';
+  if (id.startsWith('debate-usage-')) return 'debate-usage';
+  if (id.startsWith('debate-stopped-')) return 'debate-stopped';
   // Severity-qualified first: these must return the SAME category the send recorded, or the two
   // streams land in different buckets and every CTR built on them is wrong.
   // Pre-1.29.28 ids carried no severity. They can still be clicked from the tray after an update,

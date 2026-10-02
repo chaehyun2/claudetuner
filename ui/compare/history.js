@@ -23,6 +23,7 @@ import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED, RETRACTION_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
 import { readDebateRecord, legacyDebateRecord } from './debate-core.js';
+import { foldSaveBy, uniformSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
 /**
@@ -177,7 +178,10 @@ export function installHistory(ctx) {
    * history (what incognito keeps empty) have nothing to do with. The history writer never passes it.
    */
   function snapshotSession({ anyMode = false } = {}) {
-    if (!state.sessionStarted || !state.sessionId || (!anyMode && state.sessionSaveHistory !== true)) return null;
+    // #1985 (decision 1a): only an ALL-kept session is stored — a mixed one is not. Its incognito
+    // provider's words also ride the kept columns' requests (debate deltas, summary attachments),
+    // so no per-column filter could keep them out.
+    if (!state.sessionStarted || !state.sessionId || (!anyMode && foldSaveBy(state.sessionSaveBy) !== SAVE_MODE_KEPT)) return null;
     const columns = {};
     // Page order (state.columnIds), not the Map's insertion order — a replaced or re-keyed column
     // is re-inserted at the Map's end, and the entry's key order is what the history row's dots show.
@@ -665,6 +669,7 @@ export function installHistory(ctx) {
     state.sending = false; state.resuming = false; state.resumed = false; state.idleEnded = false;
     state.summaryPending = null; state.judgeChoice = null; ctx.closeSummaryPop();
     state.roundInFlight = null;
+    state.footerRound = null; state.footerShownRound = null; state.autoSummaryTried = new Set(); state.autoSkipNote = null; // #1976: no line until a round of THIS session settles
     ctx.setColumnFocus(null); // a loaded session opens as the grid (the focus was about the session being left)
     state.roundSeq = 0; // re-derived from the stored rounds below (never a leftover of the session being left)
     state.activeRound = entry.activeRound; // the comparison the user was working on when it was saved (validated; null = latest comparison round)
@@ -681,7 +686,8 @@ export function installHistory(ctx) {
     state.persistedId = entry.id; // opened FROM the history: it has an entry
     state.sessionStarted = true;
     state.sessionEnded = true;      // no port carries it: a follow-up resumes (canResume) or is refused
-    state.sessionSaveHistory = true; // only kept sessions are stored
+    state.sessionSaveBy = uniformSaveBy(true); // only all-kept sessions are stored
+    ctx.resetCrossConsent(); // #1985: another conversation — nothing agreed carries over
     state.rounds = typeof entry.rounds === 'number' ? entry.rounds : 1;
     ctx.commitPrompt(state.question);
     // The entry's columns are shown in the PAGE's order (created next to their service's column when
@@ -757,6 +763,7 @@ export function installHistory(ctx) {
     state.followupTargets = new Set(targets);
     state.pendingFollowupCol = null;
     if (debating) ctx.debateRestoreFinish();
+    ctx.syncOpenButtons(); // the restored continuations (set after each column's turns settled) — #1978
     ctx.stopBtn.disabled = true;
     ctx.syncWaitTimer();
     closeHistoryPanel();

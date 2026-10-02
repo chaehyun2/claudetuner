@@ -320,6 +320,9 @@ const TRANSLATIONS = {
     'compare_entry_sub': '같은 질문을 Claude·ChatGPT·Gemini에 한 번에',
     'compare_entry_open': '열기',
     'compare_entry_open_page': 'AI 크로스체크 페이지 열기 ↗',
+    // The popup row's second banner (ui/compare-entry.js — the two take turns every 4 h)
+    'compare_entry_debate_title': 'AI끼리 토론시키기',
+    'compare_entry_debate_sub': 'Claude·ChatGPT·Gemini가 서로 반박하고 진행자가 정리해요',
     'display_mode': '표시 방식',
     'display_mode_label': '확장 프로그램 열기 방식',
     'display_mode_sidepanel': '사이드패널',
@@ -1026,6 +1029,9 @@ const TRANSLATIONS = {
     'compare_entry_sub': 'One question to Claude, ChatGPT and Gemini at once',
     'compare_entry_open': 'Open',
     'compare_entry_open_page': 'Open the AI Cross-Check page ↗',
+    // The popup row's second banner (ui/compare-entry.js — the two take turns every 4 h)
+    'compare_entry_debate_title': 'Let the AIs debate',
+    'compare_entry_debate_sub': 'Claude, ChatGPT and Gemini rebut each other; a moderator wraps up',
     'display_mode': 'Display Mode',
     'display_mode_label': 'Extension open style',
     'display_mode_sidepanel': 'Side Panel',

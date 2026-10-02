@@ -358,6 +358,27 @@ export const SEND_VIA_COLUMN = 'column';
 // A round the 「토론 모드」 orchestrator sent (ui/compare/debate.js, #1769): carries the dock's
 // attachment tray only on its opening (#1961 — roundOwnsTray), and says so in GA like SEND_VIA_COLUMN.
 export const SEND_VIA_DEBATE = 'debate';
+// A follow-up chip on the round footer (#1976, ui/compare/round-footer.js): the chip's words go to
+// every column that answered the round — never the dock's tray (roundOwnsTray / attachmentsForRound),
+// never its draft or its routing boxes — and GA tells chip sends apart by this `send.via`.
+export const SEND_VIA_CHIP = 'chip';
+// The fact chip (#1976 stage 4): a verdict's 「확인할 사실」 line longer than FACT_CHIP_MAX is not a one-line fact
+// (no chip); the chip's face shows at most FACT_CHIP_LABEL_MAX characters of it (the title keeps it whole).
+export const FACT_CHIP_MAX = 200;
+export const FACT_CHIP_LABEL_MAX = 40;
+// 「🗣 토론 붙이기」 (#1976 stage 3, R6 / §9.4-3): the round footer opens the debate in a NEW tab and hands
+// it the topic and the cast through chrome.storage.session under `${DEBATE_HANDOFF_KEY}:<id>` — one entry per
+// click (two tabs bridging at once do not overwrite each other), read once and removed by the tab whose URL
+// names its id (DEBATE_HANDOFF_PARAM). 🔴 The URL carries only that
+// opaque id: a question in a URL lands in the browser's history, which an incognito session must not.
+// An entry older than DEBATE_HANDOFF_TTL_MS is not applied; a topic over the debate's own DEBATE_TOPIC_MAX is not bridged.
+export const DEBATE_HANDOFF_KEY = 'compareDebateHandoff';
+export const DEBATE_HANDOFF_PARAM = 'handoff';
+export const DEBATE_HANDOFF_TTL_MS = 2 * 60 * 1000;
+export const DEBATE_HANDOFF_ID_RE = /^[a-z0-9]{16}$/;
+export const DEBATE_HANDOFF_ID_LEN = 16;
+// The bridge waits this long for the handoff write; a store that never answers opens no tab and unlocks the button.
+export const DEBATE_HANDOFF_WRITE_MS = 3000;
 // Timed send-path stages (bg/compare.js, package v0.3.0) the badge reads: DIAG{stage, detail.at}.
 // first_chunk − send_start = time to first token; stream_done − send_start = the whole answer.
 export const STAGE_SEND_START = 'send_start';
@@ -444,6 +465,10 @@ export const SUMMARY_PROMPT_MAX = 48000;
 export const SUMMARY_PER_COLUMN_MAX = 20000;
 export const SUMMARY_MIN_SHARE = 200;
 export const SUMMARY_MIN_COLUMNS = 2;
+// 「다음부터 묻지 않고 바로 정리」 (#1976 R4): chrome.storage.local, `{ [judgeProvider]: true }` — consent per judge account.
+export const SUMMARY_CONSENT_KEY = 'compareSummaryConsent';
+// 「답이 끝나면 자동으로 정리」 (#1976 stage 4, §3.5 / R5): chrome.storage.local boolean, default off.
+export const SUMMARY_AUTO_KEY = 'compareSummaryAuto';
 export const SUMMARY_QUESTION_MAX = 500;
 export const SUMMARY_FENCE_OPEN = (n, label) => `<<<answer ${n}: ${label}>>>`;
 export const SUMMARY_FENCE_CLOSE = (n) => `<<<end answer ${n}>>>`;
@@ -459,11 +484,37 @@ export const TURN_KIND_DEBATE = 'debate';
 // DEBATE_SEND_BUDGET counted sends per run (opening + turns + moderator calls — each is one compare
 // and one request on the user's own AI account). A spent budget never ends the run by itself: it stops
 // and ASKS — 「늘려서 계속」 buys another budget, 「결론 내기」 has the AI moderator conclude (2026-09-28 user:
-// the automatic wrap-up cut off a debater the moderator had just asked). And a pause before the
-// next send once the tab has been hidden for DEBATE_HIDDEN_PAUSE_MS. An AI moderator may only END
+// the automatic wrap-up cut off a debater the moderator had just asked). An AI moderator may only END
 // after DEBATE_MIN_TURNS_TO_END debater turns.
 export const DEBATE_SEND_BUDGET = 50; // 2026-09-28 user: stays 50 now that a spent budget asks before going on
-export const DEBATE_HIDDEN_PAUSE_MS = 2 * 60 * 1000;
+// #1971 (docs/plans/debate-background-run.md): a hidden tab keeps debating. The pause before the next send
+// is for nobody being at the COMPUTER — a hidden tab while the system has been idle / locked for
+// DEBATE_AWAY_PAUSE_MS (the ⚙ option 「자리 비우면 멈춤」, on by default). A visible tab never pauses
+// (2026-10-02 user decision). `chrome.idle` reports 「idle」 DEBATE_IDLE_DETECT_S after the last input (the
+// browser's default detection interval — nothing in the extension changes it); 「locked」 at once.
+export const DEBATE_AWAY_PAUSE_MS = 10 * 60 * 1000;
+export const DEBATE_IDLE_DETECT_S = 60;
+// The floors no option turns off (#1971 §3.3 ②): DEBATE_HARD_CAP counted sends per run (its last one is kept
+// for the conclusion), and a stop before the next send once a service in the debate is near its limit —
+// usage-floor.js USAGE_FLOOR_PCT of a usage window, read from what Claude Tuner collected, ignored when older
+// than USAGE_MAX_AGE_MS or unreadable (2026-10-02 user decision). Both numbers are provisional (§11 ⑥).
+export const DEBATE_HARD_CAP = 200;
+// 「전송 50회에 닿으면」 (debatePrefs.budgetMode): stop and ask (default) / keep going.
+export const DEBATE_BUDGET_ASK = 'ask';
+export const DEBATE_BUDGET_CONTINUE = 'continue';
+export const DEBATE_BUDGET_MODES = Object.freeze([DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE]);
+// Debate notifications (#1971 §3.2): the page asks the SW (runtime message) while its tab is hidden; the SW
+// names the tab from `sender.tab` and builds the id `debate-<kind>-<tabId>-<run>`. State only — never the
+// topic nor anyone's words. `stopped` = a dead connection or too few debaters left.
+export const DEBATE_NOTIFY_MSG = 'DEBATE_NOTIFY';
+export const DEBATE_NOTIFY_CLEAR_MSG = 'DEBATE_NOTIFY_CLEAR';
+export const DEBATE_NOTIFY_KINDS = Object.freeze(['done', 'asked', 'budget', 'cap', 'usage', 'stopped']);
+// #1971: the sessionStorage key (per tab, survives a discard's reload) holding the page's debate — its phase
+// (§4.1: a page reloaded after a discard reports it once) and, for a kept session not yet over, its session id
+// (§5: that page reopens the debate and says it slept). One JSON value `{ p, s }`.
+export const DEBATE_PHASE_MARK_KEY = 'ctDebatePhase';
+// A freeze (Memory Saver) this long before the page resumed is said on the status line.
+export const DEBATE_FREEZE_NOTE_MS = 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
 // A debate turn with no answer text yet (2026-09-30 user decision): at DEBATE_SLOW_NOTE_MS from its send the
 // pending bubble offers 「이번 차례 건너뛰기」; at DEBATE_SLOW_SKIP_MS the turn is skipped by itself (aborted,

@@ -11,7 +11,7 @@
 // `data` base64, at most ATTACH_MAX_FILES of them. `bytes` travels with it on the page only, to
 // draw the chip.
 
-import { ATTACH_MAX_BYTES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, ATTACH_ERR_COUNT, ATTACH_ERR_TOTAL, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_DEBATE, SEND_VIA_COLUMN, SEND_VIA_DEBATE } from './constants.js';
+import { ATTACH_MAX_BYTES, ATTACH_PROVIDERS, ATTACH_ERR_TYPE, ATTACH_ERR_SIZE, ATTACH_ERR_COUNT, ATTACH_ERR_TOTAL, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_DEBATE, SEND_VIA_COLUMN, SEND_VIA_DEBATE, SEND_VIA_CHIP } from './constants.js';
 import { attachTypeOf, providerTakesTypes } from './attach-types.js';
 
 /**
@@ -211,7 +211,8 @@ export function formatBytes(bytes) {
  */
 export function roundOwnsTray(sendKind, via) {
   if (via === SEND_VIA_DEBATE) return debateOpening(sendKind, via);
-  return sendKind !== SEND_KIND_SUMMARY && sendKind !== SEND_KIND_RETRY && via !== SEND_VIA_COLUMN;
+  // A round-footer chip (#1976 R3) is not the dock's round either: the file waiting there is for the NEXT question.
+  return sendKind !== SEND_KIND_SUMMARY && sendKind !== SEND_KIND_RETRY && via !== SEND_VIA_COLUMN && via !== SEND_VIA_CHIP;
 }
 
 /**
@@ -243,7 +244,7 @@ export function attachmentsForRound(state, sendKind, via) {
   // the user did not choose it for — nor is a round the debate orchestrator composed (#1769),
   // except its opening, which is the dock's question in the debate's words (#1961).
   if (via === SEND_VIA_DEBATE) return debateOpening(sendKind, via) ? ready : [];
-  return via === SEND_VIA_COLUMN ? [] : ready;
+  return via === SEND_VIA_COLUMN || via === SEND_VIA_CHIP ? [] : ready;
 }
 
 /**

@@ -84,5 +84,23 @@ export function installReviewNudge(ctx) {
     return box;
   }
 
-  Object.assign(ctx, { reviewMoment });
+  /**
+   * The footer's standing review link (right end of the footer line, both tabs). Unlike the banner it
+   * is not gated — it is a footnote, always there, so it never interrupts. `source()` says which tab
+   * it was clicked from (FOOTER_SOURCE suffix keeps it apart from the banner in GA). 🔑 A click is
+   * GA only — it does NOT record `clicked` (2026-10-02 user decision): opening the store is not a
+   * review, so the banner and the popup's / options' nudges keep asking.
+   */
+  function footerReviewLink(source) {
+    const a = link(CWS_REVIEW_URL, t('review_footer'), 'cmp-footer-review');
+    a.addEventListener('click', () => {
+      track(REVIEW_EVENT_CLICKED, { source: `${source()}${FOOTER_SOURCE_SUFFIX}` });
+    });
+    return a;
+  }
+
+  Object.assign(ctx, { reviewMoment, footerReviewLink });
 }
+
+// GA `source` of a footer-link click: `compare_footer` / `debate_footer`.
+export const FOOTER_SOURCE_SUFFIX = '_footer';

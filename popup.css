@@ -494,6 +494,8 @@
     .compare-entry-sub { font-size: 11px; color: var(--text-muted); line-height: 1.35; margin-top: 1px; }
     .compare-entry-open { flex: none; padding: 5px 10px; border: none; border-radius: 6px; background: var(--accent); color: white; font-size: 11px; font-weight: 600; line-height: 1.2; cursor: pointer; }
     .compare-entry-open:hover { background: var(--accent-hover); }
+    /* The debate banner (ui/compare-entry.js): a speech-bubble glyph in place of the 4-point star. */
+    .compare-entry.is-debate .compare-entry-icon { clip-path: polygon(0 0, 100% 0, 100% 72%, 45% 72%, 20% 100%, 22% 72%, 0 72%); }
     /* Prediction headline — surfaces the forecast (our differentiator) above the gauges */
     .predict-headline { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; background: var(--accent-light); color: var(--accent); }
     .predict-headline.is-alert { background: #ef444418; color: #ef4444; }

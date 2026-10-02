@@ -12,7 +12,7 @@
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
 import { neutraliseQuoted, mdInlineText } from './helpers.js';
-import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS } from './constants.js';
+import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS, DEBATE_BUDGET_CONTINUE } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
 // Characters an alias may not hold: line breaks / controls, and everything that is structure in a
@@ -179,6 +179,10 @@ export const SETTING_ROLES = 'roles';
 export const SETTING_TONE = 'tone';
 export const SETTING_PACE = 'pace';
 export const SETTING_LENGTH = 'length';
+// #1971 §3.3: the background-run options — off the default when turned off / set to keep going.
+export const SETTING_AWAY = 'away';
+export const SETTING_BUDGET = 'budget';
+export const SETTING_NOTIFY = 'notify';
 /**
  * The settings in `prefs` that differ from the defaults, in the order the panel shows them. `def` =
  * the default moderator for this page (defaultModerator — the plan-picked seat is a default, not a
@@ -194,6 +198,9 @@ export function changedSettings(prefs, def = { moderator: MOD_AUTO, modCol: null
   if ((p.tone || TONE_FRIENDS) !== TONE_FRIENDS) out.push(SETTING_TONE);
   if ((p.pace || PACE_DEFAULT) !== PACE_DEFAULT) out.push(SETTING_PACE);
   if ((p.length || LENGTH_NORMAL) !== LENGTH_NORMAL) out.push(SETTING_LENGTH);
+  if (p.awayPause === false) out.push(SETTING_AWAY);
+  if (p.budgetMode === DEBATE_BUDGET_CONTINUE) out.push(SETTING_BUDGET);
+  if (p.notify === false) out.push(SETTING_NOTIFY);
   return out;
 }
 // The start problems whose cause is a control inside the ⚙ panel (planCast's keys): with the panel
@@ -1094,9 +1101,71 @@ export function owedAfterForced(pendingNext, forced) {
 export function budgetStep({ used, budget }) {
   return budget - used <= 0 ? 'stop' : 'go';
 }
-/** The tab has been hidden long enough that the next send should wait for the user (plan §15.1 ②). */
-export function hiddenTooLong({ hidden, since, now, limit }) {
-  return !!hidden && Number.isFinite(since) && now - since >= limit;
+// `chrome.idle` states (#1971): anything but these two is someone at the computer.
+const IDLE_AWAY_STATES = ['idle', 'locked'];
+/**
+ * The system idle clock (#1971 §3.1) after a `chrome.idle` report: `{ state, since }`, `since` = when the
+ * computer was last used (null while active). 「idle」 arrives `detectS` seconds after the last input, so
+ * it is dated back by that much; 「locked」 counts from the report. idle → locked keeps the earlier start.
+ */
+export function idleAfter(prev, state, now, detectS) {
+  if (!IDLE_AWAY_STATES.includes(state)) return { state: 'active', since: null };
+  const was = prev && IDLE_AWAY_STATES.includes(prev.state) && Number.isFinite(prev.since) ? prev.since : null;
+  const start = state === 'idle' ? now - detectS * 1000 : now;
+  return { state, since: was === null ? start : Math.min(was, start) };
+}
+/**
+ * Nobody has been at the computer long enough that the next send should wait for the user (#1971 §3.1,
+ * replacing §15.1 ②'s hidden-tab clock): only while the tab is HIDDEN (2026-10-02 user decision — a
+ * visible tab never pauses), only with the option on, and only after `limit` ms idle / locked.
+ */
+export function awayTooLong({ on, hidden, idle, now, limit }) {
+  return on !== false && !!hidden && !!idle && IDLE_AWAY_STATES.includes(idle.state) && Number.isFinite(idle.since) && now - idle.since >= limit;
+}
+/**
+ * The run's absolute cap (#1971 §3.3 ②) — no option lifts it and no 「늘려서 계속」 / 「결론 내기」 grant
+ * passes it. `used` = counted sends since the cap last restarted. 'stop' at the cap; 'wrap' when one
+ * send is left and someone can conclude — that last send is the conclusion; 'go' otherwise.
+ */
+export function hardCapStep({ used, cap, canConclude }) {
+  if (used >= cap) return 'stop';
+  if (used === cap - 1 && canConclude) return 'wrap';
+  return 'go';
+}
+
+// #1971 §4.1: the stops a debate waits in for the user — `paused_as` names the one the user left from.
+// The values are debate.js's PHASE_* strings (test/compare-debate-guard.mjs pins them, and the worker's list).
+export const DEBATE_PAUSED_AS = Object.freeze(['hidden', 'budget', 'asked', 'paused', 'await']);
+const OUTCOME_LEFT = 'left';
+const OUTCOME_BUDGET = 'budget';
+
+/**
+ * The milliseconds a run has spent behind a hidden tab: what was banked at earlier reveals plus the
+ * current hidden stretch, counted from the run's start at the earliest (a run started in a hidden tab).
+ */
+export function hiddenMsOf({ banked, since, run, now }) {
+  const open = Number.isFinite(since) ? Math.max(0, now - Math.max(since, run)) : 0;
+  return (banked || 0) + open;
+}
+
+/**
+ * What one reportFinish call sends (#1842, #1971 §4.1), or null to send nothing. An end the run already
+ * reported in the same place is not sent twice. `left` (새 대화, another session, the page closing) is
+ * sent only for a run that moved since its last report — a concluded debate that was then left keeps
+ * its real ending — EXCEPT a run left in a stop that waits for the user (a spent budget): that row is
+ * marked once (`leftAtStop`, same outcome) so 「left + left while stopped」 counts every walk-away.
+ */
+export function finishReport({ outcome, moved, reported, phase, sendsUsed }) {
+  if (outcome !== OUTCOME_LEFT) {
+    if (reported && reported.outcome === outcome && reported.moved === moved) return null;
+    return { outcome, pausedAs: null, leftAtStop: null };
+  }
+  if (!sendsUsed) return null;
+  const pausedAs = DEBATE_PAUSED_AS.includes(phase) ? phase : null;
+  if (!reported || reported.moved !== moved) return { outcome, pausedAs, leftAtStop: !!pausedAs };
+  // Only a budget row waits for the user: a concluded run resumed and stopped again unsent (quota) keeps its ending (Codex 1R).
+  if (pausedAs && !reported.leftAtStop && reported.outcome === OUTCOME_BUDGET) return { outcome: reported.outcome, pausedAs, leftAtStop: true };
+  return null;
 }
 
 /**

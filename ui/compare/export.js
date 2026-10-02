@@ -92,6 +92,28 @@ export function installExport(ctx) {
     return svg;
   }
   /**
+   * The paperclip glyph in the same line style — the composer's attach buttons and a turn's file
+   * marker use it instead of the 📎 emoji, which rendered as a colour picture that differed per OS.
+   * `size` = the rendered px (the button 16, the inline marker 13).
+   */
+  function attachIcon(size = 16) {
+    const svg = doc.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('class', 'cmp-attach-icon');
+    const p = doc.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', 'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48');
+    svg.appendChild(p);
+    return svg;
+  }
+  /**
    * The share glyph (an arrow leaving a tray) — the top bar's 「공유하기」 before a link exists; once
    * the conversation has one, the link glyph takes its place (CSS on `.is-shared`).
    */
@@ -259,7 +281,7 @@ export function installExport(ctx) {
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
-    copyText, focusQuietly, copyIcon, linkIcon, shareIcon, clearCopyFeedback, attachCopy, copyButton, quoteLines, markdownFor,
+    copyText, focusQuietly, copyIcon, linkIcon, shareIcon, attachIcon, clearCopyFeedback, attachCopy, copyButton, quoteLines, markdownFor,
     participatingColumns, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, columnHasAnswer,
     syncCopyAll, copyFeedback,
   });

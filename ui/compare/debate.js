@@ -18,18 +18,20 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_HIDDEN_PAUSE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_SKIP_MS, DEBATE_SLOW_SHARE_PCT, DEBATE_SLOW_SKIP_FIRST_MS, DEBATE_SLOW_SHARE_FIRST_PCT, MS_PER_SECOND, WAIT_TICK_MS } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_SKIP_MS, DEBATE_SLOW_SHARE_PCT, DEBATE_SLOW_SKIP_FIRST_MS, DEBATE_SLOW_SHARE_FIRST_PCT, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
-import { answeredTurn } from './helpers.js';
+import { answeredTurn, exampleSentCode, sendMessage, storageGet } from './helpers.js';
+import { usageFloorHit, USAGE_FLOOR_PCT, USAGE_MAX_AGE_MS } from './usage-floor.js';
 import {
   MOD_AI, MOD_AUTO, MOD_USER, MODERATOR_KINDS, STANCE_BASES, STANCE_ROLES, STANCE_NONE, STANCE_DEVIL, composeStance, splitStance, recordStance, recordPace, roleAllowed, stanceText, TONES, TONE_FRIENDS, TONE_CUSTOM, DEBATE_TONE_MAX, cleanTone, toneProblem, normalizeTone, SPEAKER_USER, ROLE_USER, ROLE_PARTICIPANT, ROLE_MODERATOR,
   DEBATE_DELTA_MAX, DEBATE_TOPIC_MAX, DEBATE_ALIAS_MAX, cleanAlias, aliasProblem, resolveNames, deltaFor, fitDelta, stancesOf,
-  openingPrompt, turnPrompt, moderatorPrompt, splitControl, tightenConclusion, conclusionLabels, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenTooLong,
+  openingPrompt, turnPrompt, moderatorPrompt, splitControl, tightenConclusion, conclusionLabels, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenMsOf, finishReport, awayTooLong, idleAfter, hardCapStep,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
-  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
+  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, SETTING_AWAY, SETTING_BUDGET, SETTING_NOTIFY, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
 } from './debate-core.js';
 import { REVIEW_SOURCE_DEBATE } from './review-nudge.js';
+import { foldSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
 
 // #1862 fold heights (px of bubble) by reply length, and the slack a bubble may exceed them by unfolded
 // (a bubble a few px over the line is not worth a button).
@@ -44,10 +46,16 @@ const PHASE_AWAIT = 'await';
 const PHASE_ASKED = 'asked'; // the AI moderator asked the user something (#1843) — the user's reply carries it on
 const PHASE_PAUSED = 'paused';
 const PHASE_BUDGET = 'budget'; // the run's send budget is spent (plan §15.1 ①)
-const PHASE_HIDDEN = 'hidden'; // paused because the tab was hidden too long (§15.1 ②)
+const PHASE_HIDDEN = 'hidden'; // paused: the tab hidden while nobody was at the computer (#1971 §3.1 — the value predates it)
+const PHASE_HARD_STOP = 'hard_stop'; // stopped at a floor no option lifts — DEBATE_HARD_CAP sends, or a service near its limit (#1971 §3.3 ②)
 const PHASE_DONE = 'done';
 const PHASE_TOO_FEW = 'too_few';
 const PHASE_DEAD = 'dead';
+// The debate has ENDED — it cannot be carried on from here. Only then does a column head open its
+// conversation on the site (#1978, plan §8 decision 3): while it runs, waits on the user, is paused —
+// or stopped at a budget that 「늘려서 계속」 lifts (PHASE_BUDGET, and any later cap that offers 「계속」) —
+// typing on the site would split the debate's conversation.
+const ENDED_PHASES = new Set([PHASE_DONE, PHASE_TOO_FEW, PHASE_DEAD]);
 const DEBATE_CLASS = 'is-debate';
 const SETUP_CLASS = 'is-debate-setup'; // on the root: the debate tab before its session — the columns are participant cards
 const MOD_CARD_CLASS = 'is-moderator'; // on a card: the AI moderator's column
@@ -61,6 +69,19 @@ const FOCUS_FIRST = 'first';
 const FOCUS_CAUSE = 'cause';
 // The ⚙ budget note per moderation (#1818 ③): an AI moderator's calls count, 「내가 진행」 waits for a pick.
 const BUDGET_HINT = { [MOD_AI]: 'debate_budget_hint', [MOD_AUTO]: 'debate_budget_hint_auto', [MOD_USER]: 'debate_budget_hint_user' };
+// …and when 「전송 50회에 닿으면」 is 「계속 진행」 (#1971 §3.3 ②): no question at the budget, the floors said instead.
+// The on / off cards of the #1971 options.
+const OPT_ON = 'on';
+const OPT_OFF = 'off';
+const BUDGET_HINT_GO = { [MOD_AI]: 'debate_budget_hint_go', [MOD_AUTO]: 'debate_budget_hint_go_auto', [MOD_USER]: 'debate_budget_hint_go_user' };
+// The notification kind a stop sends (#1971 §3.2) — DEBATE_NOTIFY_KINDS.
+const NOTIFY_DONE = 'done';
+const NOTIFY_ASKED = 'asked';
+const NOTIFY_BUDGET = 'budget';
+const NOTIFY_STOPPED = 'stopped';
+// Why a run hit a floor (PHASE_HARD_STOP): its notification kind and GA `reason`.
+const HARD_CAP = 'cap';
+const HARD_USAGE = 'usage';
 
 /** Installs the debate slice onto `ctx` (see ui/compare/history.js for the ctx contract). */
 export function installDebate(ctx) {
@@ -69,14 +90,20 @@ export function installDebate(ctx) {
   // `settingsOpen`: the ⚙ panel (plan §18) — closed until the user opens it once, then remembered.
   // `modChosen`: the user picked the moderator (the 「진행」 select) — until then the plan-picked seat
   // moderates by default (plan §18.8; `state.debateSeat` is set by compare.js with the debate layout).
-  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, roles: [], tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEFAULT, paceChosen: false, length: LENGTH_NORMAL, settingsOpen: false };
+  state.debatePrefs = { on: false, moderator: MOD_AUTO, modCol: null, modChosen: false, stance: STANCE_NONE, roles: [], tone: TONE_FRIENDS, toneCustom: '', pace: PACE_DEFAULT, paceChosen: false, length: LENGTH_NORMAL, settingsOpen: false, awayPause: true, budgetMode: DEBATE_BUDGET_ASK, notify: true };
   if (state.debateSeat === undefined) state.debateSeat = null;
   state.aliases = {};
   state.debate = null;
+  let markedPhase; // #1971: the value last written to sessionStorage (markPhase) — read before any render clears it
+  let sleptId = null; // #1971 §5: the session a discarded page is reopening (noteDiscarded)
+  let sleptLost = false; // #1971 §5: a discarded page whose running debate kept no session (incognito) — said, not reopened
+  noteDiscarded();
 
   const debateOn = () => !!(state.status && state.status.debateOn === true);
   const doc_active = () => (ctx.doc && ctx.doc.activeElement) || null;
   const debateActive = () => !!state.debate;
+  /** The debate on screen has ended (ENDED_PHASES); false while it runs, waits or is paused — and outside a debate. */
+  const debateEnded = () => !!state.debate && ENDED_PHASES.has(state.debate.phase);
   /** The AI moderator asked the user something and waits for the answer (#1843 ASK). */
   const debateAsked = () => !!state.debate && state.debate.phase === PHASE_ASKED;
   /** The name the page shows for a cast column in the debate on screen ('' outside one) — what a share carries (#1784). */
@@ -117,6 +144,10 @@ export function installDebate(ctx) {
               paceChosen: PACES.includes(p.pace) && (p.paceChosen === true || p.pace === PACE_QUICK),
               length: LENGTHS.includes(p.length) ? p.length : LENGTH_NORMAL, // #1862
               settingsOpen: p.settingsOpen === true,
+              // #1971 §3.3: both on by default — only an explicit false turns them off.
+              awayPause: p.awayPause !== false,
+              budgetMode: DEBATE_BUDGET_MODES.includes(p.budgetMode) ? p.budgetMode : DEBATE_BUDGET_ASK,
+              notify: p.notify !== false,
             };
           }
           const a = got && got[DEBATE_ALIASES_KEY];
@@ -181,13 +212,18 @@ export function installDebate(ctx) {
   /** The run's stance as the room line names it: the position, then each role — 「자유 토론 + 검증 담당 1명」. */
   const stanceLabel = (stance) => { const { base, roles } = splitStance(stance); return [base, ...roles].map((k) => t(`debate_stance_opt_${k}`)).join(' + '); };
   /** `{ debaters, modCol, names, conflicts, problem }` for the current setup (problem = i18n key or null). */
-  function planCast() {
-    const targets = reachable();
-    const modCol = moderatorCol(targets);
+  let excludeOnce = null; // #1985: the providers 「시크릿 서비스 빼고 시작」 leaves out of the NEXT start only
+  // `exclude` (#1985 §3.4.4, 「시크릿 서비스 빼고 시작」): a Set of providers left out of the cast. An AI
+  // moderator of an excluded service gives way to this page's default moderation over who is left.
+  function planCast(exclude = null) {
+    const targets = exclude ? reachable().filter((id) => { const c = colOf(id); return !(c && exclude.has(c.provider)); }) : reachable();
+    let choice = modChoice(targets);
+    if (exclude && choice.moderator === MOD_AI && !(choice.modCol && targets.includes(choice.modCol))) choice = defMod(targets);
+    const modCol = choice.moderator === MOD_AI && choice.modCol && targets.includes(choice.modCol) ? choice.modCol : null;
     const { debaters, cast } = castOrder(targets, modCol);
     const { names, conflicts } = castNames(cast, (id) => state.aliases[id]);
     let problem = null;
-    if (modChoice(targets).moderator === MOD_AI && !modCol) problem = targets.length >= 3 ? 'debate_pick_moderator' : 'debate_need_three_ai';
+    if (choice.moderator === MOD_AI && !modCol) problem = targets.length >= 3 ? 'debate_pick_moderator' : 'debate_need_three_ai';
     else if (debaters.length < 2) problem = 'debate_need_two';
     else if (conflicts.length) problem = 'debate_alias_err_conflict';
     else if (state.debatePrefs.tone === TONE_CUSTOM && toneProblem(state.debatePrefs.toneCustom)) problem = `debate_tone_err_${toneProblem(state.debatePrefs.toneCustom)}`;
@@ -195,7 +231,7 @@ export function installDebate(ctx) {
     // the start button is not dead for no stated reason. The tray is not a problem: the opening
     // carries it like a cross-check's SEND (#1961, plan §17.4).
     else if (state.link || state.linkReading) problem = 'debate_no_link';
-    return { debaters, modCol, names, conflicts, problem };
+    return { debaters, modCol, cast, names, conflicts, problem, moderator: choice.moderator };
   }
 
   // ── the mode tabs (plan §17): in the heading's place, while the flag offers the debate ──
@@ -491,6 +527,20 @@ export function installDebate(ctx) {
     [LENGTHS[0], `debate_length_opt_${LENGTHS[0]}`, '\u{1F90F}'], [LENGTHS[1], `debate_length_opt_${LENGTHS[1]}`, '\u{1F4AC}'], [LENGTHS[2], `debate_length_opt_${LENGTHS[2]}`, '\u{1F4DC}'],
   ], (v) => setLength(v));
   setupRow.appendChild(lengthGroup.field);
+  // #1971 §3.3: going on while the user is elsewhere — the pause when nobody is at the computer, what a spent
+  // send budget does, and the notifications. In the ⚙ only (§18: the first-time screen stays as it is).
+  const awayGroup = optGroup('cmp-debate-away', 'debate_away_label', [
+    [OPT_ON, 'debate_away_opt_on', '\u{23F8}\u{FE0F}'], [OPT_OFF, 'debate_away_opt_off', '\u{25B6}\u{FE0F}'],
+  ], (v) => setPref('awayPause', v === OPT_ON));
+  setupRow.appendChild(awayGroup.field);
+  const budgetGroup = optGroup('cmp-debate-budget', 'debate_budgetmode_label', [
+    [DEBATE_BUDGET_ASK, `debate_budgetmode_opt_${DEBATE_BUDGET_ASK}`, '\u{270B}'], [DEBATE_BUDGET_CONTINUE, `debate_budgetmode_opt_${DEBATE_BUDGET_CONTINUE}`, '\u{23E9}'],
+  ], (v) => setPref('budgetMode', DEBATE_BUDGET_MODES.includes(v) ? v : DEBATE_BUDGET_ASK));
+  setupRow.appendChild(budgetGroup.field);
+  const notifyGroup = optGroup('cmp-debate-notify', 'debate_notify_label', [
+    [OPT_ON, 'debate_notify_opt_on', '\u{1F514}'], [OPT_OFF, 'debate_notify_opt_off', '\u{1F515}'],
+  ], (v) => setPref('notify', v === OPT_ON));
+  setupRow.appendChild(notifyGroup.field);
   setupBody.appendChild(setupRow);
   // The cast is not listed here any more (plan §17.5): each participant's avatar and alias sit on
   // its own column head — the debate tab draws the pre-session columns as participant cards.
@@ -586,6 +636,13 @@ export function installDebate(ctx) {
     savePrefs();
     ctx.updateControls();
   });
+  /** One of the #1971 options (awayPause / budgetMode / notify): stored, and the ⚙ repainted. */
+  function setPref(key, value) {
+    state.debatePrefs[key] = value;
+    savePrefs();
+    renderSetup();
+    ctx.updateControls();
+  }
   function setLength(length) {
     state.debatePrefs.length = LENGTHS.includes(length) ? length : LENGTH_NORMAL;
     savePrefs();
@@ -772,7 +829,14 @@ export function installDebate(ctx) {
     const problem = [aliasError ? t(aliasError.key, aliasError.arg) : '', plan.problem ? t(plan.problem, problemArg(plan)) : ''].filter(Boolean).join(' · ');
     const changed = changedNow(targets);
     const mod = modChoice(targets);
-    const hint = t(BUDGET_HINT[mod.moderator] || BUDGET_HINT[MOD_AI], DEBATE_SEND_BUDGET);
+    const p = state.debatePrefs;
+    const goOn = p.budgetMode === DEBATE_BUDGET_CONTINUE;
+    // #1971: the note follows the options — what a spent budget does, the away pause, the notifications.
+    const hint = [
+      goOn ? t(BUDGET_HINT_GO[mod.moderator] || BUDGET_HINT_GO[MOD_AI], DEBATE_HARD_CAP, USAGE_FLOOR_PCT) : t(BUDGET_HINT[mod.moderator] || BUDGET_HINT[MOD_AI], DEBATE_SEND_BUDGET),
+      t(p.awayPause === false ? 'debate_hint_away_off' : 'debate_hint_away_on'),
+      p.notify === false ? '' : t('debate_hint_notify'),
+    ].filter(Boolean).join(' ');
     if (budgetHint.textContent !== hint) budgetHint.textContent = hint;
     setupBody.hidden = !open;
     summaryBtn.hidden = open || !changed.length;
@@ -806,6 +870,9 @@ export function installDebate(ctx) {
     const noAi = mod.moderator === MOD_USER;
     const paceDesc = (v) => (mod.moderator === MOD_AUTO ? t(`debate_pace_desc_auto_${v}`, autoWrapTurns(v)) : t(`debate_pace_desc_${v}`));
     paintGroup(lengthGroup, state.debatePrefs.length, (v) => t(`debate_length_desc_${v}`));
+    paintGroup(awayGroup, state.debatePrefs.awayPause === false ? OPT_OFF : OPT_ON, (v) => t(`debate_away_desc_${v}`, DEBATE_AWAY_PAUSE_MS / MS_PER_MINUTE));
+    paintGroup(budgetGroup, state.debatePrefs.budgetMode, (v) => t(`debate_budgetmode_desc_${v}`, v === DEBATE_BUDGET_CONTINUE ? DEBATE_HARD_CAP : DEBATE_SEND_BUDGET, USAGE_FLOOR_PCT));
+    paintGroup(notifyGroup, state.debatePrefs.notify === false ? OPT_OFF : OPT_ON, (v) => t(`debate_notify_desc_${v}`));
     paintGroup(paceGroup, state.debatePrefs.pace, (v) => (noAi ? t('debate_pace_desc_needai') : paceDesc(v)), () => noAi);
     renderModPicks(targets, mod, need3);
     toneInput.hidden = state.debatePrefs.tone !== TONE_CUSTOM;
@@ -831,6 +898,12 @@ export function installDebate(ctx) {
         parts.push(`${t('debate_roles_label')}: ${splitStance(runStance()).roles.map((r) => t(`debate_stance_opt_${r}`)).join(', ')}`);
       } else if (k === SETTING_LENGTH) {
         parts.push(`${t('debate_length_label')}: ${t(`debate_length_opt_${p.length}`)}`);
+      } else if (k === SETTING_AWAY) {
+        parts.push(`${t('debate_away_label')}: ${t('debate_away_opt_off')}`);
+      } else if (k === SETTING_BUDGET) {
+        parts.push(`${t('debate_budgetmode_label')}: ${t(`debate_budgetmode_opt_${DEBATE_BUDGET_CONTINUE}`)}`);
+      } else if (k === SETTING_NOTIFY) {
+        parts.push(`${t('debate_notify_label')}: ${t('debate_notify_opt_off')}`);
       } else if (k === SETTING_PACE) {
         parts.push(`${t('debate_pace_label')}: ${t(`debate_pace_opt_${p.pace}`)}`);
       } else if (k === SETTING_TONE) {
@@ -1505,28 +1578,119 @@ export function installDebate(ctx) {
   }
 
   // ── orchestrator ──
-  const STOPPED = [PHASE_PAUSED, PHASE_BUDGET, PHASE_HIDDEN, PHASE_DONE, PHASE_TOO_FEW, PHASE_DEAD, PHASE_AWAIT, PHASE_ASKED];
+  const STOPPED = [PHASE_PAUSED, PHASE_BUDGET, PHASE_HIDDEN, PHASE_HARD_STOP, PHASE_DONE, PHASE_TOO_FEW, PHASE_DEAD, PHASE_AWAIT, PHASE_ASKED];
   const isRunning = () => !!state.debate && !STOPPED.includes(state.debate.phase);
-  // When the tab went hidden (null while visible) — advance() pauses before the next send once it
-  // has been hidden for DEBATE_HIDDEN_PAUSE_MS (§15.1 ②).
-  let hiddenSince = null;
   const docHidden = () => !!(ctx.doc && ctx.doc.hidden);
+  // #1971 §3.1: the system idle clock, read by the page itself (chrome.idle needs no SW round trip and
+  // works in the site shell's frame too). advance() pauses a HIDDEN tab's debate once nobody has used the
+  // computer for DEBATE_AWAY_PAUSE_MS. Kept from the events, so the check before a send stays synchronous.
+  let idle = { state: 'active', since: null };
+  const idleApi = chrome && chrome.idle;
+  if (idleApi) {
+    try {
+      idleApi.onStateChanged.addListener((st) => { idle = idleAfter(idle, st, ctx.clock.now(), DEBATE_IDLE_DETECT_S); });
+      idleApi.queryState(DEBATE_IDLE_DETECT_S, (st) => {
+        void (chrome.runtime && chrome.runtime.lastError);
+        if (typeof st === 'string' && idle.state === 'active') idle = idleAfter(idle, st, ctx.clock.now(), DEBATE_IDLE_DETECT_S);
+      });
+    } catch { /* no idle signal: the away pause never fires — the floors still hold */ }
+  }
+  // #1971 §3.3 ②: what Claude Tuner collected about each service's usage, kept current from storage
+  // changes — the floor check before each send reads the latest collection without an async step.
+  let collectedOrgs = null;
+  let orgsChanged = false; // a change event landed: the first read's (older) answer must not overwrite it (Codex 1R #1)
+  if (store) {
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local' || !changes || !changes.collectedOrgs) return;
+        orgsChanged = true;
+        collectedOrgs = Array.isArray(changes.collectedOrgs.newValue) ? changes.collectedOrgs.newValue : null;
+      });
+    } catch { /* no live updates: the read below stands, and a stale one is ignored by its age */ }
+    storageGet(chrome, store, { collectedOrgs: null }).then((got) => { if (!orgsChanged && got && Array.isArray(got.collectedOrgs)) collectedOrgs = got.collectedOrgs; });
+  }
+  // #1971 §5: a tab the browser froze or discarded must not look like a debate still going. A freeze long
+  // enough is said on the status line once the page runs again; a discard reloads the page, which reopens
+  // the debate it was running (DEBATE_PHASE_MARK_KEY's session, read by noteDiscarded) and says it slept.
+  let frozenAt = null;
+  // #1971 §4.1: when the tab went hidden, for the run's `hidden_s` (a resume never restarts it).
+  let hiddenAt = docHidden() ? ctx.clock.now() : null;
+  const hiddenMs = (d, now) => hiddenMsOf({ banked: d.hiddenMs, since: hiddenAt, run: d.run, now });
   if (ctx.doc && typeof ctx.doc.addEventListener === 'function') {
-    ctx.doc.addEventListener('visibilitychange', () => { hiddenSince = docHidden() ? ctx.clock.now() : null; });
+    ctx.doc.addEventListener('visibilitychange', () => {
+      const now = ctx.clock.now();
+      if (!docHidden() && state.debate) state.debate.hiddenMs = hiddenMs(state.debate, now);
+      hiddenAt = docHidden() ? now : null;
+    });
     // #1842: closing the page ends the run as 「left」 (reportFinish skips a run that already reported its end).
     if (ctx.win && typeof ctx.win.addEventListener === 'function') ctx.win.addEventListener('pagehide', () => { clearSlow(); reportFinish('left'); });
+    ctx.doc.addEventListener('freeze', () => { frozenAt = ctx.clock.now(); });
+    ctx.doc.addEventListener('resume', () => {
+      const d = state.debate;
+      if (d && Number.isFinite(frozenAt) && ctx.clock.now() - frozenAt >= DEBATE_FREEZE_NOTE_MS && (isRunning() || d.current)) { d.slept = true; renderBar(); }
+      frozenAt = null;
+    });
+    // After the other slices are installed (the history's reader is theirs): the stored entry, opened like a history pick.
+    if (sleptId) ctx.clock.setTimeout(reopenSlept, 0);
+    if (sleptLost) ctx.clock.setTimeout(() => { sleptLost = false; ctx.showNotice('warn', [t('debate_discarded_lost')]); }, 0);
+  }
+  /** Nothing has happened on this page yet — a reopen may take the screen (Codex 1R #2: not over a send under way). */
+  const pageUntouched = (sid) => !state.sessionStarted && !state.sending && !state.debate && state.sessionId === sid;
+  function reopenSlept() {
+    const id = sleptId;
+    const sid = state.sessionId;
+    if (!id || typeof ctx.historyUpdate !== 'function' || typeof ctx.loadSession !== 'function') { sleptId = null; return; }
+    ctx.historyUpdate(null).then((r) => {
+      const entry = r && r.ok ? r.list.find((e) => e.id === id) : null;
+      if (entry && entry.debate && pageUntouched(sid)) ctx.loadSession(entry); else sleptId = null;
+    }, () => { sleptId = null; });
   }
   /**
    * A stopped debate starts moving again (▶ 계속, a pick chip, the user speaking): a spent budget
-   * gets another DEBATE_SEND_BUDGET, the hidden-tab clock restarts. Dead / too-few stay stopped.
+   * gets another DEBATE_SEND_BUDGET. Dead / too-few stay stopped. A floor (PHASE_HARD_STOP) is lifted
+   * only by ▶ itself (liftHardStop) — through here the next advance() stops at it again.
    */
   function reopen(d) {
     d.pauseAfter = false; // moving again cancels a 「멈춤」 still waiting for the turn in flight
     if (!STOPPED.includes(d.phase) || d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) return;
     if (d.sendsUsed >= d.sendBudget) { d.sendBudget = d.sendsUsed + DEBATE_SEND_BUDGET; d.wrapGranted = false; }
-    hiddenSince = docHidden() ? ctx.clock.now() : null;
+    d.slept = false;
     d.phase = PHASE_SPEAKING;
   }
+  /**
+   * ▶ at a floor (#1971 §3.3 ②) — the user's explicit go-on: the cap counts from zero again (2026-10-02
+   * user decision), a service near its limit is not stopped for again this run.
+   */
+  function liftHardStop(d) {
+    if (d.phase !== PHASE_HARD_STOP || !d.hardStop) return;
+    if (d.hardStop.reason === HARD_CAP) d.capBase = d.sendsUsed;
+    else if (d.hardStop.provider) d.usageGoOn.push(d.hardStop.provider);
+    d.hardStop = null;
+  }
+  /** A floor reached: stop before the next send, say why, tell a user who is elsewhere. */
+  function hardStop(d, stop) {
+    d.phase = PHASE_HARD_STOP;
+    d.hardStop = stop;
+    track('debate_hard_stop', { reason: stop.reason, sends: d.sendsUsed, ...(stop.provider ? { provider: stop.provider } : {}) });
+    reportFinish('budget');
+    notify(stop.reason);
+    renderBar();
+  }
+  /** The services a run's next send may go to: every debater still in the rotation, and an AI moderator. */
+  const castProviders = (d) => [...d.eligible, ...(d.modKind === MOD_AI && d.modCol ? [d.modCol] : [])].map((id) => (colOf(id) || {}).provider).filter(Boolean);
+  /**
+   * #1971 §3.2: a Chrome notification for a stop the user should come back for — only while this tab is
+   * hidden (a visible page already says it), only with the ⚙ option on, once per kind per run. The SW
+   * names the tab (`sender.tab`) and words it: state only, never the topic nor anyone's words.
+   */
+  function notify(kind) {
+    const d = state.debate;
+    if (!d || state.debatePrefs.notify === false || !docHidden() || d.notified.has(kind)) return;
+    d.notified.add(kind);
+    sendMessage(chrome, { type: DEBATE_NOTIFY_MSG, kind, run: d.run, ...(kind === HARD_USAGE && d.hardStop ? { provider: d.hardStop.provider } : {}) });
+  }
+  /** A new run in this tab, or the debate left: the tab's earlier debate notifications go. */
+  const clearNotices = () => { sendMessage(chrome, { type: DEBATE_NOTIFY_CLEAR_MSG }); };
   const nameOf = (id) => (id === SPEAKER_USER ? t('debate_name_user') : (state.debate.names.get(id) || {}).name || id);
   const candidates = () => state.debate.debaters.map((id) => { const c = colOf(id); return { id, names: [nameOf(id), ctx.colLabel(c), ctx.modelLabelOf(c.provider, c.model)].filter(Boolean), words: (state.debate.names.get(id) || {}).words || [] }; });
   const lastSeq = () => (state.debate.transcript.length ? state.debate.transcript[state.debate.transcript.length - 1].seq : 0);
@@ -1541,31 +1705,50 @@ export function installDebate(ctx) {
     if (bubble) bubble.appendChild(ctx.attachMark(state.questionImg));
   }
   /**
+   * A run's #1971 fields: the two ⚙ options as they were when it started (the ⚙ is closed during a
+   * session), the cap's base and the floors already passed, the notification kinds sent, and the
+   * freeze / discard note. A restore starts a fresh run like a start does.
+   */
+  function runGuards() {
+    const p = state.debatePrefs;
+    return {
+      awayPause: p.awayPause !== false, budgetMode: DEBATE_BUDGET_MODES.includes(p.budgetMode) ? p.budgetMode : DEBATE_BUDGET_ASK,
+      capBase: 0, usageGoOn: [], hardStop: null, notified: new Set(), slept: false,
+    };
+  }
+  /**
    * The first send of a debate session (sendInitial routes here when the toggle is on). Returns
    * false when it cannot start — the send button already says why (startProblem).
    */
   function start(topic) {
-    const plan = planCast();
+    const exclude = excludeOnce;
+    excludeOnce = null;
+    const plan = planCast(exclude);
     if (plan.problem) { renderSetup(); return false; }
     if (topic.length > DEBATE_TOPIC_MAX) { ctx.showNotice('warn', [t('debate_topic_long', DEBATE_TOPIC_MAX)]); return false; }
+    // 🔴 #1985 §3.4.5-4 (decision 7a): the debaters read each other, so an incognito service's turns reach the
+    // kept ones' history. Asked ONCE, here — before anything is sent — for every pair of the cast.
+    if (askStartConsent(plan)) return false;
     const { debaters, modCol, names } = plan;
     const stances = castStances(plan);
     const openingGroup = el('div', 'cmp-debate-opening');
     state.debate = {
       topic, debaters, modCol, names, stances, stance: runStance(), pace: state.debatePrefs.pace, length: state.debatePrefs.length || LENGTH_NORMAL, asks: 0, longFor: null,
       run: ctx.clock.now(), userMsgs: 0, restored: false, reported: null, reportSeq: 0, turnsAtRun: 0, legStart: 0, // #1842 finish statistics · legStart: #1909 automatic conclusion
-      modKind: modCol ? MOD_AI : (modChoice().moderator === MOD_USER ? MOD_USER : MOD_AUTO),
+      modKind: modCol ? MOD_AI : (plan.moderator === MOD_USER ? MOD_USER : MOD_AUTO),
       transcript: [], seq: 0,
       delivered: new Map(), lastSpoke: new Map(), prev: null,
       eligible: new Set(debaters), firstReplied: new Set(), modStarted: false, modFails: 0,
       phase: PHASE_OPENING, turnsUsed: 0,
       sendsUsed: 1, sendBudget: DEBATE_SEND_BUDGET, wrapNow: false, // the opening is the first counted send
+      ...runGuards(),
       queue: [], forced: null, pendingNext: null, current: null, pauseAfter: false,
       openingGroup, topicBubble: null,
       tone: normalizeTone(state.debatePrefs.tone, state.debatePrefs.toneCustom),
       typing: new Set(), // turns still showing the typing bubble (reveal() empties it)
     };
     const d = state.debate;
+    clearNotices(); // a new run in this tab: the last run's notifications are about a debate no longer on screen
     clear(timeline);
     timeline.appendChild(hiddenHolder);
     timeline.appendChild(roomHead(d));
@@ -1595,9 +1778,10 @@ export function installDebate(ctx) {
     // group, and whether it is the plan-picked default the page offered (the user never chose).
     const modC = modCol ? colOf(modCol) : null;
     const modMeta = modC ? { mod_provider: modC.provider, mod_model: modC.model || 'auto', mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {};
-    track('debate_start', { n: debaters.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
+    const exCode = exampleSentCode(state.exampleClick, topic, 'debate'); // a debate-tab topic chip, started unedited (cleared on acceptance: commitPrompt)
+    track('debate_start', { ...(exCode ? { code: exCode } : {}), n: debaters.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
     state.question = topic;
-    ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, texts);
+    ctx.beginSend(text, debaters, 'SEND', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, texts, []); // the opening carries no one's words yet
     markTopic(d); // after beginSend: it decides what the opening carries (state.questionImg)
     stampRound(d.transcript);
     renderBar();
@@ -1685,6 +1869,7 @@ export function installDebate(ctx) {
             if (d.phase === PHASE_PAUSED) { renderBar(); return false; }
             d.phase = PHASE_ASKED;
             renderBar();
+            notify(NOTIFY_ASKED);
             // #1852: the answer box says what it is for (updateControls → placeholder) and the cursor
             // waits in the box. The question comes into view like any new words — a reader scrolled up
             // stays put and the 「↓」 pill lights (2026-09-28 user: no pull while reading).
@@ -1699,7 +1884,7 @@ export function installDebate(ctx) {
           }
           // The wrap-up call MUST conclude: its answer is the conclusion even without the END line (Codex U2 1R #3 —
           // a wrap-up that came back as a NEXT slipped back into turns). Queued user words still come first.
-          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; tightenConclusionTurn(turn, entry); markConclusion(turn); offerFeedback(turn, 'moderator'); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); return false; }
+          if (pick.end || (cur.wrapUp && !d.queue.length)) { if (entry) entry.conclusion = true; tightenConclusionTurn(turn, entry); markConclusion(turn); offerFeedback(turn, 'moderator'); d.phase = PHASE_DONE; d.legStart = d.turnsUsed; renderBar(); track('debate_end', { turns: d.turnsUsed, by: 'moderator' }); reportFinish('moderator'); notify(NOTIFY_DONE); return false; }
           d.pendingNext = pick.id;
           // 「NEXT: n LONG」: that speaker may answer at length this once (#1862).
           d.longFor = pick.long && pick.id ? pick.id : null;
@@ -1741,6 +1926,7 @@ export function installDebate(ctx) {
             d.phase = PHASE_DONE;
             renderBar();
             reportFinish('moderator');
+            notify(NOTIFY_DONE);
             return false;
           }
         } else if (cur.conclude) {
@@ -1757,6 +1943,7 @@ export function installDebate(ctx) {
         }
       }
     }
+    d.slept = false; // a round settled after a freeze: the debate is moving again (#1971 §5)
     // ⏸ 멈춤 pressed while this round was in flight (#1816): its answer is kept above, the loop stops here.
     if (d.pauseAfter) { d.pauseAfter = false; d.phase = PHASE_PAUSED; }
     if (d.phase === PHASE_PAUSED) { renderBar(); return false; }
@@ -1828,7 +2015,7 @@ export function installDebate(ctx) {
       if (q.mention) d.forced = q.mention; // the latest explicit mention wins
     }
     if (![PHASE_SPEAKING, PHASE_AWAIT].includes(d.phase) && !d.forced) { renderBar(); return; }
-    if (!ctx.canFollowUp()) { d.phase = PHASE_DEAD; reportFinish('dead'); renderBar(); return; }
+    if (!ctx.canFollowUp()) { d.phase = PHASE_DEAD; reportFinish('dead'); notify(NOTIFY_STOPPED); renderBar(); return; }
     // No compares left: pause instead of sending a round the server will refuse (the quota line and
     // its CTA already say why; 「계속」 after the reset — or a Premium upgrade — picks it up).
     if (ctx.quotaExhausted()) { d.phase = PHASE_PAUSED; renderBar(); return; }
@@ -1836,18 +2023,31 @@ export function installDebate(ctx) {
     // (columnDead): it leaves the rotation — and a dead moderator hands the floor to the rule.
     for (const id of [...d.eligible]) if (ctx.columnDead(colOf(id))) d.eligible.delete(id);
     if (d.modKind === MOD_AI && d.modCol && ctx.columnDead(colOf(d.modCol))) d.modKind = MOD_AUTO;
-    if (d.eligible.size < 2) { d.phase = PHASE_TOO_FEW; reportFinish('too_few'); renderBar(); return; }
-    // The run's safeguards (plan §15.1): the tab hidden too long → wait for the user; the send budget
-    // spent → stop; one send left with an AI moderator → it closes the debate.
-    if (hiddenTooLong({ hidden: docHidden(), since: hiddenSince, now: ctx.clock.now(), limit: DEBATE_HIDDEN_PAUSE_MS })) { d.phase = PHASE_HIDDEN; track('debate_hidden_pause', { sends: d.sendsUsed }); renderBar(); return; }
+    if (d.eligible.size < 2) { d.phase = PHASE_TOO_FEW; reportFinish('too_few'); notify(NOTIFY_STOPPED); renderBar(); return; }
+    // The run's safeguards (plan §15.1, #1971): a hidden tab while nobody is at the computer → wait for the
+    // user (no notification — nobody is there to read it); the floors no option lifts → stop; the send
+    // budget spent → stop and ask (unless 「계속 진행」).
+    if (awayTooLong({ on: d.awayPause, hidden: docHidden(), idle, now: ctx.clock.now(), limit: DEBATE_AWAY_PAUSE_MS })) { d.phase = PHASE_HIDDEN; track('debate_away_pause', { sends: d.sendsUsed }); renderBar(); return; }
+    // 🔴 The floors come BEFORE the budget: neither 「늘려서 계속」 (reopen) nor 「결론 내기」 (wrapGranted) passes
+    // them — only ▶ at the floor itself (liftHardStop). The cap's last send is the conclusion, inside the cap.
+    const capStep = hardCapStep({ used: d.sendsUsed - d.capBase, cap: DEBATE_HARD_CAP, canConclude: canConclude(d) });
+    if (capStep === 'stop') { hardStop(d, { reason: HARD_CAP }); return; }
+    if (capStep === 'wrap') d.wrapNow = true;
+    // The usage floor guards a run nobody is answering: 「계속 진행」 (no question every 50), or a hidden tab. A visible
+    // 「멈추고 묻기」 run already asks every DEBATE_SEND_BUDGET — it is not stopped at the gauge its user can see.
+    const nearLimit = (d.budgetMode === DEBATE_BUDGET_CONTINUE || docHidden()) && usageFloorHit({ orgs: collectedOrgs, providers: castProviders(d), now: ctx.clock.now(), pct: USAGE_FLOOR_PCT, maxAgeMs: USAGE_MAX_AGE_MS, skip: d.usageGoOn });
+    if (nearLimit) { hardStop(d, { reason: HARD_USAGE, provider: nearLimit.provider, pct: Math.round(nearLimit.pct) }); return; }
     // A spent budget stops and asks (renderBar: 「늘려서 계속」 / 「결론 내기」) — whoever is owed the floor
     // (pendingNext, a LONG grant, the user's pick) is kept for 「늘려서 계속」.
     // A conclusion already asked for is the one send past a spent budget (Codex U2 1R #2 — pressed during the
     // 50th send, it was stopped by the limit and its button hidden).
     // Once per spent budget (Codex U2 2R #2): a conclusion that FAILED at that extra send stops at the limit
     // and asks, instead of granting itself send after send.
-    if (d.wrapNow && !d.wrapGranted && budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.sendBudget = d.sendsUsed + 1; d.wrapGranted = true; }
-    if (budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); renderBar(); return; }
+    // 「계속 진행」 (#1971 §3.3 ②): no question at the budget — the floors above are the stop.
+    if (d.budgetMode !== DEBATE_BUDGET_CONTINUE) {
+      if (d.wrapNow && !d.wrapGranted && budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.sendBudget = d.sendsUsed + 1; d.wrapGranted = true; }
+      if (budgetStep({ used: d.sendsUsed, budget: d.sendBudget }) === 'stop') { d.phase = PHASE_BUDGET; track('debate_budget', { sends: d.sendsUsed }); reportFinish('budget'); notify(NOTIFY_BUDGET); renderBar(); return; }
+    }
     d.phase = PHASE_SPEAKING;
     // 「자동 순서」 has nobody to END it (#1909): at the pace's turn count a debater concludes.
     if (!d.wrapNow && autoWrapDue({ pace: d.pace, modKind: d.modKind, legTurns: d.turnsUsed - d.legStart })) d.wrapNow = true;
@@ -1871,19 +2071,56 @@ export function installDebate(ctx) {
     if (d.modKind === MOD_USER) { d.phase = PHASE_AWAIT; renderBar(); return; }
     if (d.modKind === MOD_AI && d.modCol) { moderate(); return; }
     const id = autoNext({ order: d.debaters, eligible: d.eligible, prev: d.prev, lastSpoke: d.lastSpoke });
-    if (!id) { d.phase = PHASE_TOO_FEW; reportFinish('too_few'); renderBar(); return; }
+    if (!id) { d.phase = PHASE_TOO_FEW; reportFinish('too_few'); notify(NOTIFY_STOPPED); renderBar(); return; }
     speak(id);
   }
 
-  /** The delta `id` has not received, fitted; `covered` = the last seq it includes. */
+  /** The delta `id` has not received, fitted; `covered` = the last seq it includes; `from` = its speakers' services (#1985). */
   function pendingFor(id) {
     const d = state.debate;
     const since = d.delivered.has(id) ? d.delivered.get(id) : 0;
-    return { delta: fitDelta(deltaFor(d.transcript, id, since), DEBATE_DELTA_MAX - PROMPT_OVERHEAD), covered: lastSeq() };
+    const raw = deltaFor(d.transcript, id, since);
+    const from = [...new Set(raw.map((e) => { const c = colOf(e.speaker); return c ? c.provider : null; }).filter(Boolean))];
+    return { delta: fitDelta(raw, DEBATE_DELTA_MAX - PROMPT_OVERHEAD), covered: lastSeq(), from };
+  }
+  /**
+   * The start's consent card (#1985): every (incognito → kept) pair of the cast not yet agreed. Agree → the
+   * start again (it now passes); 「시크릿 서비스 빼고 시작」 — offered only when the cast without those services
+   * still plans (planCast's own checks) → the start again with them left out; cancel → nothing. True = asked.
+   */
+  function askStartConsent(plan) {
+    const castProviders = plan.cast.map((id) => colOf(id).provider);
+    const pairs = ctx.crossPendingFor(castProviders, plan.cast);
+    if (!pairs.length) return false;
+    const incognito = new Set(pairs.map((x) => x.from));
+    const without = planCast(incognito);
+    const canExclude = !without.problem;
+    // What 「빼고 시작」 would start (Codex stage 4 1R 후속): the debaters left and who moderates then.
+    const mod = without.modCol ? ctx.colLabel(colOf(without.modCol)) : t(without.moderator === MOD_USER ? 'debate_cross_mod_user' : 'debate_cross_mod_auto');
+    const extra = canExclude ? [t('debate_cross_consent_exclude_cast', without.debaters.map((id) => ctx.colLabel(colOf(id))).join(t('provider_list_sep')), mod)] : [];
+    ctx.askCrossConsent({
+      pairs, extra, surface: 'debate', bodyKey: 'debate_cross_consent', agreeKey: 'cross_consent_agree_debate', excludeKey: 'cross_consent_exclude_debate',
+      onAgree: () => ctx.sendInitial(),
+      onExclude: canExclude ? () => { excludeOnce = incognito; ctx.sendInitial(); } : null,
+      onCancel: () => {},
+    });
+    return true;
+  }
+  /**
+   * A turn whose delta would carry an incognito service's words into a kept one without consent (#1985 — the
+   * start asked for the whole cast, so only a cast that changed since gets here): the run pauses and asks.
+   */
+  function turnBlocked(id, from) {
+    const pairs = ctx.crossPendingFor(from, [id]);
+    if (!pairs.length) return false;
+    pause();
+    ctx.askCrossConsent({ pairs, surface: 'debate', bodyKey: 'debate_cross_consent', onAgree: () => resume(), onCancel: () => {} });
+    return true;
   }
   function speak(id, conclude = false) {
     const d = state.debate;
-    const { delta, covered } = pendingFor(id);
+    const { delta, covered, from } = pendingFor(id);
+    if (turnBlocked(id, from)) return;
     // A longer turn this once (#1862): the moderator's LONG for this speaker — spent only by the turn it is
     // for (1R #2: the user's pick speaking first kept A's grant for A). A user's 「자세히」 the debater reads itself.
     const long = d.longFor === id;
@@ -1894,7 +2131,7 @@ export function installDebate(ctx) {
     d.current = { kind: PHASE_SPEAKING, col: id, seq: d.seq, covered, ...(conclude ? { conclude: true } : {}) };
     if (!conclude) d.turnsUsed += 1; // a conclusion is no debate turn (the automatic-order count)
     d.sendsUsed += 1;
-    ctx.beginSend(text, [id], 'FOLLOWUP', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE);
+    ctx.beginSend(text, [id], 'FOLLOWUP', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, null, from);
     stampRound([d.transcript[d.transcript.length - 1]]);
     renderBar();
   }
@@ -1918,7 +2155,8 @@ export function installDebate(ctx) {
   function moderate(wrapUp = false) {
     const d = state.debate;
     const id = d.modCol;
-    const { delta, covered } = pendingFor(id);
+    const { delta, covered, from } = pendingFor(id);
+    if (turnBlocked(id, from)) return;
     const order = d.debaters.filter((x) => d.eligible.has(x));
     const names = order.map(nameOf);
     const services = order.map((x) => { const c = colOf(x); return c && PROVIDER_META[c.provider] ? PROVIDER_META[c.provider].label : ''; });
@@ -1929,7 +2167,7 @@ export function installDebate(ctx) {
     // phase of its own left the loop parked after the moderator answered (preview run, 2026-09-26).
     d.current = { kind: PHASE_MODERATING, col: id, seq: d.seq, covered, numbered: order, wrapUp }; // the numbers its cast line used
     d.sendsUsed += 1;
-    ctx.beginSend(text, [id], 'FOLLOWUP', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE);
+    ctx.beginSend(text, [id], 'FOLLOWUP', [], TURN_KIND_DEBATE, null, null, false, SEND_VIA_DEBATE, null, from);
     stampRound([d.transcript[d.transcript.length - 1]]);
     renderBar();
   }
@@ -1963,6 +2201,7 @@ export function installDebate(ctx) {
     // ▶ 계속 before the turn in flight settled: the pause is called off, the loop just goes on.
     if (d.pauseAfter && d.current) { d.pauseAfter = false; track('debate_resume', { turns: d.turnsUsed }); renderBar(); return; }
     if (d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW) { renderBar(); return; }
+    liftHardStop(d); // ▶ at a floor is the explicit go-on — only here (#1971 §3.3 ②)
     reopen(d);
     track('debate_resume', { turns: d.turnsUsed });
     advance();
@@ -2008,6 +2247,7 @@ export function installDebate(ctx) {
   function conclusionOffered(d) {
     // A conclusion waiting on the turn in flight hides it; one that failed and stopped offers it again.
     if (!d || (d.wrapNow && d.current) || [PHASE_DONE, PHASE_DEAD, PHASE_TOO_FEW, PHASE_OPENING].includes(d.phase)) return false;
+    if (d.phase === PHASE_HARD_STOP) return false; // a floor: its stop would only come back (#1971 §3.3 ②)
     const cur = d.current;
     if (cur && (cur.kind === PHASE_OPENING || cur.wrapUp || cur.conclude)) return false;
     return canConclude(d);
@@ -2046,7 +2286,9 @@ export function installDebate(ctx) {
   /** The bar above the dock: the pick chips, what is happening, and 멈춤 / 계속. */
   function renderBar() {
     const d = state.debate;
+    markPhase(d);
     syncJump();
+    ctx.syncOpenButtons(); // every phase change comes through here: the heads follow ended / running (#1978)
     bar.hidden = !d || !state.sessionStarted && !(d && d.phase === PHASE_OPENING);
     if (!d) return;
     clear(barChips);
@@ -2078,7 +2320,9 @@ export function installDebate(ctx) {
     else if (d.phase === PHASE_AWAIT) status = t('debate_status_await');
     else if (d.phase === PHASE_ASKED) status = t('debate_status_asked');
     else if (d.phase === PHASE_BUDGET) status = t(canConclude(d) ? 'debate_status_budget' : 'debate_status_budget_auto', d.sendsUsed, d.sendBudget);
-    else if (d.phase === PHASE_HIDDEN) status = t('debate_status_hidden');
+    else if (d.phase === PHASE_HIDDEN) status = t('debate_status_away');
+    else if (d.phase === PHASE_HARD_STOP) status = d.hardStop && d.hardStop.reason === HARD_USAGE ? t('debate_status_usage', (PROVIDER_META[d.hardStop.provider] || {}).label || d.hardStop.provider, d.hardStop.pct) : t('debate_status_cap', DEBATE_HARD_CAP);
+    else if (d.phase === PHASE_PAUSED && d.slept) status = t('debate_status_slept');
     // Point at the Conclusion card only when one is ON SCREEN — not when the log merely says so: a
     // record finished before the card existed has no `end`, and a marked turn evicted by the history
     // bound restores without its card (integration review 1R, 2R).
@@ -2087,20 +2331,31 @@ export function installDebate(ctx) {
     else if (d.phase === PHASE_DEAD) status = t('debate_status_dead');
     else if (d.phase === PHASE_PAUSED) status = t('debate_status_paused');
     else status = '';
+    if (d.slept && d.phase !== PHASE_PAUSED) status = [status, t('debate_status_slept_note')].filter(Boolean).join(' \u00B7 ');
     if (cur && d.pauseAfter) status = [status, t('debate_status_pausing')].filter(Boolean).join(' \u00B7 ');
     if (cur && d.wrapNow) status = [status, t('debate_status_wrap_pending')].filter(Boolean).join(' \u00B7 ');
+    // #1971 \u00A75 field run: the port went away under a stopped debate (a frozen page cannot keep the service worker
+    // alive) and the session cannot be picked up \u2014 an incognito run keeps no continuation. Say so instead of
+    // offering \u25B6 \uACC4\uC18D, which would only turn it dead (resume \u2192 PHASE_DEAD).
+    // canResume, not canFollowUp: a kept debate opened while logged out is resumable once logged in (Codex 1R).
+    // A mixed (#1985) session can resume with only its kept columns: when fewer than two debaters keep a client,
+    // ▶ would end it as too_few (advance) — the same dead end, so say it now (batch review 1.50.0).
+    const keptDebaters = [...d.eligible].filter((id) => !ctx.columnDead(colOf(id))).length;
+    const lost = !cur && !ENDED_PHASES.has(d.phase) && state.sessionEnded && (!ctx.canResume() || keptDebaters < 2);
+    if (lost) status = t(d.slept ? 'debate_status_slept_lost' : 'debate_status_dead');
     const running = isRunning();
     // While it runs, how much of this run's send budget is used (plan §15 — the debate goes on by itself).
-    if (running && d.sendsUsed) status = [status, t('debate_status_sends', d.sendsUsed, d.sendBudget)].filter(Boolean).join(' \u00B7 ');
+    // 「계속 진행」 has no budget to count against: the cap is the limit it shows (#1971).
+    if (running && d.sendsUsed) status = [status, t('debate_status_sends', d.sendsUsed, d.budgetMode === DEBATE_BUDGET_CONTINUE ? d.capBase + DEBATE_HARD_CAP : d.sendBudget)].filter(Boolean).join(' \u00B7 ');
     barStatus.textContent = status;
     // The answer box's wording follows the phase wherever it changes (1R #2: ▶ 계속 with no compares
     // left went asked → paused without a controls pass, and 「진행자 질문에 답하기…」 stayed).
     if (typeof ctx.syncComposerPlaceholders === 'function') ctx.syncComposerPlaceholders();
     const budgetAsk = d.phase === PHASE_BUDGET && !cur;
-    pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : t(budgetAsk ? 'debate_budget_more' : 'debate_resume');
+    pauseBtn.textContent = running && !d.pauseAfter ? t('debate_pause') : (d.phase === PHASE_HARD_STOP && !cur && d.hardStop && d.hardStop.reason === HARD_CAP ? t('debate_cap_more', DEBATE_HARD_CAP) : t(budgetAsk ? 'debate_budget_more' : 'debate_resume'));
     // 「🏁 결론 내기」 (#1909): whenever a conclusion can be asked for — not only at a spent budget.
-    concludeBtn.hidden = !conclusionOffered(d);
-    pauseBtn.disabled = d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
+    concludeBtn.hidden = lost || !conclusionOffered(d);
+    pauseBtn.disabled = lost || d.phase === PHASE_DEAD || d.phase === PHASE_TOO_FEW || (d.phase === PHASE_AWAIT && !running);
     pauseBtn.hidden = d.phase === PHASE_AWAIT;
   }
 
@@ -2156,12 +2411,14 @@ export function installDebate(ctx) {
       phase: PHASE_PAUSED, turnsUsed: record.turns,
       // A reloaded debate is stopped; 「계속」 starts a fresh run of the budget (like a spent one).
       sendsUsed: 0, sendBudget: DEBATE_SEND_BUDGET, wrapNow: false,
+      ...runGuards(),
       queue: [], forced: null, pendingNext: null, current: null,
       openingGroup: el('div', 'cmp-debate-opening'), topicBubble: null,
       tone: record.tone,
       typing: new Set(),
       restoring: record, // until restoreFinish: no clock on the restored bubbles, no snapshot
     };
+    clearNotices();
     ctx.root.classList.add(DEBATE_CLASS);
     clear(timeline);
     timeline.appendChild(hiddenHolder);
@@ -2226,6 +2483,8 @@ export function installDebate(ctx) {
     for (const turn of [...d.typing]) reveal(turn);
     d.restoring = null;
     d.phase = record.done ? PHASE_DONE : PHASE_PAUSED;
+    // A page the browser discarded reopened the debate it was running (#1971 §5): it says so.
+    if (sleptId && state.sessionId === sleptId) { d.slept = d.phase === PHASE_PAUSED; sleptId = null; }
     timeline.hidden = false;
     renderBar();
     follow(true);
@@ -2271,15 +2530,19 @@ export function installDebate(ctx) {
    * compare_debates row (upserted per session + run, so a later end of the same run replaces it).
    * Settings, how it ended and how long it took; never the topic or anyone's words. `left` (새 대화,
    * another session, the page closing) is reported only for a run that moved since its last report
-   * — a debate that already concluded and was then left keeps its real ending.
+   * — a debate that already concluded and was then left keeps its real ending; a run left in a spent
+   * budget's stop marks its row instead (finishReport, #1971 §4.1).
    */
-  function reportFinish(outcome) {
+  function reportFinish(ending) {
     const d = state.debate;
     if (!d || d.restoring || !state.sessionId || !Number.isFinite(d.run)) return;
     const moved = `${d.turnsUsed}:${d.sendsUsed}:${d.userMsgs}`;
-    if (outcome === 'left' && (!d.sendsUsed || (d.reported && d.reported.moved === moved))) return;
-    if (d.reported && d.reported.outcome === outcome && d.reported.moved === moved) return;
-    d.reported = { outcome, moved };
+    // A floor (#1971 §3.3 ②) is reported as a spent budget (its row's outcome is 'budget' too) — the worker's
+    // paused_as list has no value of its own for it, and leaving there is the same walk-away.
+    const report = finishReport({ outcome: ending, moved, reported: d.reported, phase: d.phase === PHASE_HARD_STOP ? PHASE_BUDGET : d.phase, sendsUsed: d.sendsUsed });
+    if (!report) return;
+    const { outcome, pausedAs, leftAtStop } = report;
+    d.reported = { outcome, moved, leftAtStop: !!leftAtStop };
     d.reportSeq += 1;
     const modC = d.modKind === MOD_AI && d.modCol ? colOf(d.modCol) : null;
     track('debate_finish', {
@@ -2287,11 +2550,57 @@ export function installDebate(ctx) {
       turns: Math.max(0, d.turnsUsed - d.turnsAtRun), sends: d.sendsUsed, user_msgs: d.userMsgs, asks: d.asks,
       elapsed_s: Math.max(0, Math.round((ctx.clock.now() - d.run) / 1000)), restored: !!d.restored,
       ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {}),
+      // #1971 §4.1: the stop the user left from (a leaving report only) and how long the tab sat hidden.
+      hidden_s: secsOf(hiddenMs(d, ctx.clock.now())),
+      ...(leftAtStop === null ? {} : { left_at_stop: leftAtStop }), ...(pausedAs ? { paused_as: pausedAs } : {}),
+      // #1971 §4.2: the run's two ⚙ options (the worker stores them once its columns exist).
+      away_pause: d.awayPause ? 1 : 0, budget_mode: d.budgetMode,
       session_id: state.sessionId, run: d.run, seq: d.reportSeq,
     });
   }
+  /**
+   * #1971 §4.1: Memory Saver may discard a hidden debate tab without a pagehide — no 「left」 row then.
+   * The page keeps its debate phase in sessionStorage (it survives the discard); a page Chrome reloads
+   * after a discard reports the phase it was in once (`cmp_debate_discarded`).
+   */
+  function sessionStore() {
+    try { return (ctx.win && ctx.win.sessionStorage) || null; } catch { return null; }
+  }
+  /**
+   * The mark follows the debate on screen (every renderBar): its phase, and — for a kept session that is not
+   * over — its session id, the one a discarded page reopens (#1971 §5). One key, one JSON value `{ p, s }`.
+   */
+  function markPhase(d) {
+    // #1985: a session with ANY incognito provider is not reopened (it has no 「최근」 entry, decision 1a).
+    const keep = d && !d.restoring && state.sessionId && (state.sessionSaveBy == null || foldSaveBy(state.sessionSaveBy) === SAVE_MODE_KEPT) && ![PHASE_DONE, PHASE_DEAD, PHASE_TOO_FEW].includes(d.phase);
+    const value = d ? JSON.stringify({ p: d.phase, s: keep ? state.sessionId : null }) : null;
+    if (value === markedPhase) return;
+    markedPhase = value;
+    const s = sessionStore();
+    try { if (!s) return; if (value) s.setItem(DEBATE_PHASE_MARK_KEY, value); else s.removeItem(DEBATE_PHASE_MARK_KEY); } catch { /* storage blocked */ }
+  }
+  /**
+   * Read once at install, then dropped whatever this load is — only a DISCARD's reload uses it (a plain reload
+   * must not leave it for a later discard to reopen a debate long gone from the screen, Codex 1R #3).
+   */
+  function noteDiscarded() {
+    const s = sessionStore();
+    let raw = null;
+    try { raw = s && s.getItem(DEBATE_PHASE_MARK_KEY); } catch { /* storage blocked */ }
+    let mark = null;
+    try { mark = raw ? JSON.parse(raw) : null; } catch { mark = { p: raw, s: null }; } // a bare phase (written before the session id joined it)
+    const phase = mark && typeof mark.p === 'string' ? mark.p : null;
+    if (phase && ctx.doc && ctx.doc.wasDiscarded === true) {
+      track('debate_discarded', { phase });
+      sleptId = typeof mark.s === 'string' && mark.s ? mark.s : null;
+      // An incognito run keeps no session to reopen: without a word the page would just come back blank.
+      sleptLost = !sleptId && !ENDED_PHASES.has(phase);
+    }
+    markPhase(null);
+  }
   /** 새 대화 / a history load: the debate (if any) is over; the page is the columns again. */
   function reset() {
+    if (state.debate) clearNotices();
     reportFinish('left');
     clearSlow();
     for (const o of foldObservers) o.disconnect();
@@ -2309,7 +2618,7 @@ export function installDebate(ctx) {
 
   Object.assign(ctx, {
     debateReveal: reveal, debateFirstText: firstText,
-    debateOn, debateActive, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem, debateOpeningTargets: openingTargets,
+    debateOn, debateActive, debateEnded, debateAsked, debateChosen, debateNameOf, debateEmojiOf, readDebatePrefs: readPrefs, renderDebateSetup: renderSetup, debateStartProblem: startProblem, debateOpeningTargets: openingTargets,
     debateStart: start, debateRoundRefused: onRoundRefused, debateRoundSettled: onRoundSettled, debateUserMessage: userMessage,
     debatePause: pause, debateResume: resume, debatePick: pick, renderDebateBar: renderBar, debateReset: reset,
     debateSnapshot: snapshot, debateMarkdown: markdown, debateRestoreBegin: restoreBegin, debateRestoreFinish: restoreFinish,

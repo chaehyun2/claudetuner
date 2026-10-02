@@ -59,7 +59,7 @@
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, FOLLOWUP_RESEND_CODES, CODE_ABORTED, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_ERR_READ, ATTACH_ERR_TYPE, ATTACH_ERR_COUNT } from './ui/compare/constants.js';
 import { ATTACH_ACCEPT, ATTACH_FORMATS_LABEL, attachTypeOf, isImageType } from './ui/compare/attach-types.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
@@ -72,7 +72,7 @@ const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_D
 const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, reserveAttachments, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
-import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix } from './ui/compare/helpers.js';
+import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix, exampleCode } from './ui/compare/helpers.js';
 import { NARROW_MEDIA, REDUCED_MOTION_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
@@ -85,7 +85,13 @@ import { installPort } from './ui/compare/port.js';
 import { installOutputImages } from './ui/compare/output-images.js';
 import { installDebate } from './ui/compare/debate.js';
 import { installShare } from './ui/compare/share.js';
-import { installReviewNudge } from './ui/compare/review-nudge.js';
+import { installOpenInProvider, OPEN_FROM_HEAD } from './ui/compare/open-in-provider.js';
+import { installReviewNudge, REVIEW_SOURCE_COMPARE, REVIEW_SOURCE_DEBATE } from './ui/compare/review-nudge.js';
+import { installRoundFooter, threadless, resendable } from './ui/compare/round-footer.js';
+import { installSummaryCard } from './ui/compare/summary-card.js';
+import { installIncognitoPop } from './ui/compare/incognito-pop.js';
+import { installConsent } from './ui/compare/consent.js';
+import { SAVE_PROVIDERS, SAVE_MODE_KEPT, SAVE_MODE_INCOGNITO, SAVE_MODE_MIXED, normalizeSaveBy, uniformSaveBy, isSaveBy, foldSaveBy, keptFor, legacySaveHistory } from './ui/compare/save-mode.js';
 // The public surface stays on compare.js (test/compare-page-flow-guard.mjs imports it from here).
 export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, MODEL_AUTO_ID, colIdOf, parseColId, normalizeColId, PROVIDER_META, LOGIN_URL, PRO_URL, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS } from './ui/compare/constants.js';
 export { listenEmbedTheme, sendableTargets, localHHMM } from './ui/compare/helpers.js';
@@ -148,9 +154,19 @@ export function mountComparePage(deps) {
   const state = {
     status: null,
     excludeSrc: false,
-    saveHistory: false,   // the wire value (SEND `saveHistory`): from status.saveHistory until the user touches the 「시크릿 대화」 toggle (checked ⇔ false); fixed per session
-    saveTouched: false,   // the user toggled it on this page (a status re-read no longer overrides it)
-    sessionSaveHistory: null, // what the first SEND of the current session carried (the topbar chip)
+    // #1985: 「시크릿 대화」 per SERVICE — a SaveBy `{claude, gemini, chatgpt}` (`true` = kept, the wire's
+    // polarity; ui/compare/save-mode.js). `saveBy` = what the NEXT SEND carries (`saveHistoryBy`): from
+    // status.saveHistoryBy until the user touches the switch / the per-service popover.
+    saveBy: uniformSaveBy(false),
+    saveTouched: false,   // the user changed it on this page (a status re-read no longer overrides ANY provider)
+    // The map the first SEND of the current session carried, frozen — every provider's value for
+    // this session (null before). 🔴 Read through keptFor(state.sessionSaveBy, provider) /
+    // foldSaveBy(state.sessionSaveBy); the old one-boolean session field is gone on purpose (a name
+    // that survived with a new meaning would be read with the old one by #1971/#1976/#1978 code).
+    sessionSaveBy: null,
+    // A bridged debate tab (#1976 R6) starts with the cross-check's map for its OWN session only:
+    // its first SEND carries `saveHistoryOnce` until the user touches the switch.
+    saveByOnce: false,
     port: null,
     // The image the NEXT round carries (#1617): `{name, type, bytes, data}` with `data` base64, as
     // the wire wants it — read once, when it is attached, so the send itself has nothing to await.
@@ -172,10 +188,11 @@ export function mountComparePage(deps) {
     linkOffer: null,      // `{provider, url}` — the chip asking "continue this?"
     linkReading: false,
     linkReadingKind: null, // `vendor` | `share` while a link is being read (#1784 U4) — the incognito toggle leaves a share alone
+    linkReadingProvider: null, // the vendor link's provider while it is being read (#1985: only ITS incognito cancels it)
     link: null,           // `{provider, title, turns, truncated}` once LINK_OK arrives
     linkError: null,      // `{key, arg}` of the refusal line, or null
     linkHistoryForced: false, // the 「시크릿 대화」 toggle was turned off FOR the link, and we said so
-    linkPrevSave: null,   // `{saveHistory, touched}` as they were before that — restored when the link goes
+    linkPrevSave: null,   // `{saveBy, touched, provider}` as they were before that — the link provider's value is restored when the link goes
     sending: false,       // a SEND/FOLLOWUP is in flight (until ALL_DONE or CONSUME_FAIL)
     sessionStarted: false, // SEND has been accepted at least once (follow-ups allowed)
     sessionEnded: false,  // the port that carried this session is gone — the SW disposed its clients (a kept session may still resume, canResume())
@@ -200,6 +217,7 @@ export function mountComparePage(deps) {
     roundKind: null,      // the in-flight / last round's send kind (beginSend) — ALL_DONE offers the review banner after a cross-check one
     roundTargets: [],     // colIds the in-flight / last round was sent to (col.round is the rollback snapshot and dies at CONSUME_OK)
     rounds: 0,            // rounds accepted (CONSUME_OK) in this session — analytics `send.round`
+    exampleClick: null,   // the last example chip clicked ({q, code, kind}) — analytics only: its `code` rides each first-send / debate_start ATTEMPT made unedited from that tab, until one is accepted (commitPrompt) or 새 대화 (releasePrompt)
     sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
     persistedId: null,    // the sessionId an entry was last written / loaded for — sessionId === persistedId ⇔ this session is in the history
     frozenDebate: false,  // a loaded debate entry shown as columns (debate not offered): read-only, not shareable (history.js loadSession)
@@ -218,11 +236,19 @@ export function mountComparePage(deps) {
     idleEnded: false,     // the keepalive stopped for lack of activity (the session then dies by itself: idle copy)
     summaryPending: null, // colId of the judge whose 「요약·비교」 FOLLOWUP awaits its CONSUME_OK / CONSUME_FAIL (C5)
     judgeChoice: null,    // colId the user picked as judge in the popover this session (null = judgeDefault())
+    summaryAutorun: false, // #1976 stage 4: 「답이 끝나면 자동으로 정리」 (chrome.storage.local, default off)
+    autoSummaryTried: new Set(), // #1976 R5: comparison rounds this session already tried to auto-summarize (once each)
+    autoSkipNote: null,   // #1976 stage 4: the round footer's 「자동 정리를 건너뛰었어요」 line (null = none)
+    acceptedRound: null,  // #1976 R5: the round of the last send that got its CONSUME_OK (null from beginSend until then)
+    roundVia: null,       // the in-flight / last round's send `via` (beginSend) — the auto summary skips a chip round
+    summaryConsent: {},   // #1976 R4: { [judgeProvider]: true } — 「다음부터 묻지 않고 바로 정리」, chrome.storage.local (summary.js loadSummaryConsent)
     roundSeq: 0,          // monotonic id of the last round beginSend put on the wire — every turn it draws carries it (C5 provenance)
     roundInFlight: null,  // the round of the send awaiting its CONSUME_OK (a retry names the round it repeats)
     quotaGen: 0,          // bumped at a beta reset's request AND its completion (cmp-beta-contract §5, Codex 2R): a round that began under an older gen carries a pre-reset quota snapshot in its CONSUME_OK/FAIL — settled, but its count is not applied (refreshQuota instead)
     roundGen: 0,          // quotaGen as it was when the in-flight round went out
     activeRound: null,    // the round of the last ACCEPTED non-summary send — the comparison the user is working on (a retry of round 1 makes round 1 active again; a summary never moves it)
+    footerRound: null,    // #1976: the round the round footer belongs to, judged at each settle (round-footer.js settleRoundFooter); null = no line
+    footerShownRound: null, // the round whose footer was last reported shown (GA once per round)
     firstRound: null,     // the round of the accepted first SEND — its request is the question card, not a user turn (persisted; a later round without a user turn has NO request)
   };
 
@@ -285,7 +311,9 @@ export function mountComparePage(deps) {
       });
       w.appendChild(strip);
     }
-    w.appendChild(el('span', 'cmp-turn-attach-glyph', '📎'));
+    const glyph = el('span', 'cmp-turn-attach-glyph');
+    glyph.appendChild(ctx.attachIcon(13));
+    w.appendChild(glyph);
     w.setAttribute('title', t('attach'));
     const name = el('span', 'cmp-turn-attach-name', img.name);
     w.appendChild(name);
@@ -410,7 +438,10 @@ export function mountComparePage(deps) {
   // Install the slices (they only register functions on ctx; nothing runs here), then take the
   // names this file calls bare. Every slice function is also reachable as ctx.name(...).
   installHistory(ctx);
+  installConsent(ctx);
   installSummary(ctx);
+  installRoundFooter(ctx);
+  installSummaryCard(ctx);
   installColumnGate(ctx);
   installModelPicker(ctx);
   installExport(ctx);
@@ -420,6 +451,7 @@ export function mountComparePage(deps) {
   installPort(ctx);
   installDebate(ctx);
   installShare(ctx);
+  installOpenInProvider(ctx);
   installReviewNudge(ctx);
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
   const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
@@ -784,8 +816,9 @@ export function mountComparePage(deps) {
   controls.appendChild(excludeLabel);
   // 「시크릿 대화」 (UX batch 3, item 6 — the default flipped): checked = the SW creates the provider
   // conversations temporary / hidden (SEND saveHistory:false); unchecked (default) = kept in each
-  // site's history, which is also what makes a lost session resumable. The wire keeps
-  // `saveHistory`, so `state.saveHistory === !checked`. Fixed for the session at the first SEND.
+  // site's history, which is also what makes a lost session resumable. #1985: it is the ALL-services
+  // switch over `state.saveBy` — checked = every provider incognito, indeterminate = mixed (the
+  // per-service popover beside it). Fixed for the session at the first SEND.
   const incognitoLabel = el('label', 'cmp-check cmp-check-incognito');
   const incognitoInput = el('input');
   incognitoInput.type = 'checkbox';
@@ -797,6 +830,8 @@ export function mountComparePage(deps) {
   incognitoLabel.appendChild(el('span', null, t('incognito')));
   incognitoLabel.title = t('incognito_tip');
   controls.appendChild(incognitoLabel);
+  // #1985: the ▾ beside it opens the per-service choice (ui/compare/incognito-pop.js).
+  controls.appendChild(installIncognitoPop(ctx));
   controls.appendChild(el('span', 'cmp-spacer'));
   const qHint = el('span', 'cmp-composer-hint', t('composer_hint'));
   controls.appendChild(qHint);
@@ -866,12 +901,13 @@ export function mountComparePage(deps) {
   attachInput.hidden = true;
   attachBox.appendChild(attachInput);
   /**
-   * The 📎 of a composer row — the only way in that a keyboard reaches (drag needs a mouse, paste
+   * The attach (paperclip) button of a composer row — the only way in that a keyboard reaches (drag needs a mouse, paste
    * needs a clipboard image). `id` in full rather than a suffix: FOLLOWUP_ID_BOTTOM is the empty
    * string, so a shared stem would give the two rows the SAME id.
    */
   function makeAttachBtn(id) {
-    const b = el('button', 'cmp-btn cmp-attach-btn', '📎');
+    const b = el('button', 'cmp-btn cmp-attach-btn');
+    b.appendChild(ctx.attachIcon());
     b.id = id;
     b.type = 'button';
     b.title = `${t('attach')} — ${t('attach_limit', ATTACH_FORMATS_LABEL, formatBytes(ATTACH_MAX_TOTAL_BYTES), ATTACH_MAX_FILES)}`;
@@ -1150,7 +1186,7 @@ export function mountComparePage(deps) {
       linkLine.appendChild(makeLinkX('link_remove', clearLink));
       // 🔴 The consent sentence, and — when we changed a setting for them — what we changed.
       const consent = t(state.link.kind === 'share' ? 'link_consent_share' : 'link_consent');
-      linkNote.textContent = state.linkHistoryForced ? `${consent} ${t('link_history_on')}` : consent;
+      linkNote.textContent = state.linkHistoryForced ? `${consent} ${t('link_history_on', providerLabel(state.link.provider))}` : consent;
       linkNote.hidden = false;
       linkBox.hidden = false;
       return;
@@ -1183,10 +1219,12 @@ export function mountComparePage(deps) {
     // FOR this link; if the link is cancelled, fails or is spent, leaving it off would hand the
     // user a session that keeps their chats when they had chosen the opposite — a privacy setting
     // they never changed, changed on their behalf and not changed back.
+    // #1985: only the LINK's provider goes back — a service the user changed while the link was held
+    // keeps their newer choice (Codex stage 3 1R blocker: restoring the whole map undid it).
     if (state.linkHistoryForced && state.linkPrevSave) {
-      state.saveHistory = state.linkPrevSave.saveHistory;
+      const p = state.linkPrevSave.provider;
+      state.saveBy = normalizeSaveBy({ ...state.saveBy, [p]: keptFor(state.linkPrevSave.saveBy, p) }, false);
       state.saveTouched = state.linkPrevSave.touched;
-      incognitoInput.checked = !state.saveHistory;
       syncSaveHistory();
     }
     state.linkPrevSave = null;
@@ -1194,6 +1232,7 @@ export function mountComparePage(deps) {
     state.link = null;
     state.linkReading = false;
     state.linkReadingKind = null;
+    state.linkReadingProvider = null;
     state.linkError = null;
     state.linkHistoryForced = false;
     renderAttachment();
@@ -1222,13 +1261,15 @@ export function mountComparePage(deps) {
     state.linkError = null;
     state.linkReading = true;
     state.linkReadingKind = offer.kind; // what is being read (the incognito toggle asks, #1784 U4)
+    state.linkReadingProvider = offer.kind === 'share' ? null : offer.provider;
     // A share page is nobody's conversation in the user's history — nothing is appended to it, so
     // 「시크릿 대화」 stays as the user set it (the SW skips LINK_NEEDS_HISTORY for a share, #1784 U4).
-    if (!state.saveHistory && offer.kind !== 'share') {
-      state.linkPrevSave = { saveHistory: state.saveHistory, touched: state.saveTouched };
-      state.saveHistory = true;
+    // #1985: only the LINK's provider must be kept (the other columns get the transcript); the
+    // other providers keep what the user chose, and the whole map comes back with clearLink.
+    if (offer.kind !== 'share' && !keptFor(state.saveBy, offer.provider)) {
+      state.linkPrevSave = { saveBy: state.saveBy, touched: state.saveTouched, provider: offer.provider };
+      state.saveBy = normalizeSaveBy({ ...state.saveBy, [offer.provider]: true }, false);
       state.saveTouched = true;
-      incognitoInput.checked = false;
       state.linkHistoryForced = true;
       syncSaveHistory();
     }
@@ -1316,11 +1357,13 @@ export function mountComparePage(deps) {
   /**
    * The language's server pool as usable items, or null when there is none / too few: each item
    * a plain object with a non-empty string `q` (cut to EXAMPLE_Q_MAX) and a string `tag` ('' when
-   * absent). Never text from anywhere but `q` — rendered through textContent only.
+   * absent). Never text from anywhere but `q` — rendered through textContent only. `debating` =
+   * the debate tab's topic pool (`examples.debate`), else the cross-check's questions.
    */
-  function examplePool() {
+  function examplePool(debating = false) {
     const ex = state.status && state.status.examples;
-    const list = ex && typeof ex === 'object' && Array.isArray(ex[lang]) ? ex[lang] : null;
+    const pools = ex && typeof ex === 'object' ? (debating ? ex.debate : ex) : null;
+    const list = pools && typeof pools === 'object' && Array.isArray(pools[lang]) ? pools[lang] : null;
     if (!list) return null;
     const items = [];
     for (const it of list) {
@@ -1335,29 +1378,44 @@ export function mountComparePage(deps) {
    * EXAMPLE_CHIP_COUNT items from the pool: a Fisher–Yates shuffle (the injected `random`), then
    * a greedy pass that takes the first item of each still-unseen tag, filled from the rest in
    * shuffled order — as many distinct tags as the pool allows, a different trio each time.
+   * `avoid` = the questions on screen now (「다른 질문」): every pick comes from the others first,
+   * and one of those only fills in when the pool has fewer than EXAMPLE_CHIP_COUNT others.
    */
-  function pickExamples(pool) {
-    const arr = pool.slice();
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
+  function pickExamples(pool, avoid = []) {
+    const shuffled = (list) => {
+      const arr = list.slice();
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    };
+    const fresh = shuffled(pool.filter((it) => !avoid.includes(it.q)));
     const picked = [];
     const seen = new Set();
-    for (const it of arr) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; if (!seen.has(it.tag)) { seen.add(it.tag); picked.push(it); } }
-    for (const it of arr) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; if (!picked.includes(it)) picked.push(it); }
+    for (const it of fresh) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; if (!seen.has(it.tag)) { seen.add(it.tag); picked.push(it); } }
+    for (const it of fresh) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; if (!picked.includes(it)) picked.push(it); }
+    for (const it of shuffled(pool.filter((x) => avoid.includes(x.q)))) { if (picked.length >= EXAMPLE_CHIP_COUNT) break; picked.push(it); }
     return picked;
   }
   // The built-in chips (no usable server pool) — the cross-check's questions and the debate tab's topics.
   const EXAMPLE_CHIP_KEYS = ['example_chip_1', 'example_chip_2', 'example_chip_3'];
   const DEBATE_EXAMPLE_KEYS = ['debate_example_1', 'debate_example_2', 'debate_example_3'];
-  /** (Re)draws the chips: the server pick when the status carries a usable pool for this language, else the built-in three. */
-  function renderExampleChips() {
+  /**
+   * (Re)draws the chips: the server pick when the status carries a usable pool for this tab and
+   * language, else the built-in three. `avoid` (the 「다른 질문」 button) = the questions to leave
+   * out this time — the set on screen.
+   */
+  function renderExampleChips(avoid = []) {
+    // Keyboard focus inside the chips survives ANY redraw (the button, a status re-read — Codex 2R #1):
+    // back on 「다른 질문」 when it was there, else on the first chip.
+    const active = doc.activeElement;
+    const focusWas = active && exampleChips.contains(active) ? (active.id === 'cmp-example-more' ? 'more' : 'chip') : null;
     clear(exampleChips);
-    // The debate tab offers topics, not questions: its built-in three (a server pool is for later).
+    // The debate tab offers topics, not questions: its own pool (examples.debate), else its built-in three.
     const debating = debateTab();
-    const pool = debating ? null : examplePool();
-    const items = pool ? pickExamples(pool) : (debating ? DEBATE_EXAMPLE_KEYS : EXAMPLE_CHIP_KEYS).slice(0, EXAMPLE_CHIP_COUNT).map((key) => ({ q: t(key), tag: '' }));
+    const pool = examplePool(debating);
+    const items = pool ? pickExamples(pool, avoid) : (debating ? DEBATE_EXAMPLE_KEYS : EXAMPLE_CHIP_KEYS).slice(0, EXAMPLE_CHIP_COUNT).map((key) => ({ q: t(key), tag: '' }));
     for (const it of items) {
       const chip = el('button', 'cmp-chip cmp-example-chip');
       chip.type = 'button';
@@ -1365,12 +1423,35 @@ export function mountComparePage(deps) {
       if (it.tag) chip.setAttribute('data-tag', it.tag);
       chip.appendChild(el('span', 'cmp-example-chip-text', it.q));
       chip.addEventListener('click', () => {
+        // Which examples get picked (and, via send / debate_start `code`, sent): our text's hash only.
+        const code = exampleCode(it.q);
+        const kind = debating ? 'debate' : 'compare';
+        state.exampleClick = { q: it.q, code, kind };
+        track('example_click', { kind, code, src: pool ? 'pool' : 'builtin', tag: it.tag || '' });
         qInput.value = it.q;
         autoGrow(qInput);
         updateControls();
         focusQuietly(qInput);
       });
       exampleChips.appendChild(chip);
+    }
+    // 「↻ 다른 질문」: a new set from the pool — only when there is one to show (more than one set's worth).
+    if (pool && pool.length > EXAMPLE_CHIP_COUNT) {
+      const more = el('button', 'cmp-chip cmp-example-more');
+      more.type = 'button';
+      more.id = 'cmp-example-more';
+      more.title = t(debating ? 'examples_more_debate' : 'examples_more');
+      more.appendChild(el('span', 'cmp-example-more-glyph', '↻'));
+      more.appendChild(el('span', 'cmp-example-more-text', t(debating ? 'examples_more_debate' : 'examples_more')));
+      more.addEventListener('click', () => {
+        track('example_more', { kind: debating ? 'debate' : 'compare' });
+        renderExampleChips(items.map((it) => it.q));
+      });
+      exampleChips.appendChild(more);
+    }
+    if (focusWas) {
+      const target = (focusWas === 'more' && doc.getElementById('cmp-example-more')) || exampleChips.querySelector('.cmp-example-chip');
+      if (target) focusQuietly(target);
     }
   }
   renderExampleChips(); // built-in until the status answers (readStatus re-draws from the pool)
@@ -1399,6 +1480,7 @@ export function mountComparePage(deps) {
    */
   function commitPrompt(text) {
     state.question = text;
+    state.exampleClick = null; // accepted (or a loaded session): a later send is not that chip's
     qInput.hidden = true;
     qHint.hidden = true;
     dock.classList.add('is-committed');
@@ -1409,6 +1491,7 @@ export function mountComparePage(deps) {
   /** New chat: an empty question composer again (the inverse of commitPrompt); the bubbles went with the columns (resetColumn). */
   function releasePrompt() {
     qInput.value = '';
+    state.exampleClick = null;
     qInput.hidden = false;
     qHint.hidden = false;
     qCopyBtn.hidden = true;
@@ -1513,6 +1596,7 @@ export function mountComparePage(deps) {
   root.appendChild(columnsBox);
   // A debate session draws into ONE timeline in the columns' place (`is-debate` on the root hides the grid).
   root.appendChild(ctx.debateTimeline);
+  ctx.buildSummaryCards(); // #1976 stage 2: 「요약·비교」 results as full-width cards, right after the columns
   // 「＋ 열 추가」 (cmp-columns §1): the last cell of the grid before the session; gone at MAX_COLUMNS.
   const addColBtn = el('button', 'cmp-card cmp-add-col', t('col_add'));
   addColBtn.id = 'cmp-add-col';
@@ -1571,6 +1655,7 @@ export function mountComparePage(deps) {
   root.insertBefore(dock, columnsBox);
   root.classList.add(HERO_CLASS);
   Object.assign(ctx, { followup, dock });
+  ctx.buildRoundFooter(); // #1976: the next-step line, right above the follow-up composer
 
   const footer = el('footer', 'cmp-footer');
   footer.id = 'cmp-footer';
@@ -1587,6 +1672,8 @@ export function mountComparePage(deps) {
   footLine.appendChild(footChargeSep);
   footLine.appendChild(footCharge);
   footer.appendChild(footLine);
+  // Right end: a standing CWS review link, both tabs (review-nudge.js footerReviewLink).
+  footer.appendChild(ctx.footerReviewLink(() => (ctx.debateMode() === MODE_DEBATE ? REVIEW_SOURCE_DEBATE : REVIEW_SOURCE_COMPARE)));
   root.appendChild(footer);
   Object.assign(ctx, { footer, footLine, footResidue });
   /**
@@ -1595,25 +1682,65 @@ export function mountComparePage(deps) {
    * prompt card and the composers a distinct surface), the 🕶 chip mid-session, the temporary /
    * hidden wording in the footer; OFF = today's "kept in history" wording, no attribute.
    */
+  const providerLabel = (p) => (PROVIDER_META[p] ? PROVIDER_META[p].label : p);
+  /** The stored preference (status) → the switch: the SW's map, else an old SW's boolean for every provider. */
+  function seedSaveBy() {
+    if (!state.status) return;
+    state.saveBy = isSaveBy(state.status.saveHistoryBy) ? normalizeSaveBy(state.status.saveHistoryBy, false) : uniformSaveBy(state.status.saveHistory === true);
+  }
   function syncSaveHistory() {
-    incognitoInput.checked = !state.saveHistory;
+    const nextMode = foldSaveBy(state.saveBy);
+    incognitoInput.checked = nextMode === SAVE_MODE_INCOGNITO;
+    incognitoInput.indeterminate = nextMode === SAVE_MODE_MIXED;
     // Once a session exists the footer describes THAT session (what its SEND carried), not the
     // toggle — the two can only differ through a programmatic flip, but the promise must be the
     // session's (Codex wire 1R #1).
-    const effective = state.sessionStarted && state.sessionSaveHistory != null ? state.sessionSaveHistory : !!state.saveHistory;
+    const effective = state.sessionStarted && state.sessionSaveBy ? state.sessionSaveBy : state.saveBy;
+    const mode = foldSaveBy(effective);
     // The debate room has its own kept-in-history line (reopen from 「최근」); the incognito line is both rooms'.
     const debateRoom = ctx.debateMode() === MODE_DEBATE;
-    footResidue.textContent = t(!effective ? 'notice_residue' : debateRoom ? 'debate_notice_residue_saved' : 'notice_residue_saved');
+    footResidue.textContent = mode === SAVE_MODE_INCOGNITO ? t('notice_residue')
+      : mode === SAVE_MODE_MIXED ? mixedResidue(effective, debateRoom)
+        : t(debateRoom ? 'debate_notice_residue_saved' : 'notice_residue_saved');
     footChargeSep.hidden = debateRoom;
     footCharge.hidden = debateRoom;
-    if (effective) doc.documentElement.removeAttribute('data-incognito');
+    // The page tint is ALL incognito only; a mixed map tints the incognito columns instead (renderColumns).
+    if (mode !== SAVE_MODE_INCOGNITO) doc.documentElement.removeAttribute('data-incognito');
     else doc.documentElement.setAttribute('data-incognito', '1');
-    modeChip.hidden = !state.sessionStarted || state.sessionSaveHistory == null;
-    modeChip.classList.toggle('is-incognito', !modeChip.hidden && !state.sessionSaveHistory);
-    modeGlyph.hidden = modeChip.hidden || !!state.sessionSaveHistory;
-    if (!modeChip.hidden) modeText.textContent = t(state.sessionSaveHistory ? 'mode_saved' : 'mode_incognito');
+    const sessionMode = state.sessionSaveBy ? foldSaveBy(state.sessionSaveBy) : null;
+    modeChip.hidden = !state.sessionStarted || !sessionMode;
+    modeChip.classList.toggle('is-incognito', !modeChip.hidden && sessionMode !== SAVE_MODE_KEPT);
+    modeGlyph.hidden = modeChip.hidden || sessionMode === SAVE_MODE_KEPT;
+    if (!modeChip.hidden) modeText.textContent = t(sessionMode === SAVE_MODE_KEPT ? 'mode_saved' : sessionMode === SAVE_MODE_MIXED ? 'mode_mixed' : 'mode_incognito');
     // A state, not a button (#1818 ⑤): the tooltip says what it means.
-    if (!modeChip.hidden) modeChip.title = t(state.sessionSaveHistory ? 'mode_saved_tip' : 'mode_incognito_tip');
+    if (!modeChip.hidden) {
+      modeChip.title = sessionMode === SAVE_MODE_MIXED ? mixedTip(state.sessionSaveBy) : t(sessionMode === SAVE_MODE_KEPT ? 'mode_saved_tip' : 'mode_incognito_tip');
+    }
+    syncColumnIncognito();
+    if (ctx.syncIncognitoPop) ctx.syncIncognitoPop();
+  }
+  /** The providers of `saveBy` that are incognito (`kept` false) / kept, as labels in page order. */
+  function providerNames(saveBy, kept) {
+    return SAVE_PROVIDERS.filter((p) => keptFor(saveBy, p) === kept).map(providerLabel).join(t('provider_list_sep'));
+  }
+  function mixedResidue(saveBy, debateRoom) {
+    return t(debateRoom ? 'debate_notice_residue_mixed' : 'notice_residue_mixed', providerNames(saveBy, false), providerNames(saveBy, true));
+  }
+  function mixedTip(saveBy) {
+    return t('mode_mixed_tip', providerNames(saveBy, false), providerNames(saveBy, true));
+  }
+  /**
+   * A mixed session marks its incognito columns (card class + a read-only 🕶 badge in the head);
+   * all-incognito / all-kept sessions mark none (the chip and the page tint say it).
+   */
+  function syncColumnIncognito() {
+    const sb = state.sessionStarted && state.sessionSaveBy ? state.sessionSaveBy : null;
+    const mixed = !!sb && foldSaveBy(sb) === SAVE_MODE_MIXED;
+    for (const col of state.columns.values()) {
+      const on = mixed && !keptFor(sb, col.provider);
+      col.node.classList.toggle('is-incognito', on);
+      if (col.incogBadge) col.incogBadge.hidden = !on;
+    }
   }
 
   // ── notices ──
@@ -1840,7 +1967,12 @@ export function mountComparePage(deps) {
     const arrow = el('span', 'cmp-ext-arrow', '↗');
     arrow.setAttribute('aria-hidden', 'true');
     name.appendChild(arrow);
-    name.addEventListener('click', () => track('provider_link_click', { provider }));
+    // syncOpenButtons (#1978) points the name at the column's conversation once there is one: a
+    // click there is the new event; provider_link_click stays the front-page click.
+    name.addEventListener('click', () => {
+      if (name.getAttribute('href') === meta.site) track('provider_link_click', { provider });
+      else track('open_in_provider', { provider, from: OPEN_FROM_HEAD });
+    });
     identity.appendChild(name);
     // Service picker (2026-09-21 user decision — split by place: the service is changed at the
     // service's name, the model at the model's face): a small 「▾」 right after the name opens the
@@ -1867,6 +1999,12 @@ export function mountComparePage(deps) {
     serviceBtn.appendChild(serviceChevron);
     serviceBtn.addEventListener('click', () => toggleServicePicker(col.id));
     identity.appendChild(serviceBtn);
+    // #1985: a mixed session marks this column's service as incognito (read-only; syncColumnIncognito).
+    const incogBadge = el('span', 'cmp-incognito-glyph cmp-col-incog', '🕶');
+    incogBadge.hidden = true;
+    incogBadge.title = t('col_incognito_tip');
+    incogBadge.setAttribute('aria-label', t('col_incognito_tip'));
+    identity.appendChild(incogBadge);
     // Model picker (cmp-columns §1): the head's model face 「Auto ▾」 opens THIS provider's list
     // (Auto first, then the catalog models) — before the session a pick re-keys the column
     // (provider:model), in session the id stays and only the model the next send carries moves
@@ -2082,7 +2220,7 @@ export function mountComparePage(deps) {
     askBox.appendChild(askInput);
     ask.appendChild(askBox);
     node.appendChild(ask);
-    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, badge, body, debateSlot, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false, closed: false };
+    col = { id: colId, provider, model, modelKnown: false, modelTouched: false, node, nameLink: name, badge, incogBadge, body, debateSlot, serviceBtn, pickerBtn, removeBtn, focusBtn, shared, modelWrap, modelSelect, plan, modelHint, copyColBtn, askColBtn, ask, askTab, askInput, askBox, askOpen: false, actions, retryBtn, openTab, loginLink, permBtn, checkBtn, autoBtn, actionHint, readinessLine, readiness: null, turns: [], renderScheduled: false, status: 'idle', errorCode: null, errorTitle: '', participated: false, round: null, badgeKey: null, badgeCls: '', servedModel: null, waitingSince: null, uploadsTotal: 0, uploadsDone: 0, uploadsSeen: null, stages: {}, gate: null, continuation: null, usageRow, jumpBtn, followAnchored: false, followTail: false, userScrolledUp: false, gateCleared: false, gateErrorSeq: 0, autoRetried: false, closed: false };
     state.columns.set(colId, col);
     state.columnIds.push(colId);
     columnsBox.insertBefore(node, addColBtn); // the ＋ card stays last
@@ -2682,7 +2820,9 @@ export function mountComparePage(deps) {
    * provider conversations still exist — and only through a column that reported a continuation
    * (DONE.continuation). An incognito session, or one lost before any DONE, has nothing to resume.
    */
-  const canResume = () => state.sessionStarted && state.sessionEnded && state.sessionSaveHistory === true && liveColumns().some((c) => !!c.continuation);
+  // #1985: any KEPT provider makes the session resumable — an incognito provider's columns hold no
+  // continuation (port.js keeps one per kept provider only) and fall out through columnDead.
+  const canResume = () => state.sessionStarted && state.sessionEnded && SAVE_PROVIDERS.some((p) => keptFor(state.sessionSaveBy, p)) && liveColumns().some((c) => !!c.continuation);
   ctx.canResume = canResume;
   /** A participating column the session can no longer reach: its port is gone (or was replaced by a resume) and it never reported a continuation. */
   const columnDead = (col) => (state.sessionEnded || state.resumed) && !col.continuation;
@@ -2716,18 +2856,7 @@ export function mountComparePage(deps) {
    * one is retried). On a lost-but-resumable session (D3) only columns holding a continuation can
    * be sent to; the other checked ones are skipped with 「건너뜀」. Zero checked → no targets.
    */
-  /**
-   * 🔴 A ChatGPT column STOPPED during its first answer has no conversation to continue: the client
-   * records `conversation_id` only when a stream completes (vendor-ai chatgpt-client), so a
-   * follow-up would open a new, context-less conversation — shown as this thread's next turn and
-   * charged (1.37.0 batch review; #1757 made stopped columns resendable). It is skipped with
-   * 「건너뜀」 instead. Claude creates its conversation before streaming and Gemini records its ids
-   * mid-stream, so theirs continue; a ChatGPT column with an earlier completed answer continues too.
-   */
-  function threadless(c) {
-    return c.provider === 'chatgpt' && c.status === 'error' && c.errorCode === CODE_ABORTED
-      && !c.turns.some((turn) => turn.role === 'assistant' && !turn.errorText);
-  }
+  // threadless / resendable: ui/compare/round-footer.js (one resend rule for followupPlan and the round-footer chips).
   function followupPlan() {
     if (!canFollowUp()) return { targets: [], skipped: [] };
     const live = liveColumns();
@@ -2738,9 +2867,8 @@ export function mountComparePage(deps) {
     // 「전체」 = every routable column checked; the AC21 sweep still runs over every live column, so
     // a gated one is skipped with 「건너뜀」 like any other non-retriable error (3R #6).
     if (checked.length === routable.length) {
-      const retriable = (c) => (c.status !== 'error' || FOLLOWUP_RESEND_CODES.has(c.errorCode)) && !threadless(c);
-      targets = live.filter(retriable);
-      skipped = live.filter((c) => !retriable(c));
+      targets = live.filter(resendable);
+      skipped = live.filter((c) => !resendable(c));
     } else {
       targets = checked.filter((c) => !threadless(c));
       skipped = checked.filter(threadless);
@@ -2962,6 +3090,8 @@ export function mountComparePage(deps) {
     ctx.renderDebateBar();
     ctx.renderModeTabs();
     syncModeHeading();
+    ctx.renderRoundFooter();
+    ctx.syncSummaryCards();
     // Last: the tray reads the targets this pass just settled, so unticking the only column that
     // takes files repaints the note in the same frame that disables the button.
     renderAttachment();
@@ -3021,7 +3151,10 @@ export function mountComparePage(deps) {
     state.resumed = false;
     state.resuming = false;
     state.idleEnded = false;
-    state.sessionSaveHistory = null; // the toggle keeps the user's last choice; the next SEND fixes it again
+    state.sessionSaveBy = null; // the switch keeps the user's last choice; the next SEND fixes it again
+    ctx.resetCrossConsent(); // #1985: a cross consent is this conversation's only
+    // A bridged debate's map (#1976 R6) was for ITS conversation: the next one starts from the preference.
+    if (state.saveByOnce) { state.saveByOnce = false; state.saveTouched = false; seedSaveBy(); }
     state.question = '';
     state.pendingFollowup = '';
     state.roundTargets = [];
@@ -3030,6 +3163,10 @@ export function mountComparePage(deps) {
     state.roundInFlight = null;
     state.activeRound = null;
     state.firstRound = null;
+    state.footerRound = null;
+    state.footerShownRound = null;
+    state.autoSummaryTried = new Set();
+    state.autoSkipNote = null;
     state.roundStartedAt = null;
     state.sessionId = null;
     state.frozenDebate = false;
@@ -3170,6 +3307,30 @@ export function mountComparePage(deps) {
   summaryPop.appendChild(summaryCost);
   const summaryHistoryNote = el('p', 'cmp-summary-pop-note');
   summaryPop.appendChild(summaryHistoryNote);
+  // #1985 §3.4.5-1: 「시크릿인 {0}의 답이 {1} 대화 기록에 남아요」 — the popover is then the consent card (summary.js paintSummaryPop).
+  const summaryCross = el('p', 'cmp-summary-pop-note cmp-summary-cross');
+  summaryCross.setAttribute('role', 'status');
+  summaryCross.hidden = true;
+  summaryPop.appendChild(summaryCross);
+  // 「다음부터 묻지 않고 바로 정리」 (#1976 R4) — right under the history note it consents to (paintSummaryPop shows both or neither).
+  const summaryAutoLabel = el('label', 'cmp-check cmp-summary-auto');
+  const summaryAuto = el('input');
+  summaryAuto.type = 'checkbox';
+  summaryAuto.id = 'cmp-summary-auto';
+  summaryAutoLabel.appendChild(summaryAuto);
+  summaryAutoLabel.appendChild(el('span', null, t('summary_pop_auto')));
+  summaryAutoLabel.hidden = true;
+  summaryPop.appendChild(summaryAutoLabel);
+  // 「답이 끝나면 자동으로 정리」 (#1976 stage 4) — default off, saved on change; turning it on is consent too (summary.js setSummaryAutorun).
+  const summaryAutorunLabel = el('label', 'cmp-check cmp-summary-auto');
+  const summaryAutorun = el('input');
+  summaryAutorun.type = 'checkbox';
+  summaryAutorun.id = 'cmp-summary-autorun';
+  summaryAutorunLabel.appendChild(summaryAutorun);
+  summaryAutorunLabel.appendChild(el('span', null, t('summary_pop_autorun')));
+  summaryAutorunLabel.hidden = true;
+  summaryPop.appendChild(summaryAutorunLabel);
+  summaryAutorun.addEventListener('change', () => ctx.setSummaryAutorun(!!summaryAutorun.checked));
   const summaryActions = el('div', 'cmp-summary-pop-actions');
   const summarySendBtn = el('button', 'cmp-btn cmp-btn-sm cmp-btn-primary', t('summary_pop_send'));
   summarySendBtn.id = 'cmp-summary-send';
@@ -3177,20 +3338,30 @@ export function mountComparePage(deps) {
   const summaryCancelBtn = el('button', 'cmp-btn cmp-btn-sm', t('summary_pop_cancel'));
   summaryCancelBtn.id = 'cmp-summary-cancel';
   summaryCancelBtn.type = 'button';
+  // 「시크릿 답 빼고 보내기」 (#1985 §3.4.4): offered only while the popover asks and the rest still makes a summary.
+  const summaryExcludeBtn = el('button', 'cmp-btn cmp-btn-sm cmp-consent-exclude', t('cross_consent_exclude'));
+  summaryExcludeBtn.id = 'cmp-summary-exclude';
+  summaryExcludeBtn.type = 'button';
+  summaryExcludeBtn.hidden = true;
   summaryActions.appendChild(summarySendBtn);
+  summaryActions.appendChild(summaryExcludeBtn);
   summaryActions.appendChild(summaryCancelBtn);
   summaryPop.appendChild(summaryActions);
   root.appendChild(summaryPop);
-  Object.assign(ctx, { summaryPop, summaryDesc, summaryJudgeLabel, summaryJudge, summaryCost, summaryHistoryNote, summaryActions, summarySendBtn, summaryCancelBtn });
-  summaryBtn.addEventListener('click', () => { if (summaryPop.hidden) openSummaryPop(); else closeSummaryPop(); });
+  Object.assign(ctx, { summaryPop, summaryDesc, summaryJudgeLabel, summaryJudge, summaryCost, summaryHistoryNote, summaryCross, summaryExcludeBtn, summaryAutoLabel, summaryAuto, summaryAutorunLabel, summaryAutorun, summaryActions, summarySendBtn, summaryCancelBtn });
+  ctx.loadSummaryConsent();
+  // The same popover opens from the round footer too (#1976 R9) — this button toggles only its own opening.
+  summaryBtn.addEventListener('click', () => { if (!summaryPop.hidden && ctx.summaryOpener() === summaryBtn) closeSummaryPop(); else openSummaryPop(summaryBtn); });
   summaryJudge.addEventListener('change', () => { state.judgeChoice = summaryJudge.value || null; paintSummaryPop(); });
-  summarySendBtn.addEventListener('click', startSummary);
-  summaryCancelBtn.addEventListener('click', closeSummaryPop);
+  summarySendBtn.addEventListener('click', () => ctx.sendFromPop(false));
+  summaryExcludeBtn.addEventListener('click', () => ctx.sendFromPop(true));
+  summaryCancelBtn.addEventListener('click', () => ctx.cancelFromPop());
   if (typeof doc.addEventListener === 'function') {
     doc.addEventListener('keydown', (e) => { if (e && e.key === 'Escape' && !summaryPop.hidden) closeSummaryPop(); });
     doc.addEventListener('click', (e) => {
       if (summaryPop.hidden || !e || !e.target) return;
-      const inside = (node) => { for (let n = node; n; n = n.parentNode) if (n === summaryPop || n === summaryBtn) return true; return false; };
+      const opener = ctx.summaryOpener();
+      const inside = (node) => { for (let n = node; n; n = n.parentNode) if (n === summaryPop || n === summaryBtn || n === opener) return true; return false; };
       if (!inside(e.target)) closeSummaryPop();
     });
   }
@@ -3287,7 +3458,9 @@ export function mountComparePage(deps) {
     // The stored preference seeds the toggle until the user touches it on this page.
     // Never while a SEND is in flight or a session exists: the value on the wire is fixed, and a
     // late answer must not flip the toggle out from under it (Codex wire 1R #1).
-    if (!state.saveTouched && !state.sessionStarted && !state.sending) state.saveHistory = state.status.saveHistory === true;
+    // #1985: the map when the SW answers one (an old SW: its boolean for every provider). All or
+    // nothing — a touched page is never re-seeded provider by provider (plan §4-6).
+    if (!state.saveTouched && !state.sessionStarted && !state.sending) seedSaveBy();
     renderColumns();
     // C3: only a read STARTED after the column's gate-code error speaks for it (Codex batch-1 #2):
     // sendable again → the retry comes back; still gated → cleared is revoked (a later negative
@@ -3406,17 +3579,29 @@ export function mountComparePage(deps) {
     // choice, so it wins and the link goes — visibly, rather than as a refusal three steps later.
     // A SHARE link is not held against incognito (#1784 U4): it appends to no conversation in the
     // user's history, so the SW does not refuse it and the toggle leaves it alone.
+    // #1985: the switch sets EVERY provider (mixed / all kept → all incognito, all incognito → all kept).
+    setSaveBy(uniformSaveBy(!incognitoInput.checked));
+    track('incognito_toggle', { on: !!incognitoInput.checked, scope: 'all' });
+  });
+  /**
+   * The user's new choice for the next conversation (switch or per-service popover). A held vendor
+   * link whose provider becomes incognito goes — the SW would refuse that round.
+   */
+  function setSaveBy(next) {
+    const linkProvider = state.link ? state.link.provider : state.linkReading ? state.linkReadingProvider : state.linkOffer ? state.linkOffer.provider : null;
     const shareLink = (state.link && state.link.kind === 'share') || (state.linkOffer && state.linkOffer.kind === 'share') || (state.linkReading && state.linkReadingKind === 'share');
-    if (incognitoInput.checked && !shareLink && (state.link || state.linkReading || state.linkOffer)) {
+    if (!shareLink && linkProvider && !keptFor(next, linkProvider) && (state.link || state.linkReading || state.linkOffer)) {
       state.linkHistoryForced = false;   // they are choosing incognito NOW; nothing to restore
       state.linkPrevSave = null;
       clearLink();
     }
-    state.saveHistory = !incognitoInput.checked;
+    state.saveBy = normalizeSaveBy(next, false);
     state.saveTouched = true;
+    if (state.linkPrevSave) state.linkPrevSave.touched = true; // the link's restore must not un-touch a choice made since
+    state.saveByOnce = false; // the user's own choice now — a bridged map no longer stands in for it
     syncSaveHistory();
-    track('incognito_toggle', { on: !!incognitoInput.checked });
-  });
+  }
+  ctx.setSaveBy = setSaveBy;
   /** First send, from the button or Enter in the question card. */
   function sendInitial() {
     noteActivity();
@@ -3489,15 +3674,16 @@ export function mountComparePage(deps) {
       // 「토론」 tab: the orchestrator composes the opening and sends it (debate.js start). The opening
       // carries the tray (#1961), so it waits on the same tray gates as the cross-check's SEND.
       if (!targets.length || !attachableTargets(ctx.debateOpeningTargets()).length || attachBusy() || ctx.debateStartProblem() || state.link || state.linkReading) return;
-      state.sessionSaveHistory = !!state.saveHistory;
-      if (!ctx.debateStart(text)) state.sessionSaveHistory = null;
+      state.sessionSaveBy = state.saveBy;
+      if (!ctx.debateStart(text)) state.sessionSaveBy = null;
       return;
     }
     if (!attachableTargets(targets).length || attachBusy()) return;
     state.question = text;
-    state.sessionSaveHistory = !!state.saveHistory; // fixed for the session (FOLLOWUP carries no field)
+    state.sessionSaveBy = state.saveBy; // fixed for the session (FOLLOWUP carries no field); a frozen SaveBy
     beginSend(text, targets, 'SEND');
   }
+  ctx.sendInitial = sendInitial; // the consent card's 「동의하고 시작」 starts again (consent.js / debate.js)
   sendBtn.addEventListener('click', sendInitial);
   bindComposer(qInput, sendInitial, updateControls, win);
   qInput.addEventListener('keydown', noteActivity);
@@ -3569,7 +3755,8 @@ export function mountComparePage(deps) {
   track('open', { src: src || '', framed: !!embedHost, lang, has_q: !!q });
   readFeedbackAccount();
   // The stored layout must be known before the first status builds the columns.
-  Promise.all([readLayout(), ctx.readDebatePrefs()]).then(() => refreshStatus());
+  // A debate tab opened by 「🗣 토론 붙이기」 (#1976 stage 3) takes its one-shot handoff before the columns are built.
+  Promise.all([readLayout(), ctx.readDebatePrefs()]).then(() => ctx.takeDebateHandoff()).then(() => refreshStatus(), () => refreshStatus());
 
   // Exposed for the flow guard only.
   return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession, fitEntry, setColumnFocus };

@@ -6,6 +6,29 @@
 import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK, FEEDBACK_CONTEXT_FIELD, FEEDBACK_CONTEXT_MAX, FEEDBACK_MODEL_UNKNOWN, FEEDBACK_COLUMN_RE, FEEDBACK_UA_RE, FEEDBACK_VERSION_RE, MODEL_ID_RE } from './constants.js';
 
 /**
+ * The analytics id of an example prompt (the empty-state chips): FNV-1a 32-bit of its text as 8
+ * hex digits — stable while the text is, and only OUR text goes in (a chip's `q`), never what the
+ * user typed. `node scripts/compare-examples-ids.mjs` maps the ids back to cdn/compare-examples.json.
+ */
+export function exampleCode(q) {
+  let h = 0x811c9dc5;
+  for (const ch of String(q)) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/**
+ * The clicked example's id when `text` is that example sent as it was (trimmed) from the tab it was
+ * offered on (`kind`: 'compare' | 'debate'), else null — an edited or a typed question, or a
+ * cross-check chip started as a debate, reports no id. `clicked` = state.exampleClick ({q, code, kind} | null).
+ */
+export function exampleSentCode(clicked, text, kind) {
+  return clicked && clicked.kind === kind && typeof clicked.q === 'string' && String(text || '').trim() === clicked.q.trim() ? clicked.code : null;
+}
+
+/**
  * Quoted model text is EVIDENCE, not instructions (Codex C5 2R #6): a line that could pass for a
  * fence or a heading (starts with `<<<` or `#`) is set off by one leading space — it still reads,
  * it no longer parses as structure. Used by 「요약·비교」 (summary.js) and the debate prompts (debate-core.js).

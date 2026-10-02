@@ -28,6 +28,7 @@ import {
 } from './constants.js';
 import { sendMessage } from './helpers.js';
 import { bytesToBase64 } from './attachments.js';
+import { foldSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
 
 /** Server / SW codes the dialog has its own sentence for; anything else reads share_err_generic. */
 /** On the page root while it may share: the per-bubble buttons show (compare.css). */
@@ -70,6 +71,9 @@ export function installShare(ctx) {
   const shareOn = () => !!(state.status && state.status.shareOn === true);
   const storage = () => ctx.historyStorage || null;
   const oneClick = SHARE_ONE_CLICK && !(ctx.win && ctx.win.__ctShareClassic === true);
+  // #1985 decision 3: a conversation with ANY incognito service is still shared (the user's own
+  // upload), and the share surfaces say so in one line — never a block.
+  const incognitoShared = () => !!state.sessionSaveBy && foldSaveBy(state.sessionSaveBy) !== SAVE_MODE_KEPT;
   state.shares = {}; // SHARE_MAP_KEY as last read: sessionId → {id, title, updatedAt, kind}
 
   // ── the local map ──
@@ -398,7 +402,7 @@ export function installShare(ctx) {
     for (const r of Object.values(dlg.vis)) r.disabled = !!existing;
     dlg.passwordInput.hidden = !priv || !!existing;
     dlg.authorSet.hidden = priv;
-    dlg.warn.textContent = t(priv ? 'share_warn_private' : 'share_warn');
+    dlg.warn.textContent = t(priv ? 'share_warn_private' : 'share_warn') + (incognitoShared() ? ` ${t('share_incognito_note')}` : '');
   }
   function setError(code) {
     dlg.error.textContent = code ? t(SHARE_ERR_CODES.includes(code) ? `share_err_${code}` : 'share_err_generic') : '';
@@ -556,7 +560,7 @@ export function installShare(ctx) {
       // An answer is drawn with the page's own answer typography (lists, code, tables).
       const body = el('div', markdown ? 'cmp-share-msg-body cmp-turn-assistant' : 'cmp-share-msg-body');
       if (markdown) {
-        try { body.appendChild(renderAnswer(text, doc, { cut: state !== 'ok' }).fragment); } catch { body.textContent = text; }
+        try { body.appendChild(renderAnswer(text, doc, { cut: state !== 'ok', directiveLabels: { writing: t('directive_writing') } }).fragment); } catch { body.textContent = text; }
       } else body.textContent = text;
       b.appendChild(body);
       if (state === 'partial' || state === 'error') b.appendChild(el('p', 'cmp-share-note', t(state === 'error' ? 'share_state_error' : 'share_state_partial')));
@@ -850,6 +854,9 @@ export function installShare(ctx) {
     node.appendChild(head);
     const sub = el('p', 'cmp-sharepop-sub');
     node.appendChild(sub);
+    const incog = el('p', 'cmp-sharepop-incog', t('share_incognito_note'));
+    incog.hidden = true;
+    node.appendChild(incog); // from the click on (Codex stage 3 1R 후속): said while the link is being made, not after
 
     const linkRow = el('div', 'cmp-sharepop-link');
     const url = el('input', 'cmp-sharepop-url');
@@ -994,7 +1001,7 @@ export function installShare(ctx) {
     ctx.root.appendChild(node);
     return {
       node, mark, status, close, sub, linkRow, url, copyBtn, openSlot, pw, pwAdd, pwOn, pwChange, pwRemove, pwForm, pwInput, pwSave,
-      author, radios, who, error, foot, scope, actions, deleteBtn, mineBtn, confirm, confirmYes,
+      author, radios, who, error, foot, scope, incog, actions, deleteBtn, mineBtn, confirm, confirmYes,
       phase: 'working', statusKey: '', subKey: '', askedAuthor: null, share: null, sessionId: null, snapshot: null, settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false, pwEditing: false, confirming: false,
     };
   }
@@ -1038,6 +1045,7 @@ export function installShare(ctx) {
     pop.who.hidden = !whoText;
     pop.foot.hidden = !href;
     pop.scope.textContent = t(priv ? 'share_scope_private' : 'share_scope_public');
+    pop.incog.hidden = !incognitoShared();
     pop.actions.hidden = pop.confirming;
     pop.confirm.hidden = !pop.confirming;
     // Nothing is pressed twice while a write runs; the inputs of that write are already taken.

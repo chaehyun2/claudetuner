@@ -42,6 +42,12 @@
 //   3. Claude-family `<cite index="38-2">…</cite>` tags go, their inner text stays (preClean).
 //   3b. Gemini's inline citation tokens `[cite: 1]` / `[cite: 1, 3]` / `[cite_start]` go (#1747) —
 //      an inline rule (geminiCiteRule), so a code span or a fence holding one keeps it verbatim.
+//   3c. Container directives `:::name[label]{attrs}` … `:::` — the generic-directive syntax of
+//      remark-directive / Docusaurus / VitePress / pandoc fenced divs (a convention, not CommonMark
+//      or GFM). ChatGPT writes its drafted messages as `:::writing{variant="chat_message" id="…"}`
+//      (2026-10-02) and chatgpt.com draws a 「글쓰기」 card; ANY name renders as a card here
+//      (directiveRule), so the next name a provider invents is a card too, not fence text. The
+//      caller labels the names it knows (opts.directiveLabels); otherwise the `[label]`, if any.
 // A typed `<br>` / `<BR/>` / `<br />` is rendered as a real <br> element: GFM cells cannot hold a
 // newline, so Gemini/ChatGPT write `<br>` inside them (2026-09-18). The RAW tag is swapped for a
 // private-use mark before tokenizing (markBreaks) and the emitter maps the mark to
@@ -208,6 +214,85 @@ function geminiCiteRule(state) {
   const m = GEMINI_CITE_RE.exec(state.src);
   if (!m || pos + m[0].length > state.posMax) return false;
   state.pos = pos + m[0].length;
+  return true;
+}
+
+// Quirk 3c: a container directive. The opener is ≥ 3 colons, a name, an optional `[label]` and an
+// optional `{attributes}` (ignored); the closer is a line of at least as many colons, so an outer
+// `::::` card is not closed by an inner `:::` one.
+const DIRECTIVE_OPEN_RE = /^(:{3,})([A-Za-z][\w-]{0,40})(?:\[([^\]\n]{0,200})\])?(?:\{[^}\n]{0,500}\})?[ \t]*$/;
+const DIRECTIVE_CLOSE_RE = /^(:{3,})[ \t]*$/;
+// No streaming tail cut (unlike FollowUp): the renderer cannot tell a streaming answer from a finished
+// one, and cutting a last `::` / `:::name` line would delete it from a FINISHED answer (Codex 1R #1).
+// A half-typed opener shows as text for the frames until its line completes.
+const CODE_FENCE_RE = /^(`{3,}|~{3,})/;
+// markdown-it stops tokenizing past its nesting cap (100) and drops the rest; a card this deep is not
+// a card (Codex 1R #3 — `:::a` ×100 lost the text after it).
+export const MAX_DIRECTIVE_DEPTH = 8;
+
+/**
+ * markdown-it block rule for a container directive (quirk 3c): `directive_open`/`directive_close`
+ * around the card's own blocks, parsed like any other markdown. The card ends at the first closer, or
+ * at the end of the answer while it streams (so it is a card from its first line), or at a dedent out
+ * of the list it sits in. The closer is found by a line scan before the body is parsed; the scan
+ * steps over ``` / ~~~ code blocks, so a `:::` line inside one is code (Codex 1R #2). Deeper than
+ * MAX_DIRECTIVE_DEPTH the opener is ordinary text.
+ */
+function directiveRule(state, startLine, endLine, silent) {
+  if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+  const start = state.bMarks[startLine] + state.tShift[startLine];
+  if (state.src.charCodeAt(start) !== 0x3A /* : */) return false;
+  const m = DIRECTIVE_OPEN_RE.exec(state.src.slice(start, state.eMarks[startLine]));
+  if (!m) return false;
+  const depth = state.env.directiveDepth || 0;
+  if (depth >= MAX_DIRECTIVE_DEPTH) return false;
+  if (silent) return true;
+  let next = startLine + 1;
+  let closed = false;
+  let fence = null;
+  for (; next < endLine; next++) {
+    const s = state.bMarks[next] + state.tShift[next];
+    const e = state.eMarks[next];
+    if (s < e && state.sCount[next] < state.blkIndent) break;
+    if (state.sCount[next] - state.blkIndent >= 4) continue;
+    const line = state.src.slice(s, e);
+    let f = CODE_FENCE_RE.exec(line);
+    // CommonMark: a backtick fence's info string has no backtick — else the line is not a fence (Codex 2R #1).
+    if (f && !fence && f[1][0] === '`' && line.slice(f[0].length).includes('`')) f = null;
+    if (fence) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.slice(f[0].length).trim()) fence = null;
+      continue;
+    }
+    if (f) { fence = f[1]; continue; }
+    const c = DIRECTIVE_CLOSE_RE.exec(line);
+    if (c && c[1].length >= m[1].length) { closed = true; break; }
+  }
+  // An opener with nothing but blank lines after it stays text: a finished answer that ends in
+  // `:::name` keeps that line, and a streaming one shows it until its body starts (Codex 1R #1).
+  if (!closed) {
+    let body = false;
+    for (let k = startLine + 1; k < next && !body; k++) body = state.bMarks[k] + state.tShift[k] < state.eMarks[k];
+    if (!body) return false; // only blank lines after it (Codex 2R #2)
+  }
+  const oldParent = state.parentType;
+  const oldLineMax = state.lineMax;
+  state.parentType = 'directive';
+  state.lineMax = next;
+  const open = state.push('directive_open', 'div', 1);
+  open.block = true;
+  open.map = [startLine, next];
+  open.info = m[2].toLowerCase();
+  open.meta = { label: (m[3] || '').trim() };
+  state.env.directiveDepth = depth + 1;
+  try {
+    state.md.block.tokenize(state, startLine + 1, next);
+  } finally {
+    state.env.directiveDepth = depth;
+  }
+  state.push('directive_close', 'div', -1).block = true;
+  state.parentType = oldParent;
+  state.lineMax = oldLineMax;
+  state.line = next + (closed ? 1 : 0);
   return true;
 }
 
@@ -446,6 +531,8 @@ function texRule(state, silent) {
 md.inline.ruler.before('escape', 'tex', texRule);
 md.inline.ruler.before('escape', 'followup', followUpRule);
 md.inline.ruler.before('escape', 'gemini_cite', geminiCiteRule);
+// It may interrupt a paragraph: the model writes the opener right under its intro line.
+md.block.ruler.before('fence', 'directive', directiveRule, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
 
 // ── CJK-friendly emphasis (#1577) ────────────────────────────────────────────────────────────
 // CommonMark's closing `**` must be RIGHT-FLANKING: not after whitespace, and — when it follows
@@ -595,7 +682,7 @@ function emitInline(children, parent, d) {
 }
 
 /** Block tokens → nodes under `root`. Tight-list paragraphs (`hidden`) add no element. */
-function emitBlocks(tokens, root, d) {
+function emitBlocks(tokens, root, d, opts = {}) {
   const stack = [root];
   const top = () => stack[stack.length - 1];
   for (const t of tokens) {
@@ -608,6 +695,27 @@ function emitBlocks(tokens, root, d) {
       case 'inline': emitInline(t.children || [], top(), d); break;
       case 'fence': case 'code_block': top().appendChild(codeBlock(t, d)); break;
       case 'hr': top().appendChild(d.createElement('hr')); break;
+      case 'directive_open': {
+        // The card (quirk 3c): a label row — the caller's word for a name it knows (md-render has no
+        // i18n), else the directive's own `[label]` — then the body. The name is [\w-] only.
+        const card = d.createElement('div');
+        card.className = 'md-directive';
+        card.setAttribute('data-name', t.info);
+        const labels = opts.directiveLabels || {};
+        const label = Object.prototype.hasOwnProperty.call(labels, t.info) ? labels[t.info] : (t.meta && t.meta.label);
+        if (label) {
+          const head = d.createElement('div');
+          head.className = 'md-directive-head';
+          head.textContent = String(label);
+          card.appendChild(head);
+        }
+        const body = d.createElement('div');
+        body.className = 'md-directive-body';
+        card.appendChild(body);
+        top().appendChild(card);
+        stack.push(body);
+        break;
+      }
       case 'table_open': {
         // compare.css scrolls a wide table inside its column via this wrapper.
         const wrap = d.createElement('div');
@@ -666,7 +774,7 @@ export function renderAnswer(text, doc, opts = {}) {
     const edited = normalizeTables(src, tokens, opts);
     if (edited !== null) { env = { followUps: [] }; tokens = md.parse(edited, env); }
     const body = d.createDocumentFragment();
-    emitBlocks(tokens, body, d);
+    emitBlocks(tokens, body, d, opts);
     frag.appendChild(body);
     followUps = env.followUps;
   } catch {

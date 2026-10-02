@@ -208,6 +208,10 @@ button:disabled { cursor: not-allowed; }
 .cmp-example-chip-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0; }
 .cmp-example-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .cmp-example-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cmp-example-more { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 5px 10px; border: 1px dashed var(--border-strong); border-radius: 14px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12.5px; line-height: 1.4; cursor: pointer; transition: color .15s ease, border-color .15s ease; }
+.cmp-example-more:hover { color: var(--text-primary); border-color: var(--accent); }
+.cmp-example-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cmp-example-more-glyph { font-size: 13px; line-height: 1; }
 /* Suggested follow-ups under an answer (#1571): the example-chip look, left-aligned, inside the turn. */
 .cmp-followups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 2px; }
 .cmp-followups-label { width: 100%; font-size: 12px; color: var(--text-secondary); }
@@ -217,6 +221,26 @@ button:disabled { cursor: not-allowed; }
 .cmp-check input:disabled { cursor: not-allowed; }
 .cmp-check:has(input:disabled) { opacity: .6; cursor: not-allowed; }
 .cmp-check-incognito .cmp-incognito-glyph { margin-right: -2px; }
+/* 「시크릿 대화」 per service (#1985): the ▾ beside the switch and its popover (one switch per service). */
+.cmp-incog-more { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; min-width: 0; padding: 0; margin-left: -4px; }
+.cmp-incog-more-icon { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.cmp-incog-pop { position: fixed; z-index: 30; overflow-y: auto; width: min(320px, calc(100vw - 16px)); display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: 0 8px 24px rgba(17, 24, 39, .14); }
+.cmp-incog-pop[hidden] { display: none; }
+.cmp-incog-pop-title { font-weight: 650; font-size: 13.5px; color: var(--text-primary); }
+.cmp-incog-row { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; row-gap: 1px; color: var(--text-primary); }
+.cmp-incog-name { font-weight: 600; }
+.cmp-incog-tip { grid-column: 2; font-size: 11.5px; color: var(--text-secondary); }
+.cmp-incog-pop-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary); }
+/* The cross-service consent card's buttons (#1985 consent.js): in the notice slot, the round footer and the summary popover. */
+.cmp-consent-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.cmp-round-footer-consent { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; padding: 8px 10px; border: 1px dashed var(--border-incognito); border-radius: 8px; background: var(--bg-incognito); }
+.cmp-round-footer-consent[hidden] { display: none; }
+.cmp-round-footer-consent-text { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--text-primary); }
+.cmp-summary-cross { color: var(--text-primary); }
+/* A mixed session: the incognito services' columns carry the incognito surface on their head + a 🕶. */
+.cmp-col-incog { margin-left: 2px; }
+.cmp-col.is-incognito { border-style: dashed; border-color: var(--border-incognito); }
+.cmp-col.is-incognito .cmp-col-head { background: var(--bg-incognito); }
 .cmp-spacer { flex: 1; }
 /* ── incognito surface (item 6) ── */
 /* `html[data-incognito="1"]` (compare.js syncSaveHistory): both faces of the dock composer move onto
@@ -484,6 +508,45 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-summary-judge { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-secondary); }
 .cmp-summary-judge-select { flex: 1 1 auto; min-width: 0; }
 .cmp-summary-pop-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
+/* Opened from the round footer (#1976 R9): fixed by its button (summary.js placeSummaryPop sets left / top). */
+.cmp-summary-pop.is-anchored { position: fixed; right: auto; z-index: 30; max-height: calc(100vh - 16px); overflow-y: auto; }
+/* The round footer (#1976): the next step under a settled comparison round, right above the follow-up composer.
+   Wraps on a narrow page, 「차이점 정리」 first (it is first in the DOM). */
+.cmp-round-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; animation: cmp-fade-in .2s ease-out both; }
+.cmp-round-footer[hidden] { display: none; }
+.cmp-round-footer .cmp-btn { max-width: 100%; white-space: normal; text-align: left; min-height: 30px; height: auto; padding-top: 4px; padding-bottom: 4px; }
+.cmp-round-footer-summary:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.cmp-round-footer-summary:not(:disabled):hover { background: var(--accent-light); }
+.cmp-round-footer-summary[hidden] { display: none; }
+.cmp-round-footer-chip, .cmp-round-footer-bridge { border-radius: var(--radius-pill); font-weight: 500; }
+.cmp-round-footer-bridge[hidden] { display: none; }
+.cmp-round-footer-fact { border-radius: var(--radius-pill); font-weight: 500; border-style: dashed; }
+.cmp-round-footer-fact[hidden] { display: none; }
+.cmp-round-footer-note { font-size: 12px; color: var(--text-secondary); }
+.cmp-round-footer-note[hidden] { display: none; }
+/* 「다음부터 바로 정리」 (#1976 R4) in the summary popover. */
+.cmp-summary-auto { font-size: 12.5px; }
+.cmp-summary-auto[hidden] { display: none; }
+.cmp-round-footer-judge { color: var(--text-secondary); font-weight: 500; }
+.cmp-round-footer-judge[hidden] { display: none; }
+/* 「요약·비교」 result cards (#1976 stage 2, summary-card.js): full width under the columns, the newest open. */
+.cmp-summary-cards { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.cmp-summary-cards[hidden] { display: none; }
+.cmp-summary-card { border: 1px solid var(--accent); border-radius: var(--radius-card); background: var(--bg-card); overflow: hidden; }
+.cmp-summary-card[hidden] { display: none; }
+.cmp-summary-card.is-summary-target { animation: cmp-summary-target 1.8s ease-out 1; }
+.cmp-summary-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.cmp-summary-card.is-folded .cmp-summary-card-head { border-bottom: 0; }
+.cmp-summary-card-judge { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+.cmp-summary-card-open { margin-left: auto; display: inline-flex; }
+.cmp-summary-card-open:empty { display: none; }
+.cmp-summary-card-toggle { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.cmp-summary-card-open:empty + .cmp-summary-card-toggle { margin-left: auto; }
+.cmp-summary-card-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cmp-summary-card-body { max-height: 45vh; overflow-y: auto; padding: 8px 14px 10px; }
+.cmp-summary-card-body[hidden] { display: none; }
+/* The card is already full width: the column's 「넓게 보기」 has nothing to widen here; its head carries the 「열기 ↗」 (one per card). */
+.cmp-summary-card .cmp-summary-widen, .cmp-summary-card-body .cmp-turn-open { display: none; }
 .cmp-turn-summary-req { display: block; }
 .cmp-turn-summary-req > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
 .cmp-turn-summary-req > summary:hover { color: var(--text-primary); }
@@ -526,6 +589,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-assistant pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; margin: 0 0 10px; font-size: 12.5px; line-height: 1.5; }
 .cmp-turn-assistant code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; background: var(--code-bg); border-radius: 4px; padding: 1px 5px; }
 .cmp-turn-assistant pre code { background: none; padding: 0; font-size: inherit; }
+.cmp-turn-assistant .md-directive { border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin: 0 0 10px; }
+.cmp-turn-assistant .md-directive-head { font-size: 12px; color: var(--text-secondary); margin: 0 0 6px; }
+.cmp-turn-assistant .md-directive-body > :last-child { margin-bottom: 0; }
 .cmp-turn-assistant blockquote { border-left: 3px solid var(--border-strong); padding: 2px 0 2px 12px; color: var(--text-secondary); margin: 0 0 10px; }
 .cmp-turn-assistant hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 .cmp-turn-assistant del { color: var(--text-secondary); }
@@ -568,7 +634,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    image itself (a history entry is byte-capped and shrinks by evicting rounds). Its own line under
    the question text so a long name cannot push the words around. */
 .cmp-turn-attach { display: flex; align-items: center; gap: 5px; margin-top: 6px; font-size: 11.5px; color: var(--text-secondary); }
-.cmp-turn-attach-glyph { flex: 0 0 auto; }
+.cmp-turn-attach-glyph { flex: 0 0 auto; display: inline-flex; align-items: center; opacity: .8; }
 .cmp-turn-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-turn-attach-size { flex: 0 0 auto; opacity: .8; }
 /* The images themselves (2026-09-26): thumbnails on the turn, a viewer over the page. */
@@ -640,7 +706,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-attach-note.is-blocking { color: var(--danger); }
 .cmp-attach-err { margin: 0; font-size: 11.5px; color: var(--danger); }
 /* Square, so the row reads as [textarea][📎][send] rather than three words. */
-.cmp-attach-btn { width: 36px; padding: 0; font-size: 15px; flex: 0 0 auto; }
+.cmp-attach-btn { width: 36px; padding: 0; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+.cmp-attach-btn:hover:not(:disabled):not(.is-on) { color: var(--text-primary); }
 .cmp-attach-btn.is-on { border-color: var(--accent); color: var(--accent); }
 /* A file is over the dock: the whole composer area is the drop target, so it is the whole area that lights up. */
 .cmp-dock.is-dropping { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: var(--radius-ctl); }
@@ -726,6 +793,12 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* One 11.5px line (two spans) — a footnote that costs the columns ~24px, not two paragraphs. */
 .cmp-footer { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; padding: 0 4px 8px; flex-shrink: 0; }
 .cmp-footer-sep { margin: 0 6px; }
+/* Right end of the footer line: a standing CWS review link, both tabs (review-nudge.js footerReviewLink).
+   Wraps under the notices on a narrow window instead of squeezing them. */
+.cmp-footer { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 12px; }
+.cmp-footer > p { flex: 1 1 auto; min-width: 0; }
+.cmp-footer-review { margin-left: auto; max-width: 100%; color: var(--accent); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.cmp-footer-review:hover { text-decoration: underline; }
 /* CWS review banner (#1966, ui/compare/review-nudge.js): a slim strip above the footer line — in the
    flow under the docked composer, so it never covers the composer or a column; the sentence is the link. */
 .cmp-review { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 6px 6px 6px 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius-ctl); background: var(--bg-card); font-size: 13px; line-height: 1.45; flex-shrink: 0; animation: cmp-fade-in .2s ease-out both; }
@@ -1087,7 +1160,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
    row whose other children are full width, so the answer still comes first and the actions under it. */
 .cmp-turn-block-assistant:not(.cmp-debate-msg) { flex-flow: row wrap; align-items: center; column-gap: 2px; }
 .cmp-turn-block-assistant:not(.cmp-debate-msg) > * { flex: 0 0 100%; }
-.cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-copy, .cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-turn-share { flex: 0 0 auto; }
+.cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-copy, .cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-turn-share, .cmp-turn-block-assistant:not(.cmp-debate-msg) > .cmp-turn-open { flex: 0 0 auto; }
 /* Debate bubbles: an icon beside the copy icon, in the copy cell (centred under a moderator's line). */
 .cmp-debate-msg > .cmp-turn-share { grid-area: copy; justify-self: start; margin-left: 24px; height: 22px; padding: 0 3px; font-size: 0; color: var(--debate-room-fg); }
 .cmp-debate-msg.is-moderator > .cmp-turn-share { justify-self: center; margin-left: 0; transform: translateX(24px); }
@@ -1095,6 +1168,11 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-turn-share > .cmp-link-icon { flex-shrink: 0; }
 .cmp-can-share .cmp-turn-share:not([hidden]) { display: inline-flex; }
 .cmp-turn-share:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* 「<서비스>에서 열기 ↗」 (#1978, open-in-provider.js): a link styled as the share button's sibling, on
+   the column's latest answer only. Never in a debate bubble (syncOpenButtons keeps it hidden there). */
+.cmp-turn-open { display: inline-flex; align-items: center; height: 26px; padding: 0 6px; border: 1px solid transparent; border-radius: 7px; color: var(--text-secondary); font-size: 11.5px; font-weight: 600; line-height: 1; white-space: nowrap; flex-shrink: 0; text-decoration: none; }
+.cmp-turn-open[hidden] { display: none; }
+.cmp-turn-open:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 /* ── one-click share popover (#1784, share.js SHARE_ONE_CLICK): fixed by its 「공유」 button, placed
    and sized by placePop (clamped to the window with a 16px gutter) ── */
@@ -1147,6 +1225,9 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-sharepop-error:empty { display: none; }
 .cmp-sharepop-foot { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--border); }
 .cmp-sharepop-scope { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
+/* #1985 decision 3: 「시크릿 대화의 답도 공유 링크에 포함돼요」 — shown from the click on, while incognito was in the session. */
+.cmp-sharepop-incog { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
+.cmp-sharepop-incog[hidden] { display: none; }
 .cmp-sharepop-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cmp-sharepop-textbtn { padding: 3px 0; border: 0; background: transparent; font-size: 12.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
 .cmp-sharepop-textbtn:hover:not(:disabled) { text-decoration: underline; }

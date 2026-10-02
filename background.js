@@ -40,6 +40,7 @@ import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm
 import { isChatGPTLoggedIn } from './bg/api-chatgpt.js';
 import { isGeminiLoggedIn } from './bg/api-gemini.js';
 import { createCompareController, COMPARE_PORT_NAME } from './bg/compare.js';
+import { createDebateNotifier } from './bg/debate-notify.js';
 import { createEntitlementCache } from './bg/entitlement-cache.js';
 import { createClient as createAiWebClient, listModels as listAiWebModels, drainPendingHides } from './vendor-ai/index.js';
 // The whole module too, for an export an older vendored package does not have (a named import of a missing
@@ -1454,10 +1455,15 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === COMPARE_PORT_NAME) compareController.onConnect(port);
 });
 
+// #1971: the debate's notifications — a hidden compare tab asks, this names its tab and focuses it on a click.
+const debateNotifier = createDebateNotifier({ chrome, createCountedNotification, logNotification, bt, sendGAEvent });
+chrome.tabs.onRemoved.addListener((tabId) => { debateNotifier.clearTab(tabId); });
+
 // === Message Handler (manual collection request from popup) ===
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // COMPARE_FLAG / COMPARE_STATUS / OPEN_COMPARE — answered asynchronously by the controller.
   if (compareController.handleMessage(message, _sender, sendResponse)) return true;
+  if (debateNotifier.handleMessage(message, _sender, sendResponse)) return true;
   // Ad measurement (design §5.3/§5.4): content scripts detect viewability/click and
   // send here; the SW is the single owner that increments + flushes. Fire-and-forget.
   if (message.type === 'ad_metric') { incrementAdCounter(message); return false; }
@@ -2026,6 +2032,7 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
   // gating the count on the one id this handler acts upon would report a 0% CTR for every other
   // category — the wrong number is worse than none, because it reads as "nobody engages".
   bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
+  if (debateNotifier.handleClick(notifId)) return; // a debate card: its tab comes forward (#1971)
   if (!notifId.startsWith('promo-push-')) return;
   const promoId = notifId.replace('promo-push-', '');
   const { promoPushState = {} } = await chrome.storage.local.get({ promoPushState: {} });

@@ -7,6 +7,7 @@
 
 import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TURN, COPY_KIND_THREAD, MODEL_AUTO_VALUE, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, CODE_RATE_LIMITED, CODE_ABORTED, CODE_TIMEOUT, DEFAULT_SEND_BUDGET_MS, MS_PER_MINUTE, PROVIDER_RATE_LIMIT_KEY, CODE_NO_TAB, CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED, CODE_MODEL_UNAVAILABLE, CODE_IN_BAND_ERROR, CODE_ATTACHMENT_FAILED, GATE_CODES, PROVIDER_BUSY_CODES, SEND_VIA_COLUMN, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, ERROR_TITLE_MAX } from './constants.js';
 import { autoGrow } from './helpers.js';
+import { SAVE_PROVIDERS } from './save-mode.js';
 import { retryNeedsAttachment } from './attachments.js';
 import { imageIdsOf, docCountOf } from './image-store.js';
 import { renderAnswer } from '../md-render.js';
@@ -32,6 +33,9 @@ export function installColumnThread(ctx) {
   /** Scroll a column to its end (next frame, like a paint) and let the scroll event clear the scrolled-up mark. */
   function scrollColumnToEnd(col) {
     if (ctx.debateActive && ctx.debateActive()) { ctx.debateFollow(); return; } // the timeline scrolls, not the (hidden) column
+    // The column's newest turn is drawn in a 「요약·비교」 card (#1976): nothing new arrived in the column itself.
+    const last = col.turns[col.turns.length - 1];
+    if (last && last.card) return;
     raf(() => { col.body.scrollTop = col.body.scrollHeight; syncJumpButton(col); });
   }
   /**
@@ -41,6 +45,9 @@ export function installColumnThread(ctx) {
    * (#1712, 2026-09-26); an open per-column composer hides it too (it would cover the textarea).
    */
   function syncJumpButton(col) {
+    // Streaming into a 「요약·비교」 card (#1976): nothing new arrives in the column, so no pill (it could not jump anywhere).
+    const last = col.turns[col.turns.length - 1];
+    if (last && last.card) { col.jumpBtn.hidden = true; return; }
     const m = scrollMetrics(col.body);
     const away = !!m && m.overflow > FOLLOW_AT_BOTTOM_PX && m.fromEnd > FOLLOW_AT_BOTTOM_PX;
     col.jumpBtn.hidden = !(away && col.turns.length > 0 && col.status === 'streaming' && !col.askOpen);
@@ -51,6 +58,8 @@ export function installColumnThread(ctx) {
    */
   function maybeFollowStream(col, turn) {
     if (ctx.debateActive && ctx.debateActive()) { ctx.debateFollow(); return; }
+    // A summary drawn in a card (#1976) scrolls inside the card; the judge column's own view is left alone.
+    if (turn.card && ctx.followSummaryCard) { ctx.followSummaryCard(turn.card, turn); return; }
     if (col.userScrolledUp) { syncJumpButton(col); return; }
     // The pill was pressed during the stream: the reader asked for the tail — follow it to the end
     // until they scroll up again (an anchored column would otherwise stay put after the jump).
@@ -84,7 +93,7 @@ export function installColumnThread(ctx) {
     try {
       // A cut answer (stopped / errored / stalled) completes a dangling table header it ended on (#1714 ④).
       // A debate moderator's reply is drawn without its control line (debate.js displayText).
-      const rendered = renderAnswer(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text, doc, { cut: !!(turn.errorText || turn.stalled) });
+      const rendered = renderAnswer(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text, doc, { cut: !!(turn.errorText || turn.stalled), directiveLabels: { writing: t('directive_writing') } });
       turn.node.appendChild(rendered.fragment);
       followUps = rendered.followUps;
     } catch {
@@ -170,6 +179,10 @@ export function installColumnThread(ctx) {
   // latest"; `summary` = the structured request (judge, round, question, attachments) a summary
   // turn is REGENERATED from (retry, reload, display), the text itself is never the record;
   // `model` = the served model captured for THIS answer (an attachment is labelled with its own).
+  // Where a turn's DOM goes: a 「요약·비교」 card (#1976 summary-card.js), the debate timeline (debate.js turnHost), or the column.
+  function hostFor(col, turn) {
+    return (ctx.summaryCardHost && ctx.summaryCardHost(col, turn)) || (ctx.turnHost ? ctx.turnHost(col, turn) : col.body);
+  }
   function pushUserTurn(col, text, kind = null, extra = null) {
     const summary = kind === TURN_KIND_SUMMARY;
     // A debate prompt (#1769) is the page's composition, not the user's words: folded like a
@@ -192,7 +205,7 @@ export function installColumnThread(ctx) {
     if (!summary && !debate && Number.isFinite(turn.round)) root.appendChild(ctx.shareTurnButton(() => ({ round: turn.round })));
     turn.root = root;
     col.turns.push(turn);
-    (ctx.turnHost ? ctx.turnHost(col, turn) : col.body).appendChild(root);
+    hostFor(col, turn).appendChild(root);
   }
   /** The provenance fields of `extra` worth keeping on a turn record: a finite round, a summary structure, a model. */
   function turnExtra(extra) {
@@ -249,11 +262,15 @@ export function installColumnThread(ctx) {
     const shareBtn = ctx.shareTurnButton(() => ({ round: turn.round, col: col.id }));
     shareBtn.hidden = true;
     root.appendChild(shareBtn);
+    // 「<서비스>에서 열기 ↗」 (#1978) — shown by open-in-provider.js syncOpenButtons on the latest answer.
+    const openBtn = ctx.openButton(col);
+    root.appendChild(openBtn);
     turn.root = root;
     turn.copyBtn = copyBtn;
     turn.shareBtn = shareBtn;
+    turn.openBtn = openBtn;
     col.turns.push(turn);
-    (ctx.turnHost ? ctx.turnHost(col, turn) : col.body).appendChild(root);
+    hostFor(col, turn).appendChild(root);
     if (ctx.decorateDebateTurn) ctx.decorateDebateTurn(col, turn); // the speaker head, in a debate session only
     col.status = 'streaming';
     col.errorCode = null;
@@ -270,6 +287,8 @@ export function installColumnThread(ctx) {
     // Between SEND and CONSUME_OK the SW is acquiring tabs / running the clients' prepare() step,
     // which can take seconds — say so, rather than "waiting for an answer" that was not asked yet.
     ctx.setBadge(col, 'col_preparing', 'is-streaming');
+    // A send begins: a debate that was stopped is running again, so its heads go back to the front page.
+    ctx.syncOpenButtons();
     return turn;
   }
   function pushSkippedTurn(col) {
@@ -284,6 +303,7 @@ export function installColumnThread(ctx) {
     if (turn && turn.copyBtn) turn.copyBtn.hidden = !turn.text;
     if (turn) turn.settled = true; // its 「공유」 may show now (share.js syncTurnShareButtons)
     if (ctx.syncTurnShareButtons) ctx.syncTurnShareButtons();
+    ctx.syncOpenButtons();
     if (turn && turn.widenBtn) turn.widenBtn.hidden = !turn.text; // a summary verdict: 「넓게 보기」 once there is one
     ctx.syncCopyAll();
   }
@@ -503,16 +523,27 @@ export function installColumnThread(ctx) {
     // DIFFERENT question, and the server would charge for it (1.33.0 batch review). The column
     // says so instead of spending a compare on it.
     if (retryNeedsAttachment(ctx.roundHadImage(col, round))) { ctx.showRetryNeedsImage(col); return; }
+    // #1985: a retried summary re-sends its attachments (their services are the provenance — never an empty
+    // list for a summary with answers); a retried debate turn carries a delta we no longer know the speakers
+    // of, so every service counts. A pending pair asks in the notice slot first (agree → this retry again).
+    const provenance = kind === TURN_KIND_SUMMARY ? (summary && Array.isArray(summary.attachments) ? summary.attachments.map((a) => a.provider) : SAVE_PROVIDERS.slice())
+      : kind === TURN_KIND_DEBATE ? SAVE_PROVIDERS.slice() : null;
+    const pending = provenance ? ctx.crossPendingFor(provenance, [col.id]) : [];
+    if (pending.length) {
+      ctx.askCrossConsent({ pairs: pending, surface: 'retry', bodyKey: 'cross_consent_body', onAgree: () => retryColumn(provider), onCancel: () => {} });
+      return;
+    }
     if (kind === TURN_KIND_SUMMARY) state.summaryPending = col.id;
     // A retry REPEATS a round, it does not open one: its turns carry the round of the answer it
     // replaces, so the comparison round still counts this column (a fresh round would silently
     // drop a retried column from the summary — the point of the retry; Codex integration).
-    ctx.beginSend(text, [col.id], 'FOLLOWUP', [], kind, summary, round, true);
+    ctx.beginSend(text, [col.id], 'FOLLOWUP', [], kind, summary, round, true, null, null, provenance);
   }
 
   /** Back to a column that never took part: empty body, no turns, no badge (new chat). */
   function resetColumn(col) {
     clear(col.body);
+    if (ctx.dropSummaryCards) ctx.dropSummaryCards(col); // its summaries were drawn in cards (#1976)
     col.turns = [];
     col.qBubble = null; // went with the body (display only — never a turn)
     col.askInput.value = '';
@@ -539,6 +570,7 @@ export function installColumnThread(ctx) {
     col.askColBtn.hidden = true;
     renderColumnActions(col);
     ctx.setBadge(col, null, '');
+    ctx.syncOpenButtons(); // no continuation any more: the head goes back to the front page
   }
 
   function errorText(provider, code, reason, budgetMs, inBandCode, attachment) {

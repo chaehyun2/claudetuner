@@ -20,12 +20,12 @@
 //
 // Wire contract (see .omc/handoffs/phase3-contract.md — the SoT shared with the page; ux3 addendum
 // at its end):
-//   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, debateOn, shareOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
+//   runtime.sendMessage   COMPARE_FLAG → {on, cta, summary}   COMPARE_STATUS → {ok, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, betaReset, examples, loggedIn, providers{[p]: {permitted,
 //                         loggedIn, plan}}, quota, quotaError, models, modelsSource, modelsPending, selectedModels,
-//                         saveHistory}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
+//                         saveHistory, saveHistoryBy}   OPEN_COMPARE{src, q, placement} → {ok} (src-less for placement popup|options)   COMPARE_EVENT{name, params} → {ok}
 //                         COMPARE_RESET → {ok, quota} | {ok:false, code}
 //                         COMPARE_SHARE{op: create|update|delete|list|image|password, …} → {ok, …} | {ok:false, status, code} (compare page only — see shareRequest)
-//   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryOnce? (the boolean is this session's only — not stored as the preference), resume?, kind?, round?, src?, session?, attachments?} ·
+//   Port 'ctcmp-compare'  page→SW  SEND{text, columns[{id, provider, model}] | targets, mayOpenTab, models?, modelsPending?, saveHistory?, saveHistoryBy? ({[provider]: boolean}, #1985 — wins over the boolean, which then = every provider kept), saveHistoryOnce? (this session's only — not stored as the preference), saveHistoryPrefBy? (with once: the user's choice to store instead, #1985), resume?, kind?, round?, src?, session?, attachments?} ·
 //                         FOLLOWUP{text, targets, models?, modelsPending?, kind?, round?, src?, session?, attachments?} · ABORT
 //                         SW→page  CONSUME_OK · CONSUME_FAIL · MODEL · CHUNK · DONE{…, continuation?, stalled?, cutReason?, retraction?} · ERROR · ALL_DONE · DIAG · MODELS · ACTIVITY · IMAGE
 //   Output images (#1684, package v0.13.0): IMAGE{provider, col, mime, data, width, height, alt} or
@@ -202,6 +202,8 @@ import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_I
 import { PROVIDER_LABELS } from './constants.js';
 import { REVIEW_EVENTS, REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './review-nudge.js';
 import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
+import { pickProviderEntry } from '../ui/compare/usage-floor.js';
+import { COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY, isSaveBy, normalizeSaveBy, keptFor, legacySaveHistory, readIncognitoPref, incognitoPrefWrite, saveByFromMessage, uniformSaveBy } from '../ui/compare/save-mode.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
@@ -233,14 +235,18 @@ export const COMPARE_SITE_UTM = 'utm_source=extension&utm_medium=cmp_button&utm_
 // button under a chat message; `popup` / `options` = the extension's own surfaces (the popup's
 // feature row under the gauges, the options card link — 2026-09-22). Anything else from a content
 // script reads as `composer` — the allow-list keeps GA's content dimension enumerable.
-export const COMPARE_PLACEMENTS = Object.freeze(['composer', 'message', 'popup', 'options']);
+export const COMPARE_PLACEMENTS = Object.freeze(['composer', 'message', 'popup', 'popup_debate', 'options']);
 export const COMPARE_DEFAULT_PLACEMENT = 'composer';
 // Placements with no provider page behind them: an OPEN_COMPARE from these may omit `src`, and
 // then opens the bare shell — `utm_content=<placement>`, no `#src`, no `q` (there is no question
 // to carry). Every other placement still requires a provider `src`. GA's `src` param reads
 // COMPARE_SRC_NONE for these so the dimension stays enumerable (three providers + 'none') rather
 // than gaining a null/undefined bucket.
-export const COMPARE_SRCLESS_PLACEMENTS = Object.freeze(['popup', 'options']);
+export const COMPARE_SRCLESS_PLACEMENTS = Object.freeze(['popup', 'popup_debate', 'options']);
+// Src-less placements that open the debate tab (the popup's 「AI끼리 토론시키기」 banner, ui/compare-entry.js):
+// the shell's `/multiai/debate/` path, which also puts debate-less builds behind its update overlay.
+export const COMPARE_DEBATE_PLACEMENTS = Object.freeze(['popup_debate']);
+export const COMPARE_DEBATE_SITE_URL = `${COMPARE_SITE_URL}debate/`;
 export const COMPARE_SRC_NONE = 'none';
 export const PUBLISHED_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
 export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
@@ -320,7 +326,10 @@ export function migrateModelSeeds(map, done) {
 // still speaks `saveHistory` (= !incognito) — the page and the package never see this key. The
 // pre-ux3 key `compareSaveHistory` is ignored: dark launch, no migration (its default was the
 // opposite, so carrying it over would keep old installs on the old default silently).
-export const COMPARE_INCOGNITO_KEY = 'compareIncognito';
+// #1985: the preference is per SERVICE now — COMPARE_INCOGNITO_BY_KEY holds the map, and this
+// boolean is still written beside it (any incognito → true) for an old version on another device.
+// Both keys, their merge and their write live in ui/compare/save-mode.js (shared with the page).
+export { COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY };
 // Size caps on a SEND's `resume` map (ux3 item 6): a continuation is what the package handed out
 // (a handful of id strings), so anything larger is not one. Per provider: at most this many
 // keys, each a string of at most this many characters.
@@ -332,7 +341,7 @@ export const RESUME_MAX_VALUE_CHARS = 200;
 // one validator serves both.
 export const COMPARE_EVENT_NAMES = Object.freeze([
   'open', 'send', 'column_done', 'column_error', 'round_done', 'consume_fail', 'copy', 'stop', 'new_chat',
-  'model_change', 'target_change', 'provider_link_click', 'gate_shown', 'permission_result', 'session_lost',
+  'model_change', 'target_change', 'provider_link_click', 'open_in_provider', 'gate_shown', 'permission_result', 'session_lost',
   'incognito_toggle', 'quota_exhausted', 'jump_to_latest', 'history_open', 'history_load', 'history_delete', 'history_clear', 'consume',
   // SW-side, from openCompare: the in-page button was clicked (`src` + `placement`, nothing else).
   'button_click',
@@ -364,7 +373,11 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // 「토론」 (#1769): counts, kinds and flags only — never a topic, an alias or a message. Emitted
   // since 2026-09-26 but never listed here, so the SW dropped every one (found with plan §17 U1).
   'debate_settings', 'debate_start', 'debate_end', 'debate_pause', 'debate_resume', 'debate_pick', 'debate_user', 'debate_restore',
-  'debate_budget', 'debate_hidden_pause', 'debate_mod_fallback', 'debate_tone', 'debate_alias', 'debate_ask', 'debate_finish',
+  // #1971: `debate_hidden_pause` became `debate_away_pause` (a hidden tab goes on; nobody at the computer pauses);
+  // `debate_hard_stop{reason: cap|usage, sends, provider?}` = a floor no option lifts.
+  'debate_budget', 'debate_away_pause', 'debate_hard_stop', 'debate_mod_fallback', 'debate_tone', 'debate_alias', 'debate_ask', 'debate_finish',
+  // #1971 §4.1: a debate page Chrome reloaded after discarding its tab (`phase` it was in, no params beyond).
+  'debate_discarded',
   // #1917: the rating and counts only (`rating`, `reasons` = how many chips, `note` = 0/1) — the note itself goes to our server, never GA.
   'debate_feedback',
   // 「내 공유 링크」 opened from the history panel (manage mode, no params).
@@ -373,8 +386,23 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'share_open', 'share_create', 'share_update', 'share_delete', 'share_copy',
   // One-click share's popover: a password set / removed on an existing link (action + 0-1 flag, never the password).
   'share_password',
+  // Round footer (#1976): shown once per settled round (`answers_n`), a chip pressed (`chip` id + `targets_n`) — never the chip's words.
+  'round_footer_shown', 'chip_click',
+  // 「🗣 토론 붙이기」 (#1976 stage 3): the bridge pressed / the new debate tab took its handoff (`cols_n`, `incognito`) — never the topic.
+  'debate_bridge', 'debate_bridge_open',
+  // Stage 4: the 「자동으로 정리」 setting toggled (`on`), an automatic summary skipped because its judge was near its limit (`judge` provider id).
+  'summary_autorun', 'summary_auto_skip',
   // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
   'share_import',
+  // Empty-state example chips (2026-10-02): `kind` (compare | debate), `code` = exampleCode(q) (8 hex, our
+  // text's hash — never the text), `src` (pool | builtin), `tag`. `send` / `debate_start` carry the same
+  // `code` when that example went out unedited. Ids → questions: scripts/compare-examples-ids.mjs.
+  'example_click',
+  // 「↻ 다른 질문」 on the empty state: a new set was drawn (`kind` only).
+  'example_more',
+  // #1985: the cross-service consent card — `surface` (summary_pop | summary_auto | chip | debate | retry),
+  // `choice` (shown | agree | exclude | cancel), `pairs_n`. Never a service's words.
+  'cross_consent',
   // The CWS review banner (#1966): `source` (compare | debate) only. Sent WITHOUT the prefix — see below.
   ...REVIEW_EVENTS,
 ]);
@@ -450,7 +478,8 @@ export function wireModelId(v) {
 // Params: a FLAT object of at most this many string/number/boolean values, keys `[a-z_]{1,40}`,
 // strings cut at this many characters. Never a question, never an email — the page does not send
 // them and the SW would not know one from a label, so the caps are the whole defence here.
-export const COMPARE_EVENT_MAX_PARAMS = 20;
+// 25 = GA4's own per-event cap; debate_finish carries up to 21 with its server-only ids since #1971 §4.1 (20 dropped it whole).
+export const COMPARE_EVENT_MAX_PARAMS = 25;
 export const COMPARE_EVENT_MAX_STRING = 100;
 const COMPARE_EVENT_KEY_RE = /^[a-z_]{1,40}$/;
 // Bound on the one storage.sync read of that key. A read that hangs must not hang a send (Stop
@@ -484,6 +513,12 @@ export const COMPARE_DEBATE_FLAG_FIELD = 'compare_debate';
 // from the page only: deleting one and the 「내 공유 링크」 list always work (the server keeps them
 // open whatever its own kill switch says — a sharer must always be able to take a page down).
 export const COMPARE_SHARE_FLAG_FIELD = 'compare_share';
+// Sixth and seventh fields (#1976, plan compare-round-footer §7/R7) — same contract (need `compare`,
+// missing / non-boolean = false): the round footer under a settled comparison round as a whole
+// (COMPARE_STATUS.roundFooterOn), and its 「확인이 필요한 사실」 chip, which parses an AI's output
+// (COMPARE_STATUS.factChipOn) — each can be killed without a release.
+export const COMPARE_ROUND_FOOTER_FLAG_FIELD = 'compare_round_footer';
+export const COMPARE_FACT_CHIP_FLAG_FIELD = 'compare_fact_chip';
 // Share links (#1784 U3) — the wire of runtime message COMPARE_SHARE (see shareRequest). The limits
 // mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
 export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list', 'image', 'password']);
@@ -522,16 +557,22 @@ export const COMPARE_FLAG_FUTURE_SKEW_MS = 5 * 60 * 1000;
 // COMPARE_EXAMPLES_MAX items, each `q` a trimmed string of 1..COMPARE_EXAMPLES_Q_MAX chars, `tag`
 // `[a-z]{1,16}` else 'other'; a language with fewer than COMPARE_EXAMPLES_MIN valid items is
 // omitted; any fetch/parse failure or a wrong `v` = null — the page falls back to its built-in
-// chips. Answered in COMPARE_STATUS as `examples` ({ko?, en?} | null), fetched IN PARALLEL with
+// chips. The debate tab's topics ride the same document as `debate: {ko:[{q, tag}], en:[…]}`
+// (2026-10-02), validated by the same per-language rules; a bad or absent `debate` only drops the
+// debate pool. Answered in COMPARE_STATUS as `examples` ({ko?, en?, debate?: {ko?, en?}} | null), fetched IN PARALLEL with
 // the other status parts and capped by COMPARE_EXAMPLES_TIMEOUT_MS so a slow CDN never delays
 // status (the fetch keeps going and fills the cache for the next one). Never on the send path.
 export const COMPARE_EXAMPLES_URL = 'https://cdn.claudetuner.com/compare-examples.json';
 export const COMPARE_EXAMPLES_CACHE_KEY = 'ct_compare_examples';
 export const COMPARE_EXAMPLES_TTL_MS = 60 * 60 * 1000;
+// Stale-while-revalidate (2026-10-02): past the TTL the cached pool is still ANSWERED (and one
+// background refresh starts) — answering null there showed the built-in chips on the first open
+// after every expiry. Only a row older than this is a miss.
+export const COMPARE_EXAMPLES_MAX_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 export const COMPARE_EXAMPLES_TIMEOUT_MS = 3000;
 // Byte caps on what the two CDN fetches will DECODE (Codex examples 1R #1): the body is read
 // through a reader with a running counter and dropped past the cap — never `res.json()` on an
-// unbounded body. The live documents are ~5 KB (examples) and well under 1 KB (flags).
+// unbounded body. The live documents are ~25 KB (examples) and well under 1 KB (flags).
 export const COMPARE_EXAMPLES_MAX_BYTES = 64 * 1024;
 export const COMPARE_FLAG_MAX_BYTES = 4 * 1024;
 // Deadline on the flags fetch itself (the examples fetch uses COMPARE_EXAMPLES_TIMEOUT_MS): the
@@ -539,34 +580,48 @@ export const COMPARE_FLAG_MAX_BYTES = 4 * 1024;
 export const COMPARE_FLAG_TIMEOUT_MS = 5000;
 export const COMPARE_EXAMPLES_VERSION = 1;
 export const COMPARE_EXAMPLES_LANGS = Object.freeze(['ko', 'en']);
-export const COMPARE_EXAMPLES_MAX = 30;
+// Per language and per pool. Up to 1.49.3 the SW read only the first 30 (the document interleaves
+// tags so that prefix still mixes them).
+export const COMPARE_EXAMPLES_MAX = 120;
 export const COMPARE_EXAMPLES_MIN = 3;
 export const COMPARE_EXAMPLES_Q_MAX = 300;
 const COMPARE_EXAMPLES_TAG_RE = /^[a-z]{1,16}$/;
 
-/**
- * The validated `{ko?: [{q, tag}], en?: [{q, tag}]}` from an untrusted compare-examples body, or
- * null when it is not a v1 document or no language survives. Pure; never throws.
- */
-export function sanitizeCompareExamples(json) {
-  if (!json || typeof json !== 'object' || Array.isArray(json) || json.v !== COMPARE_EXAMPLES_VERSION) return null;
+/** `{ko?: [{q, tag}], en?: [{q, tag}]}` — each language of `pool` that keeps COMPARE_EXAMPLES_MIN valid items. */
+function sanitizeExampleLangs(pool) {
   const out = {};
+  if (!pool || typeof pool !== 'object' || Array.isArray(pool)) return out;
   for (const lang of COMPARE_EXAMPLES_LANGS) {
-    const list = json[lang];
+    const list = pool[lang];
     if (!Array.isArray(list)) continue;
     const items = [];
+    const seen = new Set(); // a repeated question counts once (else 「다른 질문」 could redraw the same set — Codex 2R #2)
     // Only the first COMPARE_EXAMPLES_MAX entries are even LOOKED at (Codex examples 1R #1): a
-    // 100k-item array costs the same as a 30-item one; invalid entries inside the window are
+    // 100k-item array costs the same as a short one; invalid entries inside the window are
     // dropped (not skipped over), so the answer is never more than the window's valid entries.
     for (const item of list.slice(0, COMPARE_EXAMPLES_MAX)) {
       if (!item || typeof item !== 'object') continue;
       const q = typeof item.q === 'string' ? item.q.trim() : '';
-      if (!q || q.length > COMPARE_EXAMPLES_Q_MAX) continue;
+      if (!q || q.length > COMPARE_EXAMPLES_Q_MAX || seen.has(q)) continue;
+      seen.add(q);
       const tag = typeof item.tag === 'string' && COMPARE_EXAMPLES_TAG_RE.test(item.tag) ? item.tag : 'other';
       items.push({ q, tag });
     }
     if (items.length >= COMPARE_EXAMPLES_MIN) out[lang] = items;
   }
+  return out;
+}
+
+/**
+ * The validated `{ko?, en?, debate?: {ko?, en?}}` (each language `[{q, tag}]`) from an untrusted
+ * compare-examples body, or null when it is not a v1 document or no language of either pool
+ * survives. Pure; never throws.
+ */
+export function sanitizeCompareExamples(json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json) || json.v !== COMPARE_EXAMPLES_VERSION) return null;
+  const out = sanitizeExampleLangs(json);
+  const debate = sanitizeExampleLangs(json.debate);
+  if (Object.keys(debate).length) out.debate = debate;
   return Object.keys(out).length ? out : null;
 }
 
@@ -2058,20 +2113,20 @@ export function createCompareController({
       // {on:true, at:<+1y>} row hid the strip button and 「요약·비교」 for good).
       // `cta` / `summary` are read as conjunctions with `on` (Codex batch-1 #5): a row written as
       // {on:false, summary:true} must not answer a gate the page itself does not have.
-      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.at === 'number') {
+      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.footer === 'boolean' && typeof cached.factChip === 'boolean' && typeof cached.at === 'number') {
         const age = now() - cached.at;
-        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true };
+        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true, footer: cached.on && cached.footer === true, factChip: cached.on && cached.factChip === true };
       }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
   async function writeFlagCache(flags) {
-    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, at: now() } }); } catch { /* best effort */ }
+    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, footer: flags.footer === true, factChip: flags.factChip === true, at: now() } }); } catch { /* best effort */ }
   }
   // FAIL-SAFE like fetchFolderAvailable: any fetch/parse error, non-2xx or a missing/invalid
   // `compare` field reads as dark. A network error does not poison the cache. Neither `cta` nor
   // `summary` can be true while `on` is false (both are buttons that need the page).
-  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false });
+  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false, footer: false, factChip: false });
   async function fetchCompareFlags() {
     const cached = await readFlagCache();
     if (cached !== null) return cached;
@@ -2089,6 +2144,8 @@ export function createCompareController({
             summary: on && !!(json && json[COMPARE_SUMMARY_FLAG_FIELD] === true),
             debate: on && !!(json && json[COMPARE_DEBATE_FLAG_FIELD] === true),
             share: on && !!(json && json[COMPARE_SHARE_FLAG_FIELD] === true),
+            footer: on && !!(json && json[COMPARE_ROUND_FOOTER_FLAG_FIELD] === true),
+            factChip: on && !!(json && json[COMPARE_FACT_CHIP_FLAG_FIELD] === true),
           };
           await writeFlagCache(flags);
           return flags;
@@ -2108,11 +2165,16 @@ export function createCompareController({
 
   // ── Example prompts (same CDN, same cache discipline as the flags) ──────────────────────
   let examplesInFlight = null;
+  /** `{examples, fresh}` from the cache (`fresh` = younger than the TTL), or null on a miss / a row past MAX_STALE. */
   async function readExamplesCache() {
     try {
       const cached = (await storage.get(COMPARE_EXAMPLES_CACHE_KEY))?.[COMPARE_EXAMPLES_CACHE_KEY];
+      const age = cached ? now() - (cached.at || 0) : Infinity;
       // Re-validated on read: a hand-edited or older row must not answer more than the rules allow.
-      if (cached && now() - (cached.at || 0) < COMPARE_EXAMPLES_TTL_MS) return sanitizeCompareExamples({ v: COMPARE_EXAMPLES_VERSION, ...cached.examples });
+      if (cached && age >= 0 && age < COMPARE_EXAMPLES_MAX_STALE_MS) {
+        const examples = sanitizeCompareExamples({ v: COMPARE_EXAMPLES_VERSION, ...cached.examples });
+        if (examples) return { examples, fresh: age < COMPARE_EXAMPLES_TTL_MS };
+      }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
@@ -2121,7 +2183,7 @@ export function createCompareController({
   }
   // FAIL-SAFE: any fetch/parse error, non-2xx, an oversized body (COMPARE_EXAMPLES_MAX_BYTES) or
   // an invalid document answers null and caches nothing (a transient failure must not pin "no
-  // examples" for an hour); a valid document is cached for COMPARE_EXAMPLES_TTL_MS. One fetch
+  // examples" for an hour); a valid document is cached (fresh for COMPARE_EXAMPLES_TTL_MS, then served stale while refreshed). One fetch
   // shared by concurrent callers, aborted at COMPARE_EXAMPLES_TIMEOUT_MS — the shared promise
   // settles (null) and the slot is cleared, so the next status can start a fresh one (Codex
   // examples 1R #3). Never throws.
@@ -2143,12 +2205,13 @@ export function createCompareController({
   // What COMPARE_STATUS answers (Codex examples 1R #2): the CACHED document or null, from storage
   // only — the status never waits on the network for examples (a hanging CDN used to hold the
   // status at the 3 s cap while the page kept Send disabled). A miss/stale cache kicks ONE
-  // background refresh (shared, deadlined) and the NEXT status gets the result. The storage
-  // read itself is bounded like every other one.
+  // background refresh (shared, deadlined) and the NEXT status gets the result. A STALE row (past
+  // the TTL, within MAX_STALE) is still answered while that refresh runs. The storage read itself
+  // is bounded like every other one.
   async function cachedCompareExamples() {
     const cached = await withTimeout(readExamplesCache(), selectedModelsReadTimeoutMs, null);
-    if (cached === null) refreshCompareExamples();
-    return cached;
+    if (!cached || !cached.fresh) refreshCompareExamples();
+    return cached ? cached.examples : null;
   }
 
   // ── Status probe (page load) ─────────────────────────────────────────────────────────────
@@ -2242,7 +2305,7 @@ export function createCompareController({
   }
 
   // ── History preference (chrome.storage.sync, package v0.3.1 / ux3 item 6) ───────────────
-  // Same discipline as the model choice, for a single boolean: read ONCE per worker life (joined
+  // Same discipline as the model choice, for one value (a per-provider map since #1985): read ONCE per worker life (joined
   // by concurrent readers, each wait bounded by SELECTED_MODELS_READ_TIMEOUT_MS — a hung read
   // answers the DEFAULT and writes nothing), a SEND's boolean lands in memory synchronously and
   // is written through the same serialised chain, and a read that lands late never overwrites a
@@ -2250,35 +2313,46 @@ export function createCompareController({
   // it is its opposite, COMPARE_INCOGNITO_KEY (`true` = incognito), so an empty storage — and a
   // failed or hung read — is "kept in history" (the ux3 default), and only an explicit
   // incognito opt-in is temporary.
-  const SAVE_HISTORY_DEFAULT = true;
-  let saveHistoryPref = null;   // boolean once known (read, or set by a SEND)
-  let saveHistoryLoad = null;
-  function loadSaveHistory() {
-    if (saveHistoryPref !== null) return Promise.resolve(saveHistoryPref);
-    if (!saveHistoryLoad) {
-      saveHistoryLoad = (async () => {
-        let stored = SAVE_HISTORY_DEFAULT;
+  // #1985: the preference is a per-provider map (SaveBy, `true` = kept). Storage keeps both the
+  // map and the old boolean (ui/compare/save-mode.js `incognitoPrefWrite` / `readIncognitoPref` —
+  // ONE set() per write, the merge rules for an old device in between are there).
+  const SAVE_BY_DEFAULT = uniformSaveBy(true);
+  let saveByPref = null;   // SaveBy once known (read, or set by a SEND)
+  let saveByLoad = null;
+  function loadSaveBy() {
+    if (saveByPref !== null) return Promise.resolve(saveByPref);
+    if (!saveByLoad) {
+      saveByLoad = (async () => {
+        let stored = SAVE_BY_DEFAULT;
         try {
-          stored = (await storageSync.get(COMPARE_INCOGNITO_KEY))?.[COMPARE_INCOGNITO_KEY] !== true;
+          stored = readIncognitoPref(await storageSync.get([COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY]));
         } catch (e) {
           // A failed read is MEMOISED as the default (Codex wiring 1R #2): retrying it on every
           // send would cost a read per send for nothing. Nothing is written, and a preference a
           // SEND set meanwhile is never overwritten.
           console.warn('[compare] could not read history preference:', e?.message || e);
         }
-        if (saveHistoryPref === null) saveHistoryPref = stored;
-        return saveHistoryPref;
-      })().finally(() => { saveHistoryLoad = null; });
+        if (saveByPref === null) saveByPref = stored;
+        return saveByPref;
+      })().finally(() => { saveByLoad = null; });
     }
-    return withTimeout(saveHistoryLoad, selectedModelsReadTimeoutMs, null).then((v) => (v === null ? SAVE_HISTORY_DEFAULT : v === true));
+    return withTimeout(saveByLoad, selectedModelsReadTimeoutMs, null).then((v) => (v === null ? SAVE_BY_DEFAULT : v));
   }
-  function applySaveHistory(value) {
-    saveHistoryPref = value === true;
-    const incognito = !saveHistoryPref;
+  function applySaveBy(saveBy) {
+    saveByPref = saveBy;
+    const write = incognitoPrefWrite(saveBy);
     persistChain = persistChain
-      .then(() => storageSync.set({ [COMPARE_INCOGNITO_KEY]: incognito }))
+      .then(() => storageSync.set(write))
       .catch((e) => { console.warn('[compare] could not persist history preference:', e?.message || e); });
-    return saveHistoryPref;
+    return saveByPref;
+  }
+  // A SEND's map/boolean → SaveBy (null = it carries neither). Synchronous unless an INCOMPLETE map
+  // arrives WITHOUT the boolean (no page sends that; its gaps then take the stored preference's fold) —
+  // the SEND path must not gain an await it did not have.
+  function carriedSaveBy(message) {
+    const needsFallback = typeof message?.saveHistory !== 'boolean' && message?.saveHistoryBy && typeof message.saveHistoryBy === 'object' && !isSaveBy(message.saveHistoryBy);
+    if (!needsFallback) return saveByFromMessage(message, false);
+    return loadSaveBy().then((stored) => saveByFromMessage(message, legacySaveHistory(stored)));
   }
 
   // ── Plan labels (chrome.storage.local `collectedOrgs`, ux3 item 3) ──────────────────────
@@ -2295,10 +2369,8 @@ export function createCompareController({
       orgs = await withTimeout(Promise.resolve().then(() => readCollectedOrgs()), selectedModelsReadTimeoutMs, null);
     } catch { orgs = null; }
     if (!Array.isArray(orgs)) return out;
-    const providerOf = (o) => (typeof o?.provider === 'string' && o.provider ? o.provider : 'claude');
     for (const p of COMPARE_PROVIDERS) {
-      const mine = orgs.filter((o) => o && typeof o === 'object' && providerOf(o) === p);
-      const entry = (p === 'claude' ? mine.find((o) => o.isPrimary === true) : null) || mine[0] || null;
+      const entry = pickProviderEntry(orgs, p); // ui/compare/usage-floor.js — the same pick the usage floor reads
       if (!entry) continue;
       let label = null;
       if (typeof entry.plan === 'string' && entry.plan.trim()) {
@@ -2390,6 +2462,8 @@ export function createCompareController({
     const summaryOn = flagOn && flags.summary === true;
     const debateOn = flagOn && flags.debate === true; // 「토론 모드」 toggle (#1769), same shape
     const shareOn = flagOn && flags.share === true; // 「공유」 (#1784 U3), same shape
+    const roundFooterOn = flagOn && flags.footer === true; // round footer (#1976), same shape
+    const factChipOn = roundFooterOn && flags.factChip === true; // its 「확인이 필요한 사실」 chip lives on the footer
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
@@ -2418,7 +2492,10 @@ export function createCompareController({
     }
     const { models, modelsSource, modelsPending } = catalogs;
     const selectedModels = await readSelectedModels();
-    const saveHistory = await loadSaveHistory();
+    // `saveHistory` = the privacy-first fold (true only when every provider is kept) for a page
+    // that does not know the map; `saveHistoryBy` = the map (#1985).
+    const saveHistoryBy = await loadSaveBy();
+    const saveHistory = legacySaveHistory(saveHistoryBy);
 
     // Dark = nothing else to show (AC24); do not touch the server for a page that will only say
     // "coming soon". Otherwise the server's answer is the truth, including 401 for a missing
@@ -2426,7 +2503,7 @@ export function createCompareController({
     const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
     let examples = null;
     try { examples = await examplesPending; } catch { examples = null; }
-    return { ok: true, flagOn, summaryOn, debateOn, shareOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory };
+    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
   }
 
   // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders
@@ -2617,7 +2694,7 @@ export function createCompareController({
     const q = src && typeof message.q === 'string' ? message.q : '';
     const { dev, langQ } = await siteQueryExtras();
     const url = srcless
-      ? `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
+      ? `${COMPARE_DEBATE_PLACEMENTS.includes(placement) ? COMPARE_DEBATE_SITE_URL : COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
       : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}${langQ}#src=${src}&q=${encodeURIComponent(q)}`;
     emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
     await tabs.create({ url, active: true });
@@ -2951,12 +3028,16 @@ export function createCompareController({
     // client was constructed, a failed consume) fixed nothing and the next send's field — or the
     // stored preference — wins (Codex wiring 1R #1 — a permission failure on SEND{true} used to
     // make a retried SEND{false} construct a client with true).
-    let sessionSaveHistory = null;
+    // #1985: a per-provider SaveBy, fixed for ALL providers at once — a column that joins later
+    // (the debate moderator on the first FOLLOWUP, a column first asked in a follow-up) is built
+    // from this map, never from whatever the toggle says by then.
+    let sessionSaveBy = null;
+    const sessionKept = (provider) => keptFor(sessionSaveBy, provider);
     // The SEND's `resume` map (package v0.4.0, ux3 item 6): `{ [provider]: continuation }` for the
     // clients THIS send constructs — a client that already exists rides its own conversation, so
     // its entry is ignored. Re-read from every SEND (empty for a FOLLOWUP, which never carries
     // one), consumed by clientFor as each client is built, and honoured ONLY for a kept session
-    // (`sessionSaveHistory === true`): a continuation names a conversation in the user's history,
+    // (`sessionKept(provider)`): a continuation names a conversation in the user's history,
     // and appending an "incognito" turn to it would be the opposite of what the toggle says. Every
     // step after construction (readiness → consume → fan-out) is exactly the SEND path.
     let pendingResume = {};
@@ -3033,10 +3114,11 @@ export function createCompareController({
       if (torndown) throw abortedError('session torn down');
       let client = clients.get(col.id);
       if (!client) {
-        const continuation = sessionSaveHistory === true && Object.hasOwn(pendingResume, col.id) ? pendingResume[col.id] : null;
+        const kept = sessionKept(col.provider);
+        const continuation = kept && Object.hasOwn(pendingResume, col.id) ? pendingResume[col.id] : null;
         delete pendingResume[col.id];
         if (continuation) logInfo(col.provider, 'resume', { col: col.id, keys: Object.keys(continuation) });
-        client = createClient(col.provider, clientDeps, clientOptions(col.provider, sessionSaveHistory === true, continuation));
+        client = createClient(col.provider, clientDeps, clientOptions(col.provider, kept, continuation));
         clients.set(col.id, client);
       }
       return client;
@@ -3330,7 +3412,7 @@ export function createCompareController({
         // fresh client — ONLY for a kept session, and only when the client hands one out (it
         // answers null for anything it will still clean up). Omitted otherwise, never null: an
         // incognito session's conversations are gone at dispose, so there is nothing to offer.
-        const continuation = sessionSaveHistory === true && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
+        const continuation = sessionKept(provider) && typeof client.getContinuation === 'function' ? client.getContinuation() : null;
         // A late Stop's answer may not name its model: the one reported during the stream stands in.
         const served = modelForPage(result?.model) || (lateStop ? lastModel : null);
         // 🔴 A cut the CLIENT reported (package v0.5.5) is still a DONE: what arrived IS the answer,
@@ -3363,7 +3445,7 @@ export function createCompareController({
         // the client's rejection here is the abort the watchdog itself requested. `stalled:true`
         // lets the page add its note; the outcome keeps ok:true and names the cut in `code`.
         if (stalled) {
-          const continuation = sessionSaveHistory === true && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
+          const continuation = sessionKept(provider) && typeof client?.getContinuation === 'function' ? client.getContinuation() : null;
           recordOutcome(colId, { ok: true, code: SW_CODES.STALLED, total_ms: elapsed(t0), chars: streamed.length, ...streamOutcome.answered(), ...(lastModel?.id ? { model: lastModel.id } : {}) });
           post({
             type: PORT_MSG.DONE, provider, col: colId, text: streamed, model: lastModel, stalled: true,
@@ -3481,16 +3563,21 @@ export function createCompareController({
         // state, so a SEND that failed clientless fixed nothing (Codex wiring 1R #1): a SEND's
         // boolean (persisted), else the stored preference (a FOLLOWUP never carries the field).
         // Once a client exists the flag is the session's; a later SEND's boolean is only persisted.
-        const carried = !followup && typeof message.saveHistory === 'boolean' ? message.saveHistory : null;
+        // #1985: the SEND's `saveHistoryBy` map (or its boolean, for every provider) — see carriedSaveBy.
+        let carried = !followup ? carriedSaveBy(message) : null;
+        if (carried && typeof carried.then === 'function') carried = await carried;
         // 🔴 `saveHistoryOnce` (1.35.0 batch review): the boolean is THIS session's only — a pasted
         // link or a resumed history entry turns history on for its own session — and must not
         // overwrite the user's stored 「시크릿 대화」 preference.
         const once = message.saveHistoryOnce === true;
         if (!clients.size) {
-          sessionSaveHistory = carried !== null ? (once ? carried : applySaveHistory(carried)) : await loadSaveHistory();
+          sessionSaveBy = carried !== null ? (once ? carried : applySaveBy(carried)) : await loadSaveBy();
         } else if (carried !== null && !once) {
-          applySaveHistory(carried);
+          applySaveBy(carried);
         }
+        // #1985: a `once` SEND may name the user's own choice separately (`saveHistoryPrefBy`, a complete
+        // map — a link forced its provider on for this session only): that one IS stored, never used here.
+        if (!followup && once && isSaveBy(message.saveHistoryPrefBy)) applySaveBy(normalizeSaveBy(message.saveHistoryPrefBy, false));
         // Resume (ux3 item 6): what this SEND asks the clients it constructs to continue. See
         // `pendingResume` — read here, after the session's flag is known, so clientFor can refuse
         // it for an incognito session in one place.
@@ -3539,7 +3626,8 @@ export function createCompareController({
           // toggle on when the chip is accepted; this is the guard, not the flow.
           // A share page (#1784 U4) continues NOTHING in the user's history (no continuation, no
           // link column) — incognito contradicts nothing there, so the refusal is the vendor links' only.
-          if (sessionSaveHistory !== true && link.kind !== 'share') {
+          // #1985: only the LINK's provider must be kept — the other columns get the transcript only.
+          if (!sessionKept(link.provider) && link.kind !== 'share') {
             post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: SW_CODES.LINK_NEEDS_HISTORY, provider: link.provider });
             return;
           }

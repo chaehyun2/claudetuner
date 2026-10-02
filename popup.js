@@ -25,6 +25,7 @@ import { renderReauth } from './ui/reauth.js';
 import { renderClaimSwitch } from './ui/claim-switch.js';
 import { renderLoginCta } from './ui/login-cta.js';
 import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
+import { readCompareEntryVariant, ENTRY_CROSSCHECK, ENTRY_DEBATE, ENTRY_PLACEMENT } from './ui/compare-entry.js';
 
 // How long the width has to hold still before the detail charts re-rasterise to it. Long enough
 // that dragging the side panel divider settles into a single redraw, short enough that the
@@ -303,19 +304,34 @@ function _hideClaudeOnlyUI() {
 // One row under the gauges (#compare-entry) that opens the /multiai page. Gated on the PAGE flag
 // alone (COMPARE_FLAG.on = the site shell is live), not on `cta`: the in-page button can stay dark
 // while the page is public, and this row is the popup's way in. The SW owns the URL — a src-less
-// OPEN_COMPARE with placement `popup` (bg/compare.js openCompare) — so the utm/GA shape lives in
-// one place. Kept free of module imports so test/compare-button-guard.mjs can run it as-is.
-function initCompareEntry() {
+// OPEN_COMPARE with placement `popup` / `popup_debate` (bg/compare.js openCompare) — so the utm/GA
+// shape lives in one place. Two banners take turns in this one row, every 4 h per install
+// (ui/compare-entry.js): 「AI 크로스체크」 and 「AI끼리 토론시키기」 (opens the debate tab). The
+// variant is picked once per open — it never swaps under the user.
+const COMPARE_ENTRY_COPY = Object.freeze({
+  [ENTRY_CROSSCHECK]: { title: 'compare_entry_title', sub: 'compare_entry_sub' },
+  [ENTRY_DEBATE]: { title: 'compare_entry_debate_title', sub: 'compare_entry_debate_sub' },
+});
+async function initCompareEntry() {
   const row = document.getElementById('compare-entry');
   const btn = document.getElementById('compare-entry-open');
   if (!row || !btn) return;
+  const variant = await readCompareEntryVariant({ storage: chrome.storage.local });
+  const copy = COMPARE_ENTRY_COPY[variant];
+  // data-i18n too: applyI18n() re-runs on a language change and would paint the HTML's keys back.
+  for (const [sel, key] of [['.compare-entry-title', copy.title], ['.compare-entry-sub', copy.sub]]) {
+    const node = row.querySelector(sel);
+    node.setAttribute('data-i18n', key);
+    node.textContent = t(key);
+  }
+  row.classList.toggle('is-debate', variant === ENTRY_DEBATE);
   chrome.runtime.sendMessage({ type: 'COMPARE_FLAG' }, (r) => {
     // A missing SW answer (lastError / null) keeps the row hidden — fail closed, like the strips.
     void chrome.runtime.lastError;
     if (r && r.on === true) row.classList.remove('hidden');
   });
   btn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', placement: 'popup' }, () => { void chrome.runtime.lastError; });
+    chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', placement: ENTRY_PLACEMENT[variant] }, () => { void chrome.runtime.lastError; });
   });
 }
 
