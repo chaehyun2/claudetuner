@@ -7,7 +7,7 @@
 // (attached to ctx); `state.pickerKind` says which list it holds. ctx contract: see ui/compare/history.js.
 
 import { COMPARE_PROVIDERS, colIdOf, parseColId, PROVIDER_META, MODELS_CSV_AUTO, MODELS_CSV_ID_MAX, MODEL_ID_RE, MODEL_AUTO_VALUE } from './constants.js';
-import { CHATGPT_EFFORT_SEPARATOR, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
+import { CHATGPT_EFFORT_SEPARATOR, chatgptWorkLine, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
 import { modelOptionText, lockedInCatalog, lockedSuffix } from './helpers.js';
 
 /** Installs the model-picker slice onto `ctx` (ctx contract: ui/compare/history.js header). */
@@ -296,12 +296,39 @@ export function installModelPicker(ctx) {
     // / `__max`. Without this the user's Thinking choice fell back to the default (Instant),
     // silently. It is carried to the FIRST row of the same model, which in the site's slider order
     // is its lowest stop (Medium) — what the plain slug always sent (no effort = the site's default).
-    const carry = (id) => {
+    const carry = (id, owner = col) => {
       if (id == null || known.has(toValue(id))) return id;
       const prefix = `${String(id)}${CHATGPT_EFFORT_SEPARATOR}`;
       const row = list.find((m) => m.id != null && String(m.id).startsWith(prefix));
-      return row ? row.id : id;
+      return row ? row.id : carryWorkLine(id, owner);
     };
+    // 🔴 BEFORE the session a saved Work model the list no longer carries goes to the listed row of
+    // its LINE (vendor-ai v0.34.1 `chatgptWorkLine`, 2026-10-02): `gpt-6-sol-wm` → `gpt-6.1-sol-wm`.
+    // Without it the column fell to the catalog default — Chat Auto — silently leaving Work mode.
+    // Not carried: a line with no listed row (`gpt-5.6-terra-wm`), a nameless one (`gpt-5.5-wm` →
+    // null — two nulls must not match), a row a column is LAID OUT on, or a row an EARLIER column of
+    // the same line carries to (two columns sending one model is a bad_request at the SW). Decided
+    // on the layout ids and their order only — never on a sibling's resolved `model`, which the
+    // render order moves (Codex work-carry U2 1R: two old Sol columns, one went Chat Auto). A column
+    // that is not carried keeps its own saved Work model (see `kept` below). In session the thread's
+    // own model is kept instead, never carried.
+    function carryWorkLine(id, owner) {
+      if (state.sessionStarted || owner.provider !== 'chatgpt') return id;
+      const line = chatgptWorkLine(String(id));
+      if (!line) return id;
+      const row = usable.find((m) => m.id != null && chatgptWorkLine(String(m.id)) === line);
+      if (!row) return id;
+      const target = String(row.id);
+      const at = (c) => state.columnIds.indexOf(c.id);
+      for (const other of state.columns.values()) {
+        if (other === owner || other.provider !== owner.provider) continue;
+        const om = parseColId(other.id).model;
+        if (om == null) continue;
+        if (String(om) === target) return id;
+        if (at(other) < at(owner) && !known.has(toValue(om)) && chatgptWorkLine(String(om)) === line) return id;
+      }
+      return row.id;
+    }
     // The stored per-provider choice (`compareModels`, written by the SW from the FIRST column of the
     // provider on each send) seeds the provider's FIRST column only (a later column was added with
     // its own model). The LAYOUT is authoritative (Codex integration #2): when the page already has an
@@ -315,7 +342,7 @@ export function installModelPicker(ctx) {
       for (const other of state.columns.values()) {
         if (other === col || other.provider !== col.provider) continue;
         const om = parseColId(other.id).model;
-        if (om != null && String(carry(om)) === String(stored)) { stored = undefined; break; }
+        if (om != null && String(carry(om, other)) === String(stored)) { stored = undefined; break; }
       }
     }
     const fallback = usable.find((m) => m.default) || usable[0] || list[0];
@@ -347,7 +374,7 @@ export function installModelPicker(ctx) {
       if (current != null && known.has(toValue(current))) {
         const taken = new Set();
         for (const other of state.columns.values()) {
-          if (other !== col && other.provider === col.provider) taken.add(toValue(other.model == null ? null : carry(other.model)));
+          if (other !== col && other.provider === col.provider) taken.add(toValue(other.model == null ? null : carry(other.model, other)));
         }
         const open = taken.has(value) ? usable.find((m) => !taken.has(toValue(m.id))) : null;
         if (open) value = toValue(open.id);
@@ -375,8 +402,24 @@ export function installModelPicker(ctx) {
     // send, and an id the account's menu lacks would otherwise fall to Auto — the follow-up answered
     // by another model with nobody told. The id is kept as an option; gemini.google.com substitutes
     // it server-side as it did for the first turn, and the served model is reported per turn.
-    if (kept == null && state.sessionStarted && col.provider === 'gemini' && current != null && !known.has(toValue(current))) {
+    // 🔴 A ChatGPT column likewise keeps its own unlisted model of the thread's mode (2026-10-02,
+    // vendor-ai v0.33.0): the list now carries only the newest Work generation (`gpt-6.1-sol-wm`)
+    // while the site still serves `gpt-6-luna-wm`, and a Luna thread's follow-up went to the seed or
+    // the list's first Work row — another model answering, nobody told (order- and seed-dependent,
+    // Codex work-carry 1R). Checked AFTER the mode branch, which only runs when the value crossed.
+    const ownMode = (v) => col.provider === 'gemini' || (col.provider === 'chatgpt' && !crossesMode(col, v));
+    if (kept == null && state.sessionStarted && current != null && !known.has(toValue(current)) && ownMode(toValue(current))) {
       kept = toValue(current);
+      value = kept;
+    }
+    // 🔴 BEFORE the session a column's own saved Work model that could not be carried (no listed row
+    // of its line, or the row went to another column — carryWorkLine) is kept as an option rather
+    // than falling to the catalog default, a Chat model (Codex work-carry U2 1R). The site still
+    // serves the slugs it lists in `models[]`; one it dropped fails visibly on the send. The same for
+    // an `auto` column's stored SEED (batch review #1: a `gpt-5.6-terra-wm` seed went out as `gpt-5-6`).
+    const savedWork = current != null ? toValue(current) : current === undefined && stored != null ? toValue(stored) : null;
+    if (kept == null && !state.sessionStarted && col.provider === 'chatgpt' && savedWork != null && !known.has(savedWork) && isWorkValue(savedWork)) {
+      kept = savedWork;
       value = kept;
     }
     clear(sel);
@@ -405,7 +448,13 @@ export function installModelPicker(ctx) {
     // The resolved model rides the wire for this column; the column's ID follows it only when the
     // user picked it on THIS page (modelTouched) — a stored seed or the catalog default leaves an
     // `auto` column `auto` (the id says what the user chose in the layout, `model` what is sent).
-    if (col.modelTouched) setColumnModel(col, value === MODEL_AUTO_VALUE ? null : value);
+    // 🔴 A layout column CARRIED to its line's listed row (carryWorkLine) is re-keyed to that row
+    // (batch review #2): left under its old id (`chatgpt:gpt-6-sol-wm` sending `gpt-6.1-sol-wm`), the
+    // pre-session list — which marks a choice present by column id — offered 6.1 Sol again, and two
+    // columns sent one model. The saved layout follows (the old row is gone from the list anyway).
+    const laid = parseColId(col.id).model;
+    const carriedLayout = !state.sessionStarted && !col.modelTouched && laid != null && !known.has(toValue(laid)) && value !== toValue(laid) && value === toValue(carry(laid));
+    if (col.modelTouched || carriedLayout) setColumnModel(col, value === MODEL_AUTO_VALUE ? null : value);
     else col.model = value === MODEL_AUTO_VALUE ? null : value;
     renderPickerLabel(col);
     col.modelWrap.hidden = false;

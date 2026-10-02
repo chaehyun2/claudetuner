@@ -27,12 +27,12 @@ import { SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SESSION_ID_RE } from './constants.j
 import { keptFor } from './save-mode.js';
 
 /** How many questions each row asks for / shows at most. */
-export const SUGGEST_COUNT = 4;
+export const SUGGEST_COUNT = 5; // 2026-10-02 user: five (was four) — the list folds to SUGGEST_VISIBLE anyway
 /** A question's length bounds (characters): shorter is noise, longer is not a chip. */
 export const SUGGEST_Q_MIN = 4;
 export const SUGGEST_Q_MAX = 140;
-/** A chip's face is cut here (the title keeps the whole question). */
-export const SUGGEST_LABEL_MAX = 48;
+/** Lines shown before 「더 보기」 (one question per line, full width — 2026-10-02 UI). */
+export const SUGGEST_VISIBLE = 2;
 /** The hidden send gives up (ABORT) after this long without settling — the row falls back to nothing. */
 export const SUGGEST_TIMEOUT_MS = 90000;
 /**
@@ -315,59 +315,93 @@ export function installSuggest(ctx) {
     return dropQueued ? null : queued;
   }
 
-  // ── the rows ──
+  // ── the list (2026-10-02 UI): one question per line, full width; the first SUGGEST_VISIBLE show, 「더 보기」 opens the rest ──
+  // Row 1 and row 2 are one list (row 2's lines carry a 「비교」 tag); each keeps its own group node so the round footer's
+  // tests and the provenance stay per source.
+  let box = null;
+  let moreBtn = null;
+  let expandedRound = null; // the footer round whose list the user opened (a new round starts folded)
   /** Built inside the footer, before its note line (round-footer.js buildRoundFooter). */
   function buildSuggestRows(bar, before) {
+    box = el('div', 'cmp-suggest');
+    box.hidden = true;
+    const head = el('div', 'cmp-suggest-head');
+    head.appendChild(el('span', 'cmp-suggest-title', t('suggest_row_own')));
+    box.appendChild(head);
     rows = { own: makeRow('cmp-suggest-row-own', t('suggest_row_own')), cmp: makeRow('cmp-suggest-row-cmp', t('suggest_row_cmp')) };
-    bar.insertBefore(rows.own.node, before);
-    bar.insertBefore(rows.cmp.node, before);
+    box.appendChild(rows.own.node);
+    box.appendChild(rows.cmp.node);
+    moreBtn = el('button', 'cmp-suggest-more');
+    moreBtn.type = 'button';
+    moreBtn.hidden = true;
+    moreBtn.addEventListener('click', () => { expandedRound = expandedRound === state.footerRound ? null : state.footerRound; renderSuggestRows(state.footerRound, lastVerdict, lastEnabled); });
+    head.appendChild(moreBtn); // on the header line, right after the title (not the far right of a wide window) — no line of its own
+    bar.insertBefore(box, before);
   }
   function makeRow(cls, label) {
     const node = el('div', `cmp-suggest-row ${cls}`);
     node.setAttribute('role', 'group');
     node.setAttribute('aria-label', label);
     node.hidden = true;
-    node.appendChild(el('span', 'cmp-suggest-label', label));
-    const list = el('div', 'cmp-suggest-list');
-    node.appendChild(list);
-    return { node, list, sig: '' };
+    return { node, list: node, sig: '' };
   }
-  const chipLabel = (q) => (q.length > SUGGEST_LABEL_MAX ? `${q.slice(0, SUGGEST_LABEL_MAX - 1)}…` : q);
-  /** One row's content, rebuilt only when what it shows changed. */
-  function paintRow(row, { loading, questions, provenance, chipId, enabled }) {
+  /** One group's lines, rebuilt only when what it shows changed. `tag` = the small label before each line (row 2's 「비교」). */
+  function paintRow(row, { loading, questions, provenance, chipId, enabled, tag }) {
     row.node.hidden = !loading && !questions.length;
-    if (row.node.hidden) return;
+    if (row.node.hidden) return [];
     const sig = JSON.stringify([loading, questions, provenance]);
     if (sig !== row.sig) {
       row.sig = sig;
       ctx.clear(row.list);
       if (loading) row.list.appendChild(el('span', 'cmp-suggest-loading', t('suggest_loading')));
       for (const q of questions) {
-        const b = el('button', 'cmp-btn cmp-btn-sm cmp-suggest-chip', chipLabel(q));
+        const b = el('button', 'cmp-suggest-chip');
         b.type = 'button';
         b.title = `${t('suggest_chip_title')}\n${q}`;
         b.setAttribute('data-chip', chipId);
+        if (tag) b.appendChild(el('span', 'cmp-suggest-tag', tag));
+        b.appendChild(el('span', 'cmp-suggest-text', q));
         b.addEventListener('click', () => ctx.sendChip(chipId, q, provenance));
         row.list.appendChild(b);
       }
     }
-    for (const b of row.list.querySelectorAll('button')) b.disabled = !enabled;
+    const btns = [...row.list.querySelectorAll('button')];
+    for (const b of btns) b.disabled = !enabled;
+    return btns;
   }
+  let lastVerdict = null;
+  let lastEnabled = false;
   /** Every footer render (round-footer.js renderRoundFooter, while the line shows). `verdict` = the round's newest verdict or null. */
   function renderSuggestRows(round, verdict, enabled) {
     if (!rows) return;
+    lastVerdict = verdict;
+    lastEnabled = enabled;
     const s = on() && state.suggest && state.suggest.round === round ? state.suggest : null;
     const own = s && s.status === SUGGEST_READY ? s.questions : [];
-    paintRow(rows.own, { loading: !!s && s.status === SUGGEST_LOADING, questions: own, provenance: s ? [s.provider] : [], chipId: 'suggest', enabled });
+    const a = paintRow(rows.own, { loading: !!s && s.status === SUGGEST_LOADING, questions: own, provenance: s ? [s.provider] : [], chipId: 'suggest', enabled, tag: '' });
     // Row 2: the verdict's questions minus row 1's (the same question is offered once).
     const cmp = on() && verdict ? tidyQuestions(questionsFromVerdict(verdict.text), new Set(own.map(questionKey))) : [];
-    paintRow(rows.cmp, { loading: false, questions: cmp, provenance: verdict ? verdict.from : [], chipId: 'suggest_cmp', enabled });
+    const b = paintRow(rows.cmp, { loading: false, questions: cmp, provenance: verdict ? verdict.from : [], chipId: 'suggest_cmp', enabled, tag: t('suggest_tag_cmp') });
+    box.hidden = rows.own.node.hidden && rows.cmp.node.hidden;
+    // Folded: the first SUGGEST_VISIBLE lines (row 1 first); the rest behind 「더 보기 (n)」.
+    const all = [...a, ...b];
+    const open = expandedRound === round;
+    all.forEach((btn, i) => { btn.hidden = !open && i >= SUGGEST_VISIBLE; });
+    const extra = all.length - SUGGEST_VISIBLE;
+    moreBtn.hidden = extra <= 0;
+    if (extra > 0) {
+      const label = open ? t('suggest_less') : t('suggest_more', extra);
+      if (moreBtn.textContent !== label) moreBtn.textContent = label;
+      moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    // A group whose every line is folded away shows nothing (no empty gap).
+    for (const r of [rows.own, rows.cmp]) if (!r.node.hidden && r.node.querySelector('button') && ![...r.node.querySelectorAll('button')].some((x) => !x.hidden) && !r.node.querySelector('.cmp-suggest-loading')) r.node.classList.add('is-folded'); else r.node.classList.remove('is-folded');
   }
 
   /** Row 1's questions of `round` while they are on screen (summary.js lists them as ones row 2 must not repeat), else []. */
   const suggestShownFor = (round) => (on() && state.suggest && state.suggest.round === round && state.suggest.status === SUGGEST_READY ? state.suggest.questions.slice() : []);
   /** 새 대화 / a history load (compare.js resetSession, history.js loadSession): round ids restart, so the left session's row 1 and tried rounds go. */
-  function resetSuggest() { state.suggest = null; state.suggestTried = new Set(); }
+  function resetSuggest() { state.suggest = null; state.suggestTried = new Set(); expandedRound = null; } // the list folds again too (round ids restart — Codex list 1R)
 
   Object.assign(ctx, { cancelQueuedSend, resetSuggest, suggestShownFor, suggestOn: on, suggestBusy: busy, maybeSuggest, onSuggestMessage, preemptSuggest, suggestPortGone, buildSuggestRows, renderSuggestRows });
 }

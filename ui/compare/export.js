@@ -266,7 +266,24 @@ export function installExport(ctx) {
     if (model == null) return '';
     const list = state.status && state.status.models && Array.isArray(state.status.models[provider]) ? state.status.models[provider] : [];
     const m = list.find((x) => x && String(x.id) === String(model));
-    return m ? modelOptionText(m, t) : String(model);
+    return m ? modelOptionText(m, t) : servedLabelOf(provider, model) || String(model);
+  }
+  /**
+   * The label the SITE gave a model a column's thread was answered by (`turn.model.label`), '' when
+   * none says more than the id. A model the list no longer carries is kept in session (model-picker
+   * renderModelSelect, 2026-10-02 — `gpt-6-luna-wm` once `gpt-6.1-sol-wm` replaced its generation);
+   * its face read as the bare slug while the thread had already been told 「GPT-6 Luna」.
+   */
+  function servedLabelOf(provider, model) {
+    const id = String(model);
+    for (const c of allColumns()) {
+      if (c.provider !== provider) continue;
+      for (let i = c.turns.length - 1; i >= 0; i--) {
+        const served = c.turns[i].role === 'assistant' ? c.turns[i].model : null;
+        if (served && String(served.id) === id && typeof served.label === 'string' && served.label.trim() && served.label.trim() !== id) return served.label.trim();
+      }
+    }
+    return '';
   }
   // A debate session exports its timeline: the columns' user turns there are composed prompts,
   // not questions, and a moderator's answer ends in its control line (#1769 §0.4 ⑤).
