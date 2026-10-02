@@ -171,6 +171,9 @@ export function installSummary(ctx) {
         const a = answerInRound(c, round);
         return { col: c.id, provider: c.provider, model: a && a.model ? { id: a.model.id == null ? null : String(a.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(a.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } : null, text: a ? a.text : '', partial: !!(a && a.partial), clipped: false };
       }),
+      // #2026: whether the verdict is asked for questions, and row 1's questions it must not repeat — FIXED here, at the send,
+      // so a retry / a reload / a flag change later renders the very prompt that went out (Codex 2R).
+      ...(ctx.suggestOn && ctx.suggestOn() ? { suggest: { avoid: ctx.suggestShownFor ? ctx.suggestShownFor(round) : [] } } : {}),
     };
   }
   /**
@@ -182,7 +185,12 @@ export function installSummary(ctx) {
   function renderSummaryPrompt(summary) {
     const atts = Array.isArray(summary.attachments) ? summary.attachments : [];
     const head = [t('summary_prompt_head', atts.length), ctx.quoteLines(String(summary.question || '').slice(0, SUMMARY_QUESTION_MAX))];
-    const tail = t('summary_prompt_tail');
+    // #2026: with the suggested-question chips on, the verdict also ends with questions on where the answers differ (row 2).
+    // #2026: the structure says whether the verdict was asked for questions and which shown ones to avoid (live test 2026-10-02:
+    // the two rows repeated each other) — never the live state, so a re-render is the prompt that was sent.
+    const sg = summary.suggest && typeof summary.suggest === 'object' ? summary.suggest : null;
+    const avoid = sg && Array.isArray(sg.avoid) ? sg.avoid : [];
+    const tail = t('summary_prompt_tail') + (sg ? `\n${t('summary_prompt_tail_suggest')}${avoid.length ? `\n${t('summary_prompt_tail_avoid')}\n${avoid.map((q) => `- ${neutraliseAttachment(q)}`).join('\n')}` : ''}` : '');
     const items = atts.map((a, i) => {
       const m = a.model;
       const modelText = m ? String(m.label || m.id || '') : ''; // bounded where the structure is made / loaded (SUMMARY_MODEL_LABEL_MAX)

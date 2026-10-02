@@ -8,8 +8,8 @@
 // they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract is
 // written up in history.js.
 
-import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED, MS_PER_SECOND } from './constants.js';
-import { autoGrow, sendableTargets, answeredTurn, exampleSentCode } from './helpers.js';
+import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED } from './constants.js';
+import { autoGrow, sendableTargets, answeredTurn, exampleSentCode, answerTiming } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 import { isImageType } from './attach-types.js';
 import { linkErrorText } from './link.js';
@@ -24,6 +24,8 @@ export function installPort(ctx) {
   // ── port / streaming ──
   function onPortMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
+    // #2026: while the hidden 「what to ask next」 send is out, its round's messages are its own (suggest.js).
+    if (state.suggestInFlight && ctx.onSuggestMessage && ctx.onSuggestMessage(msg)) return;
     switch (msg.type) {
       // The pasted conversation was read (#1651). A RECEIPT, never the words: the worker keeps the
       // transcript for the round it composes, and what arrives here is what the chip is made of.
@@ -180,16 +182,7 @@ export function installPort(ctx) {
           }
           ctx.renderColumnActions(col);
         }
-        // The draft goes back where it was typed — the column's own composer (re-opened) when the
-        // send came from there, else the dock — unless the user already typed something new there.
-        if (state.pendingFollowup) {
-          const colBack = state.pendingFollowupCol ? state.columns.get(state.pendingFollowupCol) : null;
-          // Re-opened outright: the port may be gone at this instant (finishSend → updateControls folds it again if the column is dead by then).
-          if (colBack) { if (!colBack.askInput.value) colBack.askInput.value = state.pendingFollowup; ctx.setColumnAsk(colBack, true); }
-          else for (const c of ctx.composers) { if (!c.input.value) { c.input.value = state.pendingFollowup; autoGrow(c.input); } }
-        }
-        state.pendingFollowup = '';
-        state.pendingFollowupCol = null;
+        restorePendingDraft();
         // A first-round failure never touched the question card: the textarea still holds the
         // text and finishSend() → updateControls() unlocks it (readOnly follows `sending`).
         renderConsumeFail(msg);
@@ -263,6 +256,7 @@ export function installPort(ctx) {
           }
         }
         col.status = 'done';
+        col.doneAt = clock.now(); // #2026: the column that finished first is the one asked for suggestions
         turn.node.classList.remove('is-streaming');
         ctx.foldActivity(turn, true);
         ctx.paintAssistant(col);
@@ -277,14 +271,15 @@ export function installPort(ctx) {
         // After the continuation, not at settle above: the first answer only now has a conversation to open (#1978).
         ctx.syncOpenButtons();
         {
-          const ttft = ctx.ttftSeconds(col);
+          // The answer keeps its own timing (history → share link shows 「N초」 per answer); a
+          // stream_done stage landing after DONE completes it below (STAGE).
+          const ms = answerTiming(col.stages);
+          if (ms) turn.ms = ms; else delete turn.ms;
           // ttft_ms / total_ms / chars are GA custom METRICS (#1897 item 3): an unknown duration is
           // OMITTED, never a -1 sentinel that would drag every average down.
-          const ttftMs = ttft ? Math.round(Number(ttft.first) * MS_PER_SECOND) : NaN;
-          const totalMs = ttft && ttft.total != null ? Math.round(Number(ttft.total) * MS_PER_SECOND) : NaN;
           track('column_done', {
             provider: col.provider, col: ctx.gaCol(col),
-            ...(Number.isFinite(ttftMs) ? { ttft_ms: ttftMs } : {}), ...(Number.isFinite(totalMs) ? { total_ms: totalMs } : {}),
+            ...(ms ? { ttft_ms: ms.first } : {}), ...(ms && ms.total != null ? { total_ms: ms.total } : {}),
             chars: turn.text.length, images: ctx.outImageCount(turn), model: ctx.servedModelId(col),
           });
         }
@@ -387,7 +382,12 @@ export function installPort(ctx) {
         if (Number.isFinite(start) && at < start) return;
         if (Number.isFinite(col.stages[msg.stage]) && at < col.stages[msg.stage]) return;
         col.stages[msg.stage] = at;
-        if (col.status === 'done') ctx.paintBadge(col); // stream_done landing after DONE completes the tooltip
+        if (col.status === 'done') {
+          ctx.paintBadge(col); // stream_done landing after DONE completes the tooltip
+          const last = col.turns[col.turns.length - 1];
+          const ms = answerTiming(col.stages);
+          if (last && last.role === 'assistant' && ms) last.ms = ms; // …and the answer's stored timing
+        }
         return;
       }
       case 'ALL_DONE': {
@@ -418,6 +418,35 @@ export function installPort(ctx) {
       }
       default:
     }
+  }
+
+  /**
+   * The draft goes back where it was typed — the column's own composer (re-opened) when the send came from
+   * there, else the dock — unless the user already typed something new there. A refused round (CONSUME_FAIL)
+   * and a send that never left (#2026: it waited behind a hidden suggestion send that would not stop).
+   */
+  function restorePendingDraft() {
+    if (state.pendingFollowup) {
+      const colBack = state.pendingFollowupCol ? state.columns.get(state.pendingFollowupCol) : null;
+      // Re-opened outright: the port may be gone at this instant (finishSend → updateControls folds it again if the column is dead by then).
+      if (colBack) { if (!colBack.askInput.value) colBack.askInput.value = state.pendingFollowup; ctx.setColumnAsk(colBack, true); }
+      else for (const c of ctx.composers) { if (!c.input.value) { c.input.value = state.pendingFollowup; autoGrow(c.input); } }
+    }
+    state.pendingFollowup = '';
+    state.pendingFollowupCol = null;
+  }
+
+  let dropQuiet = null; // the port dropPort(true) dropped — its loss is settled without the resumable notice
+  /**
+   * Drop the live port as if it had been lost (#2026: a hidden suggestion send that would not stop holds it):
+   * the SW disposes its clients on the disconnect, and the page settles exactly as on a real loss.
+   */
+  function dropPort(quiet = false) {
+    const port = state.port;
+    if (!port) return;
+    if (quiet) dropQuiet = port;
+    try { port.disconnect(); } catch { /* already gone */ }
+    settlePortLoss(port);
   }
 
   function renderConsumeFail(msg) {
@@ -461,6 +490,7 @@ export function installPort(ctx) {
 
   function closePort() {
     stopKeepalive();
+    if (ctx.suggestPortGone) ctx.suggestPortGone(true); // #2026: 새 대화 / a refused first send — nothing waits behind it any more
     // 🔴 THE LINK BELONGS TO THE PORT (Codex 3/3 1R blockers 4 and 5). The receipt on screen is a
     // claim about what the WORKER is holding, and the worker holds it per port: when the port goes,
     // `pendingLink` goes with it. A receipt that outlives its port promises a continuation the next
@@ -527,6 +557,8 @@ export function installPort(ctx) {
       if (state.port !== port) return; // closed by us (closePort) or already settled — nothing to do
       state.port = null;
       stopKeepalive();
+      // #2026: the hidden suggestion send died with the port; a user send that waited behind it goes after the settlement below.
+      const afterSuggest = ctx.suggestPortGone ? ctx.suggestPortGone(false) : null;
       // The link went with the port — see closePort(). A read in flight becomes a refusal the user
       // can act on instead of a spinner that never ends.
       if (state.link || state.linkReading || state.linkError || state.linkOffer) {
@@ -586,10 +618,18 @@ export function installPort(ctx) {
       // up, and updateControls() (finishSend) leaves the composers enabled for it. Otherwise it is
       // the dead end 새 대화 leads out of.
       const resumable = ctx.canResume();
-      if (resumable) ctx.showNotice('info', [t('session_lost_resumable')]);
+      // #2026: a port WE dropped to free a hidden suggestion send that would not stop is not news when the next send resumes
+      // it anyway (batch review 1.51.0: a user who had just cancelled with Stop got 「연결이 끊겼어요」) — said only when it ends the session.
+      // …and only when EVERY live column resumes (batch 3R: in a mixed session the incognito column has no continuation — the next
+      // follow-up skips it, so the user is told, as on any loss).
+      const quiet = dropQuiet === port && resumable && ctx.liveColumns().every((c) => !ctx.columnDead(c));
+      if (dropQuiet === port) dropQuiet = null;
+      if (quiet) { /* nothing to say: the next send resumes */ }
+      else if (resumable) ctx.showNotice('info', [t('session_lost_resumable')]);
       else ctx.showNotice('warn', [t(state.idleEnded ? 'session_idle_ended' : 'session_ended')]);
       track('session_lost', { idle: state.idleEnded, since_ms: sinceLastMessageMs == null ? -1 : sinceLastMessageMs, last_type: lastMessageType, resumable });
       finishSend();
+      if (afterSuggest) afterSuggest(); // a resume (canResume) or the refusal it gets — its own way
     }
   }
 
@@ -671,6 +711,8 @@ export function installPort(ctx) {
       const pairs = ctx.crossPendingFor(provenance, targets);
       if (pairs.length) return { consent: pairs };
     }
+    // #2026: the hidden suggestion send is out — this send waits for it (it is ABORTed) and goes out once it settled.
+    if (ctx.suggestBusy && ctx.suggestBusy()) { queueBehindSuggest([text, targets, type, skipped, kind, summary, round, retry, via, texts, provenance]); return; }
     ctx.clearNotice();
     state.sending = true;
     state.roundTargets = targets.slice();
@@ -829,6 +871,29 @@ export function installPort(ctx) {
     }
   }
 
+  /**
+   * A send that arrived while the hidden suggestion send was out (#2026): it goes out once that one settled.
+   * Re-judged at the replay (Codex 2R): when the wait ended in a port loss, the session is resumed and a
+   * column with no continuation (an incognito one) has no client any more — skipped like followupPlan skips
+   * it, never sent to as a fresh, context-less conversation. Nothing left → the draft goes back.
+   */
+  function queueBehindSuggest(args) {
+    ctx.preemptSuggest(() => {
+      const [text, targets, type, skipped, ...rest] = args;
+      let tg = targets;
+      let sk = skipped;
+      if (ctx.canResume() || state.resumed) {
+        const dead = tg.filter((id) => { const c = state.columns.get(id); return !c || ctx.columnDead(c); });
+        tg = tg.filter((id) => !dead.includes(id));
+        sk = [...sk, ...dead.filter((id) => state.columns.has(id))];
+      }
+      // Nothing left: the send never happens — as on a CONSUME_FAIL, a summary's pending mark goes too (Codex 3R: it
+      // made the next follow-up's CONSUME_OK read as a summary's and leave the active round where it was).
+      if (!tg.length) { state.sending = false; state.summaryPending = null; restorePendingDraft(); ctx.updateControls(); return; }
+      beginSend(text, tg, type, sk, ...rest);
+    });
+  }
+
   function finishSend() {
     state.sending = false;
     lastActivityAt = clock.now(); // the idle countdown starts when the round settles, not when it began
@@ -858,6 +923,6 @@ export function installPort(ctx) {
 
   Object.assign(ctx, {
     columnForMsg, onPortMessage, renderConsumeFail, closePort, ensurePort, settlePortLoss, keepaliveWanted, startKeepalive,
-    stopKeepalive, tickKeepalive, ping, noteActivity, beginSend, finishSend, currentTargets, sendReadLink,
+    stopKeepalive, tickKeepalive, ping, noteActivity, beginSend, finishSend, currentTargets, sendReadLink, dropPort, restorePendingDraft,
   });
 }

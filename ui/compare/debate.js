@@ -172,7 +172,10 @@ export function installDebate(ctx) {
   /** The moderator in effect: the user's choice once made, else the default for this page (the seat — plan §18.8). */
   function modChoice(targets = reachable()) {
     const p = state.debatePrefs;
-    return p.modChosen ? { moderator: p.moderator, modCol: p.modCol } : defMod(targets);
+    // A tab opened by 「토론 붙이기」 brings its own cast: a chosen AI moderator from another cast that is
+    // not in it gives way to the default — the bridge opens ready to start (the stored choice is kept).
+    const staleForBridge = state.debateFromHandoff && p.moderator === MOD_AI && !targets.includes(p.modCol);
+    return p.modChosen && !staleForBridge ? { moderator: p.moderator, modCol: p.modCol } : defMod(targets);
   }
   /** This page's default moderation (defaultModerator — the seat, or one of 3+ columns #1909). */
   const colTier = (id) => { const c = colOf(id); return c ? tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) : null; };

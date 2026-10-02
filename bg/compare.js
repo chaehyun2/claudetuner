@@ -392,6 +392,9 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'debate_bridge', 'debate_bridge_open',
   // Stage 4: the 「자동으로 정리」 setting toggled (`on`), an automatic summary skipped because its judge was near its limit (`judge` provider id).
   'summary_autorun', 'summary_auto_skip',
+  // #2026 suggested questions: the hidden send went (`provider`, `others_n`), it came back with `n` questions /
+  // with none (`provider`, `n`, `aborted`) — never a question's words.
+  'suggest_send', 'suggest_ready', 'suggest_fail',
   // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
   'share_import',
   // Empty-state example chips (2026-10-02): `kind` (compare | debate), `code` = exampleCode(q) (8 hex, our
@@ -414,9 +417,9 @@ export const COMPARE_EVENT_UNPREFIXED = Object.freeze([...REVIEW_EVENTS]);
 
 // Usage stats (cmp-beta contract §1/§2): what a consume says it is. The page decides; anything
 // outside this list — or an older page that says nothing — is derived in runSend.
-export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume', 'debate', 'debate_turn', 'debate_mod']);
+export const COMPARE_KINDS = Object.freeze(['send', 'followup', 'summary', 'retry', 'resume', 'debate', 'debate_turn', 'debate_mod', 'suggest']);
 // Kinds whose text the PAGE composed (a summary request, a debate's prompts): no question signals.
-const COMPOSED_KINDS = Object.freeze(['summary', 'debate', 'debate_turn', 'debate_mod']);
+const COMPOSED_KINDS = Object.freeze(['summary', 'debate', 'debate_turn', 'debate_mod', 'suggest']);
 // Bounds on what the consume / outcome bodies carry (the server validates the same caps; a body
 // that exceeds them would be refused, and a refused consume is a send that never happens).
 export const ROUND_MAX = 9999;
@@ -519,6 +522,9 @@ export const COMPARE_SHARE_FLAG_FIELD = 'compare_share';
 // (COMPARE_STATUS.factChipOn) — each can be killed without a release.
 export const COMPARE_ROUND_FOOTER_FLAG_FIELD = 'compare_round_footer';
 export const COMPARE_FACT_CHIP_FLAG_FIELD = 'compare_fact_chip';
+// #2026: the suggested-question chips (COMPARE_STATUS.suggestOn) — the hidden 「what to ask next」 send to the
+// fastest column and the questions the 「요약·비교」 verdict ends with. Lives on the round footer, like the fact chip.
+export const COMPARE_SUGGEST_FLAG_FIELD = 'compare_suggest';
 // Share links (#1784 U3) — the wire of runtime message COMPARE_SHARE (see shareRequest). The limits
 // mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
 export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list', 'image', 'password']);
@@ -2113,20 +2119,20 @@ export function createCompareController({
       // {on:true, at:<+1y>} row hid the strip button and 「요약·비교」 for good).
       // `cta` / `summary` are read as conjunctions with `on` (Codex batch-1 #5): a row written as
       // {on:false, summary:true} must not answer a gate the page itself does not have.
-      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.footer === 'boolean' && typeof cached.factChip === 'boolean' && typeof cached.at === 'number') {
+      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.footer === 'boolean' && typeof cached.factChip === 'boolean' && typeof cached.suggest === 'boolean' && typeof cached.at === 'number') {
         const age = now() - cached.at;
-        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true, footer: cached.on && cached.footer === true, factChip: cached.on && cached.factChip === true };
+        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true, footer: cached.on && cached.footer === true, factChip: cached.on && cached.factChip === true, suggest: cached.on && cached.suggest === true };
       }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
   async function writeFlagCache(flags) {
-    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, footer: flags.footer === true, factChip: flags.factChip === true, at: now() } }); } catch { /* best effort */ }
+    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, footer: flags.footer === true, factChip: flags.factChip === true, suggest: flags.suggest === true, at: now() } }); } catch { /* best effort */ }
   }
   // FAIL-SAFE like fetchFolderAvailable: any fetch/parse error, non-2xx or a missing/invalid
   // `compare` field reads as dark. A network error does not poison the cache. Neither `cta` nor
   // `summary` can be true while `on` is false (both are buttons that need the page).
-  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false, footer: false, factChip: false });
+  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false, footer: false, factChip: false, suggest: false });
   async function fetchCompareFlags() {
     const cached = await readFlagCache();
     if (cached !== null) return cached;
@@ -2146,6 +2152,7 @@ export function createCompareController({
             share: on && !!(json && json[COMPARE_SHARE_FLAG_FIELD] === true),
             footer: on && !!(json && json[COMPARE_ROUND_FOOTER_FLAG_FIELD] === true),
             factChip: on && !!(json && json[COMPARE_FACT_CHIP_FLAG_FIELD] === true),
+            suggest: on && !!(json && json[COMPARE_SUGGEST_FLAG_FIELD] === true),
           };
           await writeFlagCache(flags);
           return flags;
@@ -2464,6 +2471,7 @@ export function createCompareController({
     const shareOn = flagOn && flags.share === true; // 「공유」 (#1784 U3), same shape
     const roundFooterOn = flagOn && flags.footer === true; // round footer (#1976), same shape
     const factChipOn = roundFooterOn && flags.factChip === true; // its 「확인이 필요한 사실」 chip lives on the footer
+    const suggestOn = roundFooterOn && flags.suggest === true; // #2026: the suggested-question chips, on the footer too
     let loggedIn = false;
     try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
     const providers = {};
@@ -2503,7 +2511,7 @@ export function createCompareController({
     const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
     let examples = null;
     try { examples = await examplesPending; } catch { examples = null; }
-    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
+    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, suggestOn, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
   }
 
   // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders

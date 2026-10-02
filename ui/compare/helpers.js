@@ -3,7 +3,7 @@
 // textarea) and close over nothing of mountComparePage(). Bodies as they were in compare.js;
 // compare.js re-exports the public ones (listenEmbedTheme, sendableTargets, localHHMM).
 
-import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK, FEEDBACK_CONTEXT_FIELD, FEEDBACK_CONTEXT_MAX, FEEDBACK_MODEL_UNKNOWN, FEEDBACK_COLUMN_RE, FEEDBACK_UA_RE, FEEDBACK_VERSION_RE, MODEL_ID_RE } from './constants.js';
+import { COMPARE_PROVIDERS, COMPOSER_MAX_HEIGHT, EMBED_THEME_LIGHT, EMBED_THEME_DARK, FEEDBACK_CONTEXT_FIELD, FEEDBACK_CONTEXT_MAX, FEEDBACK_MODEL_UNKNOWN, FEEDBACK_COLUMN_RE, FEEDBACK_UA_RE, FEEDBACK_VERSION_RE, MODEL_ID_RE, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, TTFT_MAX_MS } from './constants.js';
 
 /**
  * The analytics id of an example prompt (the empty-state chips): FNV-1a 32-bit of its text as 8
@@ -324,4 +324,28 @@ export function mdInlineText(text) {
  */
 export function answeredTurn(col, turn) {
   return !!(col && col.status === 'done' && turn && !turn.retracted && typeof turn.text === 'string' && turn.text.trim());
+}
+
+/**
+ * An answer's timing in whole ms from its round's timed stages: `{ first, total? }` — `first` =
+ * first_chunk − send_start, `total` = stream_done − send_start. Null when `first` is missing or not
+ * sane; `total` is omitted when its stage is missing or not sane. Never NaN, never negative, never
+ * past the cap (the badge, the GA metrics, the history and the share all read this one value).
+ */
+export function answerTiming(stages, cap = TTFT_MAX_MS) {
+  const st = stages || {};
+  const s = st[STAGE_SEND_START];
+  const sane = (ms) => Number.isFinite(ms) && ms >= 0 && ms <= cap;
+  const first = st[STAGE_FIRST_CHUNK] - s;
+  if (!sane(first)) return null;
+  const total = st[STAGE_STREAM_DONE] - s;
+  return { first: Math.round(first), ...(sane(total) && total >= first ? { total: Math.round(total) } : {}) };
+}
+
+/** A STORED timing (history / share input) re-read: the same shape as answerTiming's, or null. */
+export function readTiming(v, cap = TTFT_MAX_MS) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const ok = (ms) => Number.isInteger(ms) && ms >= 0 && ms <= cap;
+  if (!ok(v.first)) return null;
+  return { first: v.first, ...(ok(v.total) && v.total >= v.first ? { total: v.total } : {}) };
 }

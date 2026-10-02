@@ -13,6 +13,7 @@
 // from the one place that holds what was SAID, per the §9.4 table:
 //   compare round   q = the round's user turn text (first round: entry.question) · qImages = count
 //                   answers = each column's LAST assistant turn in the round: text + state
+//                   (+ ms {first, total?} — its timing, complete answers only)
 //   summary round   q = summary.question · the judge column's answer only (kind 'summary', judge).
 //                   A round is a summary round when its ANSWER says so (kind 'summary'): a request
 //                   written before structures is stored as bare text — the assembled prompt, other
@@ -29,6 +30,7 @@
 
 import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES } from './constants.js';
 import { docCountOf } from './image-store.js';
+import { readTiming } from './helpers.js';
 import { transcriptFromRecord, SPEAKER_USER, ROLE_MODERATOR, servedModelText, defaultAliasOf } from './debate-core.js';
 
 export const SHARE_SNAPSHOT_VERSION = 1;
@@ -44,6 +46,8 @@ const CUT_MARK = '…';
 export const SHARE_LABEL_MAX = 60;
 export const SHARE_ALIAS_MAX = 40;
 export const SHARE_TITLE_MAX = 120;
+/** The server's timing cap (compare-share.ts TIMING_MAX_MS) — a longer clock is dropped there, so not sent. */
+export const SHARE_TIMING_MAX_MS = 60 * 60 * 1000;
 /** The server's avatar rule (compare-share.ts AVATAR_MAX_CP / AVATAR_RE), mirrored so an avatar the
  *  server would drop is never sent — the probe checks both accept the same samples. */
 export const SHARE_AVATAR_MAX = 8;
@@ -88,6 +92,14 @@ const cut = (s) => {
 };
 /** An answer's state: failed (error line) > cut short (stalled / cut error) > complete. */
 const stateOf = (turn) => (turn.errorText ? 'error' : turn.stalled || turn.cutError ? 'partial' : 'ok');
+/**
+ * An answer's timing as the share carries it (`{first, total?}` ms — the viewer's 「N초」): only for a
+ * complete answer; a cut-short or failed one's clock says nothing about the model's speed.
+ */
+const timingOf = (turn) => {
+  const ms = stateOf(turn) === 'ok' ? readTiming(turn.ms, SHARE_TIMING_MAX_MS) : null;
+  return ms ? { ms } : {};
+};
 /**
  * How many IMAGES a stored marker stands for: its files (the first plus `more`) less its documents
  * (#1944 `docs`). A document is not counted as an image on a public card; its name is never sent.
@@ -163,13 +175,13 @@ function compareBody(entry, colIds, keyOf, summaryQuestion, focusIn) {
     if (summary || judgeId) {
       const verdict = judgeId ? answerOf(judgeId) : null;
       if (!verdict) continue; // a request that never got its verdict says nothing on its own
-      answers[keyOf.get(judgeId)] = { text: cut(verdict.text), state: stateOf(verdict) };
+      answers[keyOf.get(judgeId)] = { text: cut(verdict.text), state: stateOf(verdict), ...timingOf(verdict) };
       indexOfRound.set(r, rounds.length);
       // 🔴 Only the structure's question — never a user turn of this round (see the header).
       rounds.push({ q: cut((summary && summary.question) || summaryQuestion || ''), qImages: 0, answers, kind: 'summary', judge: keyOf.get(judgeId) });
       continue;
     }
-    for (const id of colIds) { const a = answerOf(id); if (a) answers[keyOf.get(id)] = { text: cut(a.text), state: stateOf(a) }; }
+    for (const id of colIds) { const a = answerOf(id); if (a) answers[keyOf.get(id)] = { text: cut(a.text), state: stateOf(a), ...timingOf(a) }; }
     if (!Object.keys(answers).length) continue; // a round with no answer in any column (all skipped)
     // The first SEND's question is the entry's, not a turn (history.js — the prompt card).
     const first = r === firstRound || (r === null && !userTurn);
@@ -213,7 +225,7 @@ function debateBody(entry, record, keyOf, aliasOf, emojis, focusIn) {
     if (!key || !turn) continue; // a column the entry no longer holds / a turn the history bound evicted
     indexOfSeq.set(e.seq, timeline.length);
     seqOfTurn.set(`${e.speaker}|${e.round}`, e.seq);
-    timeline.push({ who: key, role: e.role === ROLE_MODERATOR ? 'mod' : 'speak', text: cut(e.text), state: stateOf(turn) });
+    timeline.push({ who: key, role: e.role === ROLE_MODERATOR ? 'mod' : 'speak', text: cut(e.text), state: stateOf(turn), ...timingOf(turn) });
   }
   if (timeline.length < 2) return { error: 'empty' };
   if (timeline.length > SHARE_TIMELINE_MAX) timeline.splice(1, timeline.length - SHARE_TIMELINE_MAX); // keep the topic, drop the oldest

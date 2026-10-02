@@ -233,6 +233,15 @@ button:disabled { cursor: not-allowed; }
 .cmp-incog-pop-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary); }
 /* The cross-service consent card's buttons (#1985 consent.js): in the notice slot, the round footer and the summary popover. */
 .cmp-consent-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+/* #2026: the suggested-question rows — each a line of its own under the footer's buttons. */
+.cmp-suggest-row { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.cmp-suggest-row[hidden] { display: none; }
+.cmp-suggest-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.cmp-suggest-list { display: contents; } /* the chips flow right after the label, wrapping under it */
+.cmp-suggest-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-suggest-loading { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+.cmp-suggest-loading::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: cmp-pulse 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .cmp-suggest-loading::before { animation: none; } }
 .cmp-round-footer-consent { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; padding: 8px 10px; border: 1px dashed var(--border-incognito); border-radius: 8px; background: var(--bg-incognito); }
 .cmp-round-footer-consent[hidden] { display: none; }
 .cmp-round-footer-consent-text { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--text-primary); }
@@ -543,6 +552,13 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-summary-card-toggle { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-card); color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
 .cmp-summary-card-open:empty + .cmp-summary-card-toggle { margin-left: auto; }
 .cmp-summary-card-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* The waiting line (2026-10-02): a pulsing dot, 「요약·비교 만드는 중 · 12초」, then the slow hint — until the verdict's first words. */
+.cmp-summary-card-wait { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 10px 14px 0; font-size: 12.5px; color: var(--text-secondary); }
+.cmp-summary-card-wait[hidden], .cmp-summary-card.is-folded .cmp-summary-card-wait { display: none; }
+.cmp-summary-card-wait-text { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cmp-summary-card-wait-text::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: cmp-pulse 1.2s ease-in-out infinite; }
+.cmp-summary-card-wait-hint:empty { display: none; }
+@media (prefers-reduced-motion: reduce) { .cmp-summary-card-wait-text::before { animation: none; } }
 .cmp-summary-card-body { max-height: 45vh; overflow-y: auto; padding: 8px 14px 10px; }
 .cmp-summary-card-body[hidden] { display: none; }
 /* The card is already full width: the column's 「넓게 보기」 has nothing to widen here; its head carries the 「열기 ↗」 (one per card). */

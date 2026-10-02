@@ -59,7 +59,7 @@
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, CODE_AUTH_REQUIRED, GATE_CODES, STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, TTFT_MAX_MS, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, CODE_AUTH_REQUIRED, GATE_CODES, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_ERR_READ, ATTACH_ERR_TYPE, ATTACH_ERR_COUNT } from './ui/compare/constants.js';
 import { ATTACH_ACCEPT, ATTACH_FORMATS_LABEL, attachTypeOf, isImageType } from './ui/compare/attach-types.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
@@ -72,7 +72,7 @@ const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_D
 const DEBATE_SEAT_KEY = 'debateSeat';
 import { readAttachment, pickAttachableAll, reserveAttachments, unsupportedProviders, targetsTakingFiles, providerTakesFiles, formatBytes } from './ui/compare/attachments.js';
 import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } from './ui/compare/link.js';
-import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix, exampleCode } from './ui/compare/helpers.js';
+import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix, exampleCode, answerTiming } from './ui/compare/helpers.js';
 import { NARROW_MEDIA, REDUCED_MOTION_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installSummary } from './ui/compare/summary.js';
@@ -89,6 +89,7 @@ import { installOpenInProvider, OPEN_FROM_HEAD } from './ui/compare/open-in-prov
 import { installReviewNudge, REVIEW_SOURCE_COMPARE, REVIEW_SOURCE_DEBATE } from './ui/compare/review-nudge.js';
 import { installRoundFooter, threadless, resendable } from './ui/compare/round-footer.js';
 import { installSummaryCard } from './ui/compare/summary-card.js';
+import { installSuggest } from './ui/compare/suggest.js';
 import { installIncognitoPop } from './ui/compare/incognito-pop.js';
 import { installConsent } from './ui/compare/consent.js';
 import { SAVE_PROVIDERS, SAVE_MODE_KEPT, SAVE_MODE_INCOGNITO, SAVE_MODE_MIXED, normalizeSaveBy, uniformSaveBy, isSaveBy, foldSaveBy, keptFor, legacySaveHistory } from './ui/compare/save-mode.js';
@@ -428,7 +429,7 @@ export function mountComparePage(deps) {
     openInExtensionTab, openImageViewer, closeViewer, examplePool, pickExamples, renderExampleChips, renderExamplesIntro, commitPrompt, releasePrompt,
     renderQuestionBubbles, makeFollowupComposer, syncSaveHistory, showNotice, showLoginRequired, renderComingSoon, renderQuota, renderQuotaLine,
     syncQuotaNotice, quotaExhaustedTitle, betaReset, renderResetOffer, requestReset, columnFor, setBadge, waitingSeconds,
-    ttftSeconds, paintBadge, lastAssistantTurn, setServedModel, waitingColumns, countdownColumns, syncWaitTimer, tickWaiting,
+    paintBadge, lastAssistantTurn, setServedModel, waitingColumns, countdownColumns, syncWaitTimer, tickWaiting,
     errorLineText, retireCountdown, sendKindFor, ensureDefaultColumns, ensureLayout, columnChoices, addColumnByUser, removeColumnByUser,
     chooseColumn, saveLayout, readLayout, removeColumn, renderColumns, setColumnFocus, toggleColumnFocus, syncFocusButton, anyGate, syncZeroTargetsNotice, followupPlan,
     renderFollowupTargets, followupTargetText, updateControls, resetSession, refreshQuota, refreshStatus, setChecking, readStatus,
@@ -442,6 +443,7 @@ export function mountComparePage(deps) {
   installSummary(ctx);
   installRoundFooter(ctx);
   installSummaryCard(ctx);
+  installSuggest(ctx); // #2026: suggested-question chips on the round footer
   installColumnGate(ctx);
   installModelPicker(ctx);
   installExport(ctx);
@@ -2263,16 +2265,9 @@ export function mountComparePage(deps) {
    * the pair for `first` is missing or out of order — a number is never NaN, never negative.
    */
   function ttftSeconds(col) {
-    const st = col.stages || {};
-    const s = st[STAGE_SEND_START]; const f = st[STAGE_FIRST_CHUNK]; const d = st[STAGE_STREAM_DONE];
-    // The DURATIONS are what must be sane, not just the operands: finite, not negative, under
-    // the cap (Codex b2 1R #3 — 1e308 − 0 is "finite" operands and Infinity초).
-    const sane = (ms) => Number.isFinite(ms) && ms >= 0 && ms <= TTFT_MAX_MS;
-    const first = f - s;
-    if (!sane(first)) return null;
-    const total = d - s;
-    const fmt = (ms) => (ms / MS_PER_SECOND).toFixed(1);
-    return { first: fmt(first), total: sane(total) ? fmt(total) : null };
+    const ms = answerTiming(col.stages);
+    const fmt = (v) => (v / MS_PER_SECOND).toFixed(1);
+    return ms ? { first: fmt(ms.first), total: ms.total != null ? fmt(ms.total) : null } : null;
   }
   function paintBadge(col) {
     const m = col.servedModel;
@@ -3166,6 +3161,7 @@ export function mountComparePage(deps) {
     state.footerRound = null;
     state.footerShownRound = null;
     state.autoSummaryTried = new Set();
+    if (ctx.resetSuggest) ctx.resetSuggest(); // #2026: round ids restart — row 1 and its once-per-round record belong to the session left
     state.autoSkipNote = null;
     state.roundStartedAt = null;
     state.sessionId = null;
@@ -3689,9 +3685,12 @@ export function mountComparePage(deps) {
   qInput.addEventListener('keydown', noteActivity);
   stopBtn.addEventListener('click', () => {
     if (ctx.debateActive()) { ctx.debatePause(); stopBtn.disabled = true; return; } // aborts the turn AND pauses the loop
+    if (ctx.cancelQueuedSend && ctx.cancelQueuedSend()) { track('stop', { round: state.rounds + 1 }); return; } // #2026: a send still waiting behind the hidden one
     if (!state.port || !state.sending) return;
     state.port.postMessage({ type: 'ABORT' });
     stopBtn.disabled = true;
+    state.abortAskedAt = clock.now(); // a summary card's waiting line stops counting now, not when the ERROR lands
+    ctx.syncSummaryCards();
     track('stop', { round: state.rounds + 1 });
   });
   newChatBtn.addEventListener('click', resetSession);

@@ -21,9 +21,10 @@ import { imageIdsOf, docCountOf } from './image-store.js';
 import { createEntryStore } from './history-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
 import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED, RETRACTION_MAX } from './constants.js';
-import { autoGrow } from './helpers.js';
+import { autoGrow, readTiming } from './helpers.js';
 import { readDebateRecord, legacyDebateRecord } from './debate-core.js';
 import { foldSaveBy, uniformSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
+import { SUGGEST_COUNT, SUGGEST_Q_MAX } from './suggest.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
 /**
@@ -211,9 +212,9 @@ export function installHistory(ctx) {
     const base = { role: turn.role, ...(turn.kind ? { kind: turn.kind } : {}), ...(Number.isFinite(turn.round) ? { round: turn.round } : {}) };
     if (turn.role === 'user' && turn.kind === TURN_KIND_SUMMARY && turn.summary) {
       const sm = turn.summary;
-      return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })) } };
+      return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })), ...(sm.suggest ? { suggest: { avoid: storedAvoid(sm.suggest.avoid) } } : {}) } };
     }
-    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.errorText && turn.openTabLink ? { openTab: true } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.retracted ? { retracted: true, ...(turn.retraction ? { retraction: String(turn.retraction).slice(0, RETRACTION_MAX) } : {}) } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.errorText && turn.openTabLink ? { openTab: true } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.retracted ? { retracted: true, ...(turn.retraction ? { retraction: String(turn.retraction).slice(0, RETRACTION_MAX) } : {}) } : {}), ...(turn.role === 'assistant' && readTiming(turn.ms) ? { ms: readTiming(turn.ms) } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
   }
   /** The attachment MARKER a turn keeps — name (clipped) and size. Never the image; see HISTORY_ATTACH_NAME_MAX. */
   function storedImg(img) {
@@ -615,6 +616,8 @@ export function installHistory(ctx) {
         if (turn.retracted !== undefined && typeof turn.retracted !== 'boolean') return null; // a retracted answer, additive like its siblings
         if (turn.retraction !== undefined && typeof turn.retraction !== 'string') return null; // its quoted replacement (plain text, bounded below)
         const retracted = turn.retracted === true && turn.stalled === true && turn.role === 'assistant';
+        // The answer's timing (share 「N초」): a display hint — a malformed one is DROPPED, never the entry.
+        const ms = turn.role === 'assistant' ? readTiming(turn.ms) : null;
         const round = int(turn.round);
         const text = str(turn.text);
         const errorText = str(turn.errorText);
@@ -634,7 +637,7 @@ export function installHistory(ctx) {
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
         const k = kind === TURN_KIND_DEBATE ? kind : kind && (turn.role === 'assistant' || summary) ? kind : null;
-        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(errorText && turn.openTab === true ? { openTab: true } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}), ...(retracted ? { retracted: true, ...(turn.retraction ? { retraction: turn.retraction.slice(0, RETRACTION_MAX) } : {}) } : {}) });
+        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(errorText && turn.openTab === true ? { openTab: true } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}), ...(retracted ? { retracted: true, ...(turn.retraction ? { retraction: turn.retraction.slice(0, RETRACTION_MAX) } : {}) } : {}), ...(ms ? { ms } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
     }
@@ -670,6 +673,7 @@ export function installHistory(ctx) {
     state.summaryPending = null; state.judgeChoice = null; ctx.closeSummaryPop();
     state.roundInFlight = null;
     state.footerRound = null; state.footerShownRound = null; state.autoSummaryTried = new Set(); state.autoSkipNote = null; // #1976: no line until a round of THIS session settles
+    if (ctx.resetSuggest) ctx.resetSuggest(); // #2026: the loaded session's round ids are not the left session's — no stale row 1, no 「already tried」
     ctx.setColumnFocus(null); // a loaded session opens as the grid (the focus was about the session being left)
     state.roundSeq = 0; // re-derived from the stored rounds below (never a leftover of the session being left)
     state.activeRound = entry.activeRound; // the comparison the user was working on when it was saved (validated; null = latest comparison round)
@@ -781,6 +785,8 @@ export function installHistory(ctx) {
    * expected must not throw on load), providers come from the catalog, attachments are at most
    * one per provider, labels / question are cut to their bounds. null when it is not one.
    */
+  /** A summary's row-1 questions to avoid, as stored: strings, at most SUGGEST_COUNT, each at most SUGGEST_Q_MAX. */
+  const storedAvoid = (list) => (Array.isArray(list) ? list.filter((q) => typeof q === 'string').slice(0, SUGGEST_COUNT).map((q) => q.slice(0, SUGGEST_Q_MAX)) : []);
   function storedSummary(sm) {
     if (!sm || typeof sm !== 'object' || Array.isArray(sm) || typeof sm.judge !== 'string' || !normalizeColId(sm.judge) || !Array.isArray(sm.attachments)) return null;
     if (sm.question !== undefined && typeof sm.question !== 'string') return null; // written as a string, always
@@ -798,7 +804,9 @@ export function installHistory(ctx) {
       attachments.push({ col, provider: a.provider, model: a.model ? { id: a.model.id == null ? null : a.model.id.slice(0, SUMMARY_MODEL_LABEL_MAX), label: (a.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } : null, text: a.text || '', partial: a.partial === true, clipped: a.clipped === true });
     }
     if (attachments.length > MAX_COLUMNS) return null;
-    return { judge: normalizeColId(sm.judge), round: Number.isFinite(sm.round) ? sm.round : null, question: (sm.question || '').split('\n')[0].slice(0, SUMMARY_QUESTION_MAX), attachments };
+    // #2026 `suggest` (since the suggested-question chips): an object whose `avoid` is a list of strings; anything else drops the entry.
+    if (sm.suggest !== undefined && (!sm.suggest || typeof sm.suggest !== 'object' || Array.isArray(sm.suggest) || !Array.isArray(sm.suggest.avoid) || sm.suggest.avoid.some((q) => typeof q !== 'string'))) return null;
+    return { judge: normalizeColId(sm.judge), round: Number.isFinite(sm.round) ? sm.round : null, question: (sm.question || '').split('\n')[0].slice(0, SUMMARY_QUESTION_MAX), attachments, ...(sm.suggest ? { suggest: { avoid: storedAvoid(sm.suggest.avoid) } } : {}) };
   }
   function restoreAssistantTurn(col, stored, kind = null, extra = null) {
     const turn = ctx.pushAssistantTurn(col, kind, extra);
@@ -806,6 +814,8 @@ export function installHistory(ctx) {
     if (stored.errorText) { turn.errorText = String(stored.errorText); turn.node.classList.add('is-error'); if (stored.openTab === true) turn.openTabLink = true; }
     if (stored.stalled === true) turn.stalled = true;
     if (stored.cutError === true) turn.cutError = true;
+    const ms = readTiming(stored.ms);
+    if (ms) turn.ms = ms;
     if (stored.retracted === true) { turn.retracted = true; if (stored.retraction) turn.retraction = String(stored.retraction).slice(0, RETRACTION_MAX); }
     if (stored.images) ctx.restoreOutputImages(turn, stored.images);
     turn.node.classList.remove('is-streaming');

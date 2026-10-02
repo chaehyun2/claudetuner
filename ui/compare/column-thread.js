@@ -82,6 +82,9 @@ export function installColumnThread(ctx) {
     }
     scrollColumnToEnd(col); // still fits → keep the latest text visible
   }
+  /** What an answer turn shows: a debate turn without its control line (debate.js displayText); a verdict as written — its question
+   * list stays even when the footer offers it as chips (a restored card has no chips, batch review 1.51.0). */
+  const shownText = (turn) => (ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text);
   function paintAssistant(col) {
     const turn = col.turns[col.turns.length - 1];
     if (!turn || turn.role !== 'assistant') return;
@@ -93,12 +96,12 @@ export function installColumnThread(ctx) {
     try {
       // A cut answer (stopped / errored / stalled) completes a dangling table header it ended on (#1714 ④).
       // A debate moderator's reply is drawn without its control line (debate.js displayText).
-      const rendered = renderAnswer(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text, doc, { cut: !!(turn.errorText || turn.stalled), directiveLabels: { writing: t('directive_writing') } });
+      const rendered = renderAnswer(shownText(turn), doc, { cut: !!(turn.errorText || turn.stalled), directiveLabels: { writing: t('directive_writing') } });
       turn.node.appendChild(rendered.fragment);
       followUps = rendered.followUps;
     } catch {
       // md-render is bounded, but a renderer failure must never blank the answer: fall back to text.
-      turn.node.appendChild(doc.createTextNode(ctx.debateDisplayText ? ctx.debateDisplayText(turn) : turn.text));
+      turn.node.appendChild(doc.createTextNode(shownText(turn)));
     }
     // Images in the answer (#1684): the turn's cached strip, moved back under the text — never rebuilt.
     if (ctx.outImageCount(turn)) turn.node.appendChild(ctx.outImageStrip(col, turn));
@@ -277,6 +280,7 @@ export function installColumnThread(ctx) {
     col.errorTitle = '';
     col.servedModel = null;
     col.stages = {}; // a fresh round, fresh timers
+    col.doneAt = null; // #2026: this round's DONE sets it again — an earlier round's never picks the asked column
     // A fresh answer follows again until IT overflows; the send itself brings the column to its
     // new question (a scroll-up before the send is over — the user asked for more).
     col.followAnchored = false;

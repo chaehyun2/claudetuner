@@ -146,6 +146,10 @@ export const SHARE_LOCK_NAME = 'ct-cmp-share';
 export const SHARE_LOCK_WAIT_MS = 30000;
 export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
 export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
+/** The site's debate shell (site/multiai) — 「토론 붙이기」 opens here, framed like any shell visit (#1976). */
+export const MULTIAI_DEBATE_PATH = '/multiai/debate/';
+/** The published (Chrome Web Store) build; any other id is an unpacked build the shell must be told about (`?ext=`). */
+export const CWS_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
 /** A share page's path (`/c/<id>`) — a pasted one is a conversation to continue (#1784 U4; the SW's SHARE_LINK_PATH_RE is the other half). */
 export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
 /**

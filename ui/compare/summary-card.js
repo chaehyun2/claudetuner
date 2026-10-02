@@ -18,10 +18,15 @@
 // Behind the round footer's flag (`compare_round_footer`): without it summaries stay in the column.
 // See ui/compare/history.js for the ctx contract.
 
-import { TURN_KIND_SUMMARY, PROVIDER_META, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX } from './constants.js';
+import { TURN_KIND_SUMMARY, PROVIDER_META, FOLLOW_AT_BOTTOM_PX, FOLLOW_ANCHOR_TOP_PX, WAIT_TICK_MS, MS_PER_SECOND, BADGE_UPLOADING } from './constants.js';
 import { OPEN_FROM_CARD } from './open-in-provider.js';
 
 const CARD_FOLDED_CLASS = 'is-folded';
+// The verdict can take a minute on long answers (the judge reads every column first) — after this
+// long without a word the waiting line adds that it is normal, so a quiet card does not read as stuck.
+export const SUMMARY_SLOW_HINT_MS = 15000;
+// Badges the waiting line names as their own stage (before the judge has been asked at all).
+const PRE_ASK_BADGES = new Set(['col_preparing', BADGE_UPLOADING]);
 
 /** Installs the summary-card slice onto `ctx`. */
 export function installSummaryCard(ctx) {
@@ -29,6 +34,7 @@ export function installSummaryCard(ctx) {
   let box = null;
   /** [{ node, body, head, judge, toggle, openSlot, col }] in creation order. */
   let cards = [];
+  let tick = null; // the waiting lines' 1 s clock — running only while a card waits for its first word
 
   /** Built once, right after the columns (and the debate timeline) — so it sits above the docked composer. */
   function buildSummaryCards() {
@@ -63,9 +69,19 @@ export function installSummaryCard(ctx) {
     const body = el('div', 'cmp-summary-card-body');
     body.id = `cmp-summary-card-${cards.length + 1}`;
     toggle.setAttribute('aria-controls', body.id);
+    // The waiting line (2026-10-02 user report: a long verdict showed only a blinking caret): outside the body,
+    // whose emptiness means a refused summary (syncSummaryCards).
+    const wait = el('div', 'cmp-summary-card-wait');
+    wait.setAttribute('role', 'status');
+    wait.hidden = true;
+    const waitText = el('span', 'cmp-summary-card-wait-text');
+    const waitHint = el('span', 'cmp-summary-card-wait-hint');
+    wait.appendChild(waitText);
+    wait.appendChild(waitHint);
     node.appendChild(head);
+    node.appendChild(wait);
     node.appendChild(body);
-    const card = { node, body, head, judge, toggle, openSlot, openUrl: null, col, answer: null, away: false, anchored: false };
+    const card = { node, body, head, judge, toggle, openSlot, openUrl: null, col, answer: null, startedAt: null, wait, waitText, waitHint, away: false, anchored: false };
     toggle.addEventListener('click', () => fold(card, !card.body.hidden));
     // The reader scrolled the card away from its end: the stream stops moving it (like a column's userScrolledUp).
     body.addEventListener('scroll', () => { const m = metrics(body); if (m) card.away = m.fromEnd > FOLLOW_AT_BOTTOM_PX && !card.anchored; });
@@ -89,6 +105,7 @@ export function installSummaryCard(ctx) {
    * never move a card the reader scrolled — the column's rule, inside the card's own scroller.
    */
   function followSummaryCard(card, turn) {
+    if (card.answer === turn && !card.wait.hidden) paintWait(card); // the first words take the waiting line away
     if (card.body.hidden || card.away || card.anchored) return;
     const m = metrics(card.body);
     if (!m) return;
@@ -136,8 +153,38 @@ export function installSummaryCard(ctx) {
     }
     if (!card) card = makeCard(col);
     turn.card = card;
-    if (turn.role === 'assistant') card.answer = turn;
+    if (turn.role === 'assistant') { card.answer = turn; card.startedAt = ctx.clock.now(); paintWait(card); }
     return card.body;
+  }
+
+  /** The verdict has been asked and nothing of it shows yet (no words, not settled, no error, no Stop pressed since). */
+  const waiting = (card) => !!(card.answer && !card.answer.text && !card.answer.settled && !card.answer.errorText && card.col.status === 'streaming'
+    && !(Number.isFinite(state.abortAskedAt) && state.abortAskedAt >= card.startedAt));
+  /**
+   * 「요약·비교 만드는 중 · 12초」 (or the judge tab's own pre-ask stage) while the verdict has no words;
+   * the 「내용이 길면 1~2분 걸릴 수 있어요」 hint once it has been quiet SUMMARY_SLOW_HINT_MS. Hidden otherwise.
+   */
+  function paintWait(card) {
+    const on = waiting(card);
+    if (card.wait.hidden !== !on) card.wait.hidden = !on;
+    if (on) {
+      const ms = Math.max(0, ctx.clock.now() - card.startedAt);
+      const secs = Math.floor(ms / MS_PER_SECOND);
+      const stage = PRE_ASK_BADGES.has(card.col.badgeKey) ? t(card.col.badgeKey) : t('summary_card_working');
+      // 「요약·비교 만드는 중…」 → 「요약·비교 만드는 중 · 12초」: the ellipsis gives way to the count.
+      const text = secs > 0 ? `${stage.replace(/(…|\.\.\.)$/, '')} · ${t('elapsed_seconds', secs)}` : stage;
+      if (card.waitText.textContent !== text) card.waitText.textContent = text;
+      const hint = ms >= SUMMARY_SLOW_HINT_MS ? t('summary_card_slow_hint') : '';
+      if (card.waitHint.textContent !== hint) card.waitHint.textContent = hint;
+    }
+    return on;
+  }
+  /** Repaints every waiting line; the clock runs while one waits and stops with the last. */
+  function syncWaitLines() {
+    let any = false;
+    for (const c of cards) if (paintWait(c)) any = true;
+    if (any && tick == null) tick = ctx.clock.setInterval(syncWaitLines, WAIT_TICK_MS);
+    else if (!any && tick != null) { ctx.clock.clearInterval(tick); tick = null; }
   }
 
   /** The newest card of a judge column (startSummary reveals it), or null. */
@@ -170,6 +217,7 @@ export function installSummaryCard(ctx) {
     }
     cards = keep;
     box.hidden = !cards.some((c) => !c.node.hidden);
+    syncWaitLines();
   }
 
   Object.assign(ctx, { buildSummaryCards, summaryCardHost, latestSummaryCard, dropSummaryCards, syncSummaryCards, followSummaryCard });

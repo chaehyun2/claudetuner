@@ -20,7 +20,7 @@
 // see ui/compare/history.js.
 
 import { mayDirectSummarize } from './summary.js';
-import { FOLLOWUP_RESEND_CODES, CODE_ABORTED, SUMMARY_MIN_COLUMNS, SEND_KIND_SUMMARY, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, FACT_CHIP_MAX, FACT_CHIP_LABEL_MAX, SEND_VIA_CHIP, TURN_KIND_SUMMARY, MAX_COLUMNS, normalizeColId, DEBATE_HANDOFF_KEY, DEBATE_HANDOFF_PARAM, DEBATE_HANDOFF_TTL_MS, DEBATE_HANDOFF_ID_RE, DEBATE_HANDOFF_ID_LEN, DEBATE_HANDOFF_WRITE_MS } from './constants.js';
+import { FOLLOWUP_RESEND_CODES, CODE_ABORTED, SUMMARY_MIN_COLUMNS, SEND_KIND_SUMMARY, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, FACT_CHIP_MAX, FACT_CHIP_LABEL_MAX, SEND_VIA_CHIP, TURN_KIND_SUMMARY, MAX_COLUMNS, normalizeColId, DEBATE_HANDOFF_KEY, DEBATE_HANDOFF_PARAM, DEBATE_HANDOFF_TTL_MS, DEBATE_HANDOFF_ID_RE, DEBATE_HANDOFF_ID_LEN, DEBATE_HANDOFF_WRITE_MS, SHARE_SITE_ORIGIN, MULTIAI_DEBATE_PATH, CWS_EXT_ID } from './constants.js';
 import { MODE_DEBATE, DEBATE_TOPIC_MAX } from './debate-core.js';
 import { autoGrow } from './helpers.js';
 import { usagePeak, USAGE_FLOOR_PCT } from './usage-floor.js';
@@ -127,13 +127,16 @@ export function readDebateHandoff(stored, id, now) {
   const saveBy = isSaveBy(stored.saveBy) ? normalizeSaveBy(stored.saveBy, false) : uniformSaveBy(!stored.incognito);
   return { topic: stored.topic, cols, incognito: foldSaveBy(saveBy) !== SAVE_MODE_KEPT, saveBy };
 }
-/** The new tab's query: the debate tab, the page language, the handoff id — 🔴 never the topic or the cast. */
-export function debateHandoffQuery(id, lang) {
-  const q = new URLSearchParams();
-  q.set('mode', MODE_DEBATE);
-  q.set('lang', lang);
-  q.set(DEBATE_HANDOFF_PARAM, id);
-  return q.toString();
+/**
+ * The new tab: the site's debate shell, the handoff id in the FRAGMENT (never sent to a server or analytics),
+ * `?ext=` only for an unpacked build — 🔴 never the topic or the cast. The shell frames compare.html with
+ * `mode=debate` (its path) and passes the validated id on; the page's language is the shell's own.
+ */
+export function debateHandoffUrl(id, extId) {
+  const u = new URL(MULTIAI_DEBATE_PATH, SHARE_SITE_ORIGIN);
+  if (extId && extId !== CWS_EXT_ID) u.searchParams.set('ext', extId);
+  u.hash = new URLSearchParams({ [DEBATE_HANDOFF_PARAM]: id }).toString();
+  return u.toString();
 }
 
 /**
@@ -265,6 +268,8 @@ export function installRoundFooter(ctx) {
     noteLine = el('span', 'cmp-round-footer-note');
     noteLine.hidden = true;
     bar.appendChild(noteLine);
+    // #2026: the suggested-question rows (suggest.js), each on a line of its own above the note.
+    if (ctx.buildSuggestRows) ctx.buildSuggestRows(bar, noteLine);
     consentRow = el('div', 'cmp-round-footer-consent');
     consentRow.setAttribute('role', 'group');
     consentRow.hidden = true;
@@ -284,7 +289,9 @@ export function installRoundFooter(ctx) {
     // finishSend with nothing new accepted (a port lost while idle re-settles) finds null and starts nothing.
     const accepted = state.acceptedRound;
     state.acceptedRound = null;
-    if (Number.isFinite(round)) ctx.clock.setTimeout(() => maybeAutoSummarize(round, accepted), 0);
+    const kind = state.roundKind; // the settled send's kind, read now (a later send replaces it)
+    // The automatic summary first: when it starts, the hidden suggestion send stands aside (its verdict brings row 2).
+    if (Number.isFinite(round)) ctx.clock.setTimeout(() => { maybeAutoSummarize(round, accepted); if (ctx.maybeSuggest) ctx.maybeSuggest(round, accepted, kind); }, 0);
   }
 
   /** The automatic summary (stage 4, R5) — re-judged at the moment it would send. */
@@ -356,6 +363,7 @@ export function installRoundFooter(ctx) {
       factBtn.title = `${t('chip_fact_title')}\n${factNow}`;
       factBtn.disabled = !enabled;
     }
+    if (ctx.renderSuggestRows) ctx.renderSuggestRows(round, ctx.suggestOn() ? verdictOf(round) : null, enabled);
     noteLine.hidden = !state.autoSkipNote;
     noteLine.textContent = state.autoSkipNote || '';
     // The bridge sends nothing (a new tab, its own session): offered with the debate (`compare_debate`) and a session store.
@@ -400,7 +408,7 @@ export function installRoundFooter(ctx) {
     const written = (ok) => {
       bridging = false;
       if (ok) {
-        try { ctx.chrome.tabs.create({ url: ctx.chrome.runtime.getURL(`compare.html?${debateHandoffQuery(id, ctx.lang)}`) }); } catch { /* tabs API gone */ }
+        try { ctx.chrome.tabs.create({ url: debateHandoffUrl(id, ctx.chrome.runtime.id) }); } catch { /* tabs API gone */ }
         track('debate_bridge', { cols_n: cols.length, incognito });
       }
       renderRoundFooter();
@@ -437,6 +445,7 @@ export function installRoundFooter(ctx) {
         if (h) {
           state.storedLayouts[MODE_DEBATE] = h.cols;
           state.storedSeat = null; // the cast is the cross-check's columns: no seat from an earlier debate (the default moderator rule picks)
+          state.debateFromHandoff = true; // a chosen AI moderator outside this cast gives way to the default (debate.js modChoice)
           ctx.qInput.value = h.topic;
           autoGrow(ctx.qInput);
           // Both ways, and fixed (Codex 3단계 1R): the status read that follows must not put the stored default over it.
@@ -493,5 +502,8 @@ export function installRoundFooter(ctx) {
     ctx.clear(consentRow);
   }
 
-  Object.assign(ctx, { buildRoundFooter, settleRoundFooter, renderRoundFooter, sendChip, roundFooterOn: flagOn, bridgeToDebate, takeDebateHandoff, maybeAutoSummarize });
+  /** The columns a chip would go to now, as columns (suggest.js asks one of them). */
+  const footerTargets = () => targetsNow().targets.map((id) => state.columns.get(id)).filter(Boolean);
+
+  Object.assign(ctx, { buildRoundFooter, settleRoundFooter, renderRoundFooter, sendChip, roundFooterOn: flagOn, bridgeToDebate, takeDebateHandoff, maybeAutoSummarize, footerTargets });
 }
