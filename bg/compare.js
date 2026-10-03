@@ -1326,6 +1326,29 @@ export function gateModelsCsv(v) {
 // bad id is dropped from the csv (an empty csv drops the key), a bad single id drops the key.
 // The SW is the last line before GA — the page validates too, but a page that forgets must not
 // ship an email or a URL as a "model".
+// Suggested-question events (#2026) sit right next to the questions' words, so they take a closed
+// schema instead of "any key": only the listed keys pass, and a string value passes only from its
+// fixed set (or the col/model gate below) — a key added later that carries a question, or a
+// question put into an allowed key, is dropped here, not shipped (Codex 1.52.0 batch 후속).
+const SUGGEST_EVENT_STRINGS = Object.freeze({ provider: COMPARE_PROVIDERS, src: Object.freeze(['own', 'cmp']) });
+const SUGGEST_EVENT_GATED = Object.freeze(['col', 'model']);
+const SUGGEST_WHO = Object.freeze(['provider', 'col', 'model']);
+export const SUGGEST_EVENT_PARAMS = Object.freeze({
+  suggest_send: Object.freeze([...SUGGEST_WHO, 'others_n']),
+  suggest_ready: Object.freeze([...SUGGEST_WHO, 'n', 'aborted', 'ms']),
+  suggest_fail: Object.freeze([...SUGGEST_WHO, 'n', 'aborted', 'ms']),
+  suggest_shown: Object.freeze([...SUGGEST_WHO, 'src', 'n']),
+  suggest_more: Object.freeze(['open', 'total_n', 'hidden_n']),
+  suggest_click: Object.freeze([...SUGGEST_WHO, 'src', 'pos', 'folded', 'summarized', 'since_ms']),
+});
+function suggestParamAllowed(name, k, v) {
+  const keys = SUGGEST_EVENT_PARAMS[name];
+  if (!keys) return true;
+  if (!keys.includes(k)) return false;
+  if (typeof v !== 'string' || SUGGEST_EVENT_GATED.includes(k)) return true;
+  return (SUGGEST_EVENT_STRINGS[k] || []).includes(v);
+}
+
 export function sanitizeCompareEvent(name, params) {
   if (typeof name !== 'string' || !COMPARE_EVENT_NAMES.includes(name)) return null;
   if (params === undefined || params === null) params = {};
@@ -1336,6 +1359,7 @@ export function sanitizeCompareEvent(name, params) {
   for (const k of keys) {
     if (!COMPARE_EVENT_KEY_RE.test(k)) continue;
     const v = params[k];
+    if (!suggestParamAllowed(name, k, v)) continue;
     if (k === 'models' || k === 'model' || k === 'col') {
       // `col` (cmp-columns) is a colId — kept WHOLE (`provider:model`, never reduced to the
       // provider) when it has the shape; anything else is dropped.

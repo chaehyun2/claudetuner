@@ -414,7 +414,7 @@ export function installSuggest(ctx) {
     node.setAttribute('role', 'group');
     node.setAttribute('aria-label', label);
     node.hidden = true;
-    return { node, list: node, sig: '' };
+    return { node, list: node, sig: '', who: {} };
   }
   /** One group's lines, rebuilt only when what it shows changed. `tag` = the small label before each line (row 2's 「비교」). */
   /**
@@ -455,6 +455,9 @@ export function installSuggest(ctx) {
   function paintRow(row, { loading, questions, provenance, chipId, enabled, tag, src, who }) {
     row.node.hidden = !loading && !questions.length;
     if (row.node.hidden) { if (row.sig) { ctx.clear(row.list); row.sig = ''; } return []; } // no stale buttons left to count (Codex GA 1R)
+    // Who made the lines is read at click time, not captured when the buttons were built: the same questions from another
+    // saved session keep their buttons (same sig) but must count for THAT session's model (Codex 1.52.0 batch 후속).
+    row.who = who;
     const sig = JSON.stringify([loading, questions, provenance]);
     if (sig !== row.sig) {
       row.sig = sig;
@@ -467,7 +470,7 @@ export function installSuggest(ctx) {
         b.setAttribute('data-chip', chipId);
         if (tag) b.appendChild(el('span', 'cmp-suggest-tag', tag));
         b.appendChild(el('span', 'cmp-suggest-text', q));
-        b.addEventListener('click', () => { trackClick(b, src, who); ctx.sendChip(chipId, q, provenance); });
+        b.addEventListener('click', () => { trackClick(b, src, row.who); ctx.sendChip(chipId, q, provenance); });
         row.list.appendChild(b);
       }
     }
