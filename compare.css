@@ -249,9 +249,13 @@ button:disabled { cursor: not-allowed; }
 .cmp-suggest.is-open .cmp-suggest-chip { max-width: 760px; }
 .cmp-suggest.is-open .cmp-suggest-icon { display: none; } /* the title text carries its own 💬 */
 .cmp-suggest-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+/* The verdict's questions swap in for row 1's (2026-10-03): a short fade, not a jump. */
+.cmp-suggest-row-cmp { animation: cmp-fade-in .3s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .cmp-suggest-row-cmp { animation: none; } }
 .cmp-suggest-chip { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.4; text-align: left; cursor: pointer; }
 .cmp-suggest-chip:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--accent); }
 .cmp-suggest-chip:disabled { opacity: .55; cursor: default; }
+.cmp-suggest-fact { border-style: dashed; } /* the verdict's 「확인해 줘」 — dashed like its old separate chip */
 .cmp-suggest-chip::after { content: '↵'; margin-left: auto; padding-left: 4px; color: var(--text-secondary); opacity: 0; flex-shrink: 0; }
 .cmp-suggest-chip:hover:not(:disabled)::after, .cmp-suggest-chip:focus-visible::after { opacity: 1; }
 .cmp-suggest-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

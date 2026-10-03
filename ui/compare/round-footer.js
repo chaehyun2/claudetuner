@@ -318,7 +318,7 @@ export function installRoundFooter(ctx) {
         const req = col.turns[i];
         const ans = col.turns[i + 1];
         if (req.role === 'user' && req.kind === TURN_KIND_SUMMARY && req.summary && req.summary.round === round && ans.role === 'assistant' && ans.kind === TURN_KIND_SUMMARY && ans.settled && ans.text && !ans.errorText) {
-          if (!best || (Number.isFinite(ans.round) && ans.round > best.round)) best = { round: ans.round, text: ans.text, from: [col.provider, ...(Array.isArray(req.summary.attachments) ? req.summary.attachments.map((a) => a.provider) : [])] };
+          if (!best || (Number.isFinite(ans.round) && ans.round > best.round)) best = { round: ans.round, text: ans.text, col: col.id, from: [col.provider, ...(Array.isArray(req.summary.attachments) ? req.summary.attachments.map((a) => a.provider) : [])] };
         }
       }
     }
@@ -356,14 +356,16 @@ export function installRoundFooter(ctx) {
     const verdict = state.status && state.status.factChipOn === true ? verdictOf(round) : null;
     factNow = verdict ? factFromVerdict(verdict.text) : null;
     factFrom = verdict ? verdict.from : [];
-    factBtn.hidden = !factNow;
-    if (factNow) {
+    // With the suggested questions on, the fact leads their list instead (suggest.js paintFact — one chip on the line, not two).
+    const factInList = !!factNow && !!ctx.renderSuggestRows && ctx.suggestOn();
+    factBtn.hidden = !factNow || factInList;
+    if (factNow && !factInList) {
       const label = t('chip_fact', factChipLabel(factNow));
       if (factBtn.textContent !== label) factBtn.textContent = label;
       factBtn.title = `${t('chip_fact_title')}\n${factNow}`;
       factBtn.disabled = !enabled;
     }
-    if (ctx.renderSuggestRows) ctx.renderSuggestRows(round, ctx.suggestOn() ? verdictOf(round) : null, enabled);
+    if (ctx.renderSuggestRows) ctx.renderSuggestRows(round, ctx.suggestOn() ? verdictOf(round) : null, enabled, factInList ? { text: factNow, from: factFrom } : null);
     noteLine.hidden = !state.autoSkipNote;
     noteLine.textContent = state.autoSkipNote || '';
     // The bridge sends nothing (a new tab, its own session): offered with the debate (`compare_debate`) and a session store.

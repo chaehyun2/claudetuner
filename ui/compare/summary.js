@@ -171,9 +171,10 @@ export function installSummary(ctx) {
         const a = answerInRound(c, round);
         return { col: c.id, provider: c.provider, model: a && a.model ? { id: a.model.id == null ? null : String(a.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(a.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } : null, text: a ? a.text : '', partial: !!(a && a.partial), clipped: false };
       }),
-      // #2026: whether the verdict is asked for questions, and row 1's questions it must not repeat — FIXED here, at the send,
-      // so a retry / a reload / a flag change later renders the very prompt that went out (Codex 2R).
-      ...(ctx.suggestOn && ctx.suggestOn() ? { suggest: { avoid: ctx.suggestShownFor ? ctx.suggestShownFor(round) : [] } } : {}),
+      // #2026: whether the verdict is asked for questions — FIXED here, at the send, so a retry / a reload / a flag change later
+      // renders the very prompt that went out (Codex 2R). Nothing to avoid any more: its questions REPLACE row 1's (2026-10-03),
+      // so it picks the best ones freely (`avoid` stays readable for entries stored before).
+      ...(ctx.suggestOn && ctx.suggestOn() ? { suggest: { avoid: [] } } : {}),
     };
   }
   /**

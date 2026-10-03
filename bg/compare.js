@@ -395,6 +395,9 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // #2026 suggested questions: the hidden send went (`provider`, `others_n`), it came back with `n` questions /
   // with none (`provider`, `n`, `aborted`) — never a question's words.
   'suggest_send', 'suggest_ready', 'suggest_fail',
+  // …the questions shown (`src` own|cmp, `n`, `provider`, `col`, `model` — once per round and source), 「더 보기」 (`open`, `total_n`,
+  // `hidden_n`) and a line pressed (`src`, `provider`, `col`, `model`, `pos`, `folded`, `summarized`, `since_ms`) — never a question's words.
+  'suggest_shown', 'suggest_more', 'suggest_click',
   // SW-side, from OPEN_COMPARE_SHARE (#1784 U4): a share page's 「이어서 질문하기」 opened the page (no params).
   'share_import',
   // Empty-state example chips (2026-10-02): `kind` (compare | debate), `code` = exampleCode(q) (8 hex, our
