@@ -24,6 +24,8 @@
 //   ineligible_reason: string | null,  // claude only, closed vocabulary (else 'other'); null when eligible
 //   kinds_known: boolean,           // claude known: true; chatgpt: false until the detail is merged
 //   usable_by_kind: { full, five_hour, weekly },  // passes usable NOW per kind (0 = not usable / unknown)
+//   tickets: [{ kind, expires_at }],  // one per held pass (known kinds only), earliest expiry first,
+//                                     // ≤ RESET_PASS_TICKETS_MAX — the popup's ticket chips. No id/key.
 // }
 
 export function emptyResetPassKinds() {
@@ -119,7 +121,31 @@ export function unknownResetPassSummary(provider, now = Date.now()) {
     ineligible_reason: null,
     kinds_known: false,
     usable_by_kind: emptyUsableKinds(),
+    tickets: [],
   };
+}
+
+// Ticket chips (one per held pass) are capped: a pass with `left: 5` is five tickets, and a list
+// longer than this is summarised as 「+N」 by the renderer, which reads `available` for the total.
+export const RESET_PASS_TICKETS_MAX = 20;
+const TICKET_KINDS = new Set(['full', 'five_hour', 'weekly']);
+
+/**
+ * Normalised passes → `[{ kind, expires_at }]`, one entry per pass held (a grant with `left: 2` is
+ * two), known kinds only, unexpired at `now`, earliest expiry first, capped. Carries nothing that
+ * identifies a pass (no pass_key / id) — only what the chips draw.
+ */
+export function ticketsFromPasses(passes, now = Date.now()) {
+  const out = [];
+  for (const p of Array.isArray(passes) ? passes : []) {
+    if (!p || !TICKET_KINDS.has(p.kind) || typeof p.expires_at !== 'string') continue;
+    const t = Date.parse(p.expires_at);
+    if (!Number.isFinite(t) || t <= now) continue;
+    const n = isPassCount(p.left) ? Math.min(p.left, RESET_PASS_TICKETS_MAX) : 0;
+    for (let i = 0; i < n; i++) out.push({ kind: p.kind, expires_at: p.expires_at, _t: t });
+  }
+  out.sort((a, b) => a._t - b._t || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+  return out.slice(0, RESET_PASS_TICKETS_MAX).map(({ kind, expires_at }) => ({ kind, expires_at }));
 }
 
 /** A pass count as the providers send it: a non-negative integer, anything else unreadable. */

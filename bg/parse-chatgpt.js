@@ -20,7 +20,7 @@
 // outputs were captured before and after the move and compared byte for byte.
 import { normalizeResetTime } from './api.js';
 import {
-  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, unknownResetPassSummary,
+  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, ticketsFromPasses, unknownResetPassSummary,
 } from './reset-pass-model.js';
 
 // Capitalize first letter: "plus" → "Plus"
@@ -632,6 +632,7 @@ export function parseChatGPTResetSummary(usage, now = Date.now()) {
         // Kinds come only from the detail endpoint (mergeChatGPTResetDetail flips this).
         kinds_known: false,
         usable_by_kind: emptyUsableKinds(),
+        tickets: [],
       },
       passes: [],
     };
@@ -768,5 +769,6 @@ export function mergeChatGPTResetDetail(summary, detail, now = Date.now()) {
     next_expires_at: nextExpires,
     kinds_known: true,
     usable_by_kind: usableByKind,
+    tickets: ticketsFromPasses(live, now),
   };
 }

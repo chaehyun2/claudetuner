@@ -892,6 +892,18 @@
       rp_ui_help_tip_claude: '전체 초기화는 5시간 및 주간 사용량 제한을 다시 채웁니다. 5시간 초기화는 5시간 사용량 제한을 다시 채웁니다.',
       rp_ui_help_tip_chatgpt: '초기화를 사용해 5시간 한도나 주간 한도, 또는 두 한도를 모두 복원하세요. Codex·Work 한도에만 적용됩니다(채팅 제외).',
       rp_ui_help_more: '? 를 누르면 도움말이 열립니다.',
+      rp_ui_tk_head: '초기화 패스 {n}장',
+      rp_ui_tk_label_full: '전체',
+      rp_ui_tk_label_five_hour: '5시간',
+      rp_ui_tk_label_weekly: '주간',
+      rp_ui_tk_what_full: '전체 초기화 — 5시간 + 주간 한도',
+      rp_ui_tk_what_five_hour: '5시간 초기화 — 5시간 한도만',
+      rp_ui_tk_what_weekly: '주간 초기화 — 주간 한도만',
+      rp_ui_tk_expires: '{d} 만료',
+      rp_ui_tk_soon: '3일 안에 만료돼요',
+      rp_ui_tk_click: '클릭하면 사용량 설정이 열려요',
+      rp_ui_tk_more: '+{n}',
+      rp_ui_tk_more_tip: '{n}장 더 있어요 — 클릭하면 사용량 설정에서 전부 볼 수 있어요',
     },
     en: {
       rp_ui_chip_name: 'Reset passes',
@@ -909,6 +921,18 @@
       rp_ui_help_tip_claude: 'A full reset refills your 5-hour and weekly usage limits. A 5-hour reset refills your 5-hour usage limit.',
       rp_ui_help_tip_chatgpt: 'Use a reset to restore your 5-hour limit, weekly limit, or both. Applies to Codex & Work limits only (not chat).',
       rp_ui_help_more: 'Click ? to open the help article.',
+      rp_ui_tk_head: 'Reset passes: {n}',
+      rp_ui_tk_label_full: 'Full',
+      rp_ui_tk_label_five_hour: '5-hour',
+      rp_ui_tk_label_weekly: 'Weekly',
+      rp_ui_tk_what_full: 'Full reset — 5-hour + weekly limits',
+      rp_ui_tk_what_five_hour: '5-hour reset — 5-hour limit only',
+      rp_ui_tk_what_weekly: 'Weekly reset — weekly limit only',
+      rp_ui_tk_expires: 'expires {d}',
+      rp_ui_tk_soon: 'Expires within 3 days',
+      rp_ui_tk_click: 'Click to open the usage settings',
+      rp_ui_tk_more: '+{n}',
+      rp_ui_tk_more_tip: '{n} more — open the usage settings to see them all',
     },
   };
   function rpText(lang, key, vars) {
@@ -997,7 +1021,76 @@
       + 'color:inherit;opacity:0.6;cursor:help">?</a>';
   }
   /** The chip as one HTML line (empty string when hidden). `cls` = the surface's extra class. */
+  // Ticket chips (#2092, user choice 2026-10-05): one small ticket per held pass — kind on the left
+  // of a dashed perforation, expiry date on the right, amber when it expires within 3 days, the
+  // earliest first. Drawn only when the summary knows each pass (`kinds_known` + `tickets`);
+  // otherwise the one-line chip below stands. Inline styles: the in-page sidebars load no CSS of
+  // ours, and the colours are translucent so they read on light and dark pages alike.
+  const RESET_PASS_TICKETS_SHOWN = 6;
+  const RP_TICKET_COLORS = {
+    full: ['#6a58d6', 'rgba(106,88,214,0.15)'],
+    five_hour: ['#17845f', 'rgba(23,132,95,0.15)'],
+    weekly: ['#2f6bcf', 'rgba(47,107,207,0.15)'],
+  };
+  // Kind colours are tint / band / perforation only — the text inherits the page colour, so it keeps
+  // its contrast on light and dark pages alike (Codex 1R 후속: coloured 10.5px text was ~3:1).
+  const RP_SOON_COLOR = '#d97706';
+  const RP_SOON_BG = 'rgba(217,119,6,0.22)';
+  function rpDateTime(ms) {
+    const d = new Date(ms);
+    return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  function buildResetPassTicketsHtml(summary, lang, nowMs, provider, url, cls, helpUrl) {
+    const s = summary;
+    if (!s || typeof s !== 'object' || s.known !== true || s.kinds_known !== true) return '';
+    const total = rpCount(s.available);
+    const tickets = Array.isArray(s.tickets) ? s.tickets.filter((x) => x && Object.hasOwn(RP_TICKET_COLORS, x.kind)
+      && Number.isFinite(Date.parse(x.expires_at))) : [];
+    if (!total || !tickets.length) return '';
+    if (typeof url !== 'string' || !/^https:\/\//.test(url)) return '';
+    const pv = provider || s.provider;
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const link = (inner, title, style, extraCls) => '<a class="' + extraCls + '" href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer"'
+      + ' title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title.replace(/\n/g, ' · ')) + '" style="' + style + '">' + inner + '</a>';
+    const head = '<div style="display:flex;align-items:center;gap:5px;min-width:0;font-size:11px;line-height:1.4">'
+      + link('🎟 ' + escapeHtml(rpText(lang, 'rp_ui_tk_head', { n: total }))
+          + (pv === 'chatgpt' ? '<span style="opacity:0.65;font-weight:400"> · ' + escapeHtml(rpText(lang, 'rp_ui_chip_cg_scope')) + '</span>' : ''),
+        resetPassDetailTip(s, lang, pv), 'color:inherit;text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0', 'ct-rp-head')
+      + buildResetPassHelpHtml(lang, helpUrl, pv)
+      + '</div>';
+    const shown = tickets.slice(0, RESET_PASS_TICKETS_SHOWN);
+    let chips = '';
+    for (const tk of shown) {
+      const exp = Date.parse(tk.expires_at);
+      const soon = exp - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
+      const [fg, bg] = RP_TICKET_COLORS[tk.kind];
+      const d = new Date(exp);
+      const tip = [rpText(lang, 'rp_ui_tk_what_' + tk.kind), rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(exp) })]
+        .concat(soon ? [rpText(lang, 'rp_ui_tk_soon')] : [], [rpText(lang, 'rp_ui_tk_click')]).join('\n');
+      chips += link(
+        '<span style="padding:2px 6px;font-weight:700;border-left:3px solid ' + fg + ';border-radius:5px 0 0 5px">'
+          + escapeHtml(rpText(lang, 'rp_ui_tk_label_' + tk.kind)) + '</span>'
+          + '<span style="padding:2px 6px;border-left:1.5px dashed ' + fg + ';font-variant-numeric:tabular-nums'
+          + (soon ? ';font-weight:700;background:' + RP_SOON_BG : '') + '">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span>',
+        tip,
+        // Text takes the page's own colour (readable on any sidebar theme); the kind colour is the
+        // tint, the left band and the perforation, amber marks a pass expiring within 3 days.
+        'display:inline-flex;align-items:stretch;border-radius:5px;font-size:10.5px;line-height:1.5;text-decoration:none;'
+          + 'color:inherit;background:' + bg + ';border:1px solid ' + (soon ? RP_SOON_COLOR : 'transparent'),
+        'ct-rp-ticket' + (soon ? ' is-soon' : ''));
+    }
+    const more = total - shown.length;
+    if (more > 0) {
+      chips += link(escapeHtml(rpText(lang, 'rp_ui_tk_more', { n: more })), rpText(lang, 'rp_ui_tk_more_tip', { n: more }),
+        'display:inline-flex;align-items:center;padding:2px 6px;border-radius:5px;font-size:10.5px;text-decoration:none;color:inherit;opacity:0.7;border:1px dashed currentColor',
+        'ct-rp-more');
+    }
+    return '<div class="ct-rp-row ct-rp-tickets' + (cls ? ' ' + escapeHtml(cls) : '') + '" style="display:grid;gap:4px;min-width:0">'
+      + head + '<div style="display:flex;flex-wrap:wrap;gap:4px">' + chips + '</div></div>';
+  }
   function buildResetPassChipHtml(summary, lang, nowMs, provider, url, cls, helpUrl) {
+    const tickets = buildResetPassTicketsHtml(summary, lang, nowMs, provider, url, cls, helpUrl);
+    if (tickets) return tickets;
     const chip = resetPassChip(summary, lang, nowMs, provider, url);
     if (!chip) return '';
     const title = escapeHtml(chip.title);

@@ -518,6 +518,8 @@
     .rp-pred-note .rp-note-link { color: inherit; text-decoration: none; cursor: pointer; }
     .rp-pred-note .rp-note-link:hover, .ct-rp-chip:hover { text-decoration: underline; }
     .ct-rp-help:hover { opacity: 1 !important; }
+    .ct-rp-ticket:hover, .ct-rp-ticket:focus-visible, .ct-rp-more:hover { filter: brightness(1.08); outline: 2px solid currentColor; outline-offset: 1px; }
+    .ct-rp-head:hover { text-decoration: underline; }
     [data-theme="dark"] .predict-headline.is-alert { background: #ef444430; }
 
     /* 조직 선택 카드 */

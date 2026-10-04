@@ -12,7 +12,7 @@
 // captured case outputs.
 import { normalizeResetTime } from './api.js';
 import {
-  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, unknownResetPassSummary, WEEKLY_SLOT_RE,
+  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, ticketsFromPasses, unknownResetPassSummary, WEEKLY_SLOT_RE,
 } from './reset-pass-model.js';
 
 /** Normalize raw extra_usage API response into a consistent shape */
@@ -293,6 +293,7 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
         ...eligibility,
         kinds_known: true,
         usable_by_kind: usableByKind,
+        tickets: ticketsFromPasses(passes, now),
       },
       passes,
     };
