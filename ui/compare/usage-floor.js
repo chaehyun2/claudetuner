@@ -20,9 +20,12 @@ const providerOf = (o) => (typeof o?.provider === 'string' && o.provider ? o.pro
  * entry; for the others the first entry of that provider. null when nothing was collected for it.
  * 🪤 With several accounts of one service this may not be the account a compare column uses (a known limit).
  */
-export function pickProviderEntry(orgs, provider) {
+// `orgUuid` (#2054): the entry of THAT org — the org a cross-check send uses — or null when the collector has none
+// (an unpolled org: nothing known, never another org's numbers). Without it: Claude's primary, else the first.
+export function pickProviderEntry(orgs, provider, orgUuid = null) {
   if (!Array.isArray(orgs)) return null;
   const mine = orgs.filter((o) => o && typeof o === 'object' && providerOf(o) === provider);
+  if (orgUuid) return mine.find((o) => o.uuid === orgUuid) || null;
   return (provider === 'claude' ? mine.find((o) => o.isPrimary === true) : null) || mine[0] || null;
 }
 
@@ -62,14 +65,19 @@ export function usagePeak(entry, { now = Date.now(), maxAgeMs = null } = {}) {
  * debate stops at before its next send), as `{ provider, pct }` with the highest one, or null. A service
  * with nothing collected, no limits, or a reading older than `maxAgeMs` is skipped — never a stop on a
  * guess (2026-10-02 user decision: stale or unreadable = go on). `skip` = services the user already chose
- * to go on past.
+ * to go on past. `orgOf[p]` = the org (or a list of orgs, #2054 ③ — every Claude column's send org) whose
+ * entries speak for `p`; null / absent in it = the provider's default entry (pickProviderEntry). Any of them at
+ * the floor is a hit.
  */
-export function usageFloorHit({ orgs, providers, now, pct, maxAgeMs, skip = [] }) {
+export function usageFloorHit({ orgs, providers, now, pct, maxAgeMs, skip = [], orgOf = {} }) {
   let hit = null;
   for (const p of new Set(providers || [])) {
     if (skip.includes(p)) continue;
-    const peak = usagePeak(pickProviderEntry(orgs, p), { now, maxAgeMs });
-    if (peak !== null && peak >= pct && (!hit || peak > hit.pct)) hit = { provider: p, pct: peak };
+    const want = orgOf ? orgOf[p] : null;
+    for (const org of new Set(Array.isArray(want) ? (want.length ? want : [null]) : [want])) {
+      const peak = usagePeak(pickProviderEntry(orgs, p, org || null), { now, maxAgeMs });
+      if (peak !== null && peak >= pct && (!hit || peak > hit.pct)) hit = { provider: p, pct: peak };
+    }
   }
   return hit;
 }

@@ -12,6 +12,7 @@
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
 import { neutraliseQuoted, mdInlineText } from './helpers.js';
+import { isPaidClaudePlan } from '../../vendor-ai/models.js';
 import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS, DEBATE_BUDGET_CONTINUE } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
@@ -227,9 +228,37 @@ export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
 // different voices.
 export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5-5';
 export const CLAUDE_MODERATOR_FREE = 'claude-sonnet-4-6';
-/** A plan label (status.providers[p].plan) is a paid plan: present and not 「Free」 — renderPlan's `data-tier` rule. */
-export const isPaidPlan = (label) => typeof label === 'string' && !!label.trim() && !/^free$/i.test(label.trim());
-const catalogIds = (list) => (Array.isArray(list) ? list.filter((m) => m && typeof m === 'object' && m.id != null && m.id !== '').map((m) => ({ id: String(m.id), label: String(m.label || ''), default: m.default === true })) : []);
+// ── plan tier (#2054 D): 'paid' · 'free' · 'unknown' from a status plan LABEL (status.providers[p].plan) ──
+// Until #2054 anything but 「Free」 was paid, so Claude's `API` / `unknown` and a ChatGPT / Gemini label no
+// rule knows took the paid moderator model and the paid tint. Now a label is paid only when it names a
+// known paid plan; whatever cannot be told is 'unknown' — never paid.
+// Claude: the label is the collector's display of vendor-ai claudeOrgPlan (bg/plan-label.js CLAUDE_PLAN_LABELS,
+// refined by a seat tier: `Team Premium`, `Max (<tier>)`) — read back to that key and judged by the package's
+// isPaidClaudePlan, the same rule the client gates models by.
+const CLAUDE_LABEL_KEYS = [[/^max 20x$/, 'max_20x'], [/^max 5x$/, 'max_5x'], [/^max( \(.+\))?$/, 'max'], [/^pro$/, 'pro'], [/^team( (premium|standard|tier 2))?$/, 'team'], [/^enterprise$/, 'enterprise'], [/^free$/, 'free'], [/^api$/, 'api']];
+// ChatGPT (bg/parse-chatgpt.js CHATGPT_PLAN_NAMES, ui/util.js planDisplayName) and Gemini (bg/gemini-plan-labels.js)
+// paid labels, lower-cased, matched WHOLE (Codex 1R: a prefix let 「Team Mystery」 / 「AI Pro 999x」 read as paid).
+// An unrecognised code reaches the label capitalised — 'unknown' here.
+const PAID_LABELS = {
+  chatgpt: /^(go|plus|pro (5x|20x|25x|100|200|500)|team|business|enterprise|education( \(k-12\))?)$/,
+  gemini: /^(ai (plus|pro|ultra( (5|20)x)?)|advanced|work)$/,
+};
+/** The Claude plan key (vendor-ai claudeOrgPlan's vocabulary) of a display label, or 'unknown'. */
+function claudePlanKey(label) {
+  const hit = CLAUDE_LABEL_KEYS.find(([re]) => re.test(label));
+  return hit ? hit[1] : 'unknown';
+}
+/** `'paid'` · `'free'` · `'unknown'` for a provider's plan label (null / blank / unrecognised = 'unknown'). */
+export function planTier(provider, label) {
+  const l = typeof label === 'string' ? label.trim().toLowerCase() : '';
+  if (!l) return 'unknown';
+  if (l === 'free') return 'free';
+  if (provider === 'claude') return isPaidClaudePlan(claudePlanKey(l)) ? 'paid' : 'unknown';
+  return PAID_LABELS[provider] && PAID_LABELS[provider].test(l) ? 'paid' : 'unknown';
+}
+/** A plan label is a known paid plan (planTier) — the moderator seat's 「paid first」. */
+export const isPaidPlan = (label, provider) => planTier(provider, label) === 'paid';
+const catalogIds = (list) => (Array.isArray(list) ? list.filter((m) => m && typeof m === 'object' && m.id != null && m.id !== '').map((m) => ({ id: String(m.id), label: String(m.label || ''), default: m.default === true, role: typeof m.role === 'string' ? m.role : null })) : []);
 /**
  * Where the default moderator sits, from the status (`providers[p]` = { loggedIn, permitted, plan },
  * `catalogs[p]` = the model list): `{ provider, model, debaterModel }` — `model` is always an
@@ -243,12 +272,12 @@ export function pickModeratorSeat({ providers, catalogs }) {
   const cats = catalogs || {};
   const ready = MODERATOR_RANK.filter((p) => ps[p] && ps[p].loggedIn === true && ps[p].permitted === true);
   // Stable: paid first, the rank order within each group.
-  const order = [...ready.filter((p) => isPaidPlan(ps[p].plan)), ...ready.filter((p) => !isPaidPlan(ps[p].plan))];
+  const order = [...ready.filter((p) => isPaidPlan(ps[p].plan, p)), ...ready.filter((p) => !isPaidPlan(ps[p].plan, p))];
   for (const p of order) {
     const list = catalogIds(cats[p]);
-    const tierOfRow = (m) => defaultAliasOf(p, m.id, m.label);
+    const tierOfRow = (m) => defaultAliasOf(p, m.id, m.label, m.role);
     if (p === 'claude') {
-      const want = isPaidPlan(ps[p].plan) ? CLAUDE_MODERATOR_PAID : CLAUDE_MODERATOR_FREE;
+      const want = isPaidPlan(ps[p].plan, p) ? CLAUDE_MODERATOR_PAID : CLAUDE_MODERATOR_FREE;
       if (list.some((m) => m.id === want)) return { provider: p, model: want, debaterModel: null };
     } else if (p === 'gemini') {
       const flash = list.find((m) => tierOfRow(m).family === 'debate_family_flash');
@@ -363,6 +392,9 @@ const TIER_HIGH = 'debate_tier_high';
 const TIER_REASONING = 'debate_tier_reasoning';
 const TIER_BALANCED = 'debate_tier_balanced';
 const TIER_LIGHT = 'debate_tier_light';
+// ChatGPT's 「Thinking mini」 (catalog role `thinking_mini`, #2054 E — 2026-10-04 user decision): a group of its
+// own between the light Instant and the reasoning Thinking — it reasons, briefly.
+const TIER_MINI = 'debate_tier_mini';
 // `tier` (plan §13 / §13.1 ①⑤): a hand-made MODEL-GROUP hint, worded as an estimate (고성능군 / 추론형
 // / 균형형 / 경량형) — never a benchmark claim. null = no grounds to say (Auto, and the Work models
 // Sol / Luna / Terra until there is evidence; Astra is 고성능군 on the recorded evidence that it is
@@ -394,7 +426,23 @@ const DEFAULT_ALIAS_RULES = {
     { tokens: null, key: 'debate_alias_gemini', family: null, emoji: '\u{1F39B}\u{FE0F}', tier: null },                                         // gemini sign (twins)
   ],
 };
-export const TIER_KEYS = [TIER_HIGH, TIER_REASONING, TIER_BALANCED, TIER_LIGHT];
+// ROLE FIRST (#2054 E): the catalog's `role` (vendor-ai models.js — the site's own lane, an enum that does not
+// change when a slug is renamed) names the family before any token does; the token rules above are the fallback
+// for a row without a role (Claude / Gemini rows, a static list, a stored model the catalog no longer has).
+// `work` names no family (Astra / Sol / Luna / Terra are told apart by their tokens) and is left to them.
+const ruleByKey = (provider, key) => DEFAULT_ALIAS_RULES[provider].find((r) => r.key === key);
+const ROLE_RULES = {
+  chatgpt: {
+    auto: ruleByKey('chatgpt', 'debate_alias_chatgpt'),
+    fast: ruleByKey('chatgpt', 'debate_alias_chatgpt_instant'),
+    thinking: ruleByKey('chatgpt', 'debate_alias_chatgpt_thinking'),
+    thinking_more: ruleByKey('chatgpt', 'debate_alias_chatgpt_thinking'),
+    thinking_max: ruleByKey('chatgpt', 'debate_alias_chatgpt_thinking'),
+    thinking_mini: { ...ruleByKey('chatgpt', 'debate_alias_chatgpt_mini'), tier: TIER_MINI },
+    pro: ruleByKey('chatgpt', 'debate_alias_chatgpt_pro'),
+  },
+};
+export const TIER_KEYS = [TIER_HIGH, TIER_REASONING, TIER_MINI, TIER_BALANCED, TIER_LIGHT];
 const TIER_KEY_PREFIX = 'debate_tier_';
 /** A tier i18n key as a short analytics value (`debate_tier_light` → `light`); '' for none. */
 export const tierSlug = (key) => (typeof key === 'string' && key.startsWith(TIER_KEY_PREFIX) ? key.slice(TIER_KEY_PREFIX.length) : '');
@@ -414,10 +462,15 @@ function familyWords(key, t) {
 function modelTokens(modelId, modelLabel) {
   return `${modelId == null ? '' : modelId} ${modelLabel == null ? '' : modelLabel}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
-/** `{ key, family, emoji }` of the default alias for a provider + model id + catalog label (null / '' = Auto). */
-export function defaultAliasOf(provider, modelId, modelLabel = '') {
+/**
+ * `{ key, family, emoji, tier }` of the default alias for a provider + model id + catalog label (null / '' = Auto)
+ * + the catalog row's `role` (ROLE_RULES — read first; null / unknown = the token rules).
+ */
+export function defaultAliasOf(provider, modelId, modelLabel = '', role = null) {
   const rules = DEFAULT_ALIAS_RULES[provider];
   if (!rules) return FALLBACK_ALIAS;
+  const byRole = typeof role === 'string' && ROLE_RULES[provider] && Object.hasOwn(ROLE_RULES[provider], role) ? ROLE_RULES[provider][role] : null;
+  if (byRole) return { key: byRole.key, family: byRole.family, emoji: byRole.emoji, tier: byRole.tier };
   const toks = modelTokens(modelId, modelLabel);
   const hit = (want) => toks.some((tok) => (want instanceof RegExp ? want.test(tok) : tok === want));
   for (const r of rules) if (!r.tokens || r.tokens.some(hit)) return { key: r.key, family: r.family, emoji: r.emoji, tier: r.tier };
@@ -425,11 +478,12 @@ export function defaultAliasOf(provider, modelId, modelLabel = '') {
 }
 /**
  * The tier i18n key of a model, or null. `modelId` null = Auto: then only a model the SITE REPORTED
- * serving (`served`, `{ id, label }` — never a merely requested one) may name the family (§13.1 ②).
+ * serving (`served`, `{ id, label, role? }` — never a merely requested one) may name the family (§13.1 ②).
+ * `role` = the catalog role of `modelId` (role first, #2054 E).
  */
-export function tierOf(provider, modelId, modelLabel, served = null) {
-  if (modelId != null && modelId !== '') return defaultAliasOf(provider, modelId, modelLabel).tier;
-  if (served && (served.id || served.label)) return defaultAliasOf(provider, served.id, served.label).tier;
+export function tierOf(provider, modelId, modelLabel, served = null, role = null) {
+  if (modelId != null && modelId !== '') return defaultAliasOf(provider, modelId, modelLabel, role).tier;
+  if (served && (served.id || served.label)) return defaultAliasOf(provider, served.id, served.label, served.role || null).tier;
   return null;
 }
 export const DEBATE_META_MAX = 60;
@@ -587,7 +641,7 @@ export function nameKey(s) {
 }
 
 /**
- * The debate names of `people` (`[{ id, provider, model, modelLabel, alias, label }]` — `alias` the
+ * The debate names of `people` (`[{ id, provider, model, modelLabel, modelRole?, alias, label }]` — `alias` the
  * stored user alias or '', `label` the page's own 「Claude (Opus 5)」, `modelLabel` the catalog label
  * 「Opus 5」): `{ names: Map id → { name, emoji, custom, words }, conflicts: [id] }` (`words` = family words a mention may use). Colliding
  * defaults are told apart by version / label / number (below); two
@@ -614,12 +668,12 @@ export function resolveNames(people, t) {
       continue;
     }
     taken.set(k, p.id);
-    { const d = defaultAliasOf(p.provider, p.model, p.modelLabel); names.set(p.id, { name: alias, emoji: d.emoji, custom: true, words: familyWords(d.family, t) }); }
+    { const d = defaultAliasOf(p.provider, p.model, p.modelLabel, p.modelRole); names.set(p.id, { name: alias, emoji: d.emoji, custom: true, words: familyWords(d.family, t) }); }
   }
   // Defaults: a family shared by several participants (or whose name a custom alias took) names
   // each of them by its version, then by its whole label, then by a number (plan §11.4 ②) — the
   // real model stays readable in the name, and two Opus columns never read as the same speaker.
-  const defs = people.filter((p) => !names.has(p.id)).map((p) => ({ p, def: defaultAliasOf(p.provider, p.model, p.modelLabel) }));
+  const defs = people.filter((p) => !names.has(p.id)).map((p) => ({ p, def: defaultAliasOf(p.provider, p.model, p.modelLabel, p.modelRole) }));
   const baseCount = new Map();
   for (const { def } of defs) { const b = nameKey(t(def.key)); baseCount.set(b, (baseCount.get(b) || 0) + 1); }
   for (const { p, def } of defs) {

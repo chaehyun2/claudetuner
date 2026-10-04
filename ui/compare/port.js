@@ -267,9 +267,13 @@ export function installPort(ctx) {
         // The continuation (D3) is remembered ONLY for a kept PROVIDER (#1985 — per column's service): an
         // incognito conversation is deleted / hidden at dispose, so there is nothing to resume — and the
         // guard pins that such a column never sends `resume`, whatever DONE carried.
+        const orgBefore = col.continuation ? col.continuation.orgId : undefined;
         if (keptFor(state.sessionSaveBy, col.provider) && msg.continuation && typeof msg.continuation === 'object') col.continuation = msg.continuation;
         // After the continuation, not at settle above: the first answer only now has a conversation to open (#1978).
         ctx.syncOpenButtons();
+        // The head shows the facts of the org the column sends to (#2054 — column-gate columnFacts): a thread's
+        // first org, or a different one, repaints it.
+        if ((col.continuation ? col.continuation.orgId : undefined) !== orgBefore) ctx.renderColumns();
         {
           // The answer keeps its own timing (history → share link shows 「N초」 per answer); a
           // stream_done stage landing after DONE completes it below (STAGE).

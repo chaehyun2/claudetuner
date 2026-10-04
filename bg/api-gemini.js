@@ -1,4 +1,5 @@
 import { GEMINI_API_BASE } from './constants.js';
+import { isUsableTab } from '../vendor-ai/sites.js';
 
 // === Gemini batchexecute RPC helper (hybrid: tab-first, SW credentials fallback) ===
 
@@ -34,6 +35,10 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
   } catch (e) {
     console.debug(`[Claude Tuner] gemini tabs.query rejected: ${e && e.message}`);
   }
+  // 🔴 A discarded/frozen tab has no document — injecting into it operates on nothing (and is the
+  // package's browser-crash suspect). Only usable tabs are tried (vendor-ai `isUsableTab`, #2054);
+  // none left = the fallback path, as with no tab at all.
+  tabs = tabs.filter(isUsableTab);
   // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This was `tabErrorMsg`, assigned on all three
   // branches and read only by the console.warn below — the same dead variable the ChatGPT twin had
   // (#1417). So every tab-path failure was discarded and the throw at the bottom said
@@ -330,7 +335,7 @@ export async function getGeminiUserInfo() {
   // (the id starts null and the cached HTML is null too, so it degrades to "unknown").
   const tabs = _lastFetchTabId === null
     ? []
-    : (await chrome.tabs.query({ url: 'https://gemini.google.com/*' })).filter((t) => t.id === _lastFetchTabId);
+    : (await chrome.tabs.query({ url: 'https://gemini.google.com/*' })).filter((t) => t.id === _lastFetchTabId && isUsableTab(t));
   if (tabs.length > 0) {
     try {
       const results = await chrome.scripting.executeScript({
@@ -382,6 +387,10 @@ function extractUserInfoFromHtml(html) {
 
 // === Check if user is logged into Gemini ===
 // Uses lightweight HEAD request with credentials when no tab is open.
+// 🪤 Deliberately LOOSER than the vendored client's checkAuth (GOOGLE_SESSION_COOKIES, #2054): this
+// is only the pre-check — the RPC fetch that follows is the verdict, and a signed-out open tab is
+// what err_gemini_no_at_token's copy (i18n.js) describes. Tightening it here would change that copy's
+// trigger and could drop logged-in users whose Google cookies are not enumerable (the ChatGPT Dia case).
 export async function isGeminiLoggedIn() {
   try {
     // Fast check: open Gemini tab implies logged in

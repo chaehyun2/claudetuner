@@ -356,6 +356,115 @@ export function claudeUsageShape(usageData) {
   };
 }
 
+// ── Claude org capability NAMES (#2054 item 2) ───────────────────────────────────────────────
+//
+// WHY. vendor-ai `claudeOrgPlan` decides a claude.ai org's plan by SUBSTRINGS of its `capabilities`
+// names (`max`, `pro`, `raven`, `team`, `enterprise`, `free`). The day claude.ai gives Free orgs a
+// capability like `projects`, the collector AND the cross-check both read Pro — and we cannot tell
+// whether narrowing to exact names (`claude_pro`, `claude_max`) is safe, because the names that
+// exist in the field were never collected. This reports them: NAMES only, never values.
+//
+// 🔴 NOT A *Shape FUNCTION, ON PURPOSE. The worker's DRIFT_SOURCE_ALLOWLIST is compared against the
+// sources of every exported `*Shape` function (drift-contract-probe [4d]); this report rides its
+// own wire field with its own source, which the worker allow-lists separately and only on a Claude
+// carrier. Naming it `…Shape` would put the capability source on the usage-key allowlist.
+//
+// 🔴 A KNOWN NAME IS REPORTED AS A BIT, NOT AS A STRING. Every org carries `chat`; naming it would
+// fill the 5-name budget with the permanent floor (the CLAUDE_USAGE_KNOWN lesson above) and push
+// the one name we care about past the cap. A bitmask over a fixed list costs one double and says
+// "this Pro org has `claude_pro`" exactly — which is the question narrowing needs answered.
+//
+// 🪤 RESIDUAL, STATED RATHER THAN HIDDEN (Codex 1R): `isSchemaFieldName` cannot tell `user_alice`
+// from `user_agent`, so a user-ish capability name would be named. Capabilities are claude.ai's
+// own feature-flag vocabulary, not user-authored text, and three things bound the case: the worker
+// HASHES the account on this row (no email beside a name), names only for this source on a Claude
+// carrier, and the documented reading counts a name only on ≥ 2 distinct accounts — a per-user
+// string cannot become a signal. The trigger mask carries the decision even with every name withheld.
+//
+// 🔴 THE LIST IS POSITIONAL, SO IT IS VERSIONED LIKE A KEYSET: bit i means CLAUDE_CAPS_KEYSETS.cc1[i]
+// only because it is i-th. Changing the list means minting cc2, never editing cc1
+// (test/fixtures/provider/obs-claude-caps.json pins it).
+export const CLAUDE_CAPS_KEYSETS = {
+  // The capability names our plan rule (vendor-ai claudeOrgPlan) or its documented facts name
+  // literally. Exact matches — the candidates for a narrowed rule.
+  cc1: ['chat', 'claude_pro', 'claude_max', 'api', 'raven', 'raven_enterprise'],
+};
+export const CLAUDE_CAPS_KEYSET = 'cc1';
+/** Distinct from every `*Shape` source — see above. The worker names caps only for this source. */
+export const CLAUDE_CAPS_SOURCE = 'claude_org_caps';
+/**
+ * The substrings claudeOrgPlan tests, in its order. Bit i of `trigger_mask` = some UNKNOWN name
+ * contains TRIGGERS[i]. Computed over every unknown name, INCLUDING the ones withheld from naming —
+ * so "an unrecognised capability is steering the plan" survives even when we refuse to say what it
+ * was called. That is the primary question of #2054 item 2, answerable without any name at all.
+ */
+export const CLAUDE_CAPS_TRIGGERS = ['max', 'pro', 'raven', 'team', 'enterprise', 'free'];
+const CLAUDE_CAPS_NAMES_MAX = 5;
+
+/**
+ * Capability report for ONE claude.ai org (the one the snapshot is for).
+ *
+ * `orgPlan` is the caller's vendor-ai `claudeOrgPlan(org)` key — passed in because this file imports
+ * nothing (see the header). It is the RULE's verdict on these capabilities, before the collector's
+ * seat refinement, so a reader can line the names up against what the substring rule concluded.
+ *
+ * @returns {null | {keyset: string, source: string, total: number, knownMask: number,
+ *   unknownNames: string[], unknownWithheld: number, triggerMask: number, orgPlan: string}}
+ *   null when there is no org. `total` is -1 when `capabilities` is not an array.
+ */
+export function claudeCapsReport(org, orgPlan) {
+  if (!org || typeof org !== 'object') return null;
+  const caps = Array.isArray(org.capabilities) ? org.capabilities : null;
+  const known = CLAUDE_CAPS_KEYSETS[CLAUDE_CAPS_KEYSET];
+  let knownMask = 0;
+  let triggerMask = 0;
+  const unknown = [];
+  let nonString = 0;
+  for (const c of caps || []) {
+    if (typeof c !== 'string') { nonString++; continue; }
+    const i = known.indexOf(c);
+    if (i >= 0) { knownMask |= (1 << i); continue; }
+    unknown.push(c);
+    const lc = c.toLowerCase();
+    CLAUDE_CAPS_TRIGGERS.forEach((t, b) => { if (lc.includes(t)) triggerMask |= (1 << b); });
+  }
+  const distinct = [...new Set(unknown)];
+  const names = distinct.filter(isSchemaFieldName).sort().slice(0, CLAUDE_CAPS_NAMES_MAX);
+  return {
+    keyset: CLAUDE_CAPS_KEYSET,
+    source: CLAUDE_CAPS_SOURCE,
+    total: caps ? caps.length : -1,
+    knownMask,
+    unknownNames: names,
+    // Everything unknown we did not name — the name filter's rejects, the cap's overflow, and
+    // non-string entries — so a short name list never reads as the whole set.
+    unknownWithheld: distinct.length - names.length + nonString,
+    triggerMask,
+    orgPlan: typeof orgPlan === 'string' ? orgPlan : 'unknown',
+  };
+}
+
+/** What makes two reports "the same observation" for the resend throttle. */
+export function claudeCapsFingerprint(report) {
+  if (!report) return '';
+  return [report.keyset, report.total, report.knownMask, report.unknownNames.join(','),
+    report.unknownWithheld, report.triggerMask, report.orgPlan].join('|');
+}
+
+/**
+ * The report is a STATE, not a counter, so a skipped send loses nothing: it rides when it changed
+ * or every DRIFT_TOTALS_MIN_INTERVAL_MS otherwise. Without the throttle it would add a row to every
+ * Claude flush (≈ hourly per install), doubling Claude's drift volume for a value that rarely moves.
+ * A stamp from the future is treated as due, for the reason driftTotalsDue gives.
+ */
+export function claudeCapsDue(sent, report, now) {
+  if (!report) return false;
+  if (!sent || typeof sent !== 'object' || typeof sent.at !== 'number' || !sent.at) return true;
+  if (sent.fp !== claudeCapsFingerprint(report)) return true;
+  if (sent.at > now) return true;
+  return now - sent.at >= DRIFT_TOTALS_MIN_INTERVAL_MS;
+}
+
 // ── Plan, the axis the signature must be cut by ───────────────────────────────────────────────
 
 /** No plan was available for this observation. */

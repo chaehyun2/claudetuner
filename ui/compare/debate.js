@@ -178,7 +178,12 @@ export function installDebate(ctx) {
     return p.modChosen && !staleForBridge ? { moderator: p.moderator, modCol: p.modCol } : defMod(targets);
   }
   /** This page's default moderation (defaultModerator — the seat, or one of 3+ columns #1909). */
-  const colTier = (id) => { const c = colOf(id); return c ? tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) : null; };
+  /**
+   * A column's model group (tierOf): its catalog label and ROLE (#2054 E — role first); `served` = the model the
+   * site reported for an Auto column, with that model's own role.
+   */
+  const tierOfCol = (c, served = null) => tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model), served && { ...served, role: ctx.modelRoleOf(c.provider, served.id) }, ctx.modelRoleOf(c.provider, c.model));
+  const colTier = (id) => { const c = colOf(id); return c ? tierOfCol(c) : null; };
   const defMod = (targets) => defaultModerator(state.debateSeat, targets, colTier);
   /** The settings that differ from this page's defaults (the ⚙ dot, the summary line). */
   const changedNow = (targets = reachable()) => changedSettings({ ...state.debatePrefs, ...modChoice(targets) }, defMod(targets));
@@ -187,7 +192,7 @@ export function installDebate(ctx) {
     const m = modChoice(targets);
     return m.moderator === MOD_AI && m.modCol && targets.includes(m.modCol) ? m.modCol : null;
   }
-  const personOf = (id, alias = state.aliases[id]) => { const c = colOf(id); return { id, provider: c.provider, model: c.model, modelLabel: ctx.modelLabelOf(c.provider, c.model), alias: alias || '', label: ctx.colLabel(c) }; };
+  const personOf = (id, alias = state.aliases[id]) => { const c = colOf(id); return { id, provider: c.provider, model: c.model, modelLabel: ctx.modelLabelOf(c.provider, c.model), modelRole: ctx.modelRoleOf(c.provider, c.model), alias: alias || '', label: ctx.colLabel(c) }; };
   /** The cast's names (`aliasOf(id)` = the alias to honour). */
   function castNames(cast, aliasOf) {
     return resolveNames(cast.map((id) => personOf(id, aliasOf(id))), t);
@@ -1445,7 +1450,7 @@ export function installDebate(ctx) {
         kind: 'debate', session_id: state.sessionId, run, leg, concluded_by: concludedBy,
         pace: d.pace, length: d.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, n: d.debaters.length,
         turns: Math.max(0, d.turnsUsed - d.turnsAtRun),
-        ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {}),
+        ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOfCol(modC)) } : {}),
         cast: d.debaters.map((id) => { const c = colOf(id); return { provider: c ? c.provider : '', tier: tierSlug(tierAt(id)) || 'unknown' }; }),
       };
     })();
@@ -1679,8 +1684,15 @@ export function installDebate(ctx) {
     notify(stop.reason);
     renderBar();
   }
-  /** The services a run's next send may go to: every debater still in the rotation, and an AI moderator. */
-  const castProviders = (d) => [...d.eligible, ...(d.modKind === MOD_AI && d.modCol ? [d.modCol] : [])].map((id) => (colOf(id) || {}).provider).filter(Boolean);
+  /** The columns a run's next send may go to: every debater still in the rotation, and an AI moderator. */
+  const castColumns = (d) => [...d.eligible, ...(d.modKind === MOD_AI && d.modCol ? [d.modCol] : [])].map((id) => colOf(id)).filter(Boolean);
+  /**
+   * The claude.ai orgs this run's Claude sends go to (#2054 ③ — the floor reads EVERY one of them, each the
+   * org its column's gauge shows): per cast Claude column its thread org, else the status' send org; null
+   * (no claude.ai tab at the status) = the collector primary, as before.
+   */
+  const claudeSendOrgs = (d) => castColumns(d).filter((c) => c.provider === 'claude').map((c) => ctx.columnSendOrg(c));
+  const castProviders = (d) => castColumns(d).map((c) => c.provider);
   /**
    * #1971 §3.2: a Chrome notification for a stop the user should come back for — only while this tab is
    * hidden (a visible page already says it), only with the ⚙ option on, once per kind per run. The SW
@@ -1769,7 +1781,7 @@ export function installDebate(ctx) {
     for (const id of debaters) { d.seq += 1; d.transcript.push({ seq: d.seq, speaker: id, role: ROLE_PARTICIPANT, name: nameOf(id), text: '', pending: true, opening: true }); slots.set(id, d.seq); }
     d.current = { kind: PHASE_OPENING, slots };
     // The cast as the opening names it: alias (service model · model group) — no time yet (§13).
-    const roster = debaters.map((id) => { const c = colOf(id); const m = metaLine({ label: ctx.colLabel(c), tierKey: tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model)) }, t); return m ? `${nameOf(id)} (${m})` : nameOf(id); });
+    const roster = debaters.map((id) => { const c = colOf(id); const m = metaLine({ label: ctx.colLabel(c), tierKey: tierOfCol(c) }, t); return m ? `${nameOf(id)} (${m})` : nameOf(id); });
     const stanceLines = [...stances.entries()].filter(([, k]) => k).map(([id, k]) => `- ${nameOf(id)} (${ctx.colLabel(colOf(id))}): ${stanceText(t, k)}`);
     const opening = { t, names: roster, moderatorName: modCol ? nameOf(modCol) : null, stanceLines, topic, tone: d.tone, length: d.length };
     const text = openingPrompt(opening);
@@ -1780,7 +1792,7 @@ export function installDebate(ctx) {
     // Which model moderates (plan §18.8 ⑥): its service, model id (`auto` = the service's Auto), model
     // group, and whether it is the plan-picked default the page offered (the user never chose).
     const modC = modCol ? colOf(modCol) : null;
-    const modMeta = modC ? { mod_provider: modC.provider, mod_model: modC.model || 'auto', mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {};
+    const modMeta = modC ? { mod_provider: modC.provider, mod_model: modC.model || 'auto', mod_tier: tierSlug(tierOfCol(modC)) } : {};
     const exCode = exampleSentCode(state.exampleClick, topic, 'debate'); // a debate-tab topic chip, started unedited (cleared on acceptance: commitPrompt)
     track('debate_start', { ...(exCode ? { code: exCode } : {}), n: debaters.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, pace: d.pace, custom_names: debaters.filter((id) => names.get(id).custom).length, ...modMeta, mod_default: !changedNow().includes(SETTING_MODERATOR) });
     state.question = topic;
@@ -1964,7 +1976,7 @@ export function installDebate(ctx) {
     const label = metaLabel(col, words);
     showServed(turn, col, words);
     if (isMod) return { meta: metaLine({ label }, t), tierKey: null, secs: null };
-    const tierKey = tierOf(col.provider, col.model, ctx.modelLabelOf(col.provider, col.model), served);
+    const tierKey = tierOfCol(col, served);
     const clean = answered && turn && !turn.stalled && !turn.errorText && col.status === 'done';
     const st = col.stages || {};
     const secs = clean ? secondsBetween(st[STAGE_SEND_START], st[STAGE_STREAM_DONE], TTFT_MAX_MS) : null;
@@ -2038,7 +2050,7 @@ export function installDebate(ctx) {
     if (capStep === 'wrap') d.wrapNow = true;
     // The usage floor guards a run nobody is answering: 「계속 진행」 (no question every 50), or a hidden tab. A visible
     // 「멈추고 묻기」 run already asks every DEBATE_SEND_BUDGET — it is not stopped at the gauge its user can see.
-    const nearLimit = (d.budgetMode === DEBATE_BUDGET_CONTINUE || docHidden()) && usageFloorHit({ orgs: collectedOrgs, providers: castProviders(d), now: ctx.clock.now(), pct: USAGE_FLOOR_PCT, maxAgeMs: USAGE_MAX_AGE_MS, skip: d.usageGoOn });
+    const nearLimit = (d.budgetMode === DEBATE_BUDGET_CONTINUE || docHidden()) && usageFloorHit({ orgs: collectedOrgs, providers: castProviders(d), now: ctx.clock.now(), pct: USAGE_FLOOR_PCT, maxAgeMs: USAGE_MAX_AGE_MS, skip: d.usageGoOn, orgOf: { claude: claudeSendOrgs(d) } });
     if (nearLimit) { hardStop(d, { reason: HARD_USAGE, provider: nearLimit.provider, pct: Math.round(nearLimit.pct) }); return; }
     // A spent budget stops and asks (renderBar: 「늘려서 계속」 / 「결론 내기」) — whoever is owed the floor
     // (pendingNext, a LONG grant, the user's pick) is kept for 「늘려서 계속」.
@@ -2552,7 +2564,7 @@ export function installDebate(ctx) {
       outcome, pace: d.pace, length: d.length, moderator: d.modKind, stance: d.stance, tone: d.tone.kind, n: d.debaters.length,
       turns: Math.max(0, d.turnsUsed - d.turnsAtRun), sends: d.sendsUsed, user_msgs: d.userMsgs, asks: d.asks,
       elapsed_s: Math.max(0, Math.round((ctx.clock.now() - d.run) / 1000)), restored: !!d.restored,
-      ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOf(modC.provider, modC.model, ctx.modelLabelOf(modC.provider, modC.model))) } : {}),
+      ...(modC ? { mod_provider: modC.provider, mod_tier: tierSlug(tierOfCol(modC)) } : {}),
       // #1971 §4.1: the stop the user left from (a leaving report only) and how long the tab sat hidden.
       hidden_s: secsOf(hiddenMs(d, ctx.clock.now())),
       ...(leftAtStop === null ? {} : { left_at_stop: leftAtStop }), ...(pausedAs ? { paused_as: pausedAs } : {}),

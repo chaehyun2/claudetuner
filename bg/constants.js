@@ -1,5 +1,7 @@
 // === Constants & Configuration ===
 
+import { SITE_ORIGINS } from '../vendor-ai/sites.js';
+
 export const DEFAULT_SERVER_URL = 'https://api.claudetuner.com';
 export const DEFAULT_API_KEY = 'claude-manager-dev-key-2024';
 export const SITE_URL = 'https://claudetuner.com';
@@ -27,10 +29,12 @@ export const LOCAL_ACTIVE_INTERVAL_MINUTES = 2;
 export const LOCAL_BACKGROUND_INTERVAL_MINUTES = 5;
 export const VISIBILITY_THROTTLE_MS = 30_000;
 export const POPUP_COLLECT_THROTTLE_MS = 60_000;
-export const CLAUDE_API_BASE = 'https://claude.ai';
-export const CHATGPT_API_BASE = 'https://chatgpt.com';
-export const CHATGPT_SESSION_COOKIE = '__Secure-next-auth.session-token';
-export const GEMINI_API_BASE = 'https://gemini.google.com';
+// The three sites and their session cookies are the vendored package's facts (vendor-ai/sites.js,
+// #2054) — the compare clients judge a site, a link and a cookie by the same file, so they are
+// spelled once. Import the cookie names/predicates from there directly.
+export const CLAUDE_API_BASE = SITE_ORIGINS.claude;
+export const CHATGPT_API_BASE = SITE_ORIGINS.chatgpt;
+export const GEMINI_API_BASE = SITE_ORIGINS.gemini;
 export const HEARTBEAT_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
 // Backoff after a heartbeat that did NOT land. The interval above is the SUCCESS cadence; a
 // heartbeat the server never received must not consume it (#980 — see bg/heartbeat.js for why the

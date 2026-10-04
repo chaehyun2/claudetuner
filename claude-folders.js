@@ -21,10 +21,12 @@
   // Implements the pinned adapter interface (see docs/DESIGN-claude-folders.md).
   const CLAUDE_ADAPTER = {
     provider: 'claude',
-    // Claude scopes folders per Anthropic org (lastActiveOrg cookie).
+    // Claude scopes folders per Anthropic org (lastActiveOrg cookie) — read by usage-shared.js's one
+    // parser (#2054; it loads first, manifest order). A core without it reads as "org not known
+    // yet" (null): every folder shown, the same as before the cookie exists.
     getActiveOrgId() {
-      return document.cookie.split('; ')
-        .find(r => r.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+      const core = globalThis.__ctUsageCore;
+      return core && core.getClaudeActiveOrgId ? core.getClaudeActiveOrgId() : null;
     },
     // Current conversation id from the URL, e.g. /chat/<uuid>
     getCurrentChatId() {

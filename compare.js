@@ -456,7 +456,7 @@ export function mountComparePage(deps) {
   installOpenInProvider(ctx);
   installReviewNudge(ctx);
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
-  const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
+  const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, firstAccountColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
   const { closePicker, togglePicker, toggleServicePicker, syncServiceButton, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
   const { gateKindFor, checkAgainButton, providerLoginLink, requestProviderPermission, renderColumnGate, renderPlan, countdown, usageResetAt, syncGateStatus } = ctx;
   const { renderSummaryPrompt, syncSummaryButton, paintSummaryPop, openSummaryPop, closeSummaryPop, startSummary } = ctx;
@@ -2106,13 +2106,16 @@ export function mountComparePage(deps) {
     const usageRow = el('div', 'cmp-col-usage');
     usageRow.hidden = true;
     node.appendChild(usageRow);
-    // Shared-account chip (cmp-columns §0): a column that is NOT the first of its provider shows
+    // Shared-account chip (cmp-columns §0): a column that is NOT the first of its ACCOUNT shows
     // 「↖ Claude 열과 같은 계정」 in the gate / plan / gauge slot (those render on the first column
     // only — one account, one login, one quota); the click scrolls that first column into view.
+    // Account = provider, except Claude columns in different claude.ai orgs (#2054 ③ firstAccountColumnOf);
+    // a gated provider's chip (one account again) points at the provider's first column, the gate. Read at the
+    // click (sharedTarget — the rule that shows the chip), so a column closed since still hands over to the next.
     const shared = el('button', 'cmp-col-shared');
     shared.type = 'button';
     shared.hidden = true;
-    shared.addEventListener('click', () => { const first = firstColumnOf(col.provider); if (first && first !== col && typeof first.node.scrollIntoView === 'function') { try { first.node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* no layout engine */ } } });
+    shared.addEventListener('click', () => { const first = sharedTarget(col); if (first && first !== col && typeof first.node.scrollIntoView === 'function') { try { first.node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* no layout engine */ } } });
     node.appendChild(shared);
     const body = el('div', 'cmp-col-body');
     node.appendChild(body);
@@ -2707,6 +2710,21 @@ export function mountComparePage(deps) {
     state.followupTargets.delete(colId);
     if (col.node.parentNode) col.node.parentNode.removeChild(col.node);
   }
+  /** The gate a column shows before it takes part (gateKindFor over its provider's status), null once it participated. */
+  function columnGateKind(col) {
+    if (col.participated) return null;
+    const providers = state.status && state.status.providers;
+    return gateKindFor((providers && providers[col.provider]) || { permitted: false, loggedIn: null });
+  }
+  /**
+   * The column a 「같은 계정」 chip points at, or null = no chip: the first column of the same account
+   * (firstAccountColumnOf, #2054 ③), or — while the provider is gated — the provider's first column, where
+   * the gate is. One rule for showing the chip (renderColumns) and for its click.
+   */
+  function sharedTarget(col) {
+    const first = columnGateKind(col) ? firstColumnOf(col.provider) : firstAccountColumnOf(col);
+    return first && first !== col ? first : null;
+  }
   function renderColumns() {
     const st = state.status;
     if (!st || !st.providers) return;
@@ -2716,7 +2734,6 @@ export function mountComparePage(deps) {
     for (const col of allColumns()) col.node.hidden = (state.excludeSrc && col.provider === src) || col.closed;
     for (const col of allColumns()) {
       const p = col.provider;
-      const pstate = st.providers[p] || { permitted: false, loggedIn: null };
       if (col.node.hidden) continue;
       renderModelSelect(col);
       renderPickerLabel(col);
@@ -2724,18 +2741,21 @@ export function mountComparePage(deps) {
       syncRemoveButton(col);
       syncServiceButton(col);
       syncFocusButton(col);
-      // Provider-level state on the FIRST column of the provider only (cmp-columns §0): plan pill,
-      // gauges, gate box. A sibling shows the shared-account chip in that slot instead.
-      const first = firstColumnOf(p);
-      const sibling = first && first !== col;
+      // Account-level state on the FIRST column of the account only (cmp-columns §0): plan pill, gauges.
+      // A sibling shows the shared-account chip in that slot instead. Two Claude columns sending to
+      // different claude.ai orgs are two accounts (#2054 ③): each shows its own org's pill and gauges.
+      // The gate (permission / sign-in) is the provider's — on its first column only, as before; while the
+      // provider is gated nothing is sent to any org, so its columns are one account again (the chip points at the gate).
+      const kind = columnGateKind(col); // once a session has started the column shows the conversation; the gate only applies before
+      const providerFirst = firstColumnOf(p);
+      const gateSibling = providerFirst && providerFirst !== col;
+      const sibling = !!sharedTarget(col);
       if (sibling) { col.plan.hidden = true; col.usageRow.hidden = true; clear(col.usageRow); }
       else renderPlan(col);
       col.shared.hidden = !sibling; // for the whole session — the plan / gauges stay first-column-only (Codex integration #5)
       if (sibling) col.shared.textContent = t('col_shared', PROVIDER_META[p].label);
-      // Once a session has started the column shows the conversation; the gate only applies before.
       if (col.participated) continue;
-      const kind = gateKindFor(pstate);
-      if (kind && sibling) { clear(col.body); col.gate = null; setBadge(col, null); } // the gate itself sits on the first column; the chip says where
+      if (kind && gateSibling) { clear(col.body); col.gate = null; setBadge(col, null); } // the gate itself sits on the provider's first column; the chip says where
       else if (kind) renderColumnGate(col, kind);
       else if (state.sessionStarted) renderColumnGate(col, GATE_JOINED); // signed in too late to join (SW: FOLLOWUP targets only participants)
       else { clear(col.body); col.gate = null; setBadge(col, null); }

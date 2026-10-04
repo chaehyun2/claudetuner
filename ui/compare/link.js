@@ -8,15 +8,17 @@
 // composes the send (bg/compare.js). The page holds a RECEIPT — provider, title, turn count —
 // which is what the chip is made of.
 
-import { LINK_ORIGINS, SHARE_SITE_ORIGIN, SHARE_LINK_PATH_RE, CODE_SHARE_DELETED, CODE_SHARE_PRIVATE, CODE_NOT_FOUND, CODE_PERMISSION_REFUSED, CODE_AUTH_REQUIRED, CODE_NO_TAB, CODE_UNSUPPORTED, CODE_BAD_REQUEST } from './constants.js';
+import { providerForUrl, conversationRef } from '../../vendor-ai/sites.js';
+import { SHARE_SITE_ORIGIN, SHARE_LINK_PATH_RE, CODE_SHARE_DELETED, CODE_SHARE_PRIVATE, CODE_NOT_FOUND, CODE_PERMISSION_REFUSED, CODE_AUTH_REQUIRED, CODE_NO_TAB, CODE_UNSUPPORTED, CODE_BAD_REQUEST } from './constants.js';
 
 /**
  * The conversation link in `text`, or null.
  *
  * 🔴 MATCHED BY ORIGIN, never by substring: `https://chatgpt.com.evil.test/c/…` contains
- * "chatgpt.com" and is not ChatGPT. The URL is parsed and its origin compared, which is also what
- * the worker does (`providerForLink`) — this copy exists so the chip can appear before anything is
- * sent, and the drift guard pins the two lists together.
+ * "chatgpt.com" and is not ChatGPT. Which provider (`providerForUrl`) and whether the path names
+ * one of its conversations (`conversationRef`) are the vendored package's own rules — the ones the
+ * client applies when it reads the link (#2054). A hand copy here offered a chip for
+ * `gemini.google.com/app/notes` or a wrong-case Gemini path that the client then refused.
  *
  * Only the path shapes that name a CONVERSATION count. `claude.ai/chats` is the list, not a chat;
  * offering to continue it would be an offer we cannot keep.
@@ -41,19 +43,11 @@ export function findLink(text) {
       if (share) return { kind: 'share', provider: null, id: share[1], url: raw, start: m.index, end: m.index + raw.length };
       continue;
     }
-    const provider = Object.hasOwn(LINK_ORIGINS, u.origin) ? LINK_ORIGINS[u.origin] : null;
-    if (!provider || !isConversationPath(provider, u.pathname)) continue;
+    const provider = providerForUrl(raw);
+    if (!provider || conversationRef(provider, raw) === null) continue;
     return { kind: 'vendor', provider, url: raw, start: m.index, end: m.index + raw.length };
   }
   return null;
-}
-
-/** Whether this provider's path names one conversation (the shapes the package accepts). */
-function isConversationPath(provider, pathname) {
-  if (provider === 'claude') return /^\/chat\/[0-9a-f-]{36}\/?$/i.test(pathname);
-  if (provider === 'chatgpt') return /^\/(?:g\/[^/]+\/)?c\/[0-9a-f-]{36}\/?$/i.test(pathname);
-  if (provider === 'gemini') return /^\/(?:app|u\/\d+\/app)\/[A-Za-z0-9_-]+\/?$/i.test(pathname);
-  return false;
 }
 
 /**

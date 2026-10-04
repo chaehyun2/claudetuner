@@ -130,9 +130,10 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // claude.ai's active org: usage-shared.js's one parser (#2054). Guarded like every core lookup —
+  // a stale core without it reads as "org not known yet" (null), never a hand-written copy.
   function getActiveOrgId() {
-    return document.cookie.split('; ')
-      .find(r => r.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+    return CORE && CORE.getClaudeActiveOrgId ? CORE.getClaudeActiveOrgId() : null;
   }
 
   function isDarkTheme() {

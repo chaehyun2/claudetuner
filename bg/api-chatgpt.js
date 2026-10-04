@@ -1,4 +1,5 @@
-import { CHATGPT_API_BASE, CHATGPT_SESSION_COOKIE } from './constants.js';
+import { CHATGPT_API_BASE } from './constants.js';
+import { isChatgptSessionCookieName, isUsableTab } from '../vendor-ai/sites.js';
 
 // The HTTP status out of this layer's own prose throws, and NOTHING else.
 //
@@ -29,6 +30,10 @@ export async function fetchChatGPTApi(path, options = {}) {
   } catch (e) {
     console.debug(`[Claude Tuner] chatgpt tabs.query rejected: ${e && e.message}`);
   }
+  // 🔴 A discarded/frozen tab has no document — injecting into it operates on nothing (and is the
+  // package's browser-crash suspect). Only usable tabs are tried (vendor-ai `isUsableTab`, #2054);
+  // none left = the fallback path, as with no tab at all.
+  tabs = tabs.filter(isUsableTab);
   // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This used to be `tabErrorMsg`, assigned on
   // all three branches and read only by the console.warn below — so every tab-path failure was
   // discarded and the throw at the bottom said `collect_failed` no matter what had happened. That
@@ -169,11 +174,11 @@ async function fetchChatGPTViaTab(tabId, fullUrl) {
 
 // --- Cookie-based fallback: 2-step auth via cookies ---
 async function fetchChatGPTWithCookies(url) {
-  const cookies = await chrome.cookies.getAll({ url: 'https://chatgpt.com' });
+  const cookies = await chrome.cookies.getAll({ url: CHATGPT_API_BASE });
   if (!cookies.length) {
     throw new Error('err_chatgpt_no_cookies');
   }
-  const hasSession = cookies.some(c => c.name.startsWith(CHATGPT_SESSION_COOKIE));
+  const hasSession = cookies.some(c => isChatgptSessionCookieName(c.name));
   if (!hasSession) {
     throw new Error('err_chatgpt_session_expired');
   }
@@ -263,8 +268,10 @@ async function fetchChatGPTWithCookies(url) {
 // working whenever the page itself can authenticate, regardless of cookie visibility.
 export async function isChatGPTLoggedIn() {
   try {
-    const cookies = await chrome.cookies.getAll({ url: 'https://chatgpt.com' });
-    if (cookies.some(c => c.name.startsWith(CHATGPT_SESSION_COOKIE))) return true;
+    const cookies = await chrome.cookies.getAll({ url: CHATGPT_API_BASE });
+    // The package's name test (#2054): the whole cookie or a next-auth chunk (`….0`, `….1`), by
+    // name only — this stays a loose pre-check; an orphan chunk is judged by the fetch that follows.
+    if (cookies.some(c => isChatgptSessionCookieName(c.name))) return true;
   } catch {
     // cookie enumeration unavailable — fall through to the tab signal
   }

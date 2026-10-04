@@ -2,7 +2,12 @@
 // place so the mountComparePage() slices under ui/compare/ import what they use instead of closing
 // over compare.js. Values, comments and order are exactly as they were in compare.js; compare.js
 // re-exports the public ones (COMPARE_PORT_NAME, PRO_URL, KEEPALIVE_MS, …) so its consumers are
-// unchanged. No imports: this file is dependency-free.
+// unchanged. Its only imports are the vendored package's import-free facts files (site origins,
+// output-image types, MIME table — #2054), so it stays free of anything with behavior.
+
+import { SITE_ORIGINS } from '../../vendor-ai/sites.js';
+import { OUTPUT_IMAGE_MIMES } from '../../vendor-ai/output-image.js';
+import { MIME_BY_EXTENSION } from '../../vendor-ai/mime.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
 export const COMPARE_PROVIDERS = ['claude', 'gemini', 'chatgpt'];
@@ -46,10 +51,13 @@ export class ColumnMap extends Map {
   get(key) { const id = this.resolve(key); return id === null ? undefined : super.get(id); }
   has(key) { return this.resolve(key) !== null; }
 }
+// `site` = the front page, `origin` = the host-permission pattern; both from the package's
+// SITE_ORIGINS (#2054), so the site addresses are spelled once.
+const providerMeta = (provider, label) => ({ label, site: `${SITE_ORIGINS[provider]}/`, origin: `${SITE_ORIGINS[provider]}/*` });
 export const PROVIDER_META = {
-  claude: { label: 'Claude', site: 'https://claude.ai/', origin: 'https://claude.ai/*' },
-  gemini: { label: 'Gemini', site: 'https://gemini.google.com/', origin: 'https://gemini.google.com/*' },
-  chatgpt: { label: 'ChatGPT', site: 'https://chatgpt.com/', origin: 'https://chatgpt.com/*' },
+  claude: providerMeta('claude', 'Claude'),
+  gemini: providerMeta('gemini', 'Gemini'),
+  chatgpt: providerMeta('chatgpt', 'ChatGPT'),
 };
 export const SITE_URL = 'https://claudetuner.com';
 // The welcome page carries the extension sign-in flow (Google + email code) — the same entry the
@@ -272,15 +280,6 @@ export const CODE_UNSUPPORTED = 'unsupported';
 export const CODE_BAD_REQUEST = 'bad_request';
 export const CODE_LINK_CONTEXT_MISSING = 'link_context_missing';
 export const CODE_LINK_NEEDS_HISTORY = 'link_needs_history';
-// 🔴 The ORIGIN decides which provider a pasted link belongs to — never a substring, or
-// `chatgpt.com.evil.test` is ChatGPT. The SW checks again (providerForLink); this copy exists so
-// the chip can appear before the message is sent, and the drift guard pins the two together.
-export const LINK_ORIGINS = Object.freeze({
-  'https://claude.ai': 'claude',
-  'https://chatgpt.com': 'chatgpt',
-  'https://chat.openai.com': 'chatgpt',
-  'https://gemini.google.com': 'gemini',
-});
 // DONE{stalled:true} has TWO sources and one meaning — "this answer did not finish" (#1527):
 // the stall watchdog below, and a cut the CLIENT reported (`DONE.cutReason`, three values: 'stalled',
 // 'stream_error' = the provider failed mid-answer, 'retracted' = it replaced it). Same badge, same retry, same
@@ -642,7 +641,11 @@ export const IMAGE_ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 export const OUT_IMAGE_ORIGINALS_MAX_BYTES = 64 * 1024 * 1024;
 export const OUT_IMAGE_PERSIST_WAIT_MS = 30 * 1000;
 // The download's file name: `<provider>-image-<n>.<ext>`.
-export const OUT_IMAGE_EXT = Object.freeze({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' });
+// Derived from the package's tables (#2054): each output type's FIRST extension in MIME_BY_EXTENSION
+// (`jpg` before `jpeg`), so a type the package adds names its own file.
+export const OUT_IMAGE_EXT = Object.freeze(Object.fromEntries(OUTPUT_IMAGE_MIMES.map((mime) => [
+  mime, Object.keys(MIME_BY_EXTENSION).find((ext) => MIME_BY_EXTENSION[ext] === mime),
+])));
 // The file name a TURN keeps (#1616 ④ history marker), clipped. 🔴 A MARKER, NEVER THE IMAGE:
 // a history entry is capped at HISTORY_ENTRY_MAX_BYTES and shrunk by evicting whole rounds, and
 // `fitEntry` has no idea how to shrink a picture — a few data-URL thumbnails would push real

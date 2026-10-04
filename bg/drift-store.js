@@ -24,6 +24,7 @@ import {
   shouldFlushDrift, flushWindowSeconds, nextDriftState, DRIFT_EVENT_TTL_MS, purgeExpired,
   noteDriftTotal, driftTotalsDue,
   normalizeDriftPlan,
+  claudeCapsDue, claudeCapsFingerprint,
 } from './drift-obs.js';
 
 const KEY = 'driftObs';
@@ -62,6 +63,9 @@ async function read() {
     // first attempt at this ended up clearing one while meaning the other.
     totals: stored?.totals && typeof stored.totals === 'object' ? stored.totals : {},
     state: stored?.state && typeof stored.state === 'object' ? stored.state : {},
+    // 🔴 Must be read back here or every OTHER writer's whole-record write would drop it. It is the
+    // last-sent Claude capability report { fp, at } — the resend throttle (#2054, claudeCapsDue).
+    capsSent: stored?.capsSent && typeof stored.capsSent === 'object' ? stored.capsSent : null,
   };
 }
 
@@ -319,6 +323,10 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
   // report loses nothing, because the next one carries everything. The drained design had no such
   // freedom and measured 48–144 extra AE rows per install per day; this is ≤4 per provider per day.
   const otherTotals = dueTotals(rec, provider, now);
+  // Claude org capability names (#2054 item 2). Only a CLAUDE carrier may bring them — the worker
+  // ignores them on any other — and only when changed or every 6h (claudeCapsDue).
+  const caps = provider === 'claude' && shape && shape.caps && claudeCapsDue(rec.capsSent, shape.caps, now)
+    ? shape.caps : null;
 
   const rider = {
     obs_provider: provider,
@@ -349,6 +357,18 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
     } : {}),
     ...(drained.events.length ? { drift_events: drained.events } : {}),
     ...(otherTotals.length ? { other_totals: otherTotals } : {}),
+    ...(caps ? {
+      caps_obs: {
+        keyset: caps.keyset,
+        source: caps.source,
+        total: caps.total,
+        known_mask: caps.knownMask,
+        ...(caps.unknownNames.length ? { unknown_caps: caps.unknownNames } : {}),
+        ...(caps.unknownWithheld ? { unknown_caps_withheld: caps.unknownWithheld } : {}),
+        trigger_mask: caps.triggerMask,
+        org_plan: caps.orgPlan,
+      },
+    } : {}),
   };
 
   // 🔴 The commit runs INSIDE the same serialized chain as every other writer, re-reading under the
@@ -371,6 +391,7 @@ async function buildDriftRiderImpl(provider, shape, plan, now) {
     // 🪤 `since` and the counts are untouched here on purpose. Advancing either would turn this
     // back into a drained counter wearing a cumulative name.
     stampTotalsSent(fresh, otherTotals, now);
+    if (caps) fresh.capsSent = { fp: claudeCapsFingerprint(caps), at: now };
     // Clear exactly what shipped — keyed on the full identity INCLUDING the provider, so an event
     // that arrived after the rider was built is not swept out unreported. Expired entries are
     // purged in the same pass: leaving them costs a buffer slot and, worse, gave a recurring

@@ -46,6 +46,7 @@ import { createClient as createAiWebClient, listModels as listAiWebModels, drain
 // The whole module too, for an export an older vendored package does not have (a named import of a missing
 // export fails the SW's module load): `forgetOwnedTabs` (vendor-ai v0.30.0+ contract), read off it at startup.
 import * as aiWebPackage from './vendor-ai/index.js';
+import { CLAUDE_ACTIVE_ORG_COOKIE } from './vendor-ai/sites.js';
 // ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
@@ -1081,7 +1082,7 @@ chrome.tabs.onRemoved.addListener(async () => {
 // Detect lastActiveOrg cookie change → collect immediately on org switch + reset adaptive poll
 // Suppress during collection: fetchViaTab for extra orgs may trigger spurious cookie changes
 chrome.cookies.onChanged.addListener((info) => {
-  if (info.cookie.name === 'lastActiveOrg' && info.cookie.domain?.includes('claude.ai') && !info.removed) {
+  if (info.cookie.name === CLAUDE_ACTIVE_ORG_COOKIE && info.cookie.domain?.includes('claude.ai') && !info.removed) {
     if (_collecting) {
       console.log(`[Claude Tuner] lastActiveOrg cookie changed → ${info.cookie.value} (suppressed: collecting)`);
       return;

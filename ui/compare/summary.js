@@ -8,6 +8,7 @@ import { neutraliseQuoted, storageGet } from './helpers.js';
 import { keptFor } from './save-mode.js';
 import { consentAfterSend, mayDirectSummarize } from './consent.js';
 import { usagePeak, USAGE_FLOOR_PCT } from './usage-floor.js';
+import { planTier } from './debate-core.js';
 import { MAX_COLUMNS, colIdOf, PROVIDER_META, SUMMARY_PROMPT_MAX, SUMMARY_PER_COLUMN_MAX, SUMMARY_MIN_SHARE, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_FENCE_OPEN, SUMMARY_FENCE_CLOSE, SUMMARY_MODEL_LABEL_MAX, TURN_KIND_SUMMARY, SUMMARY_CONSENT_KEY, SUMMARY_AUTO_KEY } from './constants.js';
 
 /** Installs the summary slice onto `ctx` (ctx contract: ui/compare/history.js header). */
@@ -36,12 +37,13 @@ const SUMMARY_PICK_DEFAULT = 'default';
  *      at the legacy rule's place (plan §6-4);
  *   4. ties (sibling columns of one provider, unknowns) by the legacy rule: exactly one paid → it,
  *      else Claude, else the first.
- * `peakOf(provider)` = the provider's peak utilisation or null.
+ * `peakOf(provider, cand)` = the peak utilisation of the account the candidate column sends to, or null
+ * (#2054 ③: per column — two Claude columns may use two claude.ai orgs).
  */
 export function pickJudge(cands, { choice = null, peakOf = () => null } = {}) {
   if (!cands.length) return null;
   if (choice && cands.some((c) => c.id === choice)) return choice;
-  const peak = (c) => { const v = peakOf(c.provider); return typeof v === 'number' && Number.isFinite(v) ? v : null; };
+  const peak = (c) => { const v = peakOf(c.provider, c); return typeof v === 'number' && Number.isFinite(v) ? v : null; };
   const calm = cands.filter((c) => { const v = peak(c); return v === null || v < USAGE_FLOOR_PCT; });
   const pool = calm.length ? calm : cands;
   const known = pool.map(peak).filter((v) => v !== null);
@@ -142,13 +144,18 @@ export function installSummary(ctx) {
   }
   /**
    * The default judge (pickJudge): the user's pick this session, else the candidate with the most
-   * usage headroom (busy providers out), ties by the old rule — exactly ONE candidate on a paid tier
-   * (the header pill's data-tier, from status.providers[p].plan), else Claude, else the first.
+   * usage headroom (busy accounts out), ties by the old rule — exactly ONE candidate on a paid tier
+   * (planTier of its plan, the pill's data-tier), else Claude, else the first. Plan and usage are those of the account the
+   * COLUMN sends to (columnFacts, #2054 ③): a resumed Claude conversation in a Team org at 10 % is not
+   * judged by the new-chat Pro org at 95 % — the same numbers as that column's head.
    */
   function judgeDefault(cands) {
-    // #1976 R11: the remaining usage now ranks the candidates (pickJudge) — the same numbers as the column heads' gauges.
-    const usage = (p) => { const e = state.status && state.status.providers && state.status.providers[p]; return e && typeof e === 'object' ? e.usage : null; };
-    return pickJudge(cands.map((c) => ({ id: c.id, provider: c.provider, paid: c.plan.getAttribute('data-tier') === 'paid' })), { choice: state.judgeChoice, peakOf: (p) => usagePeak(usage(p)) });
+    const facts = (c) => { const f = ctx.columnFacts(c); return f && typeof f === 'object' ? f : null; };
+    // `paid` only on the account's first column — the one whose head shows the pill (a sibling shows 「같은 계정」):
+    // one paid account stays ONE paid candidate however many columns it has.
+    const paidOf = (c, f) => ctx.firstAccountColumnOf(c) === c && planTier(c.provider, f && f.plan) === 'paid';
+    return pickJudge(cands.map((c) => { const f = facts(c); return { id: c.id, provider: c.provider, paid: paidOf(c, f), usage: f ? f.usage : null }; }),
+      { choice: state.judgeChoice, peakOf: (p, cand) => usagePeak(cand.usage) });
   }
   /**
    * An attachment is EVIDENCE, not instructions (Codex C5 2R #6): every attached answer is fenced

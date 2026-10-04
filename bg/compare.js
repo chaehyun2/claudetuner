@@ -199,10 +199,12 @@
 // The output-image contract (#1684) — the package's own numbers, so the host never refuses an image
 // the client accepted. A pure module (no browser global), safe for the Node guard.
 import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
+import { SITE_ORIGINS, providerForUrl } from '../vendor-ai/sites.js';
 import { PROVIDER_LABELS } from './constants.js';
 import { REVIEW_EVENTS, REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './review-nudge.js';
 import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
 import { pickProviderEntry } from '../ui/compare/usage-floor.js';
+import { detectPlan } from './plan-label.js';
 import { COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY, isSaveBy, normalizeSaveBy, keptFor, legacySaveHistory, readIncognitoPref, incognitoPrefWrite, saveByFromMessage, uniformSaveBy } from '../ui/compare/save-mode.js';
 
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
@@ -293,6 +295,11 @@ export const GEMINI_STREAM_STALL_MS = 150 * 1000;
 // image event at all — an off watchdog left only the 10-minute budget. Above the ChatGPT client's
 // own image deadline (180 s); the clients heartbeat far more often than this while they poll.
 export const IMAGE_WAIT_STALL_MS = 240 * 1000;
+
+// The org name a Claude column head may show (#2054) is cut here — a workspace name is user text.
+const CLAUDE_ORG_NAME_MAX = 60;
+// Orgs a status carries per-org Claude facts for (#2054) — an account belongs to a handful; a bound, not a limit anyone meets.
+const CLAUDE_ORGS_MAX = 20;
 
 // Bound on each provider's `listModels()` inside COMPARE_STATUS. The package caps its own ChatGPT
 // round trip at the same value; this one is the SW's, so the status probe never waits on a client's
@@ -678,9 +685,9 @@ export const PIN_DISABLED_KEY = 'ctcmp_pin_disabled';
 // pass, so nothing is debited for a column that cannot be asked. The drift guard in
 // test/compare-send-order-guard.mjs pins the copy against the real classes.
 export const PROVIDER_SITES = Object.freeze({
-  claude: { origin: 'https://claude.ai', relayFile: 'vendor-ai/bridge/claude-relay.js', optionalHost: false, liveCatalog: false, uploads: true },
-  gemini: { origin: 'https://gemini.google.com', relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
-  chatgpt: { origin: 'https://chatgpt.com', relayFile: 'vendor-ai/bridge/chatgpt-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
+  claude: { origin: SITE_ORIGINS.claude, relayFile: 'vendor-ai/bridge/claude-relay.js', optionalHost: false, liveCatalog: false, uploads: true },
+  gemini: { origin: SITE_ORIGINS.gemini, relayFile: 'vendor-ai/bridge/gemini-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
+  chatgpt: { origin: SITE_ORIGINS.chatgpt, relayFile: 'vendor-ai/bridge/chatgpt-relay.js', optionalHost: true, liveCatalog: true, uploads: true },
 });
 
 // ── Continuing a conversation the user already has (#1651) ────────────────────────────────────
@@ -723,19 +730,13 @@ export const LINK_READ_TIMEOUT_MS = 60 * 1000;
 
 /**
  * Which provider a pasted link belongs to, by ORIGIN — never by substring, so
- * `chatgpt.com.evil.test` is not ChatGPT. null when it is nobody's. The client validates the rest
- * of the shape (`readConversation` refuses what is not one of its conversations).
+ * `chatgpt.com.evil.test` is not ChatGPT; chat.openai.com is still ChatGPT. null when it is
+ * nobody's. The vendored package's own rule (sites.js `providerForUrl`, #2054) — the page's
+ * findLink uses the same one. The client validates the rest of the shape (`readConversation`
+ * refuses what is not one of its conversations).
  */
 export function providerForLink(url) {
-  if (typeof url !== 'string' || !url.trim()) return null;
-  let u;
-  try { u = new URL(url.trim()); } catch { return null; }
-  for (const [provider, site] of Object.entries(PROVIDER_SITES)) {
-    if (u.origin === site.origin) return provider;
-  }
-  // chatgpt.com's previous origin — still in people's notes, and the package takes it.
-  if (u.origin === 'https://chat.openai.com') return 'chatgpt';
-  return null;
+  return providerForUrl(url);
 }
 
 // ── Share links as a conversation to continue (#1784 U4, docs/plans/compare-share.md §9.3) ──
@@ -2400,15 +2401,24 @@ export function createCompareController({
   // else the first claude entry; for the others the first entry of that provider. `null` when
   // nothing was collected for that provider, or when the read failed/hung (bounded like the
   // other storage reads — a status probe must not wait on storage.local).
-  async function planLabels() {
+  // `claudeOrg` (#2054): the org the cross-check's Claude listing resolved (package listedOrg()) —
+  // the one a send uses (claude.ai's current org, no 「주 조직」 pin). When known, the Claude badge
+  // and gauges describe THAT org: its collected entry if the collector has one, else its plan label
+  // with no gauges. `org` (its name) rides along only when it could be mistaken — the account has
+  // several chat orgs AND it is not the collector's primary (what the popup/badge show). Unknown
+  // (no claude.ai tab open) = the collector's primary, as before.
+  function readCollectedOrgsBounded() {
+    return withTimeout(Promise.resolve().then(() => readCollectedOrgs()), selectedModelsReadTimeoutMs, null).catch(() => null);
+  }
+  async function planLabels({ claudeOrg = null, collected = null } = {}) {
     const out = {};
-    for (const p of COMPARE_PROVIDERS) out[p] = null; // { plan, usage } per provider, or null when nothing was collected
+    for (const p of COMPARE_PROVIDERS) out[p] = null; // { plan, usage[, org, orgUuid] } per provider, or null when nothing was collected
     let orgs = null;
-    try {
-      orgs = await withTimeout(Promise.resolve().then(() => readCollectedOrgs()), selectedModelsReadTimeoutMs, null);
-    } catch { orgs = null; }
+    try { orgs = await (collected || readCollectedOrgsBounded()); } catch { orgs = null; }
+    out.claude = claudeFacts(claudeOrg, Array.isArray(orgs) ? orgs : []);
     if (!Array.isArray(orgs)) return out;
     for (const p of COMPARE_PROVIDERS) {
+      if (p === 'claude' && out.claude) continue;
       const entry = pickProviderEntry(orgs, p); // ui/compare/usage-floor.js — the same pick the usage floor reads
       if (!entry) continue;
       let label = null;
@@ -2421,6 +2431,36 @@ export function createCompareController({
       };
     }
     return out;
+  }
+  /**
+   * planLabels' Claude answer (#2054): the facts of the org a NEW send uses (`claudeOrg`, package
+   * listedOrg(); unknown = the collector primary), plus `orgs` — the same facts for every org the
+   * collector holds — and `orgUuid`, which of them the top level describes. A column whose thread lives
+   * in another org (a resumed conversation sends to ITS org) reads that org from `orgs` (column-gate
+   * renderPlan); an org that is in neither shows nothing. `org` (the name) only where it could be
+   * mistaken: several orgs, and not the primary the popup shows. Null when there is no Claude org at all.
+   */
+  function claudeFacts(claudeOrg, orgs) {
+    const entries = orgs.filter((o) => o && typeof o === 'object' && (!o.provider || o.provider === 'claude') && typeof o.uuid === 'string');
+    const primary = pickProviderEntry(orgs, 'claude');
+    const multi = (claudeOrg && claudeOrg.chatOrgCount > 1) || entries.length > 1;
+    const factsOf = (uuid, entry, raw) => {
+      let label = null;
+      try { label = planLabel(entry && typeof entry.plan === 'string' && entry.plan.trim() ? entry.plan : detectPlan(raw || {}), 'claude'); } catch { label = null; }
+      const nameSrc = (raw && raw.name) || (entry && entry.name);
+      const name = typeof nameSrc === 'string' ? nameSrc.trim().slice(0, CLAUDE_ORG_NAME_MAX) : '';
+      return {
+        plan: typeof label === 'string' && label.trim() && label !== 'unknown' ? label.trim() : null,
+        usage: entry ? usageFacts(entry) : null,
+        ...(multi && name && (!primary || primary.uuid !== uuid) ? { org: name } : {}),
+      };
+    };
+    const byOrg = Object.create(null); // keys are org uuids (account data): no prototype to collide with
+    for (const e of entries.slice(0, CLAUDE_ORGS_MAX)) byOrg[e.uuid] = factsOf(e.uuid, e, claudeOrg && claudeOrg.uuid === e.uuid ? claudeOrg : null);
+    if (claudeOrg && typeof claudeOrg.uuid === 'string' && !byOrg[claudeOrg.uuid]) byOrg[claudeOrg.uuid] = factsOf(claudeOrg.uuid, null, claudeOrg);
+    const sendUuid = claudeOrg && typeof claudeOrg.uuid === 'string' ? claudeOrg.uuid : (primary ? primary.uuid : null);
+    if (!sendUuid || !byOrg[sendUuid]) return null;
+    return { ...byOrg[sendUuid], orgUuid: sendUuid, orgs: byOrg };
   }
   // The same entry's usage windows, display-ready for the column head's mini gauges (2026-09-18,
   // user request): utilisation 0–100 per window (null = not collected / not a number), the reset
@@ -2468,7 +2508,10 @@ export function createCompareController({
         listModelsTimeoutMs,
         null,
       );
-      if (Array.isArray(list) && list.length) return { list, source: source || MODELS_SOURCE.STATIC };
+      // The org the listing resolved (Claude, package v0.37.0) — the one a send would use NOW, so the
+      // column's plan badge can name IT rather than the org the collector reads usage for (#2054).
+      const org = provider === 'claude' && typeof client.listedOrg === 'function' ? client.listedOrg() : null;
+      if (Array.isArray(list) && list.length) return { list, source: source || MODELS_SOURCE.STATIC, org };
     } catch { /* fall through to the static list */ } finally {
       if (client) Promise.resolve().then(() => client.dispose()).catch(() => {});
     }
@@ -2477,17 +2520,19 @@ export function createCompareController({
     return { list, source: Array.isArray(list) && list.length ? MODELS_SOURCE.STATIC : MODELS_SOURCE.NONE };
   }
 
-  /** `{ models, modelsSource, modelsPending }` for `providers`, in parallel (one cap, not N). */
+  /** `{ models, modelsSource, modelsPending, orgs }` for `providers`, in parallel (one cap, not N). `orgs[p]` = the org the listing resolved, or absent. */
   async function catalogsFor(providers) {
     const models = {};
     const modelsSource = {};
+    const orgs = {};
     await Promise.all(providers.map(async (p) => {
-      const { list, source } = await providerModels(p);
+      const { list, source, org } = await providerModels(p);
       models[p] = list;
       modelsSource[p] = source;
+      if (org) orgs[p] = org;
     }));
     const modelsPending = providers.filter((p) => catalogPending(p, modelsSource[p]));
-    return { models, modelsSource, modelsPending };
+    return { models, modelsSource, modelsPending, orgs };
   }
 
   async function buildStatus() {
@@ -2521,19 +2566,26 @@ export function createCompareController({
     // nothing out of it while dark (`renderComingSoon()` returns first), and inventing
     // `loggedIn:false` for a provider nobody asked about would be a claim, not a default.
     if (flagOn) {
-      const [facts] = await Promise.all([
-        planLabels(),
-        ...COMPARE_PROVIDERS.map(async (p) => { providers[p] = await providerStatus(p); }),
-      ]);
-      for (const p of COMPARE_PROVIDERS) { providers[p].plan = facts[p] ? facts[p].plan : null; providers[p].usage = facts[p] ? facts[p].usage : null; }
+      await Promise.all(COMPARE_PROVIDERS.map(async (p) => { providers[p] = await providerStatus(p); }));
     }
     // Pickers only for providers the page can actually send to (permitted AND signed in) — and only
     // when the page will show anything at all (dark = nothing else, AC24). In parallel: three caps
     // of LIST_MODELS_TIMEOUT_MS must cost one, not three.
-    let catalogs = { models: {}, modelsSource: {}, modelsPending: [] };
+    let catalogs = { models: {}, modelsSource: {}, modelsPending: [], orgs: {} };
     if (flagOn) {
       const sendable = COMPARE_PROVIDERS.filter((p) => providers[p].permitted && providers[p].loggedIn === true);
+      // The collected-orgs read starts NOW, beside the catalogs (Codex #2054 1R: serialised after
+      // them, a slow storage added its own bound to the status' worst case).
+      const collectedP = readCollectedOrgsBounded();
       catalogs = await catalogsFor(sendable);
+      // AFTER the catalogs: the Claude listing names the org a send would use (#2054).
+      const facts = await planLabels({ claudeOrg: catalogs.orgs.claude || null, collected: collectedP });
+      for (const p of COMPARE_PROVIDERS) {
+        providers[p].plan = facts[p] ? facts[p].plan : null;
+        providers[p].usage = facts[p] ? facts[p].usage : null;
+        if (facts[p] && facts[p].org) providers[p].org = facts[p].org;
+        if (facts[p] && facts[p].orgUuid) { providers[p].orgUuid = facts[p].orgUuid; providers[p].orgs = facts[p].orgs; }
+      }
     }
     const { models, modelsSource, modelsPending } = catalogs;
     const selectedModels = await readSelectedModels();

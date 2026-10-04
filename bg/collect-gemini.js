@@ -1,5 +1,8 @@
 import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
 import { platformField } from './platform.js';
+// The plan-policy RPC (`otAQ7b`) — the same call the vendored client reads the model picker from
+// (#2054), so its id is spelled once.
+import { GEMINI_PICKER_RPC_ID } from '../vendor-ai/models.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import it
 // (#1315). collectGemini() keeps every await: parse-gemini.js decides from parsed values and only
 // REPORTS which stored state must then be consulted.
@@ -83,7 +86,7 @@ export async function collectGemini(force = false, userManual = false) {
     let otResponse = null;
     let otOk = false;   // true only when otAQ7b returned a well-formed (array) response
     try {
-      otResponse = await fetchGeminiRpc('otAQ7b', '[]');
+      otResponse = await fetchGeminiRpc(GEMINI_PICKER_RPC_ID, '[]');
       otOk = Array.isArray(otResponse);
     } catch (e) {
       console.warn('[Claude Tuner] Gemini otAQ7b failed:', e.message);

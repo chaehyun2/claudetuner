@@ -376,6 +376,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-gauge-fill { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
 .cmp-gauge-note { font-size: 11px; color: var(--text-secondary); }
 .cmp-col-plan[hidden] { display: none; }
+/* #2054: the workspace a send uses, only when it could be mistaken — cut, the full name is in the title */
+.cmp-col-plan-org { margin-left: 4px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 /* ── column model (cmp-columns, 2026-09-20): service ▾ · model picker · ＋ 열 추가 · ✕ · shared-account chip ── */
 /* Two controls in the identity group (2026-09-21, split by place): the service ▾ right after the
    name (pre-session only — opens the three services) and the model face (the model label + a caret,

@@ -1006,6 +1006,19 @@
     return n[lang] || n.en;
   }
 
+  // claude.ai's active org — the uuid in its `lastActiveOrg` cookie, or null. ONE parser for the
+  // three claude.ai content scripts (sidebar-usage.js, input-usage.js, claude-folders.js), which
+  // each had their own copy (#2054). The cookie NAME is a copy of vendor-ai/sites.js
+  // CLAUDE_ACTIVE_ORG_COOKIE: this is a classic content script and cannot import the ESM file, so
+  // test/sidebar-usage-org-scope-guard.mjs pins the two strings together.
+  const CLAUDE_ACTIVE_ORG_COOKIE = 'lastActiveOrg';
+  function getClaudeActiveOrgId(cookieString) {
+    const src = typeof cookieString === 'string' ? cookieString : document.cookie;
+    const prefix = `${CLAUDE_ACTIVE_ORG_COOKIE}=`;
+    const row = src.split(/;\s*/).find((r) => r.startsWith(prefix));
+    return (row && row.slice(prefix.length)) || null;
+  }
+
   function bucketDisplayName(name) {
     return Object.prototype.hasOwnProperty.call(BUCKET_DISPLAY_NAMES, name)
       ? BUCKET_DISPLAY_NAMES[name]
@@ -1029,6 +1042,8 @@
     observeCompareFit,
     isNonModelBucket,
     bucketDisplayName,
+    CLAUDE_ACTIVE_ORG_COOKIE,
+    getClaudeActiveOrgId,
     bucketNote,
     bucketNoteSlugs,
     isContextValid,

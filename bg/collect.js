@@ -18,6 +18,8 @@ import {
   detectPlan, refineTeamPlan, planFromSeatTier, hasConsumerOrg, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
+import { claudeOrgPlan, pickClaudeOrg } from '../vendor-ai/models.js';
+import { CLAUDE_ACTIVE_ORG_COOKIE, SITE_ORIGINS } from '../vendor-ai/sites.js';
 import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
@@ -28,7 +30,7 @@ import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import
 // it (#1315). Names unchanged — the call sites below are what the guards match on.
 import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows, claudeUsageWithheld } from './parse-claude.js';
-import { claudeUsageShape } from './drift-obs.js';
+import { claudeUsageShape, claudeCapsReport } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
@@ -289,7 +291,7 @@ async function noteClaudeCollected(account) {
 
 export async function getLastActiveOrgId() {
   try {
-    const cookie = await chrome.cookies.get({ name: 'lastActiveOrg', url: 'https://claude.ai' });
+    const cookie = await chrome.cookies.get({ name: CLAUDE_ACTIVE_ORG_COOKIE, url: SITE_ORIGINS.claude });
     return cookie?.value || null;
   } catch (e) {
     console.warn('[Claude Tuner] lastActiveOrg cookie read failed:', e.message);
@@ -485,63 +487,30 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // Detect plan for each org (skip API-only orgs)
     const orgPlans = orgList.map(o => { const p = detectPlan(o); return `${o.name}(${p})${p === 'API' ? '[skip]' : ''}`; });
     console.log(`[Claude Tuner] ${orgList.length} orgs:`, orgPlans.join(' | '));
-    const planScoreMap = { 'Max 20x': 7, 'Team Premium': 6, 'Max 5x': 5, 'Team Standard': 4, 'Max': 3.5, 'Enterprise': 3, 'Team': 2.5, 'Team Tier 2': 2.5, 'Pro': 2, 'Free': 1 };
-
-    // === Primary org selection: manual > cookie > plan score fallback ===
-    let bestOrg = null;
-    let bestPlan = 'unknown';
-    let selectionMethod = '';
+    // === Primary org selection: vendor-ai pickClaudeOrg — pin > lastActiveOrg cookie > plan score ===
+    // ONE rule with the cross-check: ranks, API-only skip, Free skipped on a multi-org account all
+    // live there; only the side effects below are the collector's. The pin (`selectedOrgId`) is the
+    // collector's alone — a display setting. The cross-check passes none: its conversations go to
+    // claude.ai's current org (the cookie), like the site (user decision 2026-10-03).
     const cookieOrgId = await getLastActiveOrgId();
+    const picked = pickClaudeOrg(orgList, { pinnedOrgId: config.selectedOrgId, lastActiveOrgId: cookieOrgId });
+    const bestOrg = picked.org;
+    let bestPlan = bestOrg ? detectPlan(bestOrg) : 'unknown';
+    const selectionMethod = picked.method || '';
 
-    // 1) Manual selection (selectedOrgId)
-    if (config.selectedOrgId) {
-      bestOrg = orgList.find(o => o.uuid === config.selectedOrgId);
-      if (bestOrg) {
-        bestPlan = detectPlan(bestOrg);
-        selectionMethod = 'manual';
-      } else {
-        // selectedOrgId may be an external provider (ChatGPT/Gemini) — don't reset
-        const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
-        const isExternal = collectedOrgs.some(o => o.uuid === config.selectedOrgId && o.provider && o.provider !== 'claude');
-        if (!isExternal) {
-          console.warn('[Claude Tuner] selectedOrgId not found, resetting to auto');
-          await chrome.storage.sync.set({ selectedOrgId: null });
-        }
+    if (config.selectedOrgId && selectionMethod !== 'manual') {
+      // selectedOrgId may be an external provider (ChatGPT/Gemini) — don't reset
+      const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+      const isExternal = collectedOrgs.some(o => o.uuid === config.selectedOrgId && o.provider && o.provider !== 'claude');
+      if (!isExternal) {
+        console.warn('[Claude Tuner] selectedOrgId not found, resetting to auto');
+        await chrome.storage.sync.set({ selectedOrgId: null });
       }
     }
-
-    // 2) lastActiveOrg cookie (automatically set by Claude.ai on org switch)
-    if (!bestOrg) {
-      if (cookieOrgId) {
-        const cookieOrg = orgList.find(o => o.uuid === cookieOrgId && detectPlan(o) !== 'API');
-        if (cookieOrg) {
-          bestOrg = cookieOrg;
-          bestPlan = detectPlan(cookieOrg);
-          selectionMethod = 'cookie';
-        } else {
-          console.log(`[Claude Tuner] lastActiveOrg cookie (${cookieOrgId}) not in org list or is API, falling back`);
-        }
-      } else {
-        console.log('[Claude Tuner] lastActiveOrg cookie not found, falling back to plan scoring');
-      }
-    }
-
-    // 3) Plan score-based fallback (when cookie is missing or match fails)
-    if (!bestOrg) {
-      const nonApiOrgs = orgList.filter(o => detectPlan(o) !== 'API');
-      const isMultiOrg = nonApiOrgs.length > 1;
-      let topScore = -1;
-      for (const o of nonApiOrgs) {
-        const p = detectPlan(o);
-        if (isMultiOrg && p === 'Free') continue;
-        const score = planScoreMap[p] || (p.startsWith('Max') ? 3 : 0);
-        if (score > topScore) {
-          topScore = score;
-          bestOrg = o;
-          bestPlan = p;
-        }
-      }
-      selectionMethod = 'score';
+    if (selectionMethod === 'score') {
+      console.log(cookieOrgId
+        ? `[Claude Tuner] lastActiveOrg cookie (${cookieOrgId}) not in org list or is API, falling back`
+        : '[Claude Tuner] lastActiveOrg cookie not found, falling back to plan scoring');
     }
 
     console.log(`[Claude Tuner] Primary org: ${bestOrg?.name} (${bestPlan}) [${selectionMethod}]`);
@@ -913,7 +882,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // Computed on the raw usage response, before buildUsageFields normalises it away.
     await noteDriftOutcome('claude', 'success', null);
     const { rider: claudeDriftRider, commit: claudeDriftCommit } =
-      await buildDriftRider('claude', claudeUsageShape(usageData),
+      await buildDriftRider('claude',
+        // Capability NAMES of the org this snapshot is for, beside the rule's verdict on them
+        // (#2054 item 2) — field data for narrowing claudeOrgPlan's substring match.
+        { ...claudeUsageShape(usageData), caps: claudeCapsReport(bestOrg, claudeOrgPlan(bestOrg)) },
         { label: plan, raw: plan === 'unknown' ? null : plan });
     const snapshot = {
       user_email: userEmail,

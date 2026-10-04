@@ -1,4 +1,5 @@
 import { CLAUDE_API_BASE } from './constants.js';
+import { isUsableTab } from '../vendor-ai/sites.js';
 
 // === Normalize resets_at (round to minute) ===
 // Claude API returns random 59.xxx / 00.xxx seconds, breaking same-window comparison
@@ -17,7 +18,10 @@ export async function fetchClaudeApi(path, options = {}) {
   const fullUrl = `${CLAUDE_API_BASE}${path}`;
 
   // Primary: tab-based (most reliable — bypasses Cloudflare)
-  const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+  // 🔴 A discarded/frozen tab has no document — injecting into it operates on nothing (and is the
+  // package's browser-crash suspect). Only usable tabs are tried (vendor-ai `isUsableTab`, #2054);
+  // none left = the fallback path, as with no tab at all.
+  const tabs = (await chrome.tabs.query({ url: 'https://claude.ai/*' })).filter(isUsableTab);
   let tabErrorMsg = '';
 
   if (tabs.length > 0) {

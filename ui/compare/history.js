@@ -768,6 +768,7 @@ export function installHistory(ctx) {
     state.pendingFollowupCol = null;
     if (debating) ctx.debateRestoreFinish();
     ctx.syncOpenButtons(); // the restored continuations (set after each column's turns settled) — #1978
+    ctx.renderColumns(); // and the heads: each shows the facts of the org its restored thread sends to (#2054 — columnFacts)
     ctx.stopBtn.disabled = true;
     ctx.syncWaitTimer();
     closeHistoryPanel();

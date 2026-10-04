@@ -5,6 +5,7 @@ import { getConfig, getLastStatus, authedFetch } from './storage.js';
 import { logNotification, createCountedNotification } from './notifications.js';
 import { resetIcon , badgeLockedByAuthBlock, updateBadgeForSelectedOrg } from './badge.js';
 import { recordRecDismiss, clearDismissedClaudeRec } from './rec-dismiss.js';
+import { detectPlan } from './plan-label.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -75,55 +76,8 @@ export async function fetchSubscriptionInfo(orgUuid) {
   return info;
 }
 
-// === Plan detection ===
-export function detectPlan(org) {
-  const capabilities = org.capabilities || [];
-  const tier = org.rate_limit_tier;
-  const capsStr = capabilities.join(',').toLowerCase();
-
-  let plan = 'unknown';
-  if (capabilities.includes('claude_max') || capsStr.includes('max')) {
-    const tierStr = (tier || '').toLowerCase();
-    // Exact match max_20x / max_5x from tier
-    if (tierStr.includes('max_20x')) plan = 'Max 20x';
-    else if (tierStr.includes('max_5x')) plan = 'Max 5x';
-    else plan = 'Max';
-  } else if (capabilities.includes('pro') || capsStr.includes('pro')) {
-    plan = 'Pro';
-  } else if (org.raven_type === 'enterprise' || capsStr.includes('raven_enterprise')) {
-    plan = 'Enterprise';
-  } else if (org.raven_type === 'team' || capsStr.includes('raven') || capsStr.includes('team')) {
-    plan = 'Team';
-  } else if (capabilities.includes('free') || capsStr.includes('free')) {
-    plan = 'Free';
-  } else if (capabilities.includes('api') && capabilities.length === 1) {
-    plan = 'API';
-  }
-
-  // Tier-based fallback
-  if (plan === 'unknown' && tier) {
-    const t = tier.toLowerCase();
-    if (t.includes('max')) plan = 'Max';
-    else if (t.includes('pro') || t === 'stripe_subscription') plan = 'Pro';
-    else if (t.includes('enterprise')) plan = 'Enterprise';
-    else if (t.includes('team') || t.includes('raven')) plan = 'Team';
-    else if (t.includes('prepaid') || t.includes('api')) plan = 'API';
-    // default_claude_ai is shared by both Free and Pro — rely on capabilities instead
-  }
-
-  // Final fallback: if no paid plan keywords in capabilities, assume Free
-  if (plan === 'unknown' && capabilities.includes('chat') &&
-      !capsStr.includes('pro') && !capsStr.includes('max') &&
-      !capsStr.includes('raven') && !capsStr.includes('enterprise')) {
-    plan = 'Free';
-  }
-
-  if (plan === 'Max' && tier && !['stripe_subscription', 'default'].includes(tier)) {
-    plan = `Max (${tier})`;
-  }
-
-  return plan;
-}
+// === Plan detection === (bg/plan-label.js — import-light, shared with bg/compare.js)
+export { detectPlan };
 
 // Plans a `team_*` seat must not override: Enterprise seats are reported as-is, and an API-only
 // org has no claude.ai seat to speak of.

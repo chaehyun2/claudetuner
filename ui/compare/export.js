@@ -6,6 +6,7 @@
 
 import { PROVIDER_META, COPY_FEEDBACK_MS, SVG_NS, TURN_KIND_SUMMARY } from './constants.js';
 import { modelOptionText, mdInlineText } from './helpers.js';
+import { columnAccount } from './column-gate.js';
 
 /** Installs the export slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installExport(ctx) {
@@ -255,6 +256,16 @@ export function installExport(ctx) {
     const own = allColumns().filter((c) => c.provider === provider);
     return own.find((c) => !c.node.hidden) || own[0] || null;
   };
+  /**
+   * The first column (visible first, as above) that uses the same ACCOUNT as `col` (#2054 ③): same provider
+   * and same columnAccount — a Claude column resuming a conversation in another claude.ai org is the first
+   * of ITS org and shows its own plan / gauges, never 「같은 계정」. One account per provider = firstColumnOf.
+   */
+  const firstAccountColumnOf = (col) => {
+    const acct = columnAccount(state.status, col);
+    const own = allColumns().filter((c) => c.provider === col.provider && columnAccount(state.status, c) === acct);
+    return own.find((c) => !c.node.hidden) || own[0] || null;
+  };
   /** A column's display label: the provider, plus its model label when it has one (`Claude (Opus 5)`). */
   function colLabel(col) {
     const base = PROVIDER_META[col.provider].label;
@@ -267,6 +278,13 @@ export function installExport(ctx) {
     const list = state.status && state.status.models && Array.isArray(state.status.models[provider]) ? state.status.models[provider] : [];
     const m = list.find((x) => x && String(x.id) === String(model));
     return m ? modelOptionText(m, t) : servedLabelOf(provider, model) || String(model);
+  }
+  /** The catalog `role` of a model id (vendor-ai models.js — ChatGPT rows carry one), or null. */
+  function modelRoleOf(provider, model) {
+    if (model == null) return null;
+    const list = state.status && state.status.models && Array.isArray(state.status.models[provider]) ? state.status.models[provider] : [];
+    const m = list.find((x) => x && String(x.id) === String(model));
+    return m && typeof m.role === 'string' && m.role ? m.role : null;
   }
   /**
    * The label the SITE gave a model a column's thread was answered by (`turn.model.label`), '' when
@@ -299,7 +317,7 @@ export function installExport(ctx) {
   // Everything another file reaches (compare.js destructures the names it calls bare).
   Object.assign(ctx, {
     copyText, focusQuietly, copyIcon, linkIcon, shareIcon, attachIcon, clearCopyFeedback, attachCopy, copyButton, quoteLines, markdownFor,
-    participatingColumns, allColumns, firstColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, columnHasAnswer,
+    participatingColumns, allColumns, firstColumnOf, firstAccountColumnOf, colLabel, modelLabelOf, modelRoleOf, compareMarkdown, columnMarkdown, columnHasAnswer,
     syncCopyAll, copyFeedback,
   });
 }

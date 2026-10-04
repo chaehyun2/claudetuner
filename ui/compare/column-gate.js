@@ -8,6 +8,49 @@ import { PROVIDER_META, SECONDS_PER_HOUR, SECONDS_PER_DAY, GATE_PERMISSION, GATE
 // The popup's gauge palette (ui/util.js is dependency-free): the mini gauges here read like the
 // overview cards — same thresholds, same colours (user request 2026-09-18).
 import { gaugeColor } from '../util.js';
+// The plan tier rule (#2054 D) — one answer for the pill's tint, the judge's tie-break and the moderator seat.
+import { planTier } from './debate-core.js';
+
+// ── a column's account (#2054 ③): Claude may send each column to a different claude.ai org ──
+/** The claude.ai org a Claude column's thread lives in (its continuation), or null (no thread yet / another provider). */
+export function threadOrgOf(col) {
+  const c = col && col.provider === 'claude' ? col.continuation : null;
+  return c && typeof c === 'object' && typeof c.orgId === 'string' && c.orgId ? c.orgId : null;
+}
+const claudeStatusOf = (status) => (status && status.providers && status.providers.claude && typeof status.providers.claude === 'object' ? status.providers.claude : null);
+/**
+ * The claude.ai org a Claude column SENDS to: its thread's org once it has one (a resumed conversation
+ * goes to ITS org), else the status' send org; null when neither is known (no claude.ai tab at the
+ * status = the collector's primary) and for every other provider.
+ */
+export function columnSendOrg(status, col) {
+  if (!col || col.provider !== 'claude') return null;
+  const st = claudeStatusOf(status);
+  return threadOrgOf(col) || (st && typeof st.orgUuid === 'string' && st.orgUuid ? st.orgUuid : null);
+}
+/**
+ * Which account of its provider a column uses, as a key two columns compare: the send org for Claude
+ * once the status names orgs (`orgUuid`), else null — one account per provider, as before (other
+ * providers, an older SW, a status without Claude facts). Columns of one provider with the same key
+ * share the plan pill, the gauges and the 「같은 계정」 chip; different keys each show their own.
+ */
+export function columnAccount(status, col) {
+  const st = col && col.provider === 'claude' ? claudeStatusOf(status) : null;
+  return st && typeof st.orgUuid === 'string' ? columnSendOrg(status, col) : null;
+}
+/**
+ * The provider facts a column's head shows (#2054). Claude: those of the org the column SENDS to,
+ * looked up in `providers.claude.orgs`; an org the status knows nothing about shows nothing, never
+ * another org's plan or gauges. Other providers: the provider's facts as they are. The ONE place a
+ * per-column reader (plan pill, gauges, a limit's reset time, the default judge) gets them from.
+ */
+export function columnFacts(status, col) {
+  const pstate = col && status && status.providers ? status.providers[col.provider] : null;
+  const org = columnAccount(status, col);
+  if (!pstate || !org || org === pstate.orgUuid) return pstate || null;
+  const facts = pstate.orgs && typeof pstate.orgs === 'object' && Object.prototype.hasOwnProperty.call(pstate.orgs, org) ? pstate.orgs[org] : null;
+  return facts && typeof facts === 'object' ? facts : null;
+}
 
 /** Installs the column-gate slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installColumnGate(ctx) {
@@ -195,14 +238,21 @@ export function installColumnGate(ctx) {
 
   /** Item 3: the plan label under the model pill, from the status answer; hidden when the SW has none. */
   function renderPlan(col) {
-    const pstate = state.status && state.status.providers ? state.status.providers[col.provider] : null;
+    const pstate = columnFacts(state.status, col);
     const label = pstate && typeof pstate.plan === 'string' ? pstate.plan.trim() : '';
+    // `org` (#2054): the workspace a send uses, named only when it could be mistaken (several orgs,
+    // not the one Claude Tuner's popup shows) — the SW decides; one-org accounts never see it.
+    const orgName = label && pstate && typeof pstate.org === 'string' ? pstate.org.trim() : '';
     col.plan.hidden = !label;
     col.plan.textContent = label;
+    if (orgName) col.plan.appendChild(el('span', 'cmp-col-plan-org', `· ${orgName}`));
     // The pill's tier tint: paid tiers (Pro / Max / Plus / Ultra / Team / Enterprise / Business …)
     // read as "paid", Free as quiet — a glance says which account is behind each column.
-    col.plan.setAttribute('data-tier', /^free$/i.test(label) ? 'free' : (label ? 'paid' : ''));
-    if (label) col.plan.title = t('col_plan_title', PROVIDER_META[col.provider].label);
+    // A label no rule knows (`unknown`, Claude `API`, a new tier) is neither — no tint (#2054 D).
+    const tier = label ? planTier(col.provider, label) : null;
+    col.plan.setAttribute('data-tier', tier === 'unknown' || !tier ? '' : tier);
+    if (orgName) col.plan.title = t('col_plan_org_title', PROVIDER_META[col.provider].label, orgName);
+    else if (label) col.plan.title = t('col_plan_title', PROVIDER_META[col.provider].label);
     else col.plan.removeAttribute('title');
     renderUsage(col, pstate && pstate.usage && typeof pstate.usage === 'object' ? pstate.usage : null);
   }
@@ -219,7 +269,7 @@ export function installColumnGate(ctx) {
   }
   /** The 5h window's reset instant (ISO) when that gauge is full and the reset lies ahead (C3: explains a provider limit); null otherwise. */
   function usageResetAt(col) {
-    const pstate = state.status && state.status.providers ? state.status.providers[col.provider] : null;
+    const pstate = columnFacts(state.status, col); // the org this column sent to (#2054 ③), not the provider's new-chat org
     const usage = pstate && pstate.usage && typeof pstate.usage === 'object' ? pstate.usage : null;
     if (!usage || !(typeof usage.h5 === 'number' && usage.h5 >= USAGE_FULL_PCT) || !usage.resetsAt5h) return null;
     return countdown(usage.resetsAt5h) ? usage.resetsAt5h : null;
@@ -278,5 +328,7 @@ export function installColumnGate(ctx) {
   Object.assign(ctx, {
     gateKindFor, checkAgainButton, providerLoginLink, permissionButtonLabel, requestProviderPermission, permissionPendingProviders, askSitePermission, notePermissionTabHint, renderColumnGate, renderPlan, countdown, usageResetAt,
     windowText, miniGauge, renderUsage, syncGateStatus,
+    // Per-column account facts over the live status (#2054 ③) — the module functions above, bound to state.
+    columnFacts: (col) => columnFacts(state.status, col), columnSendOrg: (col) => columnSendOrg(state.status, col), columnAccount: (col) => columnAccount(state.status, col),
   });
 }
