@@ -1,6 +1,9 @@
 // Pure leaf helpers shared across the popup UI.
 // No module-level mutable state — only arguments + global i18n (`t`, `getLang` from i18n.js, a classic script).
-// Extracted from popup.js (see refactor/popup-modular). Keep these dependency-free so any UI module can import them.
+// Extracted from popup.js (see refactor/popup-modular). Keep these dependency-free so any UI module can import them
+// (the one import is ui/usage-tiers.js, itself pure and import-free — the shared usage-level judgement, #2067).
+
+import { usageLevel } from './usage-tiers.js';
 
 export function escHtml(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -245,10 +248,12 @@ export function _fmIcon(level) {
   return map[level] || map.nodata;
 }
 
+// The bar colour of a usage %: the shared 50/80 judgement (ui/usage-tiers.js usageLevel, #2067) on
+// the popup's palette. usage-shared.js (content scripts) answers the same from its synced copy.
+// No reading is the low shade, as before.
+const GAUGE_LEVEL_COLORS = { high: '#ef4444', mid: '#f59e0b', low: '#06b6d4' };
 export function gaugeColor(util) {
-  if (util >= 80) return '#ef4444';
-  if (util >= 50) return '#f59e0b';
-  return '#06b6d4';
+  return GAUGE_LEVEL_COLORS[usageLevel(util)] || GAUGE_LEVEL_COLORS.low;
 }
 
 // Relative countdown, compact and language-neutral: "6h 29m" / "6d 13h" / "29m".
@@ -339,7 +344,7 @@ export function planDisplayName(plan, provider) {
   if (provider === 'chatgpt') {
     if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
     if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
-    if (p === 'pro 25x') return 'Pro 500';
+    if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
   }
   return plan || '';
 }
@@ -365,7 +370,7 @@ export function planToMultiplier(plan, provider, win) {
     if (p === 'go') return 0.4;
     if (p === 'pro' || p === 'pro 20x') return 20;
     if (p === 'pro 5x' || p === 'prolite') return 5;
-    if (p === 'pro 25x') return 25; // $500 Pro tier (25x Plus quota; no parser emits it yet)
+    if (p === 'pro 25x' || p === 'promax') return 25; // $500 Pro tier (25x Plus quota; raw plan_type 'promax')
     if (p === 'team') return 1.25;
     return 1; // plus, education, business, unknown
   }

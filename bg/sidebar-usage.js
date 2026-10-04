@@ -3,6 +3,7 @@
 import { calcPredictedAtReset } from '../ui/prediction-core.js';
 import { usageWithheldIsFreeCutover } from '../ui/util.js';
 import { hasProviderPermission } from './providers.js';
+import { SITE_TAB_PATTERNS } from './constants.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
 
@@ -270,18 +271,18 @@ export async function pushSidebarUsage() {
   // always granted; ChatGPT only when its optional permission is present.
   const refresh = (tab) => chrome.tabs.sendMessage(tab.id, { type: 'SIDEBAR_USAGE_REFRESH' }).catch(() => {});
   try {
-    const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    const tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude });
     for (const tab of tabs) refresh(tab);
   } catch { /* content script may not be ready */ }
   try {
     if (await hasProviderPermission('chatgpt')) {
-      const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+      const tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt });
       for (const tab of tabs) refresh(tab);
     }
   } catch { /* no permission / not ready */ }
   try {
     if (await hasProviderPermission('gemini')) {
-      const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+      const tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini });
       for (const tab of tabs) refresh(tab);
     }
   } catch { /* no permission / not ready */ }

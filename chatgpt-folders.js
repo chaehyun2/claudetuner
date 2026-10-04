@@ -37,7 +37,7 @@
   const NEW_ROW_KEY_RE = new RegExp(`^(?:(?:https://chatgpt\\.com)?/c/)?(${UUID})$`, 'i');
   function conversationIdFromKey(key) {
     const m = String(key || '').trim().match(NEW_ROW_KEY_RE);
-    return m ? m[1] : null;
+    return m ? m[1].toLowerCase() : null;
   }
 
   // ── Provider adapter: everything host-coupled for chatgpt.com ──
@@ -50,23 +50,28 @@
     // change. foldersForActiveOrg()/createFolder() partition on this value, so a
     // ChatGPT page only ever shows/creates "chatgpt"-bucket folders.
     getActiveOrgId() { return 'chatgpt'; },
-    // Current conversation id from the URL, e.g. /c/<uuid>
+    // Current conversation id from the URL — /c/<uuid> or a GPT's /g/<gizmo>/c/<uuid>, lowercased —
+    // by usage-shared.js's one parser (#2065, vendor conversationRef rule; guarded like every core
+    // lookup — a stale core reads as "not in a conversation").
     getCurrentChatId() {
-      const m = location.pathname.match(/\/c\/([\w-]+)/);
-      return m ? m[1] : null;
+      const core = globalThis.__ctUsageCore;
+      return core && core.conversationIdFromPath ? core.conversationIdFromPath('chatgpt', location.pathname) : null;
     },
     // Sidebar conversation-row selector — BOTH DOMs; specific when a chatId is given, else the
     // generic form used for pointer-drag hit-testing. `chatId` comes from getCurrentChatId()
-    // (`[\w-]+`), so it is safe inside the quoted attribute value.
+    // (a lowercased uuid — [0-9a-f-] only), so it is safe inside the quoted attribute value.
     getChatLinkSelector(chatId) {
       if (!chatId) return `${LEGACY_ROW}, [${NEW_ROW_ATTR}]`;
-      return `a[href*="/c/${chatId}"], [${NEW_ROW_ATTR}="${chatId}"], [${NEW_ROW_ATTR}$="/c/${chatId}"]`;
+      // Case-insensitive (`i`): the id is the lowercased canonical one, the site's may not be (Codex #2065 R1).
+      return `a[href*="/c/${chatId}" i], [${NEW_ROW_ATTR}="${chatId}" i], [${NEW_ROW_ATTR}$="/c/${chatId}" i]`;
     },
     // Conversation id of a row (pointer-drag import): the <a>'s href, else the new row's key.
     chatIdFromLink(el) {
-      const m = (el?.getAttribute?.('href') || '').match(/\/c\/([\w-]+)/);
-      if (m) return m[1];
-      return conversationIdFromKey(el?.getAttribute?.(NEW_ROW_ATTR));
+      const core = globalThis.__ctUsageCore;
+      const href = el?.getAttribute?.('href');
+      const fromHref = href && core && core.conversationIdFromHref
+        ? core.conversationIdFromHref('chatgpt', href, location.href) : null;
+      return fromHref || conversationIdFromKey(el?.getAttribute?.(NEW_ROW_ATTR));
     },
     // Visible title: the new row's title span when there is one (the row also holds its options
     // button), else the row's text.

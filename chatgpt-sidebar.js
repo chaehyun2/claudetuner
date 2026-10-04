@@ -606,7 +606,7 @@
 
   // ── Announcements (shared source/logic with claude.ai) ──
   async function fetchNotices() {
-    if (!isCurrent() || !CORE.fetchAnnouncements) return;
+    if (!isCurrent() || !CORE || !CORE.fetchAnnouncements) return;
     try {
       const fresh = await CORE.fetchAnnouncements(_lang, chrome.runtime.getManifest().version);
       if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
@@ -616,85 +616,37 @@
     } catch { /* silent — keep last-known notices */ }
   }
 
-  // ── In-house ad banner (design §2.2/§3.2/§4) ──
-  // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium skips the fetch and
-  // clears the slot. Feature-detected — a stale core (dynamic injection, see docs/EXTENSION.md) has no
-  // adFreeEntitled and must not throw — and FAIL-OPEN: any error or a non-Premium answer → ads as before.
-  const adFree = () => {
-    try {
-      if (!CORE || typeof CORE.adFreeEntitled !== 'function') return Promise.resolve(false);
-      return Promise.resolve(CORE.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
-    } catch { return Promise.resolve(false); }
-  };
+  // ── Bell badge, notice strip, in-house ad banner (design §2.2/§3.2/§4) ──
+  // One copy in usage-shared.js shared by the three sidebars (#2065) — this file passes only its
+  // prefix, theme classes, utm_source and placement. The ad round (readiness set, Premium gate —
+  // fail-open —, selection) is CORE.fetchSidebarAds: null = leave the slot as it is, [] = Premium
+  // (slot cleared). Guarded like every core lookup: a core without them skips the round.
+  const AD_PLACEMENT = 'CHATGPT_SIDEBAR';
   async function fetchAds() {
-    if (!isCurrent() || !CORE.selectAds) return;
-    const gated = await adFree();
-    if (!isCurrent()) return; // superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch
-    if (gated) { _ads = []; renderInlineAd(); return; } // Premium: no fetch, slot cleared
-    try {
-      const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CHATGPT_SIDEBAR, lang: _lang });
-      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
-      _ads = fresh;
-      renderInlineAd();
-    } catch { /* silent — no ads this round */ }
+    if (!isCurrent() || !CORE || typeof CORE.fetchSidebarAds !== 'function') return;
+    const next = await CORE.fetchSidebarAds({ placementKey: AD_PLACEMENT, lang: _lang, isCurrent });
+    if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+    if (next === null) return;
+    _ads = next;
+    renderInlineAd();
   }
 
   function renderInlineAd() {
-    const container = document.getElementById('ct-cg-ad');
-    if (!container || !CORE.buildAdBannerHtml) return;
-    if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
-    container.style.display = '';
-    container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
-    container.querySelectorAll('.ct-ad-banner').forEach((el, i) => {
-      const ad = _ads[i];
-      CORE.noteAdServed(ad.campaign.campaign_id, ad.placement); // daily frequency cap (serving-side)
-      CORE.trackAdViewability(el, ad, _guard); // measurement seam: viewability-gated impression → SW counter owner
-      const url = el.getAttribute('data-ad-url');
-      if (url) el.addEventListener('click', (e) => {
-        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
-        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
-        CORE.trackAdClick(ad, e); // measurement seam: click → SW counter owner
-        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=chatgpt_sidebar', '_blank');
-      });
-    });
+    if (!CORE || !CORE.renderSidebarAds) return;
+    CORE.renderSidebarAds(document.getElementById('ct-cg-ad'), _ads,
+      { placementKey: AD_PLACEMENT, lang: _lang, guard: _guard, utm: 'chatgpt_sidebar' });
   }
 
   function updateBellBadge() {
-    const badge = document.getElementById('ct-cg-bell-badge');
-    if (!badge) return;
-    const unseen = CORE.getUnseenCount(_notices, _lastSeenId);
-    if (unseen > 0) { badge.textContent = unseen; badge.style.display = ''; }
-    else { badge.style.display = 'none'; }
+    if (!CORE || !CORE.renderBellBadge) return;
+    CORE.renderBellBadge(document.getElementById('ct-cg-bell-badge'), _notices, _lastSeenId);
   }
 
   function renderInlineNotice() {
-    const container = document.getElementById('ct-cg-notice');
-    if (!container) return;
-    chrome.storage.local.get({ ct_dismissed_notices: [] }, (result) => {
-      const dismissed = result.ct_dismissed_notices || [];
-      const active = _notices.filter(n => !dismissed.includes(n.id));
-      if (active.length === 0) { container.innerHTML = ''; container.style.display = 'none'; return; }
-      const latest = active[0];
-      container.style.display = '';
-      container.innerHTML = `
-        <span class="ct-cg-notice-icon">📢</span>
-        <span class="ct-cg-notice-text text-token-text-secondary">${CORE.escapeHtml(latest.title || '')}</span>
-        <button class="ct-cg-notice-close text-token-text-tertiary">×</button>
-      `;
-      container.querySelector('.ct-cg-notice-text').addEventListener('click', () => {
-        let url = latest.url || '';
-        try { const u = new URL(url); if (u.protocol !== 'http:' && u.protocol !== 'https:') url = ''; } catch { url = ''; }
-        if (!url) url = CORE.NOTICE_BASE + _lang;
-        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=chatgpt_sidebar', '_blank');
-      });
-      container.querySelector('.ct-cg-notice-close').addEventListener('click', (e) => {
-        e.stopPropagation();
-        chrome.storage.local.get({ ct_dismissed_notices: [] }, (r) => {
-          const arr = r.ct_dismissed_notices || [];
-          if (!arr.includes(latest.id)) arr.push(latest.id);
-          chrome.storage.local.set({ ct_dismissed_notices: arr }, () => renderInlineNotice());
-        });
-      });
+    if (!CORE || !CORE.renderSidebarNotice) return;
+    CORE.renderSidebarNotice(document.getElementById('ct-cg-notice'), {
+      getNotices: () => _notices, lang: _lang, prefix: 'ct-cg', textClass: 'text-token-text-secondary', closeClass: 'text-token-text-tertiary',
+      utm: 'chatgpt_sidebar', isCurrent, rerender: renderInlineNotice,
     });
   }
 

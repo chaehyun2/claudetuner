@@ -199,15 +199,20 @@
 // The output-image contract (#1684) — the package's own numbers, so the host never refuses an image
 // the client accepted. A pure module (no browser global), safe for the Node guard.
 import { OUTPUT_IMAGE_MIMES, MAX_OUTPUT_IMAGES, MAX_OUTPUT_IMAGE_BYTES, OUTPUT_IMAGE_ERRORS } from '../vendor-ai/output-image.js';
-import { SITE_ORIGINS, providerForUrl } from '../vendor-ai/sites.js';
+import { SITE_ORIGINS, providerForUrl, conversationRef } from '../vendor-ai/sites.js';
+import { ERROR_CODES } from '../vendor-ai/errors.js';
 import { PROVIDER_LABELS } from './constants.js';
 import { REVIEW_EVENTS, REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './review-nudge.js';
 import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
 import { pickProviderEntry } from '../ui/compare/usage-floor.js';
 import { detectPlan } from './plan-label.js';
+// The compare wire constants (port name, providers, column cap, id/share patterns, share limits) are
+// the page's, single-sourced in ui/compare/constants.js (#2065) and re-exported for this module's importers.
+import { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, SHARE_ID_RE, SHARE_LINK_PATH_RE, SHARE_SITE_ORIGIN, SHARE_PASSWORD_MIN, SESSION_ID_RE, MODEL_ID_RE, SHARE_AUTHOR_MODES, SHARE_TITLE_MAX, SHARE_PASSWORD_MAX, SHARE_AUTHOR_NAME_MAX, CWS_EXT_ID } from '../ui/compare/constants.js';
+import { CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX } from '../ui/compare/constants.js';
+export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, SHARE_ID_RE, SHARE_LINK_PATH_RE, SHARE_SITE_ORIGIN, SHARE_PASSWORD_MIN, SESSION_ID_RE, MODEL_ID_RE, SHARE_AUTHOR_MODES, SHARE_TITLE_MAX, SHARE_PASSWORD_MAX, SHARE_AUTHOR_NAME_MAX };
 import { COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY, isSaveBy, normalizeSaveBy, keptFor, legacySaveHistory, readIncognitoPref, incognitoPrefWrite, saveByFromMessage, uniformSaveBy } from '../ui/compare/save-mode.js';
 
-export const COMPARE_PORT_NAME = 'ctcmp-compare';
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
 export const PROBE_MULTI_MSG = 'COMPARE_PROBE_MULTI';
 // Dev-only (unpacked builds): one send with attachments through the vendored client (#1613), see probeUpload.
@@ -250,11 +255,8 @@ export const COMPARE_SRCLESS_PLACEMENTS = Object.freeze(['popup', 'popup_debate'
 export const COMPARE_DEBATE_PLACEMENTS = Object.freeze(['popup_debate']);
 export const COMPARE_DEBATE_SITE_URL = `${COMPARE_SITE_URL}debate/`;
 export const COMPARE_SRC_NONE = 'none';
-export const PUBLISHED_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
-export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
-// Columns (cmp-columns contract): the most columns one round may have, and the id of the
-// provider's default-model column.
-export const MAX_COLUMNS = 6;
+// Columns (cmp-columns contract): the id of the provider's default-model column (the most columns
+// one round may have is MAX_COLUMNS, imported above).
 export const COLUMN_AUTO = 'auto';
 /** `${provider}:${modelId || 'auto'}` — a column's id. */
 export const columnId = (provider, model) => `${provider}:${model || COLUMN_AUTO}`;
@@ -481,11 +483,10 @@ const STG_TAB_READY = OUTCOME_STAGES.indexOf('tab_ready');
 // ChatGPT slugs with dots or hyphens (`gpt-5-5`, `gpt-5.5`) — and nothing a page, a storage row or
 // a provider could report as an id is private text unless it is NOT one of these (an email, a URL,
 // a sentence). A non-matching id is OMITTED, never truncated (a cut string is still that text)
-// and never null (null means Auto) — Codex cmp-beta SW 1R #1.
-export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-// The page's opaque session id (contract §5): the id its history entry uses, forwarded to consume
-// as `session_id` so the rows of one conversation can be grouped. Shape-checked, else omitted.
-export const SESSION_ID_RE = /^[A-Za-z0-9-]{8,40}$/;
+// and never null (null means Auto) — Codex cmp-beta SW 1R #1. That rule is MODEL_ID_RE (imported
+// above). SESSION_ID_RE (imported too) shapes the page's opaque session id (contract §5): the id its
+// history entry uses, forwarded to consume as `session_id` so the rows of one conversation can be
+// grouped. Shape-checked, else omitted.
 /** A model id that may go on the wire, or null when it must not (see MODEL_ID_RE). */
 export function wireModelId(v) {
   return typeof v === 'string' && v.length <= OUTCOME_MODEL_MAX && MODEL_ID_RE.test(v) ? v : null;
@@ -544,20 +545,14 @@ export const COMPARE_SUGGEST_ENABLED_KEY = 'compareSuggestEnabled';
 // mirror the server's (worker/src/utils/compare-share.ts); the server re-checks every one of them.
 export const SHARE_OPS = Object.freeze(['create', 'update', 'delete', 'list', 'image', 'password']);
 export const SHARE_VISIBILITIES = Object.freeze(['public', 'private']);
-export const SHARE_AUTHOR_MODES = Object.freeze(['anon', 'name', 'name_photo']);
-export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
 /** A public share's content revision (worker CONTENT_REV_RE): create/update answer it, the card upload carries it back. */
 export const SHARE_REV_RE = /^[A-Za-z0-9]{12}$/;
 export const SHARE_REQUEST_MAX_BYTES = 640 * 1024;
 /** A share card PNG as standard base64 (#1784 U6): the server's own request cap (it decodes ≤ 500 KB). */
 export const SHARE_IMAGE_B64_MAX = 700 * 1024;
-export const SHARE_AUTHOR_NAME_MAX = 40;
-export const SHARE_TITLE_MAX = 120;
-/** A private share's password (#1784 U5): the server's own bounds (worker validPassword). */
-export const SHARE_PASSWORD_MIN = 6;
-export const SHARE_PASSWORD_MAX = 128;
+// SHARE_AUTHOR_NAME_MAX / SHARE_PASSWORD_MAX (a private share's password, worker validPassword) are the
+// page's constants, re-exported above (#2067: they were twin copies here).
 export const SHARE_LIST_MAX = 200;
-export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
 /** The one extension page that may create, edit, list or delete shares. */
 export const SHARE_PAGE_PATH = '/compare.html';
 /** OPEN_COMPARE_SHARE opens the shell with this `utm_content` and on this tab (a debate cannot continue a link). */
@@ -743,18 +738,19 @@ export function providerForLink(url) {
 // A Claude Tuner share page (`https://claudetuner.com/c/<22 base62>`) is a link KIND of its own —
 // not a provider: nobody holds it as a conversation, so there is no continuation and EVERY column
 // is handed the transcript (pendingLink.provider = null → no link column). Matched by origin and
-// exact path, like the vendor links; the page's findLink (ui/compare/link.js) is the other half
-// and the share probe pins the two together.
-export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
+// exact path with SHARE_LINK_PATH_RE — the same constant the page's findLink (ui/compare/link.js)
+// uses, imported from ui/compare/constants.js.
 /** A share page's JSON is at most the stored snapshot (512 KB) — the read is capped a little above. */
 export const SHARE_CONTENT_MAX_BYTES = 640 * 1024;
 /**
  * What a pasted link is: `{kind:'vendor', provider}` | `{kind:'share', id}` | null. (A fragment is
  * ignored: whether a share is private is the page's answer, not the link's — readShareLink.)
+ * A vendor link counts only when it names a CONVERSATION (vendor conversationRef) — the same rule as
+ * the page's findLink (ui/compare/link.js); a provider's home or settings page is not one (#2065).
  */
 export function linkTarget(url) {
   const provider = providerForLink(url);
-  if (provider) return { kind: 'vendor', provider };
+  if (provider) return conversationRef(provider, String(url)) !== null ? { kind: 'vendor', provider } : null;
   let u;
   try { u = new URL(String(url).trim()); } catch { return null; }
   if (u.origin !== SHARE_SITE_ORIGIN) return null;
@@ -1035,17 +1031,17 @@ export const SHARE_CODES = Object.freeze({
   BAD_PASSWORD: 'bad_password',  // a private share's password outside SHARE_PASSWORD_MIN..MAX (the server's code too)
 });
 export const SW_CODES = Object.freeze({
-  AUTH_REQUIRED: 'auth_required',   // readiness: no provider session (or no host permission to see one)
-  NO_TAB: 'no_tab',                 // readiness: prepare() found no provider tab (and could not open one)
+  AUTH_REQUIRED: ERROR_CODES.AUTH_REQUIRED, // readiness: no provider session (or no host permission to see one)
+  NO_TAB: ERROR_CODES.NO_TAB,       // readiness: prepare() found no provider tab (and could not open one)
   NO_TARGETS: 'no_targets',         // CONSUME_FAIL status 0: nothing was ready, nothing consumed
   BUSY: 'busy',                     // CONSUME_FAIL status 0: a send is still in flight on this port
   NETWORK_ERROR: 'network_error',   // CONSUME_FAIL status 0: consume never reached the server
   TIMEOUT: 'timeout',               // per-provider budget exhausted
   STALLED: 'stalled',               // outcome `code` on a DONE{stalled:true} column (ok stays true — the text arrived)
-  CUT_ERROR: 'stream_error',        // same, but the PROVIDER said it failed mid-answer (package `partial`) — see cutKindOf
-  RETRACTED: 'retracted',           // same, but the provider took the answer back and replaced it (CUT_RETRACTED)
-  ABORTED: 'aborted',
-  UNKNOWN: 'unknown',
+  CUT_ERROR: CUT_STREAM_ERROR,      // same, but the PROVIDER said it failed mid-answer (package `partial`) — see cutKindOf
+  RETRACTED: CUT_RETRACTED,         // same, but the provider took the answer back and replaced it (CUT_RETRACTED)
+  ABORTED: ERROR_CODES.ABORTED,
+  UNKNOWN: ERROR_CODES.UNKNOWN,
   BAD_REQUEST: 'bad_request',       // LINK_FAIL: the pasted link is nobody's conversation (#1651)
   LINK_NEEDS_HISTORY: 'link_needs_history', // SEND{useLink} while the session is incognito (#1651)
   LINK_CONTEXT_MISSING: 'link_context_missing', // a column of a link round never received the context (#1651)
@@ -1069,14 +1065,15 @@ export const SW_CODES = Object.freeze({
 // How much of the provider's own message the console keeps. Diagnostics only.
 const CUT_REASON_LOG_MAX = 200;
 export const CUT_STALLED = 'stalled';
-export const CUT_STREAM_ERROR = 'stream_error';
-// The provider wrote an answer and then REPLACED it with something short (Gemini, live 2026-10-01:
-// 730 chars, then a canned "beyond my abilities" line). Package v0.30.3: `partial` + this exact
-// `cutReason` + `retraction` (the replacement). What was written before stays the answer; the
-// replacement is quoted under it (`DONE.retraction`, retractionForPage) — page only, never the server.
-export const CUT_RETRACTED = 'retracted';
-// How much of the replacement the page may quote. The package already caps it (300); this is ours.
-export const RETRACTION_MAX = 300;
+// CUT_STREAM_ERROR / CUT_RETRACTED / RETRACTION_MAX are the package's own vocabulary (vendor-ai
+// v0.40.0 CUT_REASONS / RETRACTION_MAX_CHARS), shared with the page through ui/compare/constants.js
+// and re-exported here (#2067). CUT_RETRACTED: the provider wrote an answer and then REPLACED it with
+// something short (Gemini, live 2026-10-01: 730 chars, then a canned "beyond my abilities" line).
+// Package v0.30.3: `partial` + this exact `cutReason` + `retraction` (the replacement). What was
+// written before stays the answer; the replacement is quoted under it (`DONE.retraction`,
+// retractionForPage) — page only, never the server. RETRACTION_MAX bounds how much of it the page
+// may quote (the package's own cap, applied again here).
+export { CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX };
 // Control characters (C0 + DEL + C1) never reach the page's sentence; whitespace runs fold to one space.
 const RETRACTION_CTRL_RE = /[\u0000-\u001f\u007f-\u009f]+/g;
 // The package's diag for a stream it ended early; `detail.reason` is its free-text cut reason.
@@ -1103,7 +1100,7 @@ export function pageSafeDiag(stage, detail) {
 // not free text): anything merely starting with it is still an unexplained stop.
 function cutKindOfReason(raw) {
   if (raw === CUT_RETRACTED) return CUT_RETRACTED;
-  return raw.startsWith('stream_error') ? CUT_STREAM_ERROR : CUT_STALLED;
+  return raw.startsWith(CUT_STREAM_ERROR) ? CUT_STREAM_ERROR : CUT_STALLED;
 }
 
 export function cutKindOf(result) {
@@ -1598,15 +1595,15 @@ function stripStreamHead(detail) {
 // in-band status, and only from the package's exact, anchored message shapes
 // (vendor-ai/gemini-client.js `_inBandFailure` + IN_BAND_ERROR_CODES — pinned by
 // test/compare-privacy-guard.mjs [1]). Anything else answers null.
-export const IN_BAND_ERROR_CODE = 'in_band_error';
+export const IN_BAND_ERROR_CODE = ERROR_CODES.IN_BAND_ERROR;
 const IN_BAND_PROVIDER = 'gemini';
 const IN_BAND_UNKNOWN_RE = /^Gemini answered with in-band code (\d{1,9})$/;
 // code → the package's fixed sentence(s) for it; the message is `${sentence} (in-band ${n})`.
 export const IN_BAND_KNOWN_MESSAGES = Object.freeze({
-  overloaded: ['Gemini is temporarily unavailable'],
-  rate_limited: ['Gemini usage limit reached', 'Google temporarily blocked the request'],
-  model_unavailable: ['the selected Gemini model is unavailable', 'the Gemini model configuration is invalid'],
-  previous_turn_pending: ['Gemini is still answering the previous turn of this conversation'],
+  [ERROR_CODES.OVERLOADED]: ['Gemini is temporarily unavailable'],
+  [ERROR_CODES.RATE_LIMITED]: ['Gemini usage limit reached', 'Google temporarily blocked the request'],
+  [ERROR_CODES.MODEL_UNAVAILABLE]: ['the selected Gemini model is unavailable', 'the Gemini model configuration is invalid'],
+  [ERROR_CODES.PREVIOUS_TURN_PENDING]: ['Gemini is still answering the previous turn of this conversation'],
 });
 const IN_BAND_KNOWN_SUFFIX_RE = / \(in-band (\d{1,9})\)$/;
 export function inBandCodeOf(e) {
@@ -1718,15 +1715,19 @@ export function streamOutcomeOf(ev) {
   return Object.keys(out).length ? out : null;
 }
 // Gemini's 1097 wait (vendor-ai v0.20.0): emitted between attempts of ONE send while the previous
-// turn is still live server-side; the next attempt is a fresh request with its own stream.
+// turn is still live server-side; the next attempt is a fresh request with its own stream. Since
+// vendor-ai v0.41.0 (#2074) a follow-up's in-band 1095 waits the same way, and the stage's
+// `detail.code` names which code the refused attempt carried.
 export const STAGE_PREVIOUS_TURN_WAIT = 'previous_turn_wait';
 // The package's `tab_ready` (v0.3.0): `detail.tabId` is the tab the send is about to use.
 export const STAGE_TAB_READY = 'tab_ready';
+// The code an older package's wait stood for (no `detail.code`, no stream_status code seen).
 export const PREVIOUS_TURN_IN_BAND_CODE = 1097;
 // One send's stream fields for the outcome, across the client's internal attempts (Codex telemetry
 // 1R follow-up #1): a 1097 wait starts a new attempt, so what the earlier attempt's stream said is
 // dropped there — the row describes the attempt that ended the send. `answered()` = the fields of an
-// ok row: env/end/sr, and `ib` ONLY as "this send waited out a 1097" (a code on an answered turn
+// ok row: env/end/sr, and `ib` ONLY as "this send waited out <code>" — the last wait's code: the stage's
+// `detail.code`, else the refused attempt's stream_status code, else 1097 (#2074) (a code on an answered turn
 // means nothing else). `failed(e)` = the fields of a failure row: env/end/sr, and `ib` from the
 // final attempt's stream_status, else from the error itself (inBandCodeOf — the package's exact
 // shapes only).
@@ -1734,13 +1735,17 @@ export const PREVIOUS_TURN_IN_BAND_CODE = 1097;
 // again from its ready tab — and `fz`/`act` the tab as `noteTab` last read it (the SW reads it at tab_ready).
 export function createStreamOutcome() {
   let fields = {};
-  let waited = false;
+  let waitedCode = null;
   let stg = -1;
   let tab = {};
   const counts = () => { const { ib, ...rest } = fields; return { ...rest, ...(stg >= 0 ? { stg } : {}), ...tab }; };
   return {
     onStage(ev) {
-      if (ev?.stage === STAGE_PREVIOUS_TURN_WAIT) { fields = {}; waited = true; stg = Math.min(stg, STG_TAB_READY); return; }
+      if (ev?.stage === STAGE_PREVIOUS_TURN_WAIT) {
+        const code = ev.detail?.code;
+        waitedCode = Number.isSafeInteger(code) && code >= 0 ? code : (fields.ib ?? PREVIOUS_TURN_IN_BAND_CODE);
+        fields = {}; stg = Math.min(stg, STG_TAB_READY); return;
+      }
       stg = Math.max(stg, OUTCOME_STAGES.indexOf(ev?.stage));
       const f = streamOutcomeOf(ev);
       if (f) fields = { ...fields, ...f };
@@ -1751,7 +1756,7 @@ export function createStreamOutcome() {
       if (typeof t?.frozen === 'boolean') tab.fz = t.frozen ? 1 : 0;
       if (typeof t?.active === 'boolean') tab.act = t.active ? 1 : 0;
     },
-    answered() { return { ...counts(), ...(waited ? { ib: PREVIOUS_TURN_IN_BAND_CODE } : {}) }; },
+    answered() { return { ...counts(), ...(waitedCode !== null ? { ib: waitedCode } : {}) }; },
     failed(e) {
       const ib = fields.ib ?? inBandCodeOf(e);
       return { ...counts(), ...(ib !== null && ib !== undefined ? { ib } : {}) };
@@ -1838,7 +1843,7 @@ function modelForPage(m) {
 }
 
 // The timed send-path stages (package v0.3.0), in order, and the segment name each one closes.
-export const TTFT_STAGES = Object.freeze([
+export const TTFT_STAGE_SEGMENTS = Object.freeze([
   ['send_start', null], ['org_resolved', 'org'], ['tab_ready', 'tab'], ['conversation_created', 'create'],
   // `upload` (#1642): the attachments, as one span. The stage is reported once PER FILE and the map
   // keeps the last `at`, so the segment runs from whatever came before the first upload to the
@@ -1855,7 +1860,7 @@ export function ttftSegments(stages) {
   const at = (name) => (typeof stages?.[name] === 'number' ? stages[name] : null);
   const segments = {};
   let prev = at('send_start');
-  for (const [stage, segment] of TTFT_STAGES) {
+  for (const [stage, segment] of TTFT_STAGE_SEGMENTS) {
     const t = at(stage);
     // 🔴 A NEGATIVE span is not a measurement (Codex #1642 1R follow-up 3): a Claude retry
     // re-reports `conversation_created` AFTER the uploads it reuses, so `upload` came out at
@@ -2802,7 +2807,7 @@ export function createCompareController({
   /** `&ext=<id>` for an unpacked build and `&lang=` when the user CHOSE a language — the shell's query extras. */
   async function siteQueryExtras() {
     const id = typeof runtime.id === 'string' ? runtime.id : '';
-    const dev = id && id !== PUBLISHED_EXT_ID ? `&ext=${id}` : '';
+    const dev = id && id !== CWS_EXT_ID ? `&ext=${id}` : '';
     // The extension's language, when the user CHOSE one (ko|en; 'auto' adds nothing and the shell
     // resolves as before): the shell otherwise follows the site toggle / browser language, so an
     // English extension on a Korean browser opened a Korean page (2026-09-26 i18n audit).

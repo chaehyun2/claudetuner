@@ -3,14 +3,21 @@
 // over compare.js. Values, comments and order are exactly as they were in compare.js; compare.js
 // re-exports the public ones (COMPARE_PORT_NAME, PRO_URL, KEEPALIVE_MS, …) so its consumers are
 // unchanged. Its only imports are the vendored package's import-free facts files (site origins,
-// output-image types, MIME table — #2054), so it stays free of anything with behavior.
+// output-image types, MIME table — #2054; error codes and cut vocabulary — #2067), so it stays free
+// of anything with behavior.
 
 import { SITE_ORIGINS } from '../../vendor-ai/sites.js';
+import { CUT_REASONS, ERROR_CODES, RETRACTION_MAX_CHARS } from '../../vendor-ai/errors.js';
 import { OUTPUT_IMAGE_MIMES } from '../../vendor-ai/output-image.js';
 import { MIME_BY_EXTENSION } from '../../vendor-ai/mime.js';
 
+// 🔑 THE COMPARE WIRE CONSTANTS LIVE HERE AND ONLY HERE (#2065): the port name, providers, column
+// cap, ID/share patterns and share limits below are imported by the service worker (bg/compare.js
+// re-exports them) — the page and the SW used to carry twin copies that could drift apart, and a
+// drifted port name or ID pattern fails silently (the port never connects / ids are dropped).
+
 export const COMPARE_PORT_NAME = 'ctcmp-compare';
-export const COMPARE_PROVIDERS = ['claude', 'gemini', 'chatgpt'];
+export const COMPARE_PROVIDERS = Object.freeze(['claude', 'gemini', 'chatgpt']);
 // Column model (2026-09-20, .omc/handoffs/cmp-columns-contract.md): a column is a PROVIDER + a
 // MODEL — `colId` = `${provider}:${modelId || 'auto'}` (`claude:auto`, `claude:claude-opus-5`),
 // unique per session, at most MAX_COLUMNS on the page. Everything that used to be keyed by
@@ -127,7 +134,7 @@ export const SHARE_OP_PASSWORD = 'password';
 export const SHARE_AUTHOR_ANON = 'anon';
 export const SHARE_AUTHOR_NAME = 'name';
 export const SHARE_AUTHOR_NAME_PHOTO = 'name_photo';
-export const SHARE_AUTHOR_MODES = [SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO];
+export const SHARE_AUTHOR_MODES = Object.freeze([SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO]);
 /**
  * Who a new public share shows as until the user picks otherwise: name + profile photo (2026-09-28 user
  * decision — was anonymous, plan §10.2). A private (password) share is anonymous regardless.
@@ -156,9 +163,9 @@ export const SHARE_ID_RE = /^[A-Za-z0-9]{22}$/;
 export const SHARE_SITE_ORIGIN = 'https://claudetuner.com';
 /** The site's debate shell (site/multiai) — 「토론 붙이기」 opens here, framed like any shell visit (#1976). */
 export const MULTIAI_DEBATE_PATH = '/multiai/debate/';
-/** The published (Chrome Web Store) build; any other id is an unpacked build the shell must be told about (`?ext=`). */
+/** The published (Chrome Web Store) build; any other id is an unpacked build the shell must be told about (`?ext=`). The SW reads it too (bg/compare.js, #2067). */
 export const CWS_EXT_ID = 'ajnnckikagphjbgpicpoffockabnhond';
-/** A share page's path (`/c/<id>`) — a pasted one is a conversation to continue (#1784 U4; the SW's SHARE_LINK_PATH_RE is the other half). */
+/** A share page's path (`/c/<id>`) — a pasted one is a conversation to continue (#1784 U4; the SW matches with this same constant). */
 export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
 /**
  * The ONE way a share link is spelled on the page: the constant origin + an id that is exactly 22
@@ -168,27 +175,30 @@ export const SHARE_LINK_PATH_RE = /^\/c\/([A-Za-z0-9]{22})\/?$/;
 export function shareUrlOf(id) {
   return typeof id === 'string' && SHARE_ID_RE.test(id) ? `${SHARE_SITE_ORIGIN}/c/${id}` : null;
 }
-/** Server caps the dialog mirrors (worker/src/utils/compare-share.ts TITLE_MAX / AUTHOR_NAME_MAX). */
-export const SHARE_TITLE_INPUT_MAX = 120;
-export const SHARE_NAME_INPUT_MAX = 40;
+/** Server caps the dialog mirrors (worker/src/utils/compare-share.ts TITLE_MAX / AUTHOR_NAME_MAX); the SW bounds the wire with the same ones (#2067). */
+export const SHARE_TITLE_MAX = 120;
+export const SHARE_TITLE_INPUT_MAX = SHARE_TITLE_MAX;
+export const SHARE_AUTHOR_NAME_MAX = 40;
+export const SHARE_NAME_INPUT_MAX = SHARE_AUTHOR_NAME_MAX;
 /** Who may open a share (#1784 U5): anyone with the link, or only with the password the server checks. */
 export const SHARE_VIS_PUBLIC = 'public';
 export const SHARE_VIS_PRIVATE = 'private';
 /** The server's password bounds (worker validPassword, code points after NFC). */
 export const SHARE_PASSWORD_MIN = 6;
-export const SHARE_PASSWORD_INPUT_MAX = 128;
+export const SHARE_PASSWORD_MAX = 128;
+export const SHARE_PASSWORD_INPUT_MAX = SHARE_PASSWORD_MAX;
 // Analytics `send.models`: a target with no model choice (no catalog / the provider default) reads as this.
 export const MODELS_CSV_AUTO = 'auto';
 // …and each id is cut to its last path segment and this many chars, so three `provider:id` pairs
 // stay under the SW's 100-char param cap (bg/compare.js bounds every string param).
 export const MODELS_CSV_ID_MAX = 24;
-// 🔴 The model-id rule, twin of the SW's (bg/compare.js MODEL_ID_RE — the SW is the last line, it
-// re-checks `models` / `model` params; this page cannot import it). Checked on the RAW id before
+// 🔴 The model-id rule — the SW's too (bg/compare.js imports it; the SW is the last line, it
+// re-checks `models` / `model` params). Checked on the RAW id before
 // any shortening: an id that fails is not a model id (a label, a path, junk) and the pair is
 // dropped from analytics — `column_done.model` likewise carries the id only, never the label.
 export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 // The page's session id on the wire (cmp-beta-contract §5): the history entry id — opaque, and
-// bounded exactly as the SW validates it (bg/compare.js `^[A-Za-z0-9-]{8,40}$`); anything else is
+// bounded exactly as the SW validates it (bg/compare.js imports this same pattern); anything else is
 // omitted here already, so the two validators never disagree about what went out.
 export const SESSION_ID_RE = /^[A-Za-z0-9-]{8,40}$/;
 // COMPARE_RESET answered `{ok:false, reset:true, code:'status_unavailable'}`: the counter WAS reset
@@ -256,13 +266,13 @@ export const HTTP_FORBIDDEN = 403;
 export const HTTP_NOT_FOUND = 404;
 export const HTTP_TOO_MANY = 429;
 export const CODE_COMPARE_QUOTA = 'compare_quota';
-export const CODE_RATE_LIMITED = 'rate_limited';
+export const CODE_RATE_LIMITED = ERROR_CODES.RATE_LIMITED;
 export const CODE_NO_TARGETS = 'no_targets';
 // CONSUME_FAIL codes the SW emits besides the HTTP ones (PR #1459): a send already in flight, the
 // consume request itself failed, Stop pressed before the debit (free — nothing was counted).
 export const CODE_BUSY = 'busy';
 export const CODE_NETWORK_ERROR = 'network_error';
-export const CODE_ABORTED = 'aborted';
+export const CODE_ABORTED = ERROR_CODES.ABORTED;
 // Per-provider answer budget exhausted (bg/compare.js PROVIDER_SEND_TIMEOUT_MS); ERROR carries `budgetMs`.
 export const CODE_TIMEOUT = 'timeout';
 export const DEFAULT_SEND_BUDGET_MS = 10 * 60 * 1000;
@@ -272,11 +282,11 @@ export const CODE_SESSION_ENDED = 'session_ended';
 // Continuing a conversation the user pasted a link to (#1651). LINK_FAIL carries the package's own
 // code; these are the ones with a sentence of their own, and anything else falls back to the
 // generic line — a code the page does not know must not become a blank notice.
-export const CODE_NOT_FOUND = 'not_found';
+export const CODE_NOT_FOUND = ERROR_CODES.NOT_FOUND;
 /** READ_LINK of a share page (#1784 U4, bg/compare.js SHARE_LINK_CODES). */
 export const CODE_SHARE_DELETED = 'share_deleted';
 export const CODE_SHARE_PRIVATE = 'share_private';
-export const CODE_UNSUPPORTED = 'unsupported';
+export const CODE_UNSUPPORTED = ERROR_CODES.UNSUPPORTED;
 export const CODE_BAD_REQUEST = 'bad_request';
 export const CODE_LINK_CONTEXT_MISSING = 'link_context_missing';
 export const CODE_LINK_NEEDS_HISTORY = 'link_needs_history';
@@ -290,15 +300,17 @@ export const CODE_LINK_NEEDS_HISTORY = 'link_needs_history';
 // marker on the badge, one line under the answer, `stalled` in the history snapshot, and the
 // summary attachment is flagged partial like an ERROR-cut answer.
 export const BADGE_STALLED_CLS = 'is-stalled';
-// The SW's bounded cut vocabulary (bg/compare.js CUT_STREAM_ERROR). Repeated, not imported:
-// this file is a classic script in the page world and the SW is an ES module — the two cannot
-// share a symbol. test/compare-privacy-guard.mjs pins that the two spellings agree.
-export const CUT_STREAM_ERROR = 'stream_error';
-// The provider wrote an answer and then REPLACED it (bg/compare.js CUT_RETRACTED): DONE also carries
-// `retraction`, the replacement sentence, which the cut note quotes (cutNote). Same pin as above.
-export const CUT_RETRACTED = 'retracted';
-// The page's own bound on that sentence (the SW's RETRACTION_MAX) — on DONE and on a restored entry.
-export const RETRACTION_MAX = 300;
+// The bounded cut vocabulary DONE.cutReason carries — the package's own (vendor-ai v0.40.0
+// CUT_REASONS, #2067), and bg/compare.js imports it from here: this file is an ES module the
+// service worker imports too, so page and SW share one symbol (it used to say "classic script,
+// cannot share" and kept twin copies).
+export const CUT_STREAM_ERROR = CUT_REASONS.STREAM_ERROR;
+// The provider wrote an answer and then REPLACED it: DONE also carries `retraction`, the
+// replacement sentence, which the cut note quotes (cutNote).
+export const CUT_RETRACTED = CUT_REASONS.RETRACTED;
+// The bound on that sentence (the package's cap, applied again by the SW and the page) — on DONE
+// and on a restored entry.
+export const RETRACTION_MAX = RETRACTION_MAX_CHARS;
 // 🔴 MV3 service-worker lifetime (Chrome 110+): the extension SW is killed after ~30 s with no
 // EVENTS; an open runtime.connect port does NOT keep it alive — only a message arriving on it
 // (an onMessage event) resets the idle timer. The session's clients live in that SW, so a page
@@ -319,7 +331,7 @@ export const PROVIDER_RATE_LIMIT_KEY = 'err_rate_limited_provider';
 // prepares every FOLLOWUP target with mayOpenTab:true). Such a column is retried by 「전체」 —
 // whatever the `reason` (a no_tab that timed out loading or was still settling is cured by the
 // resend just the same; the copy differs, the routing does not).
-export const TAB_LOST_CODES = new Set(['bridge_disconnected', 'no_tab']);
+export const TAB_LOST_CODES = new Set([ERROR_CODES.BRIDGE_DISCONNECTED, ERROR_CODES.NO_TAB]);
 // A column whose last turn is an error restored from history (history.js loadSession): the stored
 // line is the past, not a live condition — reopening the conversation is the user asking to go on.
 export const CODE_RESTORED = 'restored';
@@ -330,7 +342,7 @@ export const FOLLOWUP_RESEND_CODES = new Set([...TAB_LOST_CODES, CODE_ABORTED, C
 // A column that ended in no_tab (whatever the reason) offers to open the provider's site next to
 // the retry — the SW re-opens a tab on FOLLOWUP anyway, but a user-opened, signed-in tab is the
 // surer fix (batch 2).
-export const CODE_NO_TAB = 'no_tab';
+export const CODE_NO_TAB = ERROR_CODES.NO_TAB;
 // C3 (chathub batch 1): error codes whose action row is more than 「다시 보내기」 — each one names
 // the next thing to do (chathub's ErrorAction pattern: one action per error).
 //   auth_required / permission_refused → the remedy is a sign-in or a grant, NOT a resend: the
@@ -342,14 +354,14 @@ export const CODE_NO_TAB = 'no_tab';
 //   retried (costs a compare, the label says so); offered once per model choice (col.autoRetried).
 //   rate_limited / overloaded → the retry stays, plus 「<Provider> 탭에서 확인」 (the openTab link,
 //   relabelled) and, when the 5h gauge is full, the reset countdown on the error line.
-export const CODE_AUTH_REQUIRED = 'auth_required';
-export const CODE_PERMISSION_REFUSED = 'permission_refused';
-export const CODE_MODEL_UNAVAILABLE = 'model_unavailable';
-export const CODE_OVERLOADED = 'overloaded';
+export const CODE_AUTH_REQUIRED = ERROR_CODES.AUTH_REQUIRED;
+export const CODE_PERMISSION_REFUSED = ERROR_CODES.PERMISSION_REFUSED;
+export const CODE_MODEL_UNAVAILABLE = ERROR_CODES.MODEL_UNAVAILABLE;
+export const CODE_OVERLOADED = ERROR_CODES.OVERLOADED;
 // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; ERROR.inBandCode carries the number.
-export const CODE_IN_BAND_ERROR = 'in_band_error';
+export const CODE_IN_BAND_ERROR = ERROR_CODES.IN_BAND_ERROR;
 // A provider refused one of the round's files (package `attachment_failed`); ERROR.attachment names it (#1951).
-export const CODE_ATTACHMENT_FAILED = 'attachment_failed';
+export const CODE_ATTACHMENT_FAILED = ERROR_CODES.ATTACHMENT_FAILED;
 export const GATE_CODES = new Set([CODE_AUTH_REQUIRED, CODE_PERMISSION_REFUSED]);
 export const PROVIDER_BUSY_CODES = new Set([CODE_RATE_LIMITED, CODE_OVERLOADED]);
 // A 5h gauge at this utilisation explains a provider-side limit: the error line then carries the reset countdown.
@@ -387,7 +399,9 @@ export const DEBATE_HANDOFF_WRITE_MS = 3000;
 export const STAGE_SEND_START = 'send_start';
 export const STAGE_FIRST_CHUNK = 'first_chunk';
 export const STAGE_STREAM_DONE = 'stream_done';
-export const TTFT_STAGES = new Set([STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE]);
+// The stages the page's TTFT badge listens for. NOT bg/compare.js TTFT_STAGE_SEGMENTS (the SW's ordered
+// stage → segment table for the outcome log) — distinct names since #2065, they meant different things.
+export const TTFT_BADGE_STAGES = new Set([STAGE_SEND_START, STAGE_FIRST_CHUNK, STAGE_STREAM_DONE]);
 // DIAG stage the client reports when it starts a tool (web search) — the badge says 「웹 검색 중…」.
 export const STAGE_TOOL_USE = 'tool_use';
 // Activity panel (package v0.5.0, 2026-09-18): the provider's process — thinking text, tool calls,
@@ -520,22 +534,36 @@ export const DEBATE_PHASE_MARK_KEY = 'ctDebatePhase';
 export const DEBATE_FREEZE_NOTE_MS = 60 * 1000;
 export const DEBATE_MIN_TURNS_TO_END = 2;
 // A debate turn with no answer text yet (2026-09-30 user decision): at DEBATE_SLOW_NOTE_MS from its send the
-// pending bubble offers 「이번 차례 건너뛰기」; at DEBATE_SLOW_SKIP_MS the turn is skipped by itself (aborted,
-// the debate moves on). Only while no text has arrived — a pause mid-answer is the SW's stall watchdog.
+// pending bubble offers 「이번 차례 건너뛰기」; at its provider's skip time (DEBATE_SLOW_BY_PROVIDER) the turn is
+// skipped by itself (aborted, the debate moves on). Only while no text has arrived — a pause mid-answer is the
+// SW's stall watchdog.
 export const DEBATE_SLOW_NOTE_MS = 30 * 1000;
-export const DEBATE_SLOW_SKIP_MS = 60 * 1000;
-// The note's 「약 8%」: the share of answered Gemini debate turns whose first text took longer than
-// DEBATE_SLOW_NOTE_MS (prod, measured 2026-09-30, n=464: p50 4.6 s, p90 26.7 s, >60 s 1.9%). Re-measure when
-// the timing moves.
-export const DEBATE_SLOW_SHARE_PCT = 8;
-// …but a column's FIRST turn of the session (the opening, or the moderator's first call — a new conversation on
-// that AI, with the longest prompt of the run) is routinely slower, so it gets DEBATE_SLOW_SKIP_FIRST_MS before
-// the auto-skip (2026-09-30, worker-slowgem): Gemini debate openings p90 43 s, cross-check first questions p90
-// 88 s, and 58–123 s openings that did answer; later debate turns p90 4–22 s whatever the idle gap before them.
-// Its note quotes DEBATE_SLOW_SHARE_FIRST_PCT: the share of Gemini openings with no text after
-// DEBATE_SLOW_NOTE_MS (prod 1.43+, 9 of 42). The note time stays DEBATE_SLOW_NOTE_MS.
-export const DEBATE_SLOW_SKIP_FIRST_MS = 120 * 1000;
-export const DEBATE_SLOW_SHARE_FIRST_PCT = 21;
+// Per provider (#2076): `skipMs` = the auto-skip from the send; `firstSkipMs` = the same for a column's FIRST turn
+// of the session (the opening, or the moderator's first call — a new conversation on that AI with the run's longest
+// prompt); `pct` / `firstPct` = the note's 「약 N%」, the share of that provider's debate turns with no text after
+// DEBATE_SLOW_NOTE_MS. Measured on prod compare_events (debate · debate_turn · debate_mod), 2026-09-20..10-04,
+// first text time per turn, a turn skipped or given up on after 30 s counted as slower than that
+// (docs/plans/compare-debate-mode.md 「느린 차례 — 서비스별 실측」):
+//   Gemini  first n=143 p90 19 s, >30 s 7.7%, >60 s 4.2% · later n=1297 p90 16 s, >30 s 4.2%, and 60–125 s answers do
+//           occur — the 60 s / 120 s of 2026-09-30 stand (the copy's shares were 8% / 21% then, n=464 / 42).
+//   ChatGPT first n=134 >30 s 3.0% · later n=1279 p99 ≤ 49 s, >30 s 1.1%.
+//   Claude  first n=150 p99 23 s, >30 s 0.7% · later n=2079 p50 1.3 s, >30 s 0.8% — but its tail GROWS with the
+//           conversation (rounds 26+: p99 31–41 s, >30 s 1.2–1.8%, vs 0.2% up to round 25) and one long Pro debate
+//           (2026-10-04, auto = Sonnet 5.5) answered at 27–51 s after round 50: 60 s cut five of its turns in a row.
+//           No Claude turn has ever answered after 51 s, so 120 s is more than twice its slowest real answer and
+//           still ends a dead turn in two minutes.
+// A provider with no row gets DEBATE_SLOW_DEFAULT (the strictest row).
+export const DEBATE_SLOW_BY_PROVIDER = Object.freeze({
+  gemini: Object.freeze({ skipMs: 60 * 1000, firstSkipMs: 120 * 1000, pct: 4, firstPct: 8 }),
+  chatgpt: Object.freeze({ skipMs: 60 * 1000, firstSkipMs: 120 * 1000, pct: 1, firstPct: 3 }),
+  claude: Object.freeze({ skipMs: 120 * 1000, firstSkipMs: 120 * 1000, pct: 1, firstPct: 1 }),
+});
+export const DEBATE_SLOW_DEFAULT = DEBATE_SLOW_BY_PROVIDER.gemini;
+/** The skip time and the note's share for a turn of `provider` (`first` = the column's first turn). */
+export function debateSlowFor(provider, first) {
+  const row = Object.hasOwn(DEBATE_SLOW_BY_PROVIDER, provider) ? DEBATE_SLOW_BY_PROVIDER[provider] : DEBATE_SLOW_DEFAULT;
+  return first ? { skipMs: row.firstSkipMs, pct: row.firstPct } : { skipMs: row.skipMs, pct: row.pct };
+}
 // Under 「충분히 논의 후 결론」 (the balanced pace, 2026-09-29 user request) the moderator concludes on its
 // own only after this many debater turns — before it, like 「깊게」, only on the user's word. Between the
 // measured runs (D1 compare_debates, 2026-09-29): 「빠르게」 ended at ~8.5 turns, 「깊게」's median user-ended run at ~23.

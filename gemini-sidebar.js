@@ -346,7 +346,7 @@
 
   // ── Announcements (shared source/logic with claude.ai) ──
   async function fetchNotices() {
-    if (!isCurrent() || !_enabled || !CORE.fetchAnnouncements) return; // skip while disabled
+    if (!isCurrent() || !_enabled || !CORE || !CORE.fetchAnnouncements) return; // skip while disabled
     try {
       const fresh = await CORE.fetchAnnouncements(_lang, chrome.runtime.getManifest().version);
       if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
@@ -356,87 +356,37 @@
     } catch { /* silent — keep last-known notices */ }
   }
 
-  // ── In-house ad banner (design §2.2/§3.2/§4) ──
-  // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium skips the fetch and
-  // clears the slot. Feature-detected — a stale core (dynamic injection, see docs/EXTENSION.md) has no
-  // adFreeEntitled and must not throw — and FAIL-OPEN: any error or a non-Premium answer → ads as before.
-  const adFree = () => {
-    try {
-      if (!CORE || typeof CORE.adFreeEntitled !== 'function') return Promise.resolve(false);
-      return Promise.resolve(CORE.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
-    } catch { return Promise.resolve(false); }
-  };
+  // ── Bell badge, notice strip, in-house ad banner (design §2.2/§3.2/§4) ──
+  // One copy in usage-shared.js shared by the three sidebars (#2065) — this file passes only its
+  // prefix, theme classes, utm_source and placement. The ad round (readiness set, Premium gate —
+  // fail-open —, selection) is CORE.fetchSidebarAds: null = leave the slot as it is, [] = Premium
+  // (slot cleared). Guarded like every core lookup: a core without them skips the round.
+  const AD_PLACEMENT = 'GEMINI_SIDEBAR';
   async function fetchAds() {
-    if (!isCurrent() || !_enabled || !CORE.selectAds) return; // skip while disabled
-    const gated = await adFree();
-    if (!isCurrent()) return; // superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch
-    if (gated) { _ads = []; renderInlineAd(); return; } // Premium: no fetch, slot cleared
-    try {
-      const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.GEMINI_SIDEBAR, lang: _lang });
-      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
-      _ads = fresh;
-      renderInlineAd();
-    } catch { /* silent — no ads this round */ }
+    if (!isCurrent() || !_enabled || !CORE || typeof CORE.fetchSidebarAds !== 'function') return; // skip while disabled
+    const next = await CORE.fetchSidebarAds({ placementKey: AD_PLACEMENT, lang: _lang, isCurrent });
+    if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+    if (next === null) return;
+    _ads = next;
+    renderInlineAd();
   }
 
   function renderInlineAd() {
-    const container = document.getElementById('ct-gm-ad');
-    if (!container || !CORE.buildAdBannerHtml) return;
-    if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
-    container.style.display = '';
-    container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
-    container.querySelectorAll('.ct-ad-banner').forEach((el, i) => {
-      const ad = _ads[i];
-      CORE.noteAdServed(ad.campaign.campaign_id, ad.placement); // daily frequency cap (serving-side)
-      CORE.trackAdViewability(el, ad, _guard); // measurement seam: viewability-gated impression → SW counter owner
-      const url = el.getAttribute('data-ad-url');
-      if (url) el.addEventListener('click', (e) => {
-        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
-        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
-        CORE.trackAdClick(ad, e); // measurement seam: click → SW counter owner
-        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=gemini_sidebar', '_blank');
-      });
-    });
+    if (!CORE || !CORE.renderSidebarAds) return;
+    CORE.renderSidebarAds(document.getElementById('ct-gm-ad'), _ads,
+      { placementKey: AD_PLACEMENT, lang: _lang, guard: _guard, utm: UTM });
   }
 
   function updateBellBadge() {
-    const badge = document.getElementById('ct-gm-bell-badge');
-    if (!badge) return;
-    const unseen = CORE.getUnseenCount(_notices, _lastSeenId);
-    if (unseen > 0) { badge.textContent = unseen; badge.style.display = ''; }
-    else { badge.style.display = 'none'; }
+    if (!CORE || !CORE.renderBellBadge) return;
+    CORE.renderBellBadge(document.getElementById('ct-gm-bell-badge'), _notices, _lastSeenId);
   }
 
   function renderInlineNotice() {
-    const container = document.getElementById('ct-gm-notice');
-    if (!container) return;
-    chrome.storage.local.get({ ct_dismissed_notices: [] }, (result) => {
-      if (!isCurrent()) return; // superseded by a newer injection since the async read
-      const dismissed = result.ct_dismissed_notices || [];
-      const active = _notices.filter(n => !dismissed.includes(n.id));
-      if (active.length === 0) { container.innerHTML = ''; container.style.display = 'none'; return; }
-      const latest = active[0];
-      container.style.display = '';
-      container.innerHTML = `
-        <span class="ct-gm-notice-icon">📢</span>
-        <span class="ct-gm-notice-text">${CORE.escapeHtml(latest.title || '')}</span>
-        <button class="ct-gm-notice-close">×</button>
-      `;
-      container.querySelector('.ct-gm-notice-text').addEventListener('click', () => {
-        let url = latest.url || '';
-        try { const u = new URL(url); if (u.protocol !== 'http:' && u.protocol !== 'https:') url = ''; } catch { url = ''; }
-        if (!url) url = CORE.NOTICE_BASE + _lang;
-        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=' + UTM, '_blank');
-      });
-      container.querySelector('.ct-gm-notice-close').addEventListener('click', (e) => {
-        e.stopPropagation();
-        chrome.storage.local.get({ ct_dismissed_notices: [] }, (r) => {
-          if (!isCurrent()) return; // superseded since the click
-          const arr = r.ct_dismissed_notices || [];
-          if (!arr.includes(latest.id)) arr.push(latest.id);
-          chrome.storage.local.set({ ct_dismissed_notices: arr }, () => { if (isCurrent()) renderInlineNotice(); });
-        });
-      });
+    if (!CORE || !CORE.renderSidebarNotice) return;
+    CORE.renderSidebarNotice(document.getElementById('ct-gm-notice'), {
+      getNotices: () => _notices, lang: _lang, prefix: 'ct-gm', textClass: '', closeClass: '',
+      utm: UTM, isCurrent, rerender: renderInlineNotice,
     });
   }
 

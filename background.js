@@ -9,6 +9,7 @@ import {
   DEFAULT_SERVER_URL, SITE_URL,
   SEND_MIN_INTERVAL_MS,
   PROVIDER_LABELS,
+  CLAUDE_API_BASE, SITE_TAB_PATTERNS,
 } from './bg/constants.js';
 import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activity.js';
 import { bt } from './bg/i18n.js';
@@ -46,7 +47,7 @@ import { createClient as createAiWebClient, listModels as listAiWebModels, drain
 // The whole module too, for an export an older vendored package does not have (a named import of a missing
 // export fails the SW's module load): `forgetOwnedTabs` (vendor-ai v0.30.0+ contract), read off it at startup.
 import * as aiWebPackage from './vendor-ai/index.js';
-import { CLAUDE_ACTIVE_ORG_COOKIE } from './vendor-ai/sites.js';
+import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, isUsableTab, providerForUrl } from './vendor-ai/sites.js';
 // ui/util.js is popup ESM but this one export is a pure string mapper (no DOM, no `t()`), and the
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
@@ -306,8 +307,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // that moved to optional_host_permissions (Chrome may not auto-retain them)
     const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
     const optionalOrigins = [];
-    if (collectChatGPT) optionalOrigins.push('https://chatgpt.com/*');
-    if (collectGemini) optionalOrigins.push('https://gemini.google.com/*');
+    if (collectChatGPT) optionalOrigins.push(SITE_TAB_PATTERNS.chatgpt);
+    if (collectGemini) optionalOrigins.push(SITE_TAB_PATTERNS.gemini);
     if (optionalOrigins.length > 0) {
       const already = await chrome.permissions.contains({ origins: optionalOrigins });
       if (!already) {
@@ -321,7 +322,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   // Re-inject content scripts into existing Claude.ai tabs (dev reload / extension update)
   try {
-    const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    // Discarded/frozen tabs are skipped (#2064, vendor-ai isUsableTab): no document to inject
+    // into, and the browser-crash suspect. Their manifest content scripts run when they reload.
+    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).filter(isUsableTab);
     for (const tab of tabs) {
       chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -1035,7 +1038,7 @@ async function tryTabCollect(reason) {
 
 // Detect URL changes (login complete, page navigation, etc.)
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url?.startsWith('https://claude.ai')) {
+  if (changeInfo.status === 'complete' && providerForUrl(tab.url) === 'claude') {
     // At least background state when a claude.ai tab is ready
     const prev = getActivityState();
     if (prev === ACTIVITY_STATES.IDLE) {
@@ -1046,7 +1049,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     tryAutoOpenSidePanel(tabId);
   }
   // Gemini has no server-side polling here; collect on tab load so its panel fills.
-  if (changeInfo.status === 'complete' && tab.url?.startsWith('https://gemini.google.com')) {
+  if (changeInfo.status === 'complete' && providerForUrl(tab.url) === 'gemini') {
     maybeCollectGeminiForTab();
   }
 });
@@ -1055,16 +1058,16 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    if (tab.url?.startsWith('https://claude.ai')) {
+    if (providerForUrl(tab.url) === 'claude') {
       if (await setActivityState(ACTIVITY_STATES.ACTIVE)) await updatePollAlarm();
       tryTabCollect('tab-activated');
     } else {
       // Switched away from claude.ai — check if any claude.ai tabs remain
-      const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+      const claudeTabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude });
       const newState = claudeTabs.length > 0 ? ACTIVITY_STATES.BACKGROUND : ACTIVITY_STATES.IDLE;
       if (await setActivityState(newState)) await updatePollAlarm();
       // Also refresh the Gemini panel when returning to its tab.
-      if (tab.url?.startsWith('https://gemini.google.com')) maybeCollectGeminiForTab();
+      if (providerForUrl(tab.url) === 'gemini') maybeCollectGeminiForTab();
     }
   } catch (_) { /* ignore tab query failure */ }
 });
@@ -1072,7 +1075,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Detect tab close — transition to idle if no claude.ai tabs remain
 chrome.tabs.onRemoved.addListener(async () => {
   try {
-    const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
+    const claudeTabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude });
     if (claudeTabs.length === 0) {
       if (await setActivityState(ACTIVITY_STATES.IDLE)) await updatePollAlarm();
     }
@@ -1133,8 +1136,8 @@ chrome.webRequest.onCompleted.addListener(
   },
   {
     urls: [
-      'https://claude.ai/api/organizations/*/completion',
-      'https://claude.ai/api/organizations/*/retry_completion',
+      `${CLAUDE_API_BASE}${CLAUDE_ORGS_PATH}/*/completion`,
+      `${CLAUDE_API_BASE}${CLAUDE_ORGS_PATH}/*/retry_completion`,
     ],
   }
 );
@@ -1572,7 +1575,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'EXECUTE_PLAN_CHANGE') {
-    executePlanChange(message.recommendation).then((result) => sendResponse(result));
+    executePlanChange(message.recommendation, { orgUuid: message.orgUuid || null }).then((result) => sendResponse(result));
     return true;
   }
   if (message.type === 'DISMISS_RECOMMENDATION') {
@@ -1619,7 +1622,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'CANCEL_DOWNGRADE') {
-    cancelDowngrade().then(async (result) => {
+    cancelDowngrade({ orgUuid: message.orgUuid || null }).then(async (result) => {
       if (result?.success) {
         // Report revert if completedPlanOrder exists
         const { completedPlanOrder: cpo } = await chrome.storage.local.get('completedPlanOrder');
@@ -1645,7 +1648,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'DOWNGRADE_TO') {
-    downgradeTo(message.targetPlan).then((result) => sendResponse(result));
+    downgradeTo(message.targetPlan, { orgUuid: message.orgUuid || null }).then((result) => sendResponse(result));
     return true;
   }
   if (message.type === 'GET_COOKIE_ORG') {
@@ -1713,7 +1716,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'GET_ORGANIZATIONS') {
-    fetchClaudeApi('/api/organizations').then(async orgList => {
+    fetchClaudeApi(CLAUDE_ORGS_PATH).then(async orgList => {
       if (!Array.isArray(orgList)) { sendResponse({ success: false, error: 'Invalid response' }); return; }
       // Exclude API only (Enterprise included). Seat-refined like the popup chips, so a variant
       // Team org is not listed as Pro here while the popup says Team (#1891).
@@ -2058,7 +2061,7 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   }
   // Collection failure notification → open Claude.ai
   if (notifId.startsWith('collect-fail-') && btnIdx === 0) {
-    chrome.tabs.create({ url: 'https://claude.ai' });
+    chrome.tabs.create({ url: CLAUDE_API_BASE });
     chrome.notifications.clear(notifId);
     return;
   }

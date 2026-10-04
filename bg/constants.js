@@ -1,6 +1,6 @@
 // === Constants & Configuration ===
 
-import { SITE_ORIGINS } from '../vendor-ai/sites.js';
+import { CLAUDE_CLIENT_HEADERS, SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 export const DEFAULT_SERVER_URL = 'https://api.claudetuner.com';
 export const DEFAULT_API_KEY = 'claude-manager-dev-key-2024';
@@ -35,6 +35,13 @@ export const POPUP_COLLECT_THROTTLE_MS = 60_000;
 export const CLAUDE_API_BASE = SITE_ORIGINS.claude;
 export const CHATGPT_API_BASE = SITE_ORIGINS.chatgpt;
 export const GEMINI_API_BASE = SITE_ORIGINS.gemini;
+// `chrome.tabs.query({ url })` / host-permission match patterns for each site — every path of the
+// origin (#2067: the literals were spelled at ~15 call sites).
+export const SITE_TAB_PATTERNS = Object.freeze({
+  claude: `${SITE_ORIGINS.claude}/*`,
+  chatgpt: `${SITE_ORIGINS.chatgpt}/*`,
+  gemini: `${SITE_ORIGINS.gemini}/*`,
+});
 export const HEARTBEAT_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
 // Backoff after a heartbeat that did NOT land. The interval above is the SUCCESS cadence; a
 // heartbeat the server never received must not consume it (#980 — see bg/heartbeat.js for why the
@@ -85,8 +92,8 @@ export const PROVIDER_SITE_URLS = {
   gemini: GEMINI_API_BASE,
 };
 
-// Client headers required for Claude.ai API requests
-export const ANTHROPIC_HEADERS = { 'anthropic-client-platform': 'web_claude_ai', 'anthropic-client-version': '1.0.0' };
+// Client headers claude.ai's own page sends — the vendored package's (vendor-ai v0.40.0, #2067). Frozen.
+export const ANTHROPIC_HEADERS = CLAUDE_CLIENT_HEADERS;
 
 // Plans that are NOT personal (no subscription API access)
 export const NON_PERSONAL_PLANS = ['Enterprise', 'Team', 'Team Standard', 'Team Premium', 'Team Tier 2', 'API'];

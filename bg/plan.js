@@ -6,6 +6,8 @@ import { logNotification, createCountedNotification } from './notifications.js';
 import { resetIcon , badgeLockedByAuthBlock, updateBadgeForSelectedOrg } from './badge.js';
 import { recordRecDismiss, clearDismissedClaudeRec } from './rec-dismiss.js';
 import { detectPlan } from './plan-label.js';
+import { pickClaudeOrg } from '../vendor-ai/models.js';
+import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Circular dependency resolution: inject collectAndSend reference ===
 let _collectAndSendFn = null;
@@ -28,15 +30,49 @@ async function notifyPlanChange(title, message, priority = 1) {
   }
 }
 
-/** Fetch org list and resolve the user's selected (or first) org */
-async function getSelectedOrg(config) {
-  const orgList = await fetchClaudeApi('/api/organizations');
-  if (!Array.isArray(orgList) || orgList.length === 0) {
-    throw new Error('Failed to verify organization info');
+// 🔴 THE ORG A PLAN ACTION TOUCHES IS THE ORG THE USER SAW (#2064). These actions spend money on
+// claude.ai, and they used to resolve `selectedOrgId || orgList[0]` — while the collector (and so
+// the recommendation, the pending-plan row and the cancel button) picks with vendor-ai
+// pickClaudeOrg: pin > lastActiveOrg cookie > plan score. An account with [Team, personal Pro] and
+// the cookie on Pro saw "Pro → Max 5x", clicked it, and the check below read the TEAM org, reported
+// "changed externally" and dismissed the server recommendation; cancelDowngrade looked for the
+// scheduled downgrade on the wrong org.
+// So: the org of the snapshot the popup rendered (`lastStatus.snapshot.claude_org_uuid`) first. If
+// that org is no longer in the list (another account signed in since) we REFUSE rather than fall
+// through to some other org. Only with no snapshot at all do we pick the way the collector does —
+// re-reading the cookie here, not importing bg/collect.js (it imports this module).
+const ERR_PLAN_ORG_UNVERIFIED = 'Failed to verify organization info';
+async function readLastActiveOrgId() {
+  try {
+    return (await chrome.cookies.get({ name: CLAUDE_ACTIVE_ORG_COOKIE, url: SITE_ORIGINS.claude }))?.value || null;
+  } catch {
+    return null;
   }
-  return config.selectedOrgId
-    ? (orgList.find(o => o.uuid === config.selectedOrgId) || orgList[0])
-    : orgList[0];
+}
+// `expectedOrgId` = the org the popup rendered the action on, when it says. A mismatch means the
+// button sat on another org's screen (Codex #2064 1R) — refuse instead of choosing either one.
+async function getPlanTargetOrg(config, expectedOrgId = null) {
+  const orgList = await fetchClaudeApi(CLAUDE_ORGS_PATH);
+  if (!Array.isArray(orgList) || orgList.length === 0) {
+    throw new Error(ERR_PLAN_ORG_UNVERIFIED);
+  }
+  const shownOrgId = (await getLastStatus())?.snapshot?.claude_org_uuid;
+  let target;
+  if (shownOrgId) {
+    target = orgList.find(o => o.uuid === shownOrgId);
+  } else {
+    const { org } = pickClaudeOrg(orgList, {
+      pinnedOrgId: config.selectedOrgId,
+      lastActiveOrgId: await readLastActiveOrgId(),
+    });
+    // A single org is unambiguous even when pickClaudeOrg declines it (API-only) — the pre-#2064
+    // behaviour for single-org accounts, where the plan check below reports the mismatch.
+    target = org || (orgList.length === 1 ? orgList[0] : null);
+  }
+  if (!target || (expectedOrgId && target.uuid !== expectedOrgId)) {
+    throw new Error(ERR_PLAN_ORG_UNVERIFIED);
+  }
+  return target;
 }
 
 // === Fetch subscription info (personal org only) ===
@@ -44,8 +80,8 @@ export async function fetchSubscriptionInfo(orgUuid) {
   const info = {};
   // Call both APIs in parallel (each can fail independently)
   const [subResult, pausedResult] = await Promise.allSettled([
-    fetchClaudeApi(`/api/organizations/${orgUuid}/subscription_details`, { quiet: true }),
-    fetchClaudeApi(`/api/organizations/${orgUuid}/paused_subscription_details`, { quiet: true }),
+    fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgUuid}/subscription_details`, { quiet: true }),
+    fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgUuid}/paused_subscription_details`, { quiet: true }),
   ]);
   if (subResult.status === 'fulfilled') {
     const subDetails = subResult.value;
@@ -227,14 +263,14 @@ export async function dismissRecommendationServer({ permanent = false } = {}) {
 export const muteRecommendationServer = () => dismissRecommendationServer({ permanent: true });
 
 // === Execute plan change (based on server recommendation) ===
-export async function executePlanChange(recommendation) {
+export async function executePlanChange(recommendation, { orgUuid = null } = {}) {
   const fromPlan = recommendation.from_plan || recommendation.fromPlan;
   const toPlan = recommendation.to_plan || recommendation.toPlan;
 
   try {
     // Re-verify current plan before executing
     const config = await getConfig();
-    const verifyOrg = await getSelectedOrg(config);
+    const verifyOrg = await getPlanTargetOrg(config, orgUuid);
     const orgId = verifyOrg.uuid;
     const currentPlan = detectPlan(verifyOrg);
     if (currentPlan !== fromPlan) {
@@ -252,7 +288,7 @@ export async function executePlanChange(recommendation) {
       const maxTier = tierMap[toPlan];
       if (!maxTier) throw new Error(`Unknown upgrade target: ${toPlan}`);
 
-      await fetchClaudeApi(`/api/organizations/${orgId}/upgrade_to_max`, {
+      await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/upgrade_to_max`, {
         method: 'PUT',
         body: JSON.stringify({ max_tier: maxTier }),
         headers: { 'Content-Type': 'application/json', ...ANTHROPIC_HEADERS },
@@ -261,7 +297,7 @@ export async function executePlanChange(recommendation) {
       const targetApiType = PLAN_API_MAP[toPlan];
       if (!targetApiType) throw new Error(`Unknown downgrade target: ${toPlan}`);
 
-      await fetchClaudeApi(`/api/organizations/${orgId}/downgrade_individual_claude_subscription`, {
+      await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/downgrade_individual_claude_subscription`, {
         method: 'PUT',
         body: JSON.stringify({ target_plan_type: targetApiType }),
         headers: { 'Content-Type': 'application/json', ...ANTHROPIC_HEADERS },
@@ -308,20 +344,20 @@ export async function executePlanChange(recommendation) {
 }
 
 // === Cancel downgrade (keep current plan) ===
-export async function cancelDowngrade() {
+export async function cancelDowngrade({ orgUuid = null } = {}) {
   try {
     const config = await getConfig();
-    const orgId = (await getSelectedOrg(config)).uuid;
+    const orgId = (await getPlanTargetOrg(config, orgUuid)).uuid;
 
     // Check current scheduled status
-    const subDetails = await fetchClaudeApi(`/api/organizations/${orgId}/subscription_details`);
+    const subDetails = await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/subscription_details`);
     if (!subDetails?.scheduled_downgrade) {
       return { success: false, error: 'No scheduled downgrade found' };
     }
 
     const fromPlan = subDetails.scheduled_downgrade.plan_type;
 
-    await fetchClaudeApi(`/api/organizations/${orgId}/cancel_subscription_downgrade`, {
+    await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/cancel_subscription_downgrade`, {
       method: 'PUT',
       headers: ANTHROPIC_HEADERS,
     });
@@ -341,14 +377,14 @@ export async function cancelDowngrade() {
 }
 
 // === Execute direct downgrade ===
-export async function downgradeTo(targetPlanApi) {
+export async function downgradeTo(targetPlanApi, { orgUuid = null } = {}) {
   try {
     if (!PLAN_API_MAP || !Object.values(PLAN_API_MAP).includes(targetPlanApi)) {
       return { success: false, error: `Unknown plan: ${targetPlanApi}` };
     }
 
     const config = await getConfig();
-    const targetOrg = await getSelectedOrg(config);
+    const targetOrg = await getPlanTargetOrg(config, orgUuid);
     const orgId = targetOrg.uuid;
     const currentPlan = detectPlan(targetOrg);
 
@@ -357,7 +393,7 @@ export async function downgradeTo(targetPlanApi) {
 
     console.log(`[Claude Tuner] Direct downgrade: ${currentPlan} → ${targetLabel} (${targetPlanApi})`);
 
-    await fetchClaudeApi(`/api/organizations/${orgId}/downgrade_individual_claude_subscription`, {
+    await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/downgrade_individual_claude_subscription`, {
       method: 'PUT',
       body: JSON.stringify({ target_plan_type: targetPlanApi }),
       headers: { 'Content-Type': 'application/json', ...ANTHROPIC_HEADERS },

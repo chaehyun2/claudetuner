@@ -5,6 +5,7 @@ import {
   HEARTBEAT_TIMEOUT_MS, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
   DEFAULT_SERVER_URL,
+  CLAUDE_API_BASE, SITE_TAB_PATTERNS,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
 import { scopedLimitsForDisplay } from './scoped-limits.js';
@@ -19,7 +20,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
 import { claudeOrgPlan, pickClaudeOrg } from '../vendor-ai/models.js';
-import { CLAUDE_ACTIVE_ORG_COOKIE, SITE_ORIGINS } from '../vendor-ai/sites.js';
+import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, SITE_ORIGINS, isUsableTab } from '../vendor-ai/sites.js';
 import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
@@ -477,7 +478,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
   try {
     // 1. Fetch organization info (cookie auth, org-scoped endpoint)
     let _ts = performance.now();
-    const orgList = await fetchClaudeApi('/api/organizations');
+    const orgList = await fetchClaudeApi(CLAUDE_ORGS_PATH);
     _timings['1_organizations'] = Math.round(performance.now() - _ts);
 
     if (!Array.isArray(orgList) || orgList.length === 0) {
@@ -687,10 +688,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // Skip if already parsed from account API above
         try {
           _ts = performance.now();
-          const tabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
-          if (tabs.length > 0) {
+          // A discarded/frozen tab has no document to run in (#2064, vendor-ai isUsableTab) —
+          // none usable is the same as no tab: grove stays unobserved this cycle.
+          const groveTab = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).find(isUsableTab);
+          if (groveTab) {
             const groveResult = await chrome.scripting.executeScript({
-              target: { tabId: tabs[0].id },
+              target: { tabId: groveTab.id },
               world: 'MAIN',
               func: async () => {
                 try {
@@ -730,7 +733,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             console.log('[Claude Tuner] grove API:', groveEnabled, 'detected:', groveDetected);
           } else {
             // No tabs available — cookie fallback
-            const acctNo = await fetchWithCookies('https://claude.ai/api/account');
+            const acctNo = await fetchWithCookies(`${CLAUDE_API_BASE}/api/account`);
             const parsed = parseGroveFromText(acctNo);
             if (parsed !== null) {
               groveEnabled = parsed;
@@ -743,7 +746,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           console.warn('[Claude Tuner] grove executeScript failed, trying cookie fallback:', ge.message);
           // Cookie-based fallback: when executeScript fails (insufficient permissions, etc.)
           try {
-            const acct = await fetchWithCookies('https://claude.ai/api/account');
+            const acct = await fetchWithCookies(`${CLAUDE_API_BASE}/api/account`);
             const parsed = parseGroveFromText(acct);
             if (parsed !== null) {
               groveEnabled = parsed;
@@ -814,7 +817,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     let usageData = null;
     try {
       _ts = performance.now();
-      usageData = await fetchClaudeApi(`/api/organizations/${orgId}/usage`);
+      usageData = await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/usage`);
       _timings['4_usage'] = Math.round(performance.now() - _ts);
     } catch (e) {
       console.warn(`[Claude Tuner] Usage fetch failed for ${bestOrg.name}: ${e.message}`);
@@ -843,7 +846,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         });
         for (const o of personalOrgs) {
           try {
-            await fetchClaudeApi(`/api/organizations/${o.uuid}/subscription_details`, { quiet: true });
+            await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${o.uuid}/subscription_details`, { quiet: true });
             return o.uuid;
           } catch (_) {}
         }
@@ -946,7 +949,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       console.log(`[Claude Tuner] Local-only collection (${blockServerNewUser ? `login required for server sync: ${withheldReason}` : userPaused ? 'user paused server sync' : 'boost mode'})`);
       // Hoisted so the GA event below reports the SAME fetch mode the status records, without a
       // second chrome.tabs.query on a path that runs on every alarm tick.
-      const withheldFetchMode = (await chrome.tabs.query({ url: 'https://claude.ai/*' })).length > 0 ? 'tab' : 'cookie';
+      const withheldFetchMode = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).some(isUsableTab) ? 'tab' : 'cookie';
       await setStatus({
         success: true,
         // 🔴 The COLLECTION succeeded; the SERVER SYNC did not. Recording only `success: true`
@@ -1406,8 +1409,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     } // end primary adaptive gate (primaryDue)
 
     // === Local UI update (don't wait for server response) ===
-    const claudeTabs = await chrome.tabs.query({ url: 'https://claude.ai/*' });
-    const fetchMode = claudeTabs.length > 0 ? 'tab' : 'cookie';
+    // Labels the transport fetchClaudeApi actually had: it skips discarded tabs (#2064).
+    const fetchMode = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).some(isUsableTab) ? 'tab' : 'cookie';
 
     // Keep previous recommendation (will be async-updated when server response arrives)
     const prevStatus = await getLastStatus();
@@ -1603,7 +1606,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         }
 
         try {
-          const extraUsage = await fetchClaudeApi(`/api/organizations/${extraOrg.uuid}/usage`);
+          const extraUsage = await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${extraOrg.uuid}/usage`);
           if (!extraUsage) {
             failedOrgs.push({ uuid: extraOrg.uuid, name: extraOrg.name, reason: 'empty_usage' });
             continue;

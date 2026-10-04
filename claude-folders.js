@@ -17,6 +17,16 @@
 (() => {
   'use strict';
 
+  // Conversation ids come from usage-shared.js's one parser (#2065; it loads first in both the
+  // claude.ai and the chatgpt.com injection). Guarded like every core lookup: a stale core without
+  // it reads as "not in a conversation" (null) — the move button hides, drag-import is inert —
+  // never a hand-written copy of the rule; a stored id is then left exactly as stored.
+  const coreFn = (name) => {
+    const core = globalThis.__ctUsageCore;
+    return core && typeof core[name] === 'function' ? core[name] : null;
+  };
+  const canonicalStoredChatId = (id) => { const f = coreFn('canonicalStoredChatId'); return f ? f(id) : id; };
+
   // ── Provider adapter: everything host-coupled for claude.ai ──
   // Implements the pinned adapter interface (see docs/DESIGN-claude-folders.md).
   const CLAUDE_ADAPTER = {
@@ -28,21 +38,22 @@
       const core = globalThis.__ctUsageCore;
       return core && core.getClaudeActiveOrgId ? core.getClaudeActiveOrgId() : null;
     },
-    // Current conversation id from the URL, e.g. /chat/<uuid>
+    // Current conversation id from the URL: /chat/<uuid>, lowercased (vendor conversationRef rule).
     getCurrentChatId() {
-      const m = location.pathname.match(/\/chat\/([\w-]+)/);
-      return m ? m[1] : null;
+      const f = coreFn('conversationIdFromPath');
+      return f ? f('claude', location.pathname) : null;
     },
     // Sidebar conversation-link selector; specific when a chatId is given, else the
-    // generic form used for pointer-drag hit-testing.
+    // generic form used for pointer-drag hit-testing. Case-insensitive (`i`): the id is the
+    // lowercased canonical one, the site's href may not be (Codex #2065 R1).
     getChatLinkSelector(chatId) {
-      return chatId ? `a[href*="/chat/${chatId}"]` : 'a[href*="/chat/"]';
+      return chatId ? `a[href*="/chat/${chatId}" i]` : 'a[href*="/chat/"]';
     },
     // Conversation id of a sidebar row / folded-chat link (pointer-drag import). Claude's rows
     // are <a href="/chat/<id>">.
     chatIdFromLink(el) {
-      const m = (el?.getAttribute?.('href') || '').match(/\/chat\/([\w-]+)/);
-      return m ? m[1] : null;
+      const f = coreFn('conversationIdFromHref');
+      return f ? f('claude', el?.getAttribute?.('href') || '', location.href) : null;
     },
     // Visible title of that row.
     chatTitleOf(el) { return el?.textContent || ''; },
@@ -368,12 +379,34 @@
       try {
         chrome.storage.local.get({ [FOLDERS_KEY]: [], [CHAT_META_KEY]: {} }, (r) => {
           if (chrome.runtime.lastError) { resolve(); return; }
-          _folders = Array.isArray(r[FOLDERS_KEY]) ? r[FOLDERS_KEY] : [];
-          _chatMeta = r[CHAT_META_KEY] && typeof r[CHAT_META_KEY] === 'object' ? r[CHAT_META_KEY] : {};
+          _folders = canonicalFolderChatIds(Array.isArray(r[FOLDERS_KEY]) ? r[FOLDERS_KEY] : []);
+          _chatMeta = canonicalChatMetaKeys(r[CHAT_META_KEY] && typeof r[CHAT_META_KEY] === 'object' ? r[CHAT_META_KEY] : {});
           resolve();
         });
       } catch { resolve(); }
     });
+  }
+  // 🔴 NO FOLDER ASSIGNMENT MAY BE LOST TO THE PARSER CHANGE (#2065). Conversation ids are now
+  // spelled the vendor way (lowercased uuid); entries saved under the old loose parser are brought
+  // to that spelling on every read — local store, imported file, server blob — so they keep
+  // matching the current chat and the sidebar rows. A non-uuid entry is kept exactly as it was
+  // (still listed and openable), and two spellings of one chat collapse into one entry.
+  function canonicalFolderChatIds(folders) {
+    for (const f of folders) {
+      if (f && Array.isArray(f.chatIds)) {
+        f.chatIds = Array.from(new Set(f.chatIds.map((c) => (typeof c === 'string' ? canonicalStoredChatId(c) : c))));
+      }
+    }
+    return folders;
+  }
+  function canonicalChatMetaKeys(meta) {
+    const out = {};
+    for (const k of Object.keys(meta)) {
+      const ck = canonicalStoredChatId(k);
+      const prev = out[ck];
+      if (!prev || ((meta[k] && meta[k].at) || 0) > ((prev && prev.at) || 0)) out[ck] = meta[k];
+    }
+    return out;
   }
   // One-time restore of the expanded set (survives full page reloads / chat clicks).
   // Kept separate from loadStore so the folder-change reload never clobbers live UI state.
@@ -607,7 +640,8 @@
       orgUuid: typeof f.orgUuid === 'string' ? f.orgUuid : null,
       name,
       parent: (typeof f.parent === 'string' && FOLDER_ID_RE.test(f.parent)) ? f.parent : null,
-      chatIds: Array.isArray(f.chatIds) ? f.chatIds.filter(c => typeof c === 'string') : [],
+      chatIds: Array.isArray(f.chatIds)
+        ? Array.from(new Set(f.chatIds.filter(c => typeof c === 'string').map(canonicalStoredChatId))) : [],
       favorite: !!f.favorite,
       color: (typeof f.color === 'string' && FOLDER_COLORS.includes(f.color)) ? f.color : null,
       icon: (typeof f.icon === 'string' && EMOJI_CHOICES.includes(f.icon)) ? f.icon : null,
@@ -632,7 +666,7 @@
       out[k] = { title, at: Number.isFinite(m.at) ? m.at : Date.now() };
       n++;
     }
-    return out;
+    return canonicalChatMetaKeys(out);
   }
   // Restore from a backup file: parse → sanitize → confirm → REPLACE the whole store in ONE
   // atomic storage write (so a quota/runtime failure never reports success on a partial

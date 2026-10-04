@@ -12,7 +12,7 @@
 // older ones shrink to an excerpt, then to a count (fitDelta).
 
 import { neutraliseQuoted, mdInlineText } from './helpers.js';
-import { isPaidClaudePlan } from '../../vendor-ai/models.js';
+import { CLAUDE_FAST_MODEL, CLAUDE_SONNET_MODEL, isPaidClaudePlan } from '../../vendor-ai/models.js';
 import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS, DEBATE_BUDGET_CONTINUE } from './constants.js';
 
 export const DEBATE_ALIAS_MAX = 20;
@@ -225,9 +225,10 @@ export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
 // a paid plan; on a measured Free plan Auto is Sonnet 5 (vendor-ai v0.25.0 — Sonnet 5.5 was measured
 // ~5x slower to first text on Free, 2026-09-30). The Free moderator stays on Sonnet 4.6 (free-tier in
 // claude.ai's gate, fast) so the moderator and the Free debater are different models and read as
-// different voices.
-export const CLAUDE_MODERATOR_PAID = 'claude-sonnet-5-5';
-export const CLAUDE_MODERATOR_FREE = 'claude-sonnet-4-6';
+// different voices. Both are the package's names (#2067), so a vendor bump moves them with it:
+// PAID = CLAUDE_FAST_MODEL, FREE = CLAUDE_SONNET_MODEL (the end of the package's Auto fallback chain).
+export const CLAUDE_MODERATOR_PAID = CLAUDE_FAST_MODEL;
+export const CLAUDE_MODERATOR_FREE = CLAUDE_SONNET_MODEL;
 // ── plan tier (#2054 D): 'paid' · 'free' · 'unknown' from a status plan LABEL (status.providers[p].plan) ──
 // Until #2054 anything but 「Free」 was paid, so Claude's `API` / `unknown` and a ChatGPT / Gemini label no
 // rule knows took the paid moderator model and the paid tint. Now a label is paid only when it names a

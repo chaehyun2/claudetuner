@@ -571,9 +571,9 @@ export const COMPARE_I18N = {
     debate_role_moderator: '진행자',
     debate_auto_pick: '자동 선택',
     debate_mod_fallback: 'AI 진행자가 두 번 연속 답하지 못해 자동 순서로 바꿨어요',
-    // A turn with no answer text yet (2026-09-30): {0} = DEBATE_SLOW_NOTE_MS in seconds, {1} = DEBATE_SLOW_SHARE_PCT (a column's first
-    // turn: DEBATE_SLOW_SHARE_FIRST_PCT), {2} = when THIS turn is auto-skipped, in seconds from its send (DEBATE_SLOW_SKIP_MS, a first
-    // turn's DEBATE_SLOW_SKIP_FIRST_MS, or later for a turn whose round got under way late).
+    // A turn with no answer text yet (2026-09-30): {0} = DEBATE_SLOW_NOTE_MS in seconds, {1} = the speaker's provider's measured share
+    // (DEBATE_SLOW_BY_PROVIDER `pct`, a column's first turn: `firstPct` — #2076), {2} = when THIS turn is auto-skipped, in seconds from
+    // its send (that provider's `skipMs` / `firstSkipMs`, or later for a turn whose round got under way late).
     debate_slow_note: '대부분 몇 초 안에 답하지만, {0}초보다 오래 걸리는 경우가 약 {1}% 있어요. 조금 더 기다리거나 이번 차례를 건너뛸 수 있어요. ({2}초가 지나면 자동으로 건너뛰어요)',
     debate_slow_skip: '이번 차례 건너뛰기',
     debate_slow_skipped: '{0}{1} {2}초 안에 답하지 않아 이번 차례를 건너뛰었어요', // {1} = 이/가 (debate-core subjectParticle)
@@ -694,7 +694,7 @@ export const COMPARE_I18N = {
     err_queued: '{0}이(가) 아직 답을 끝내지 않았어요 — 다시 시도해 주세요',
     // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; {1} = the number (ERROR.inBandCode).
     err_in_band_error: '{0}이(가) 요청을 거절했어요 (코드 {1})',
-    // Gemini (vendor-ai v0.20.0, in-band 1097): the previous turn is still live server-side; the client already retried for up to 30 s.
+    // Gemini (vendor-ai v0.20.0, in-band 1097; v0.41.0 also a follow-up's in-band 1095, #2074): the previous turn is still live server-side; the client already retried for up to 30 s.
     err_previous_turn_pending: '{0}이(가) 이전 답변을 아직 마무리하는 중이에요 — 잠시 후 다시 시도해 주세요',
     // 첨부가 있는 라운드에서 업로드 경로가 없는 사이트의 열 (#1616 SW `unsupported`) — 차감되지 않는다.
     err_unsupported: '{0}은(는) 이 파일 형식을 받지 못해요',

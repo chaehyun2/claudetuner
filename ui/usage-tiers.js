@@ -86,6 +86,22 @@ export function isAlertTier(predicted) {
   return !!tier && tierSeverity(tier) >= tierSeverity(PROJECTION_TIERS.find((x) => x.id === 'pressing'));
 }
 
+// === Current-usage level (a reading, not a forecast) =========================================
+// How full a window is RIGHT NOW, for the plain usage colour of bars, gauges and grid cells. One
+// judgement, two cuts (#2063 decision: 50/80); each screen maps the level onto its own palette.
+// The dashboard and team pages used 60/80 while the extension used 50/80, so the same 55% read
+// green on the team grid and amber in the popup.
+export const USAGE_LEVEL_HIGH_PCT = 80;
+export const USAGE_LEVEL_MID_PCT = 50;
+
+// 'high' | 'mid' | 'low', or null when there is no reading (callers draw their "no data" shade).
+export function usageLevel(util) {
+  if (util == null || util === '') return null;
+  const n = Number(util);
+  if (!Number.isFinite(n)) return null;
+  return n >= USAGE_LEVEL_HIGH_PCT ? 'high' : n >= USAGE_LEVEL_MID_PCT ? 'mid' : 'low';
+}
+
 // Minimum projected GROWTH (%p over the current value) worth drawing a marker for. Below it the
 // forecast is visually indistinguishable from the current fill, so the gauge shows a "stable" look
 // instead of a marker that hasn't moved.

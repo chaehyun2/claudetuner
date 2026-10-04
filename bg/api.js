@@ -1,5 +1,5 @@
-import { CLAUDE_API_BASE } from './constants.js';
-import { isUsableTab } from '../vendor-ai/sites.js';
+import { CLAUDE_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
+import { CLAUDE_SESSION_COOKIE, isUsableTab } from '../vendor-ai/sites.js';
 
 // === Normalize resets_at (round to minute) ===
 // Claude API returns random 59.xxx / 00.xxx seconds, breaking same-window comparison
@@ -21,7 +21,7 @@ export async function fetchClaudeApi(path, options = {}) {
   // 🔴 A discarded/frozen tab has no document — injecting into it operates on nothing (and is the
   // package's browser-crash suspect). Only usable tabs are tried (vendor-ai `isUsableTab`, #2054);
   // none left = the fallback path, as with no tab at all.
-  const tabs = (await chrome.tabs.query({ url: 'https://claude.ai/*' })).filter(isUsableTab);
+  const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).filter(isUsableTab);
   let tabErrorMsg = '';
 
   if (tabs.length > 0) {
@@ -139,11 +139,11 @@ export async function fetchViaTab(tabId, fullUrl, options) {
 
 // --- Cookie-based direct call (fallback when no tab available) ---
 export async function fetchWithCookies(url, options = {}) {
-  const cookies = await chrome.cookies.getAll({ url: 'https://claude.ai' });
+  const cookies = await chrome.cookies.getAll({ url: CLAUDE_API_BASE });
   if (!cookies.length) {
     throw new Error('err_no_cookies');
   }
-  if (!cookies.some((c) => c.name === 'sessionKey')) {
+  if (!cookies.some((c) => c.name === CLAUDE_SESSION_COOKIE)) {
     throw new Error('err_session_expired');
   }
 
@@ -152,8 +152,8 @@ export async function fetchWithCookies(url, options = {}) {
   const headers = {
     'Accept': 'application/json',
     'Cookie': cookieStr,
-    'Referer': 'https://claude.ai/',
-    'Origin': 'https://claude.ai',
+    'Referer': `${CLAUDE_API_BASE}/`,
+    'Origin': CLAUDE_API_BASE,
     ...(options.headers || {}),
   };
   if (method !== 'GET' && !headers['Content-Type']) {

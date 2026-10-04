@@ -18,7 +18,7 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_SKIP_MS, DEBATE_SLOW_SHARE_PCT, DEBATE_SLOW_SKIP_FIRST_MS, DEBATE_SLOW_SHARE_FIRST_PCT, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, debateSlowFor, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import { answeredTurn, exampleSentCode, sendMessage, storageGet } from './helpers.js';
 import { usageFloorHit, USAGE_FLOOR_PCT, USAGE_MAX_AGE_MS } from './usage-floor.js';
@@ -1230,8 +1230,8 @@ export function installDebate(ctx) {
   }
 
   // ── slow turns (2026-09-30 user decision) ──
-  // A turn with no answer text DEBATE_SLOW_NOTE_MS after its send offers 「이번 차례 건너뛰기」; at
-  // DEBATE_SLOW_SKIP_MS (a column's first turn: DEBATE_SLOW_SKIP_FIRST_MS) it is skipped by itself. A skip is the page's one Stop (ABORT) — so it is only
+  // A turn with no answer text DEBATE_SLOW_NOTE_MS after its send offers 「이번 차례 건너뛰기」; at its
+  // provider's skip time (debateSlowFor — a column's first turn waits longer, #2076) it is skipped by itself. A skip is the page's one Stop (ABORT) — so it is only
   // offered while this turn is all the round waits for: the opening's other debaters still writing
   // would be aborted with it. Every exit clears the timers: the first words (firstText), the turn
   // settling (reveal), a refused round, 새 대화 / a history load (reset), the page closing.
@@ -1242,14 +1242,16 @@ export function installDebate(ctx) {
   /**
    * The column's first turn of the session: nothing it said before has any words (the opening, the
    * moderator's first call, or a turn after a first one that was skipped). A new conversation on that AI with
-   * the run's longest prompt — it gets DEBATE_SLOW_SKIP_FIRST_MS (see constants).
+   * the run's longest prompt — it gets its provider's `firstSkipMs` (see constants).
    */
   const isFirstTurn = (col, turn) => !(col.turns || []).some((x) => x !== turn && x.role === 'assistant' && x.text);
   function watchSlow(col, turn) {
     turn.debateCol = col;
     turn.debateSentAt = ctx.clock.now();
     turn.debateFirst = isFirstTurn(col, turn);
-    turn.debateSkipMs = turn.debateFirst ? DEBATE_SLOW_SKIP_FIRST_MS : DEBATE_SLOW_SKIP_MS;
+    const slow = debateSlowFor(col.provider, turn.debateFirst);
+    turn.debateSkipMs = slow.skipMs;
+    turn.debateSharePct = slow.pct;
     // When the auto-skip is due, from the send — moved later if the round gets under way late (checkSlow).
     turn.debateSkipAt = turn.debateSentAt + turn.debateSkipMs;
     const at = (stage, ms) => ctx.clock.setTimeout(() => { turn.debateSlowStage = stage; checkSlow(turn); }, ms);
@@ -1309,12 +1311,12 @@ export function installDebate(ctx) {
     }
     const held = waitingOn();
     if (!held || !held.includes(turn)) return;
-    // At 60 s every turn still silent goes (several only in an opening where none has answered).
+    // At its skip time every turn still silent goes (several only in an opening where none has answered).
     if (held.every((x) => x.debateSlowStage >= SLOW_SKIP && !x.debateLate)) { skipTurns(held, secsOf(turn.debateWasLate ? ctx.clock.now() - turn.debateSentAt : turn.debateSkipMs)); return; }
     // The button skips one speaker: offered only on the one turn the round is left waiting for.
     if (held.length !== 1 || turn.debateSlowNote) return;
     const box = el('div', 'cmp-debate-slow');
-    box.appendChild(el('p', 'cmp-debate-slow-text', t('debate_slow_note', secsOf(DEBATE_SLOW_NOTE_MS), turn.debateFirst ? DEBATE_SLOW_SHARE_FIRST_PCT : DEBATE_SLOW_SHARE_PCT, secsOf(turn.debateSkipAt - turn.debateSentAt))));
+    box.appendChild(el('p', 'cmp-debate-slow-text', t('debate_slow_note', secsOf(DEBATE_SLOW_NOTE_MS), turn.debateSharePct, secsOf(turn.debateSkipAt - turn.debateSentAt))));
     const btn = el('button', 'cmp-debate-slow-skip', t('debate_slow_skip'));
     btn.type = 'button';
     btn.addEventListener('click', () => { const now = waitingOn(); if (now && now.length === 1 && now[0] === turn) skipTurns(now, secsOf(ctx.clock.now() - turn.debateSentAt)); });

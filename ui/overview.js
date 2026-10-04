@@ -11,6 +11,7 @@
 import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, windowLabel } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
 import { popupForecastCache } from './prediction-core.js';
+import { planOrderRank } from './plan-order.js';
 import {
   calcPredictedAtReset, estimateCapHitTime, tierColor, isAlertTier, degradedApprox,
   isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, viewerTzOffsetMin,
@@ -89,13 +90,10 @@ function _historyByOrg(orgs) {
   return map;
 }
 
-// Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini — matches org chips.
+// Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini — matches org chips. The rule is
+// shared with the mobile widget (ui/plan-order.js).
 function _planOrder(org) {
-  const p = org.provider || 'claude';
-  const base = p === 'gemini' ? 200 : p === 'chatgpt' ? 100 : 0;
-  if (/Enterprise/i.test(org.plan)) return base + 3;
-  if (/Team/i.test(org.plan)) return base + 2;
-  return base + 1;
+  return planOrderRank(org.provider || 'claude', org.plan);
 }
 
 // The inline "▸ X%" prediction badge — mirrors renderGaugePrediction()'s detail-gauge

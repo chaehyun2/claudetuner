@@ -1,5 +1,14 @@
-import { GEMINI_API_BASE } from './constants.js';
+import { GEMINI_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 import { isUsableTab } from '../vendor-ai/sites.js';
+import { batchexecuteUrl, decodeBatchEnvelope } from '../vendor-ai/gemini-batch.js';
+
+// The site path our usage RPCs claim to come from (the usage page), as they always have — the
+// package's chat RPCs say `/app`; nothing has shown the usage RPC answering differently for either.
+const USAGE_SOURCE_PATH = '/usage';
+// In-band quota codes (vendor-ai gemini-client IN_BAND_ERROR_CODES 1037 / 1060 → rate_limited).
+const GEMINI_IN_BAND_QUOTA_CODES = new Set([1037, 1060]);
+// A status row with no number (the queue/pending state) — the observation code's tail.
+const IN_BAND_BARE = 'status';
 
 // === Gemini batchexecute RPC helper (hybrid: tab-first, SW credentials fallback) ===
 
@@ -31,7 +40,7 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
   // the fallback path does not need the tab list to run.
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini });
   } catch (e) {
     console.debug(`[Claude Tuner] gemini tabs.query rejected: ${e && e.message}`);
   }
@@ -52,6 +61,11 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
       _lastFetchTabId = tabs[0].id;
       return viaTab;
     } catch (e) {
+      // The tab's account ANSWERED — with an in-band status instead of a payload (#2067). That is
+      // its answer, not a failed path: falling back would read the DEFAULT cookie account's usage
+      // instead (the mismatch getGeminiUserInfo guards against). Same as before, when that answer
+      // came back as `null` and never reached the fallback.
+      if (e && e.inBand) throw e;
       tabError = e;
       console.warn('[Claude Tuner] Gemini tab fetch failed, trying SW fallback:', e.message);
     }
@@ -104,7 +118,8 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: async (rpcId, params) => {
+    // `url` is built HERE (the injected function is serialized and cannot import): same-origin path.
+    func: async (rpcId, params, url) => {
       try {
         // Extract AT token (XSRF) from page — required by batchexecute
         let atToken = '';
@@ -122,8 +137,6 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
         const innerReq = JSON.stringify([[[rpcId, params, null, 'generic']]]);
         let body = `f.req=${encodeURIComponent(innerReq)}&`;
         if (atToken) body += `at=${encodeURIComponent(atToken)}&`;
-
-        const url = `/_/BardChatUi/data/batchexecute?rpcids=${rpcId}&source-path=%2Fusage&rt=c`;
 
         const resp = await fetch(url, {
           method: 'POST',
@@ -147,7 +160,7 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
         return { _err: true, status: 0, message: e.message };
       }
     },
-    args: [rpcId, params],
+    args: [rpcId, params, batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)],
   });
 
   const result = results?.[0]?.result;
@@ -242,7 +255,7 @@ async function fetchGeminiWithCredentials(rpcId, params) {
   // Step 2: Call batchexecute with credentials
   const innerReq = JSON.stringify([[[rpcId, params, null, 'generic']]]);
   const body = `f.req=${encodeURIComponent(innerReq)}&at=${encodeURIComponent(atToken)}&`;
-  const url = `${GEMINI_API_BASE}/_/BardChatUi/data/batchexecute?rpcids=${rpcId}&source-path=%2Fusage&rt=c`;
+  const url = `${GEMINI_API_BASE}${batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)}`;
 
   let resp;
   try {
@@ -283,37 +296,56 @@ let _lastPageHtmlTs = 0;
 const PAGE_HTML_TTL_MS = 60_000; // 1 min
 
 /**
- * Parse Google batchexecute response format.
- * Format: ")]}\'\n<length>\n<json-array>\n..."
- * Returns the parsed data for the given rpcId.
+ * One RPC's payload out of a batchexecute answer — decoded by the vendored package's own framing
+ * (vendor-ai v0.40.0 gemini-batch.js, the decoder GeminiClient uses), limited to `rpcId`'s rows.
+ *
+ * 🔴 AN IN-BAND STATUS IS AN ANSWER, NOT A MISSING ONE (#2067). Gemini says "quota" / "busy" as a
+ * status on the row (row[5]) with NO payload; the hand-rolled decoder this replaced read only
+ * row[2], so such an answer came back `null` and the collector filed it as `parse_fail` — schema
+ * drift — with the shape of nothing. Now: a quota code throws `err_gemini_rate_limit` (the stored,
+ * user-facing code it is); any other code or a bare status throws the usual `collect_failed`
+ * carrying `inBandCode` (the number, or `status`), which bg/collect-gemini.js records as an in-band drift
+ * observation (stage collect) instead of `parse_fail`. Digits only from the answer —
+ * never its text.
+ * 🪤 A status row may name NO rpc (row[1] === null — the live-captured 1097 row did), so rows naming
+ * none count for the status too (Codex 1R 배포차단 #1: filtering by `rpcId` alone missed it and the
+ * tab's answer fell through to the default cookie account).
+ * A row for `rpcId` with empty / `null` data and no status → `null`, as before (the collector's
+ * `parse_fail`; Codex 1R 배포차단 #2: throwing here sent the tab's answer to the fallback). No row at
+ * all → `err_gemini_collect_failed`, as before.
  */
 function parseBatchExecuteResponse(text, rpcId) {
-  // Split by lines, skip the ")]}'" prefix and length lines
-  const lines = text.split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed === ")]}'") continue;
-    if (/^\d+$/.test(trimmed)) continue; // length line
-
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (!Array.isArray(parsed)) continue;
-
-      // batchexecute wraps response as: [["wrb.fr", rpcId, dataString, ...], ...]
-      // Multiple rows possible — iterate all to find our rpcId
-      for (const row of parsed) {
-        if (!Array.isArray(row)) continue;
-        if (row[0] === 'wrb.fr' && row[1] === rpcId) {
-          const dataStr = row[2];
-          if (dataStr) return JSON.parse(dataStr);
-          return null;
-        }
-      }
-    } catch {
-      // not a JSON line, skip
-    }
+  const statuses = [];
+  let answered = false;
+  for (const line of String(text).split('\n')) {
+    const own = decodeBatchEnvelope(line, { rpcId });
+    if (own.payload !== null) return own.payload;
+    statuses.push(...own.statuses, ...decodeBatchEnvelope(line, { rpcId: null }).statuses);
+    if (!answered) answered = namesRpc(line, rpcId);
   }
+  const coded = statuses.find((x) => x.code !== null);
+  if (coded && GEMINI_IN_BAND_QUOTA_CODES.has(coded.code)) throw inBandError('err_gemini_rate_limit', coded.code);
+  if (coded) throw inBandError('err_gemini_collect_failed', coded.code);
+  if (statuses.length) throw inBandError('err_gemini_collect_failed', IN_BAND_BARE);
+  if (answered) return null;
   throw new Error('err_gemini_collect_failed');
+}
+
+// Whether an envelope line carries a `wrb.fr` row for `rpcId` at all (payload or not).
+function namesRpc(line, rpcId) {
+  const t = line.trim();
+  if (!t.startsWith('[[')) return false;
+  try {
+    const rows = JSON.parse(t);
+    return Array.isArray(rows) && rows.some((row) => row?.[0] === 'wrb.fr' && row[1] === rpcId);
+  } catch { return false; }
+}
+
+// `inBand`: the provider answered (a status, not a payload) — fetchGeminiRpc does not fall back.
+// `inBandCode`: the status's number (or `status`), for the drift observation only — the message
+// stays a code PROVIDER_ERROR_CODES knows, so the stored, user-facing code is an existing one.
+function inBandError(message, inBandCode) {
+  return Object.assign(new Error(message), { inBand: true, inBandCode });
 }
 
 // === Extract user info from Gemini page (MAIN world) or cached HTML ===
@@ -335,7 +367,7 @@ export async function getGeminiUserInfo() {
   // (the id starts null and the cached HTML is null too, so it degrades to "unknown").
   const tabs = _lastFetchTabId === null
     ? []
-    : (await chrome.tabs.query({ url: 'https://gemini.google.com/*' })).filter((t) => t.id === _lastFetchTabId && isUsableTab(t));
+    : (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter((t) => t.id === _lastFetchTabId && isUsableTab(t));
   if (tabs.length > 0) {
     try {
       const results = await chrome.scripting.executeScript({
@@ -394,7 +426,7 @@ function extractUserInfoFromHtml(html) {
 export async function isGeminiLoggedIn() {
   try {
     // Fast check: open Gemini tab implies logged in
-    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    const tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini });
     if (tabs.length > 0) return true;
 
     // SW check: HEAD request with credentials — redirect to login means not logged in

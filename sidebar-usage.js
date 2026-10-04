@@ -42,30 +42,9 @@
   // windowLabel's third argument — so there is no second copy of the span rule here. A stale core
   // shows `Session` / `Weekly` instead of a span-derived label, which is what windowLabel itself
   // returns when the provider reports no span.
-  // 🔴 THE AD PATH IS CHECKED AS A SET, AND THAT IS NOT THE SAME CHOICE AS THE LOOKUPS ABOVE.
-  //
-  // Everything else in this file guards ONE method and degrades ONE feature: a stale core loses the
-  // span label, or the countdown refresh, or the spend bar, and keeps the rest. The ad path is not
-  // like that — one render uses five methods together and its degradation is all-or-nothing ("no
-  // ads this round"), so asking about them one at a time buys nothing and costs a real defect:
-  // `renderInlineAd` guarded on `buildAdBannerHtml` (exported 2026-07-12) and then called
-  // `trackAdViewability` / `trackAdClick` (exported 2026-07-13). A core from that one-day window
-  // passes the check and throws. Codex loaded the actual 07-12 core and reproduced it: the banner
-  // is WRITTEN, then the loop throws, and a later renderContent() throws again through
-  // syncBanners(). (#1422, split out of #1415 ④.)
-  //
-  // 🔑 `trackAdClick` IS WHY THIS MUST BE A SET CHECK AT RENDER TIME. It runs inside a click
-  // handler — minutes later, on a banner that is already on screen. Checking it when the listener
-  // is attached is the only moment we can still decline to draw. Missing it, the user clicks an ad
-  // and the handler throws BEFORE `window.open`: nothing happens, twice, with no way to tell why.
-  //
-  // 🪤 The other ~20 lookups are deliberately NOT folded into this helper. Each has its own
-  // fallback, and one shared gate would replace per-feature degradation with all-or-nothing —
-  // strictly worse for exactly the stale core this file exists to survive.
-  const AD_CORE_METHODS = ['selectAds', 'buildAdBannerHtml', 'noteAdServed', 'trackAdViewability', 'trackAdClick'];
-  const adCoreReady = () => !!CORE
-    && AD_CORE_METHODS.every((n) => typeof CORE[n] === 'function')
-    && !!(CORE.PLACEMENTS && CORE.PLACEMENTS.CLAUDE_SIDEBAR);
+  // 🔴 THE AD PATH IS CHECKED AS A SET (#1422) — the five ad methods plus this placement — and that
+  // check now lives with the ad code in usage-shared.js (fetchSidebarAds / renderSidebarAds, #2065),
+  // shared by all three sidebars. A core too old to have those helpers serves no ads this round.
 
   const windowLabel = (seconds, fallbackText) => ((CORE && CORE.windowLabel)
     ? CORE.windowLabel(seconds, _lang, fallbackText)
@@ -145,11 +124,10 @@
   }
 
   // ── Utility ──
-  function gaugeColor(util) {
-    if (util >= 80) return '#ef4444';
-    if (util >= 50) return '#f59e0b';
-    return '#06b6d4';
-  }
+  // Gauge colour and escaping come from usage-shared.js (#2065), guarded like every core lookup in
+  // this file; the fallbacks degrade (no colour, characters dropped) instead of restating the rules.
+  const gaugeColor = (util) => (CORE && CORE.gaugeColor ? CORE.gaugeColor(util) : '');
+  const escapeHtml = (s) => (CORE && CORE.escapeHtml ? CORE.escapeHtml(s) : String(s).replace(/[&<>"]/g, ''));
 
   // Countdown / absolute-reset formatting is single-sourced in usage-shared.js
   // (CORE.formatCountdown / CORE.formatResetAbsolute) — the same helpers the
@@ -204,127 +182,52 @@
     // Defensive: notices depend on the shared core. If it's missing (e.g. a stale
     // cached sidebar-usage.js after an update where usage-shared.js wasn't
     // injected), skip notices entirely — the rest of the sidebar still works.
-    if (!CORE || !CORE.fetchAnnouncements) return;
+    if (!isCurrent() || !CORE || !CORE.fetchAnnouncements) return;
     try {
       // Shared fetch/filter (drops promos, applies min_version + lang). Throws on
       // transient error → keep last-known notices.
-      _notices = await CORE.fetchAnnouncements(_lang, chrome.runtime.getManifest().version);
+      const fresh = await CORE.fetchAnnouncements(_lang, chrome.runtime.getManifest().version);
+      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+      _notices = fresh;
       updateBellBadge();
       renderInlineNotice();
     } catch (e) { /* silent — keep last-known notices */ }
   }
 
+  // Bell badge, notice strip and ad banner: one copy in usage-shared.js shared by the three
+  // sidebars (#2065) — this file passes only its prefix, theme classes, utm_source and placement.
+  // Guarded like every core lookup: a core without them shows no badge / notice / ad this round.
   function updateBellBadge() {
-    const badge = document.getElementById('ct-sb-bell-badge');
-    if (!badge || !CORE || !CORE.getUnseenCount) return;
-    const unseen = CORE.getUnseenCount(_notices, _lastSeenId);
-    if (unseen > 0) {
-      badge.textContent = unseen;
-      badge.style.display = '';
-    } else {
-      badge.style.display = 'none';
-    }
+    if (!CORE || !CORE.renderBellBadge) return;
+    CORE.renderBellBadge(document.getElementById('ct-sb-bell-badge'), _notices, _lastSeenId);
   }
 
   function renderInlineNotice() {
-    const container = document.getElementById('ct-sb-notice');
-    if (!container) return;
-
-    chrome.storage.local.get({ ct_dismissed_notices: [] }, (result) => {
-      const dismissed = result.ct_dismissed_notices || [];
-      const active = _notices.filter(n => !dismissed.includes(n.id));
-
-      if (active.length === 0) {
-        container.innerHTML = '';
-        container.style.display = 'none';
-        return;
-      }
-
-      // Show only the latest one
-      const latest = active[0];
-      container.style.display = '';
-      container.innerHTML = `
-        <span class="ct-sb-notice-icon">\uD83D\uDCE2</span>
-        <span class="ct-sb-notice-text text-text-300" data-url="${escapeHtml(latest.url || '')}">${escapeHtml(latest.title || '')}</span>
-        <button class="ct-sb-notice-close text-text-500" data-nid="${escapeHtml(latest.id || '')}">\u00D7</button>
-      `;
-
-      // Click notice text → open URL or dashboard
-      container.querySelector('.ct-sb-notice-text').addEventListener('click', () => {
-        // Reject non-http(s) schemes (e.g. javascript:) before navigating.
-        let url = latest.url || '';
-        try {
-          const u = new URL(url);
-          if (u.protocol !== 'http:' && u.protocol !== 'https:') url = '';
-        } catch { url = ''; }
-        if (!url) url = NOTICE_BASE + _lang;
-        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=sidebar', '_blank');
-      });
-
-      // Dismiss button
-      container.querySelector('.ct-sb-notice-close').addEventListener('click', (e) => {
-        e.stopPropagation();
-        chrome.storage.local.get({ ct_dismissed_notices: [] }, (r) => {
-          const arr = r.ct_dismissed_notices || [];
-          if (!arr.includes(latest.id)) arr.push(latest.id);
-          chrome.storage.local.set({ ct_dismissed_notices: arr }, () => renderInlineNotice());
-        });
-      });
+    if (!CORE || !CORE.renderSidebarNotice) return;
+    CORE.renderSidebarNotice(document.getElementById('ct-sb-notice'), {
+      getNotices: () => _notices, lang: _lang, prefix: 'ct-sb', textClass: 'text-text-300', closeClass: 'text-text-500',
+      utm: 'sidebar', isCurrent, rerender: renderInlineNotice,
     });
   }
 
   // ── In-house ad banner (design §2.2/§3.2/§4) ──
-  // Premium ad gate (1.32.0, plan compare-quota-premium §2): a confirmed Premium skips the fetch and
-  // clears the slot. Feature-detected — a stale core (dynamic injection, see docs/EXTENSION.md) has no
-  // adFreeEntitled and must not throw — and FAIL-OPEN: any error or a non-Premium answer → ads as before.
-  const adFree = () => {
-    try {
-      if (!CORE || typeof CORE.adFreeEntitled !== 'function') return Promise.resolve(false);
-      return Promise.resolve(CORE.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
-    } catch { return Promise.resolve(false); }
-  };
+  // The round — readiness set, Premium gate (fail-open), selection for this placement — is
+  // CORE.fetchSidebarAds; null = leave the slot as it is, [] = Premium (slot cleared).
+  const AD_PLACEMENT = 'CLAUDE_SIDEBAR';
   async function fetchAds() {
     if (!isCurrent()) return; // superseded instance — don't fetch or rotate
-    if (!adCoreReady()) return; // stale core without the whole ad module — skip the round
-    const gated = await adFree();
-    if (!isCurrent()) return; // superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch
-    if (gated) { _ads = []; renderInlineAd(); return; } // Premium: no fetch, slot cleared
-    try {
-      const fresh = await CORE.selectAds({ placement: CORE.PLACEMENTS.CLAUDE_SIDEBAR, lang: _lang });
-      if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
-      _ads = fresh;
-      renderInlineAd();
-    } catch (e) { /* silent — no ads this round */ }
+    if (!CORE || typeof CORE.fetchSidebarAds !== 'function') return; // core without the shared ad round — skip it
+    const next = await CORE.fetchSidebarAds({ placementKey: AD_PLACEMENT, lang: _lang, isCurrent });
+    if (!isCurrent()) return; // superseded mid-flight — don't mutate shared DOM
+    if (next === null) return;
+    _ads = next;
+    renderInlineAd();
   }
 
   function renderInlineAd() {
-    const container = document.getElementById('ct-sb-ad');
-    // 🔑 The SET, not `buildAdBannerHtml` alone — see AD_CORE_METHODS. Drawing a banner we cannot
-    // fully operate is worse than drawing none: the click handler would throw before window.open.
-    if (!container || !adCoreReady()) return;
-    if (!_ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
-    container.style.display = '';
-    container.innerHTML = _ads.map(ad => CORE.buildAdBannerHtml(ad, _lang)).join('');
-    const banners = container.querySelectorAll('.ct-ad-banner');
-    banners.forEach((el, i) => {
-      const ad = _ads[i];
-      // Count the serve toward the daily frequency cap (serving-side, not measurement).
-      CORE.noteAdServed(ad.campaign.campaign_id, ad.placement);
-      // Measurement seam: viewability-gated impression → message to the SW counter owner.
-      CORE.trackAdViewability(el, ad, _guard);
-      const url = el.getAttribute('data-ad-url');
-      if (url) el.addEventListener('click', (e) => {
-        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
-        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
-        CORE.trackAdClick(ad, e); // measurement seam: click → SW counter owner
-        const sep = url.includes('?') ? '&' : '?';
-        window.open(url + sep + 'utm_source=claude_sidebar', '_blank');
-      });
-    });
-  }
-
-  function escapeHtml(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    if (!CORE || !CORE.renderSidebarAds) return;
+    CORE.renderSidebarAds(document.getElementById('ct-sb-ad'), _ads,
+      { placementKey: AD_PLACEMENT, lang: _lang, guard: _guard, utm: 'claude_sidebar' });
   }
 
   // claude.ai's active org: usage-shared.js's one parser (#2054). Guarded like every core lookup —

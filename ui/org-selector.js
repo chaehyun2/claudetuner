@@ -368,7 +368,11 @@ export function selectOrg(orgId, container) {
     // === 4. Subscription / Pending plan (Claude + ChatGPT) ===
     const pendingRow = document.getElementById('pending-row');
     const cancelDowngradeWrap = document.getElementById('cancel-downgrade-wrap');
-    if (isClaudeOrg && isPrimary) {
+    // The Claude snapshot's org — the one state.currentSnapshot, its pending plan and the Claude rec
+    // slot describe. Not `isPrimary`: a pin click flips that locally before the next collect, and the
+    // cancel button would then sit on an org bg/plan.js refuses to act for (#2064, Codex 3R).
+    const claudeRecOrg = local.lastStatus?.snapshot?.claude_org_uuid;
+    if (isClaudeOrg && orgId === claudeRecOrg) {
       // primary: restore subscription from state.currentSnapshot
       if (state.currentSnapshot?.subscription?.pending_plan) {
         if (pendingRow) {
@@ -434,8 +438,11 @@ export function selectOrg(orgId, container) {
     // is how org A's row ends up showing org B's downgrade. A miss renders NOTHING: the stored rec
     // describes a different org's 14-day window, and no card is always better than a card about
     // the wrong seat.
+    // 🔴 The Claude slot is ONE rec, computed for the snapshot's org (`claudeRecOrg`, §4) — render
+    // it on that org only. On an extra Claude org it offered "execute" for a plan change that lands
+    // on the snapshot org (#2064, Codex 1R).
     const rec = isClaudeOrg
-      ? (state.lastRecommendation || local.lastStatus?.recommendation)
+      ? (orgId === claudeRecOrg ? (state.lastRecommendation || local.lastStatus?.recommendation) : null)
       : ((local.lastStatus?.recommendations_by_provider || {})[providerKey] || {})[orgId || '-'];
     // === EXT REC READ (per provider AND org): END ===
     // insufficient_data means the signal is missing, not that the plan fits: show NO card. A 0%

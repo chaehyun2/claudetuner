@@ -28,7 +28,7 @@
 // Never sent: errorText, model ids, continuation, attachment names/bytes/ids, generated images,
 // the summary's attachments, composed debate prompts, control lines, the session id, `src`.
 
-import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES } from './constants.js';
+import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES, SHARE_TITLE_MAX } from './constants.js';
 import { docCountOf } from './image-store.js';
 import { readTiming } from './helpers.js';
 import { transcriptFromRecord, SPEAKER_USER, ROLE_MODERATOR, servedModelText, defaultAliasOf } from './debate-core.js';
@@ -45,7 +45,6 @@ const CUT_MARK = '…';
 /** The server's one-line label caps (compare-share.ts LABEL_MAX / ALIAS_MAX / TITLE_MAX). */
 export const SHARE_LABEL_MAX = 60;
 export const SHARE_ALIAS_MAX = 40;
-export const SHARE_TITLE_MAX = 120;
 /** The server's timing cap (compare-share.ts TIMING_MAX_MS) — a longer clock is dropped there, so not sent. */
 export const SHARE_TIMING_MAX_MS = 60 * 60 * 1000;
 /** The server's avatar rule (compare-share.ts AVATAR_MAX_CP / AVATAR_RE), mirrored so an avatar the

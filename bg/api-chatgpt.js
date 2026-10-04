@@ -1,4 +1,4 @@
-import { CHATGPT_API_BASE } from './constants.js';
+import { CHATGPT_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 import { isChatgptSessionCookieName, isUsableTab } from '../vendor-ai/sites.js';
 
 // The HTTP status out of this layer's own prose throws, and NOTHING else.
@@ -26,7 +26,7 @@ export async function fetchChatGPTApi(path, options = {}) {
   // the fallback path does not need the tab list to run.
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt });
   } catch (e) {
     console.debug(`[Claude Tuner] chatgpt tabs.query rejected: ${e && e.message}`);
   }
@@ -186,8 +186,8 @@ async function fetchChatGPTWithCookies(url) {
   const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
   const commonHeaders = {
     'Cookie': cookieStr,
-    'Referer': 'https://chatgpt.com/',
-    'Origin': 'https://chatgpt.com',
+    'Referer': `${CHATGPT_API_BASE}/`,
+    'Origin': CHATGPT_API_BASE,
   };
 
   // Step 1: Get Bearer token via session endpoint
@@ -276,7 +276,7 @@ export async function isChatGPTLoggedIn() {
     // cookie enumeration unavailable — fall through to the tab signal
   }
   try {
-    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    const tabs = await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt });
     return tabs.length > 0;
   } catch {
     return false;

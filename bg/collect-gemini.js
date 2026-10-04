@@ -15,6 +15,10 @@ import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
          noteProviderSendError, noteProviderSendOk } from './provider-state.js';
 
+// The in-band status bg/api-gemini.js attaches as `e.inBandCode` (a number, or `status`), recorded as
+// the drift code `err_gemini_in_band:<it>` (≤28 chars — AE caps a drift code at 32).
+const IN_BAND_CODE_RE = /^(?:\d{1,9}|status)$/;
+
 /**
  * Collect Gemini usage data via jSf9Qc RPC.
  * Response: [planId, [[used, percent, windowType, [[resetSec, resetNano]]], ...], false]
@@ -234,14 +238,17 @@ export async function collectGemini(force = false, userManual = false) {
     // 🪤 It stays OUT of PROVIDER_ERROR_CODES on purpose. A user cannot act on "unclassified", and
     // the sentence they should read is the same one `collect_failed` already gives them. The split
     // is for the readout, so it lives only where the readout looks.
+    // 🔑 Same for an IN-BAND STATUS (#2067, bg/api-gemini.js parseBatchExecuteResponse): Gemini
+    // answered with a status row instead of a payload. It used to come back `null` and be filed as
+    // `parse_fail` — schema drift, which it is not. The user still reads `collect_failed` (no new
+    // copy to learn for a code they cannot act on); the observation keeps the code — digits or
+    // `status`, nothing from the answer's text.
     const rawMsg = (e && e.message) || '';
     const storedCode = (st && st.lastError && st.lastError.code) || 'err_gemini_collect_failed';
-    await noteDriftOutcome('gemini', 'error', {
-      stage: 'collect',
-      code: (storedCode === 'err_gemini_collect_failed' && rawMsg.indexOf('err_') !== 0)
-        ? unclassifiedCode('err_gemini_unclassified', e)
-        : storedCode,
-    });
+    let driftCode = storedCode;
+    if (storedCode === 'err_gemini_collect_failed' && e && e.inBand && IN_BAND_CODE_RE.test(String(e.inBandCode))) driftCode = `err_gemini_in_band:${e.inBandCode}`;
+    else if (storedCode === 'err_gemini_collect_failed' && rawMsg.indexOf('err_') !== 0) driftCode = unclassifiedCode('err_gemini_unclassified', e);
+    await noteDriftOutcome('gemini', 'error', { stage: 'collect', code: driftCode });
     return { success: false, orgs: [] };
   }
 }

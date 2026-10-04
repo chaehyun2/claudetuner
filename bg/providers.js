@@ -4,12 +4,14 @@ import { updateBadgeForSelectedOrg } from './badge.js';
 import { collectChatGPT } from './collect-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
 import { appendUsageHistory, reconcileProviderRecs } from './storage.js';
+import { CLAUDE_SESSION_COOKIE, isUsableTab } from '../vendor-ai/sites.js';
+import { CLAUDE_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 
 // Check if optional host permission is granted for a provider
 export function hasProviderPermission(provider) {
   const origins = {
-    chatgpt: ['https://chatgpt.com/*'],
-    gemini: ['https://gemini.google.com/*'],
+    chatgpt: [SITE_TAB_PATTERNS.chatgpt],
+    gemini: [SITE_TAB_PATTERNS.gemini],
   };
   if (!origins[provider]) return Promise.resolve(true);
   return chrome.permissions.contains({ origins: origins[provider] });
@@ -28,7 +30,7 @@ export function hasProviderPermission(provider) {
 // fork. Order matters: claude-folders.js MUST precede chatgpt-folders.js.
 const CHATGPT_INJECT = {
   id: 'ct-chatgpt-usage',
-  matches: ['https://chatgpt.com/*'],
+  matches: [SITE_TAB_PATTERNS.chatgpt],
   js: ['usage-shared.js', 'chatgpt-sidebar.js', 'ui/cmp-msg-rows.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
   css: ['chatgpt-usage.css', 'claude-folders.css'],
   runAt: 'document_idle',
@@ -63,7 +65,9 @@ export async function unregisterChatGPTScripts() {
 export async function injectChatGPTOpenTabs() {
   try {
     if (!(await hasProviderPermission('chatgpt'))) return;
-    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    // Discarded/frozen tabs are skipped (#2064, vendor-ai isUsableTab) — the registered content
+    // scripts cover them when they reload.
+    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt })).filter(isUsableTab);
     for (const tab of tabs) {
       chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CHATGPT_INJECT.js }).catch(() => {});
       chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: CHATGPT_INJECT.css }).catch(() => {});
@@ -77,7 +81,7 @@ export async function injectChatGPTOpenTabs() {
 // (gemini-sidebar.js) and input strip (gemini-input.js) share usage-shared.js.
 const GEMINI_INJECT = {
   id: 'ct-gemini-usage',
-  matches: ['https://gemini.google.com/*'],
+  matches: [SITE_TAB_PATTERNS.gemini],
   js: ['usage-shared.js', 'gemini-sidebar.js', 'gemini-input.js'],
   css: ['gemini-usage.css', 'gemini-input.css'],
   runAt: 'document_idle',
@@ -112,7 +116,7 @@ export async function unregisterGeminiScripts() {
 export async function injectGeminiOpenTabs() {
   try {
     if (!(await hasProviderPermission('gemini'))) return;
-    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter(isUsableTab); // #2064, as above
     for (const tab of tabs) {
       chrome.scripting.executeScript({ target: { tabId: tab.id }, files: GEMINI_INJECT.js }).catch(() => {});
       chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: GEMINI_INJECT.css }).catch(() => {});
@@ -125,8 +129,8 @@ export async function injectGeminiOpenTabs() {
 // sign in to Claude — without it, skipClaude would permanently skip Claude.
 export async function hasClaudeSession() {
   try {
-    const cookies = await chrome.cookies.getAll({ url: 'https://claude.ai' });
-    return cookies.some((c) => c.name === 'sessionKey');
+    const cookies = await chrome.cookies.getAll({ url: CLAUDE_API_BASE });
+    return cookies.some((c) => c.name === CLAUDE_SESSION_COOKIE);
   } catch {
     return false;
   }

@@ -79,33 +79,25 @@
   }
 
   // ── Utility ──
-  function gaugeColor(util) {
-    if (util >= 80) return '#ef4444';
-    if (util >= 50) return '#f59e0b';
-    return '#06b6d4';
-  }
+  // Gauge colour, countdown, absolute reset time and escaping are single-sourced in usage-shared.js
+  // (#2065) — the same helpers the Claude sidebar and the ChatGPT/Gemini strips use, so one page no
+  // longer shows "6h 05m" under the composer and "6h 5m" in the sidebar. Guarded like every core
+  // lookup here; the fallbacks DEGRADE (no colour, no reset segment, characters dropped) rather
+  // than restating the rules — a restated copy is what drifted in the first place.
+  const gaugeColor = (util) => (CORE && CORE.gaugeColor ? CORE.gaugeColor(util) : '');
+  const escapeHtml = (s) => (CORE && CORE.escapeHtml ? CORE.escapeHtml(s) : String(s).replace(/[&<>"]/g, ''));
 
+  // Bare countdown ("6h 5m" / "2d 3h" / "29m") — CORE.formatCountdown without its ⏱ prefix, which
+  // this strip renders as a separate label. Same shape as chatgpt-input.js resetLabel.
   function formatResetTime(resetAt) {
     if (!resetAt) return null;
-    const diff = new Date(resetAt).getTime() - Date.now();
-    if (diff <= 0) return t('soon');
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
-    if (h >= 24) {
-      const d = Math.floor(h / 24);
-      return `${d}d ${h % 24}h`;
-    }
-    return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
+    if (new Date(resetAt).getTime() - Date.now() <= 0) return t('soon');
+    if (!CORE || !CORE.formatCountdown) return null;
+    return CORE.formatCountdown(resetAt, _lang).replace(/^⏱\s*/, '');
   }
 
   function formatResetAbsolute(resetAt) {
-    if (!resetAt) return '';
-    const d = new Date(resetAt);
-    if (_lang === 'ko') {
-      const days = ['일', '월', '화', '수', '목', '금', '토'];
-      return `${d.getMonth() + 1}/${d.getDate()}(${days[d.getDay()]}) ${d.toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit', hour12: true })} 리셋 예정`;
-    }
-    return `Resets ${d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}`;
+    return CORE && CORE.formatResetAbsolute ? CORE.formatResetAbsolute(resetAt, _lang) : '';
   }
 
   function isPeakNow() {
@@ -124,10 +116,6 @@
     const end   = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 18));
     const fmt = d => d.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit', hour12: true });
     return fmt(start) + '\u2013' + fmt(end);
-  }
-
-  function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // claude.ai's active org: usage-shared.js's one parser (#2054). Guarded like every core lookup —
@@ -614,8 +602,8 @@
       let iconUrl2 = '';
       try { iconUrl2 = chrome.runtime.getURL('icons/icon16.png'); } catch { /* ignore */ }
       // ⓘ = the dated Free-plan explanation; `noUsageFree` is decided by the SW (bg/sidebar-usage.js).
-      // Quotes escaped too: this file's escapeHtml is text-only, and the tip goes into attributes.
-      const tip = _data.noUsageFree ? escapeHtml(t('no_usage_free_tip')).replace(/"/g, '&quot;') : '';
+      // CORE.escapeHtml escapes quotes too, so the tip is safe inside the attributes below.
+      const tip = _data.noUsageFree ? escapeHtml(t('no_usage_free_tip')) : '';
       strip.innerHTML = `
         ${iconUrl2 ? `<a href="https://claudetuner.com/dashboard/?utm_source=input" target="_blank" class="ct-logo-link"><img src="${iconUrl2}" class="ct-logo" alt="CT"></a>` : ''}
         <div class="ct-seg">

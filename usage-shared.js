@@ -13,10 +13,24 @@
   // in the isolated world (a plain `if (exists) return` guard would keep the old
   // object and hide new methods like fetchAnnouncements from fresh callers).
 
+  // <usage-level> AUTO-GENERATED from ui/usage-tiers.js by scripts/sync-usage-tiers.mjs — DO NOT EDIT
+  const USAGE_LEVEL_HIGH_PCT = 80;
+  const USAGE_LEVEL_MID_PCT = 50;
+
+  // 'high' | 'mid' | 'low', or null when there is no reading (callers draw their "no data" shade).
+  function usageLevel(util) {
+    if (util == null || util === '') return null;
+    const n = Number(util);
+    if (!Number.isFinite(n)) return null;
+    return n >= USAGE_LEVEL_HIGH_PCT ? 'high' : n >= USAGE_LEVEL_MID_PCT ? 'mid' : 'low';
+  }
+  // </usage-level>
+
+  // The bar colour of a usage %: ui/usage-tiers.js usageLevel (the copy above) on the popup's
+  // palette — ui/util.js gaugeColor answers the same (#2067). No reading is the low shade.
+  const GAUGE_LEVEL_COLORS = { high: '#ef4444', mid: '#f59e0b', low: '#06b6d4' };
   function gaugeColor(util) {
-    if (util >= 80) return '#ef4444';
-    if (util >= 50) return '#f59e0b';
-    return '#06b6d4';
+    return GAUGE_LEVEL_COLORS[usageLevel(util)] || GAUGE_LEVEL_COLORS.low;
   }
 
   // Localized day word relative to today (어제/오늘/내일 within ±1 day, else the
@@ -326,7 +340,7 @@
     if (provider === 'chatgpt') {
       if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
       if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
-      if (p === 'pro 25x') return 'Pro 500';
+      if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
     }
     return plan || '';
   }
@@ -1019,10 +1033,158 @@
     return (row && row.slice(prefix.length)) || null;
   }
 
+  // A conversation id from a claude.ai / chatgpt.com path — the folders' one parser (#2065), which
+  // used to be four loose `/\/chat\/([\w-]+)/` matches (no anchor, no uuid check, no lowercasing)
+  // in claude-folders.js / chatgpt-folders.js.
+  // 🪤 SYNC COPY of vendor-ai/sites.js CONVERSATION_RULES (claude + chatgpt `path` and `canon`):
+  // this is a classic content script and cannot import the ESM file, so
+  // test/folders-dry-guard.mjs runs both over a table of paths and requires identical answers.
+  // Takes a PATHNAME (query/hash ignored); null when the path names no conversation.
+  const CONVERSATION_PATH_RULES = {
+    claude: /^\/chat\/([0-9a-f-]{36})\/?$/i,
+    chatgpt: /^\/(?:g\/[^/]+\/)?c\/([0-9a-f-]{36})\/?$/i,
+  };
+  const CONVERSATION_UUID_ISH_RE = /^[0-9a-f-]{36}$/i;
+  function conversationIdFromPath(provider, path) {
+    if (!Object.prototype.hasOwnProperty.call(CONVERSATION_PATH_RULES, provider)) return null;
+    if (typeof path !== 'string') return null;
+    const m = path.trim().replace(/[?#].*$/, '').match(CONVERSATION_PATH_RULES[provider]);
+    return m && CONVERSATION_UUID_ISH_RE.test(m[1]) ? m[1].toLowerCase() : null;
+  }
+  // Same, from a link's href (relative or absolute): resolved against `base` (the page URL) and
+  // only when it stays on the page's own origin — a sidebar link to another site is no conversation.
+  function conversationIdFromHref(provider, href, base) {
+    if (typeof href !== 'string' || !href) return null;
+    let u, b;
+    try { b = new URL(base); u = new URL(href, b); } catch { return null; }
+    return u.origin === b.origin ? conversationIdFromPath(provider, u.pathname) : null;
+  }
+  // A STORED folder chat id as the parser above would spell it today: a uuid lowercased, anything
+  // else unchanged. Applied when folders are read so an entry saved under an older, looser parser
+  // keeps matching — never dropped (a non-uuid entry stays listed and openable).
+  function canonicalStoredChatId(id) {
+    return typeof id === 'string' && CONVERSATION_UUID_ISH_RE.test(id) ? id.toLowerCase() : id;
+  }
+
   function bucketDisplayName(name) {
     return Object.prototype.hasOwnProperty.call(BUCKET_DISPLAY_NAMES, name)
       ? BUCKET_DISPLAY_NAMES[name]
       : name;
+  }
+
+  // ── Sidebar notice + ad blocks (#2065) ──────────────────────────────────────────────────────
+  // ONE copy of the announcement strip, bell badge and in-house ad banner that the three sidebars
+  // (sidebar-usage.js / chatgpt-sidebar.js / gemini-sidebar.js) each carried. They differ only by
+  // their class prefix, theme text classes, utm_source and placement — passed in.
+  //
+  // 🔴 Every helper reads the core's ad methods off the EXPORTED object at CALL time, never the
+  // closure: what a sidebar can rely on is what the exported object holds (a stale or partially
+  // replaced core is exactly the case the readiness check is for — #1422, and
+  // test/panel-render-execution-guard.mjs ages the exported object method by method).
+  const exported = () => globalThis.__ctUsageCore || {};
+  const AD_CORE_METHODS = ['selectAds', 'buildAdBannerHtml', 'noteAdServed', 'trackAdViewability', 'trackAdClick'];
+  // 🔑 THE SET, not `buildAdBannerHtml` alone: a banner we cannot fully operate is worse than none —
+  // its click handler would throw before window.open. Plus the placement: it is what selection is
+  // scoped by, so a core that cannot name it must not be asked.
+  function sidebarAdsReady(placementKey) {
+    const c = exported();
+    return AD_CORE_METHODS.every((n) => typeof c[n] === 'function')
+      && !!(c.PLACEMENTS && c.PLACEMENTS[placementKey]);
+  }
+  // Premium ad gate (1.32.0, plan compare-quota-premium §2): FAIL-OPEN — any error, a missing
+  // adFreeEntitled or a non-Premium answer → ads as before.
+  function sidebarAdFree() {
+    try {
+      const c = exported();
+      if (typeof c.adFreeEntitled !== 'function') return Promise.resolve(false);
+      return Promise.resolve(c.adFreeEntitled(chrome.runtime)).then((v) => v === true, () => false);
+    } catch { return Promise.resolve(false); }
+  }
+  /**
+   * One ad round for a sidebar: the ads to show ([] = Premium, clear the slot), or null = leave the
+   * slot as it is (core not ready, superseded instance, or a transient selection error). The caller
+   * re-checks its own isCurrent() before touching the DOM with the answer.
+   */
+  async function fetchSidebarAds({ placementKey, lang, isCurrent }) {
+    // The gate is asked even when the ad set is incomplete: clearing a banner already on screen
+    // needs no ad method, and a Premium answer must clear it (Codex #2065 R2).
+    const gated = await sidebarAdFree();
+    // Superseded while the SW answered (Codex U3 1R #5): neither branch may touch shared DOM or fetch.
+    if (isCurrent && !isCurrent()) return null;
+    if (gated) return [];
+    if (!sidebarAdsReady(placementKey)) return null;
+    try {
+      const c = exported();
+      return await c.selectAds({ placement: c.PLACEMENTS[placementKey], lang });
+    } catch { return null; }
+  }
+  /** Draw `ads` into the sidebar's ad slot (or hide it when empty); `utm` is the click's utm_source. */
+  function renderSidebarAds(container, ads, { placementKey, lang, guard, utm }) {
+    if (!container) return;
+    // Clearing first: it needs no ad method, so even an incomplete core can empty the slot.
+    if (!ads || !ads.length) { container.innerHTML = ''; container.style.display = 'none'; return; }
+    if (!sidebarAdsReady(placementKey)) return;
+    const c = exported();
+    container.style.display = '';
+    container.innerHTML = ads.map((ad) => c.buildAdBannerHtml(ad, lang)).join('');
+    container.querySelectorAll('.ct-ad-banner').forEach((el, i) => {
+      const ad = ads[i];
+      c.noteAdServed(ad.campaign.campaign_id, ad.placement); // daily frequency cap (serving-side)
+      c.trackAdViewability(el, ad, guard); // measurement seam: viewability-gated impression → SW counter owner
+      const url = el.getAttribute('data-ad-url');
+      if (url) el.addEventListener('click', (e) => {
+        // Label chip is an advertiser-inquiry link (its own target=_blank nav) — not an ad click.
+        if (e.target.closest && e.target.closest('.ct-ad-label')) return;
+        c.trackAdClick(ad, e); // measurement seam: click → SW counter owner
+        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=' + utm, '_blank');
+      });
+    });
+  }
+  /** The bell's unseen-count badge. */
+  function renderBellBadge(badge, notices, lastSeenId) {
+    if (!badge) return;
+    const unseen = getUnseenCount(notices, lastSeenId);
+    if (unseen > 0) { badge.textContent = unseen; badge.style.display = ''; }
+    else { badge.style.display = 'none'; }
+  }
+  /**
+   * The inline announcement strip: the latest notice the user has not dismissed, or nothing.
+   * `getNotices` is read when the dismissed list arrives (the sidebar's list may have been refreshed
+   * meanwhile); `rerender` runs after a dismissal; `isCurrent` (the sidebar's instance guard) is
+   * re-checked after every async step so a superseded injection never touches shared DOM.
+   */
+  function renderSidebarNotice(container, { getNotices, lang, prefix, textClass, closeClass, utm, isCurrent, rerender }) {
+    if (!container) return;
+    const live = () => !isCurrent || isCurrent();
+    chrome.storage.local.get({ ct_dismissed_notices: [] }, (result) => {
+      if (!live()) return; // superseded by a newer injection since the async read
+      const dismissed = result.ct_dismissed_notices || [];
+      const active = (getNotices() || []).filter((n) => !dismissed.includes(n.id));
+      if (active.length === 0) { container.innerHTML = ''; container.style.display = 'none'; return; }
+      const latest = active[0];
+      container.style.display = '';
+      container.innerHTML = `
+        <span class="${prefix}-notice-icon">📢</span>
+        <span class="${prefix}-notice-text${textClass ? ` ${textClass}` : ''}">${escapeHtml(latest.title || '')}</span>
+        <button class="${prefix}-notice-close${closeClass ? ` ${closeClass}` : ''}">×</button>
+      `;
+      container.querySelector(`.${prefix}-notice-text`).addEventListener('click', () => {
+        // Reject non-http(s) schemes (e.g. javascript:) before navigating.
+        let url = latest.url || '';
+        try { const u = new URL(url); if (u.protocol !== 'http:' && u.protocol !== 'https:') url = ''; } catch { url = ''; }
+        if (!url) url = NOTICE_BASE + lang;
+        window.open(url + (url.includes('?') ? '&' : '?') + 'utm_source=' + utm, '_blank');
+      });
+      container.querySelector(`.${prefix}-notice-close`).addEventListener('click', (e) => {
+        e.stopPropagation();
+        chrome.storage.local.get({ ct_dismissed_notices: [] }, (r) => {
+          if (!live()) return; // superseded since the click
+          const arr = r.ct_dismissed_notices || [];
+          if (!arr.includes(latest.id)) arr.push(latest.id);
+          chrome.storage.local.set({ ct_dismissed_notices: arr }, () => { if (live() && rerender) rerender(); });
+        });
+      });
+    });
   }
 
   globalThis.__ctUsageCore = {
@@ -1044,6 +1206,9 @@
     bucketDisplayName,
     CLAUDE_ACTIVE_ORG_COOKIE,
     getClaudeActiveOrgId,
+    conversationIdFromPath,
+    conversationIdFromHref,
+    canonicalStoredChatId,
     bucketNote,
     bucketNoteSlugs,
     isContextValid,
@@ -1066,5 +1231,10 @@
     trackAdClick,
     sendAdFlushHint,
     buildAdBannerHtml,
+    // ── Sidebar notice + ad blocks (#2065) ──
+    fetchSidebarAds,
+    renderSidebarAds,
+    renderBellBadge,
+    renderSidebarNotice,
   };
 })();

@@ -27,9 +27,10 @@ function capitalizeFirst(s) {
 }
 
 // Map raw ChatGPT plan_type codes to intuitive display names.
-// 'prolite' = the $100 Pro tier (5x Plus quota, launched 2026-04); 'pro' = $200 Pro (20x Plus).
+// 'prolite' = the $100 Pro tier (5x Plus quota, launched 2026-04); 'pro' = $200 Pro (20x Plus);
+// 'promax' = the $500 Pro tier (OpenAI "Pro 500", 25x Plus; first observed 2026-10-04, #1925).
 const CHATGPT_PLAN_NAMES = {
-  free: 'Free', go: 'Go', plus: 'Plus', prolite: 'Pro 5x', pro: 'Pro 20x',
+  free: 'Free', go: 'Go', plus: 'Plus', prolite: 'Pro 5x', pro: 'Pro 20x', promax: 'Pro 25x',
   team: 'Team', business: 'Business', enterprise: 'Enterprise',
   education: 'Education', k12: 'Education (K-12)',
 };
@@ -46,7 +47,8 @@ export function chatgptPlanName(code) {
 // code (e.g. 'self_serve_business_usage_based') rather than a plain tier code.
 const CHATGPT_SUBSCRIPTION_PLAN_NAMES = {
   chatgptfreeplan: 'Free', chatgptfreeworkspaceplan: 'Free', chatgptgoplan: 'Go',
-  chatgptplusplan: 'Plus', chatgptprolite: 'Pro 5x', chatgptpro: 'Pro 20x',
+  // chatgptpromax is inferred from the chatgptprolite/chatgptpro naming — not yet observed (#1925).
+  chatgptplusplan: 'Plus', chatgptprolite: 'Pro 5x', chatgptpro: 'Pro 20x', chatgptpromax: 'Pro 25x',
   chatgptteamplan: 'Team', chatgptbusinessplan: 'Business', chatgptenterpriseplan: 'Enterprise',
 };
 const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {

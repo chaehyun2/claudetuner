@@ -1244,9 +1244,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // (ui/recommend.js); this second check makes a stale/injected click a no-op rather than a
     // claude.ai plan change triggered by a ChatGPT recommendation.
     if ((state.recProvider || 'claude') !== 'claude') return;
+    const shownOrgId = state.selectedOrgId;
     chrome.storage.local.get({ lastStatus: {} }, (result) => {
       const recommendation = result.lastStatus?.recommendation;
       if (!recommendation?.type) return;
+      // The user switched org while this read was in flight: the card they clicked is gone.
+      if (state.selectedOrgId !== shownOrgId) return;
 
       openPlanConfirmModal({
         fromPlan: recommendation.from_plan,
@@ -1255,7 +1258,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         fromCost: recommendation.from_cost,
         toCost: recommendation.to_cost,
         costDiff: recommendation.cost_diff,
-        onConfirm: () => _executeRecommendedPlanChange(),
+        // The org on screen when the modal opened; _executeRecommendedPlanChange also refuses if
+        // the screen has moved on since (#2064, Codex 3R·4R).
+        onConfirm: () => _executeRecommendedPlanChange(shownOrgId),
       });
     });
   });
@@ -1272,7 +1277,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     action();
   });
 
-  function _executeRecommendedPlanChange() {
+  function _executeRecommendedPlanChange(shownOrgId) {
     const confirmBtn = document.getElementById('src-modal-confirm');
 
     const btn = document.getElementById('smart-rec-btn');
@@ -1280,9 +1285,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     chrome.storage.local.get({ lastStatus: {} }, (result) => {
       const recommendation = result.lastStatus?.recommendation;
-      if (!recommendation?.type) { closePlanConfirmModal(); btn.disabled = false; return; }
+      if (!recommendation?.type || state.selectedOrgId !== shownOrgId) { closePlanConfirmModal(); btn.disabled = false; return; }
 
-      chrome.runtime.sendMessage({ type: 'EXECUTE_PLAN_CHANGE', recommendation }, (res) => {
+      // orgUuid = the org this card was rendered on; bg/plan.js refuses if it is not the target (#2064).
+      chrome.runtime.sendMessage({ type: 'EXECUTE_PLAN_CHANGE', recommendation, orgUuid: shownOrgId || null }, (res) => {
         closePlanConfirmModal();
         confirmBtn.disabled = false;
         confirmBtn.classList.remove('loading');
@@ -1470,7 +1476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.disabled = true;
     btn.textContent = t('cancelling');
 
-    chrome.runtime.sendMessage({ type: 'CANCEL_DOWNGRADE' }, (res) => {
+    chrome.runtime.sendMessage({ type: 'CANCEL_DOWNGRADE', orgUuid: state.selectedOrgId || null }, (res) => {
       if (chrome.runtime.lastError) {
         btn.disabled = false;
         btn.textContent = t('cancel_downgrade');
@@ -1530,7 +1536,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       statusEl.textContent = t('changing');
       statusEl.style.color = '#9a3412';
 
-      chrome.runtime.sendMessage({ type: 'DOWNGRADE_TO', targetPlan }, (res) => {
+      chrome.runtime.sendMessage({ type: 'DOWNGRADE_TO', targetPlan, orgUuid: state.selectedOrgId || null }, (res) => {
         btn.disabled = false;
         if (chrome.runtime.lastError) {
           statusEl.textContent = t('cancel_fail');

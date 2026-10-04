@@ -8,7 +8,7 @@
 // they were in compare.js (test/mutants/compare-page.json anchors on them). The ctx contract is
 // written up in history.js.
 
-import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED } from './constants.js';
+import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_BADGE_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED } from './constants.js';
 import { autoGrow, sendableTargets, answeredTurn, exampleSentCode, answerTiming } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
 import { isImageType } from './attach-types.js';
@@ -375,7 +375,7 @@ export function installPort(ctx) {
         }
         // Readiness stages from the SW (package v0.2.3) are logged there; the page keeps only the
         // TIMED send-path stages of the column's live round (package v0.3.0) for the badge.
-        if (!TTFT_STAGES.has(msg.stage) || (col.status !== 'streaming' && col.status !== 'done')) return;
+        if (!TTFT_BADGE_STAGES.has(msg.stage) || (col.status !== 'streaming' && col.status !== 'done')) return;
         const at = msg.detail && msg.detail.at;
         if (typeof at !== 'number' || !Number.isFinite(at)) return;
         // Round isolation on one port (Codex b2 1R #4): a previous round's stage delivered late
