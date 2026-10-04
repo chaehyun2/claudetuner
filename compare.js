@@ -64,7 +64,7 @@ import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_ERR_
 import { ATTACH_ACCEPT, ATTACH_FORMATS_LABEL, attachTypeOf, isImageType } from './ui/compare/attach-types.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
 import { PROFILE_PHOTO_KEY, profilePhotoFor } from './bg/profile-photo.js';
-import { MODE_DEBATE, MODE_CROSSCHECK, pickModeratorSeat, defaultDebateLayout } from './ui/compare/debate-core.js';
+import { MODE_DEBATE, MODE_CROSSCHECK, pickDebateDefault, repickSeat } from './ui/compare/debate-core.js';
 // storage.sync key of each tab's column layout (see syncStorage below).
 const LAYOUT_KEYS = Object.freeze({ [MODE_CROSSCHECK]: 'compareColumns', [MODE_DEBATE]: 'debateColumns' });
 // The debate layout's moderator seat (plan §18.8/§18.9 ①): a colId written WITH `debateColumns`, so a
@@ -315,7 +315,9 @@ export function mountComparePage(deps) {
     const glyph = el('span', 'cmp-turn-attach-glyph');
     glyph.appendChild(ctx.attachIcon(13));
     w.appendChild(glyph);
-    w.setAttribute('title', t('attach'));
+    // Hovering the marker says the files stay here when the conversation is shared (owner request
+    // 2026-10-05) — the link shows each file's kind, never the file. A thumbnail keeps its own title.
+    w.setAttribute('title', t('attach_not_shared'));
     const name = el('span', 'cmp-turn-attach-name', img.name);
     w.appendChild(name);
     const size = formatBytes(img.bytes);
@@ -2425,15 +2427,39 @@ export function mountComparePage(deps) {
       // the default four, the seat picked from the plans now (a catalog without the model → three, §18.9 ⑥).
       if (stored && stored.length) { state.debateSeat = state.storedSeat && stored.includes(state.storedSeat) ? state.storedSeat : null; return stored; }
       // Picked once per conversation (Codex U2 1R): a tab round trip must not re-pick it from a
-      // catalog that arrived since — only 새 대화 (resetSession) picks again.
+      // catalog that arrived since — only 새 대화 (resetSession) picks again, and before the session a
+      // service that becomes ready since (repickDebateSeat, #2087).
       if (!state.debateDefault) {
         const st = state.status || {};
-        state.debateDefault = defaultDebateLayout(pickModeratorSeat({ providers: st.providers, catalogs: st.models }));
+        state.debateDefault = pickDebateDefault({ providers: st.providers, catalogs: st.models, now: clock.now() });
       }
       state.debateSeat = state.debateDefault.seat;
       return state.debateDefault.ids;
     }
     return stored && stored.length ? stored : COMPARE_PROVIDERS.map((p) => colIdOf(p, null));
+  }
+  /**
+   * #2087: a status read that finds a service ready which was not when the default layout was picked
+   * (a new user signs in to Claude / grants its site after the first status) re-picks the seat when that
+   * service is the better moderator (repickSeat — readiness only, each service once). The page follows
+   * only before the session, with nothing on the wire, while the debate layout is still the untouched
+   * default: no stored layout (§18.9 ① — an edited / bridged layout keeps its seat), no moderator the
+   * user chose (modChosen), no history entry's columns. Otherwise only `ready` is merged — a choice made
+   * later never brings back a re-pick held off now. True when the columns were rebuilt (the caller renders).
+   */
+  function repickDebateSeat() {
+    const prev = state.debateDefault;
+    if (!prev || state.sending || state.sessionStarted) return false;
+    const st = state.status || {};
+    const next = repickSeat(prev, { providers: st.providers, catalogs: st.models, now: clock.now() });
+    if (next === prev) return false;
+    const stored = state.storedLayouts[MODE_DEBATE];
+    const shown = layoutMode() === MODE_DEBATE;
+    const untouched = !(stored && stored.length) && !(state.debatePrefs && state.debatePrefs.modChosen)
+      && (!shown || (!state.layoutFromEntry && state.columnIds.join('\n') === prev.ids.join('\n')));
+    if (!next.repicked || !untouched) { state.debateDefault = { ...prev, ready: next.ready }; return false; }
+    state.debateDefault = next;
+    return shown && applyLayout();
   }
   /**
    * Back to the current tab's own layout (plan §17.6/§17.11 ③④): a tab switch before the session,
@@ -3477,6 +3503,7 @@ export function mountComparePage(deps) {
     // #1985: the map when the SW answers one (an old SW: its boolean for every provider). All or
     // nothing — a touched page is never re-seeded provider by provider (plan §4-6).
     if (!state.saveTouched && !state.sessionStarted && !state.sending) seedSaveBy();
+    if (repickDebateSeat()) syncWaitTimer();
     renderColumns();
     // C3: only a read STARTED after the column's gate-code error speaks for it (Codex batch-1 #2):
     // sendable again → the retry comes back; still gated → cleared is revoked (a later negative

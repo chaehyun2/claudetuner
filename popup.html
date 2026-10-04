@@ -353,6 +353,11 @@
     </div>
   </div>
 
+  <!-- Usage-limit reset pass holdings (#2092 P1-1). Sibling of #gauge-section, not a child, for the
+       same reason as #predict-headline: the Enterprise / _restoreGaugeHTML innerHTML swaps would
+       wipe it. Filled by ui/reset-pass-ui.js renderResetPassChip from usage-shared.js's builder. -->
+  <div id="reset-pass-chip" class="reset-pass-chip hidden"></div>
+
   <!-- AI Cross-Check shortcut (2026-09-22): one slim row under the gauges to the /multiai page.
        Hidden until the SW says the page is live (COMPARE_FLAG.on) — popup.js initCompareEntry.
        The glyph is the compare page's 「요약·비교」 4-point star (compare.css .cmp-btn-summary). -->

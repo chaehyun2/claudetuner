@@ -229,6 +229,7 @@
        restores each section to whatever its own visibility logic last set. */
     body.ct-view-overview #predict-headline,
     body.ct-view-overview #gauge-section,
+    body.ct-view-overview #reset-pass-chip,
     body.ct-view-overview #extra-usage-section,
     body.ct-view-overview #additional-limits-section,
     body.ct-view-overview #fitness-section,
@@ -271,6 +272,14 @@
     /* Chevron: persistent "this card opens a detail view" affordance. */
     .ov-chevron { flex-shrink: 0; color: var(--text-muted); font-size: 16px; font-weight: 700; line-height: 1; margin-left: 2px; }
     .ov-card:hover .ov-chevron { color: var(--accent); }
+    /* Reset-pass icon (#2092): a button inside the clickable card. Padding + negative margin give it
+       a generous hit area so a near miss does not fall through to the card (= detail view). */
+    .ov-rp { flex-shrink: 0; display: inline-flex; align-items: center; gap: 1px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 5px; margin: -3px -2px; cursor: pointer; font-size: 11px; line-height: 1; color: var(--text-secondary); }
+    .ov-rp:hover, .ov-rp:focus-visible { border-color: var(--accent); background: var(--accent-light); }
+    .ov-rp-n { font-size: 10px; font-weight: 700; }
+    .ov-rp-warn { color: #b45309; }
+    [data-theme="dark"] .ov-rp-warn { color: #fbbf24; }
+    .ov-rp-now { color: var(--accent); border-color: var(--accent); }
     /* One-time hint banner teaching the card→detail interaction. */
     .ov-hint { display: flex; align-items: center; gap: 6px; background: var(--accent-light); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px 6px 10px; font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
     .ov-hint span { flex: 1; }
@@ -499,6 +508,16 @@
     /* Prediction headline — surfaces the forecast (our differentiator) above the gauges */
     .predict-headline { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; background: var(--accent-light); color: var(--accent); }
     .predict-headline.is-alert { background: #ef444418; color: #ef4444; }
+    /* Reset pass link appended to the headline (#2092 P1-2): stays on the strip's line, wraps last. */
+    .predict-headline .rp-headline-link { margin-left: auto; color: inherit; font-weight: 700; text-decoration: underline; white-space: nowrap; }
+    /* Reset pass holdings line under the gauges (#2092 P1-1). The <a> itself is styled inline by
+       usage-shared.js so the in-page sidebars draw the same line. */
+    .reset-pass-chip { margin: -4px 2px 10px; color: var(--text-secondary); }
+    /* 7d forecast pass note / relearning line (#2092 P1-3). */
+    .rp-pred-note { font-size: 10.5px; color: var(--text-secondary); margin-top: 2px; }
+    .rp-pred-note .rp-note-link { color: inherit; text-decoration: none; cursor: pointer; }
+    .rp-pred-note .rp-note-link:hover, .ct-rp-chip:hover { text-decoration: underline; }
+    .ct-rp-help:hover { opacity: 1 !important; }
     [data-theme="dark"] .predict-headline.is-alert { background: #ef444430; }
 
     /* 조직 선택 카드 */

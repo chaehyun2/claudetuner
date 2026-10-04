@@ -21,7 +21,7 @@
 import {
   IMAGE_DB_NAME, IMAGE_DB_VERSION, IMAGE_STORE, IMAGE_SESSION_INDEX,
   IMAGE_PREVIEW_MAX_EDGE, IMAGE_PREVIEW_TYPE, IMAGE_PREVIEW_QUALITY,
-  IMAGE_ID_RE, IMAGE_ORPHAN_MIN_AGE_MS,
+  IMAGE_ID_RE, IMAGE_ORPHAN_MIN_AGE_MS, ATTACH_KINDS,
 } from './constants.js';
 import { reqPromise, txDone } from '../idb.js';
 
@@ -42,6 +42,22 @@ export function imageIdsOf(v, max) {
  */
 export function docCountOf(v, max) {
   return Number.isInteger(v) && v > 0 && v <= max ? v : 0;
+}
+
+/**
+ * The per-file KINDS of a marker (2026-10-05, ATTACH_KINDS), in send order — or [] when `v` is not a
+ * list of exactly `files` known kinds (an older marker has none; a list that cannot be this
+ * marker's is dropped whole, never trusted in part: it only decides a share card's icons).
+ */
+export function attachKindsOf(v, files) {
+  return Array.isArray(v) && v.length === files && v.every((k) => ATTACH_KINDS.includes(k)) ? [...v] : [];
+}
+
+/** `{kinds}` for a marker object (`1 + more` files) whose kinds are valid, else `{}` — spread into a stored marker. */
+export function markerKinds(img) {
+  const more = Number.isInteger(img && img.more) && img.more > 0 ? img.more : 0;
+  const kinds = attachKindsOf(img && img.kinds, 1 + more);
+  return kinds.length ? { kinds } : {};
 }
 
 /**

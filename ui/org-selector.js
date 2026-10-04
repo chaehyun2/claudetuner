@@ -7,6 +7,7 @@ import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory, primaryPlanFor } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
+import { renderResetPassChip } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS } from '../bg/constants.js';
@@ -190,6 +191,7 @@ export function selectOrg(orgId, container) {
     // it. Usage-based Enterprise / no-5h orgs never call renderGaugePrediction,
     // so without this a headline from a previous org would linger.
     setPredictHeadline(null);
+    renderResetPassChip(orgData); // #2092 P1-1 — every branch below, Enterprise and no-limit included
     const hist = _filteredHistory();
     const isPrimary = orgData.isPrimary;
     const providerKey = orgData.provider || 'claude';
@@ -327,7 +329,7 @@ export function selectOrg(orgId, container) {
         renderGaugePrediction('7d', hist, 'd7', null, resetsAt7d, orgData.w7s); // self-hides on null
       }
       // Maxed-window "limit reached \u2014 wait until {reset}" strip (same as the primary render path).
-      renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d, orgData.w5s, orgData.w7s);
+      renderLimitReachedHeadline(util5h, resetsAt5h, util7d, resetsAt7d, orgData.w5s, orgData.w7s, orgData);
     }
 
     // === 3. Extra usage section (Claude Enterprise only) ===

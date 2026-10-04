@@ -25,6 +25,7 @@ import { renderReauth } from './ui/reauth.js';
 import { renderClaimSwitch } from './ui/claim-switch.js';
 import { renderLoginCta } from './ui/login-cta.js';
 import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
+import { RP_PASS_USE_KEY, primeResetPassUse, observeResetPassUse } from './ui/reset-pass-ui.js';
 import { readCompareEntryVariant, ENTRY_CROSSCHECK, ENTRY_DEBATE, ENTRY_PLACEMENT } from './ui/compare-entry.js';
 
 // How long the width has to hold still before the detail charts re-rasterise to it. Long enough
@@ -716,7 +717,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    getLocalWithHistory({ lastStatus: null, collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
+    getLocalWithHistory({ lastStatus: null, collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null, [RP_PASS_USE_KEY]: null }, (result) => {
       state.providerEmail = result.accountCache?.email || null;
       // Which Tuner account this install actually syncs into (see bg/ext-token-claims.js).
       // Skipped once the onChanged listener has already reported a token: this read was issued
@@ -730,6 +731,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Multi-org: restore pinned org or fall back to primary
       const cOrgs = result.collectedOrgs || [];
+      // Reset-pass use detection (#2092 P1-3) — seeded BEFORE the first render so a 7d forecast
+      // already known to be unreliable is never drawn and then withdrawn.
+      primeResetPassUse(result[RP_PASS_USE_KEY], cOrgs);
       if (cOrgs.length >= 1) {
         state.collectedOrgs = cOrgs;
         // Restore the user's last-viewed org (persisted by selectOrg) so reopening the
@@ -922,6 +926,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {
       state.collectedOrgs = changes.collectedOrgs.newValue || [];
+      // Before any re-render below, so the 7d forecast reads this observation (#2092 P1-3).
+      observeResetPassUse(state.collectedOrgs);
       const viewTabs = document.getElementById('view-tabs');
       if (state.collectedOrgs.length >= 2) {
         showMultiOrgBadges(state.collectedOrgs);

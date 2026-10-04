@@ -28,7 +28,7 @@ import {
   openingPrompt, turnPrompt, moderatorPrompt, splitControl, tightenConclusion, conclusionLabels, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenMsOf, finishReport, awayTooLong, idleAfter, hardCapStep,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
-  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, SETTING_AWAY, SETTING_BUDGET, SETTING_NOTIFY, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, tierSlug,
+  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, SETTING_AWAY, SETTING_BUDGET, SETTING_NOTIFY, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, moderatorOrder, seatPassed, tierSlug,
 } from './debate-core.js';
 import { REVIEW_SOURCE_DEBATE } from './review-nudge.js';
 import { foldSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
@@ -184,7 +184,21 @@ export function installDebate(ctx) {
    */
   const tierOfCol = (c, served = null) => tierOf(c.provider, c.model, ctx.modelLabelOf(c.provider, c.model), served && { ...served, role: ctx.modelRoleOf(c.provider, served.id) }, ctx.modelRoleOf(c.provider, c.model));
   const colTier = (id) => { const c = colOf(id); return c ? tierOfCol(c) : null; };
-  const defMod = (targets) => defaultModerator(state.debateSeat, targets, colTier);
+  // The services by the usage they have left (#2082) — read when the default is asked for, i.e. before a run:
+  // a running debate keeps the moderator it started with (d.modCol).
+  const modOrder = () => moderatorOrder(state.status && state.status.providers, { now: ctx.clock.now() });
+  const defMod = (targets) => defaultModerator(state.debateSeat, targets, colTier, modOrder());
+  /**
+   * #2082: the service the plan / rank order alone would have given the default moderator, when the usage
+   * left moved it to another service; else null. The seat's answer was fixed with the layout (compare.js
+   * debateDefault.passed); a fallback column is compared here, with and without the usage order.
+   */
+  function passedOver(targets, mod) {
+    if (state.debateSeat && mod.modCol === state.debateSeat) return seatPassed(state.debateDefault, state.debateSeat, targets);
+    const prov = (id) => (id && colOf(id) ? colOf(id).provider : null);
+    const plain = defaultModerator(state.debateSeat, targets, colTier);
+    return plain.modCol && prov(plain.modCol) !== prov(mod.modCol) ? prov(plain.modCol) : null;
+  }
   /** The settings that differ from this page's defaults (the ⚙ dot, the summary line). */
   const changedNow = (targets = reachable()) => changedSettings({ ...state.debatePrefs, ...modChoice(targets) }, defMod(targets));
   /** The AI moderator column when that is the choice and it is reachable; else null. */
@@ -818,6 +832,16 @@ export function installDebate(ctx) {
       modPicks.appendChild(b);
     }
     modPicks.appendChild(el('span', 'cmp-debate-modpicks-note', t(mod.modCol && targets.includes(mod.modCol) ? 'debate_mod_pick_note' : 'debate_mod_pick_none')));
+    // #2082: what moderating costs, and — while the default moderates — why this AI was picked.
+    const cost = [t('debate_mod_pick_cost')];
+    if (!state.debatePrefs.modChosen && mod.modCol && targets.includes(mod.modCol)) {
+      const passed = passedOver(targets, mod);
+      // #2087: a seat re-picked when its service became ready says so — the column swapped before the user's eyes.
+      const repicked = !passed && state.debateDefault && state.debateDefault.repicked && state.debateSeat && mod.modCol === state.debateSeat && colOf(mod.modCol);
+      cost.push(passed && PROVIDER_META[passed] ? t('debate_mod_pick_auto_passed', PROVIDER_META[passed].label)
+        : repicked && PROVIDER_META[repicked.provider] ? t('debate_mod_pick_auto_ready', PROVIDER_META[repicked.provider].label) : t('debate_mod_pick_auto'));
+    }
+    modPicks.appendChild(el('span', 'cmp-debate-modpicks-cost', cost.join(' · ')));
   }
 
   /** The setup block from the current choice: moderator options, the cast, the reason it cannot start. */

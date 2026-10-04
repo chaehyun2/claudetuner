@@ -5,8 +5,10 @@ import { platformField } from './platform.js';
 import {
   chatgptPlanName, unixToResetTime, parseAccountsRoster, windowSpan, classifyWindows,
   parseAdditionalLimits, parseModelAvailability, parseReachedType, summarizeLimitBuckets,
-  pickScopedModel,
+  pickScopedModel, parseChatGPTResetSummary, parseChatGPTResetDetail, mergeChatGPTResetDetail,
 } from './parse-chatgpt.js';
+import { unknownResetPassSummary } from './reset-pass-model.js';
+import { resetPassField } from './reset-pass-payload.js';
 import { chatgptUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
@@ -126,6 +128,97 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
   }
 }
 
+// ── Reset-credit detail (#2092 P1-4): kinds + expiry for the passes /wham/usage only counts ──
+// 🔴 READ-ONLY, ONE FIXED PATH. Spending a pass is irreversible and belongs to the user on
+// chatgpt.com. This is the only reset-credit path the extension may name (guarded in
+// test/provider-fetch-no-store-guard.mjs [4]), and fetchChatGPTApi issues plain GETs only — it
+// takes no method or body. Nothing here may pass it a second argument.
+const CHATGPT_RESET_DETAIL_PATH = '/backend-api/wham/rate-limit-reset-credits';
+const RESET_DETAIL_STATE_KEY = 'chatgptResetDetail';
+// The usage endpoint — read once per cycle, and once more right after a reset-credit detail fetch.
+const CHATGPT_USAGE_PATH = '/backend-api/wham/usage';
+// At most once a day per account, or when the held count changes (plan §4: low frequency only).
+const RESET_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
+// Failure backoff doubles from 1h up to the daily TTL; a failure never clears the last good detail.
+const RESET_DETAIL_BACKOFF_BASE_MS = 60 * 60 * 1000;
+
+function fetchChatGPTResetDetail() {
+  return fetchChatGPTApi(CHATGPT_RESET_DETAIL_PATH);
+}
+
+// Whether a stored detail still describes what the summary counts: same account, same count.
+const resetDetailMatches = (st, accountId, count) => !!st?.detail && st.accountId === accountId && st.count === count;
+
+// One state entry PER ACCOUNT (batch review 1.55.0): a single shared entry let A↔B alternation
+// refetch every cycle regardless of the daily TTL. Bounded to the most recently fetched accounts.
+const RESET_DETAIL_MAX_ACCOUNTS = 5;
+
+async function readResetDetailState(accountId) {
+  const all = (await chrome.storage.local.get({ [RESET_DETAIL_STATE_KEY]: null }))[RESET_DETAIL_STATE_KEY];
+  // Older single-entry shape ({ accountId, … }) reads as empty: its detail lacks availableCount and
+  // would not merge anyway.
+  const byAccount = all && typeof all === 'object' && all.byAccount && typeof all.byAccount === 'object' ? all.byAccount : {};
+  return { byAccount, st: Object.hasOwn(byAccount, accountId) ? byAccount[accountId] : null };
+}
+
+async function writeResetDetailState(byAccount, accountId, entry) {
+  const next = { ...byAccount, [accountId]: entry };
+  const keep = Object.entries(next)
+    .sort((a, b) => Math.max(b[1]?.fetchedAt || 0, b[1]?.failedAt || 0) - Math.max(a[1]?.fetchedAt || 0, a[1]?.failedAt || 0))
+    .slice(0, RESET_DETAIL_MAX_ACCOUNTS);
+  await chrome.storage.local.set({ [RESET_DETAIL_STATE_KEY]: { byAccount: Object.fromEntries(keep) } });
+}
+
+/**
+ * The summary with the detail merged in, fetching the detail only when due. Never throws past the
+ * caller's isolation; on any failure the summary is returned as it was (counts, no kinds/expiry).
+ * State lives in chrome.storage.local, per account: { byAccount: { [accountId]: { accountId, count,
+ * fetchedAt, detail, failedAt, failures } } }.
+ */
+async function withResetPassDetail(summary, accountId) {
+  // 「모름」 stays 「모름」; 0 held needs no detail — there is nothing to classify.
+  if (summary?.known !== true || summary.available === 0) return summary;
+  const now = Date.now();
+  const { byAccount, st } = await readResetDetailState(accountId);
+  const fresh = resetDetailMatches(st, accountId, summary.available) && now - st.fetchedAt < RESET_DETAIL_TTL_MS;
+  const sameAccountFailures = st?.failures || 0;
+  const backoffMs = Math.min(RESET_DETAIL_TTL_MS, RESET_DETAIL_BACKOFF_BASE_MS * 2 ** Math.max(0, sameAccountFailures - 1));
+  const inBackoff = sameAccountFailures > 0 && st?.failedAt && now - st.failedAt < backoffMs;
+  if (fresh || inBackoff) {
+    return resetDetailMatches(st, accountId, summary.available) ? mergeChatGPTResetDetail(summary, st.detail, now) : summary;
+  }
+  let detail = null;
+  try {
+    detail = parseChatGPTResetDetail(await fetchChatGPTResetDetail(), now);
+    // 🔴 Same account? The detail GET is scoped to the site's ACTIVE workspace, which may have
+    // switched since /wham/usage was read (batch review 1.55.0) — and two accounts can hold the
+    // same count, so the count check in the merge alone cannot tell. Re-read the active account
+    // right after; a different one discards the detail. Costs one GET only when a detail was fetched.
+    if (detail) {
+      const again = await fetchChatGPTApi(CHATGPT_USAGE_PATH);
+      if ((again?.account_id || again?.user_id || 'unknown') !== accountId) detail = null;
+    }
+    // A detail that cannot explain this summary (count mismatch) is not stored as fresh either —
+    // it would pin 「kinds unknown」 for the whole TTL; it takes the failure path (short backoff).
+    if (detail && detail.availableCount !== summary.available) detail = null;
+  } catch (e) {
+    console.warn('[Claude Tuner] ChatGPT reset-credit detail fetch failed:', e && e.message);
+    detail = null;
+  }
+  if (!detail) {
+    // Keep the last good detail (it still merges while the count is unchanged), count the failure.
+    await writeResetDetailState(byAccount, accountId, {
+      ...(st || { accountId, count: null, fetchedAt: 0, detail: null }),
+      failedAt: now, failures: sameAccountFailures + 1,
+    });
+    return resetDetailMatches(st, accountId, summary.available) ? mergeChatGPTResetDetail(summary, st.detail, now) : summary;
+  }
+  await writeResetDetailState(byAccount, accountId, {
+    accountId, count: summary.available, fetchedAt: now, detail, failedAt: null, failures: 0,
+  });
+  return mergeChatGPTResetDetail(summary, detail, now);
+}
+
 /**
  * Collect ChatGPT usage data.
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
@@ -149,7 +242,7 @@ export async function collectChatGPT(force = false, userManual = false) {
   // an earlier failure (see sendChatGPTSnapshot).
   const sendOutcome = { failed: null, ok: 0 };
   try {
-    const usage = await fetchChatGPTApi('/backend-api/wham/usage');
+    const usage = await fetchChatGPTApi(CHATGPT_USAGE_PATH);
 
     // 🔴 Computed on the RAW response, before the give-up below and before parseAdditionalLimits
     // truncates the bucket list to 5. Neither the early return nor the payload can answer "what did
@@ -216,7 +309,21 @@ export async function collectChatGPT(force = false, userManual = false) {
       reachedType: decoration('rate_limit_reached_type', () => parseReachedType(usage), undefined),
       // Raw-array census for server-side observation only — never rendered (#1184).
       bucketCensus: decoration('bucket_census', () => summarizeLimitBuckets(usage), null),
+      // Reset passes held (#2092) — `rate_limit_reset_credits`, already in this response. Kept
+      // locally as is; 🔴 the server gets only resetPassField()'s disclosed summary (P0b, /privacy
+      // section 2), never this object. Extra workspaces get none — /wham/usage describes the
+      // active account only.
+      resetPasses: decoration('reset_passes', () => parseChatGPTResetSummary(usage).summary, unknownResetPassSummary('chatgpt')),
     };
+
+    // Kinds + expiry from the detail GET (P1-4), inside the same failure isolation as decoration():
+    // whatever happens there, the summary above stands and the 5h/7d numbers go out.
+    try {
+      org.resetPasses = await withResetPassDetail(org.resetPasses, accountId);
+    } catch (e) {
+      console.warn('[Claude Tuner] ChatGPT reset_pass_detail skipped:', e && e.message);
+      noteDriftEvent('chatgpt', { stage: 'decorate:reset_pass_detail', code: unclassifiedCode('err_chatgpt_unclassified', e) });
+    }
 
     // Append to local usage history (for chart display)
     await appendUsageHistory({
@@ -442,6 +549,9 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     // and never lets it overwrite what it derived from the request's own headers.
     // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
     ...(await platformField()),
+    // Reset-pass summary (#2092 P0b) — the disclosed fields only, never the org object's summary
+    // itself. Extra workspaces carry none (absent → `{}`).
+    ...resetPassField(org.resetPasses),
     // Force = "store, don't dedup": the server's usage-only dedup (sig cache / D1) keys on
     // h5/d7/r7, so a plan/pending change with flat usage would otherwise be dropped. Set only on
     // plan/pending-change or user-manual sends (shouldForceProviderPost) — flat heartbeats stay dedupable.

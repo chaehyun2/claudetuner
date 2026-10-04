@@ -11,7 +11,7 @@
 import { COMPARE_PORT_NAME, SESSION_ID_RE, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_TOO_MANY, CODE_COMPARE_QUOTA, CODE_NO_TARGETS, CODE_BUSY, CODE_NETWORK_ERROR, CODE_NO_TAB, CODE_ABORTED, CODE_SESSION_ENDED, CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX, PORT_MSG_PING, KEEPALIVE_MS, KEEPALIVE_MAX_IDLE_MS, CODE_SEND_FAILED, SEND_KIND_SUMMARY, SEND_KIND_RETRY, CROSSCHECK_SEND_KINDS, SEND_VIA_COLUMN, GATE_CODES, PROVIDER_BUSY_CODES, STAGE_SEND_START, TTFT_BADGE_STAGES, STAGE_TOOL_USE, BADGE_SEARCHING, BADGE_WAITING, BADGE_UPLOADING, STAGE_ATTACHMENT_UPLOADED } from './constants.js';
 import { autoGrow, sendableTargets, answeredTurn, exampleSentCode, answerTiming } from './helpers.js';
 import { attachmentsForRound, roundOwnsTray } from './attachments.js';
-import { isImageType } from './attach-types.js';
+import { isImageType, attachKindOf } from './attach-types.js';
 import { linkErrorText } from './link.js';
 import { REVIEW_SOURCE_COMPARE } from './review-nudge.js';
 import { keptFor, foldSaveBy, legacySaveHistory, SAVE_MODE_KEPT } from './save-mode.js';
@@ -751,7 +751,9 @@ export function installPort(ctx) {
     // many of the round's files were documents — the share card counts images from it.
     const imgIds = roundAtts.filter((a) => a.imageId).map((a) => a.imageId);
     const docs = roundAtts.filter((a) => !a.imageId).length;
-    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}), ids: imgIds, ...(docs ? { docs } : {}) } : null;
+    // `kinds` (2026-10-05): each file's kind in order (image / pdf / docx …), so a share can show
+    // which is which by its icon — the names stay home.
+    const imgMark = roundAtts.length ? { name: roundAtts[0].name, bytes: roundAtts[0].bytes, ...(roundAtts.length > 1 ? { more: roundAtts.length - 1 } : {}), ids: imgIds, ...(docs ? { docs } : {}), kinds: roundAtts.map((a) => attachKindOf(a.type)) } : null;
     if (type === 'SEND') state.questionImg = imgMark; // the first round's question is the bubble, not a turn
     // The session id exists from the FIRST message out (it rides the wire, §5) — the same id the
     // history entry gets at CONSUME_OK; 새 대화 drops it and the next first SEND mints a new one.

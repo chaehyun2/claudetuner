@@ -24,7 +24,7 @@ import { renderAnswer } from '../md-render.js';
 import {
   PROVIDER_META, COPY_FEEDBACK_MS, SHARE_MSG_TYPE, SHARE_OP_CREATE, SHARE_OP_UPDATE, SHARE_OP_DELETE, SHARE_OP_LIST, SHARE_OP_PASSWORD,
   SHARE_AUTHOR_ANON, SHARE_AUTHOR_NAME, SHARE_AUTHOR_NAME_PHOTO, SHARE_AUTHOR_MODES, SHARE_AUTHOR_DEFAULT, SHARE_AUTHOR_PREF_KEY, SHARE_AUTHOR_PREF_KEY_V1, SHARE_MAP_KEY, SHARE_MAP_MAX,
-  SHARE_ID_RE, SHARE_TITLE_INPUT_MAX, SHARE_NAME_INPUT_MAX, SHARE_VIS_PUBLIC, SHARE_VIS_PRIVATE, SHARE_PASSWORD_MIN, SHARE_PASSWORD_INPUT_MAX, SHARE_LOCK_NAME, SHARE_LOCK_WAIT_MS, shareUrlOf,
+  SHARE_ID_RE, SHARE_TITLE_INPUT_MAX, SHARE_NAME_INPUT_MAX, SHARE_VIS_PUBLIC, SHARE_VIS_PRIVATE, SHARE_PASSWORD_MIN, SHARE_PASSWORD_INPUT_MAX, SHARE_LOCK_NAME, SHARE_LOCK_WAIT_MS, shareUrlOf, ATTACH_KIND_IMAGE, ATTACH_KIND_FILE,
 } from './constants.js';
 import { sendMessage } from './helpers.js';
 import { bytesToBase64 } from './attachments.js';
@@ -74,6 +74,11 @@ export function installShare(ctx) {
   // #1985 decision 3: a conversation with ANY incognito service is still shared (the user's own
   // upload), and the share surfaces say so in one line — never a block.
   const incognitoShared = () => !!state.sessionSaveBy && foldSaveBy(state.sessionSaveBy) !== SAVE_MODE_KEPT;
+  // Did any question of this snapshot carry files? The link shows only their kinds, never the files
+  // themselves — the sharer is told so (2026-10-05) where the link is made, only when it applies.
+  const sharesAttachments = (snap) => !!snap && (
+    (snap.rounds || []).some((r) => (r.att && r.att.length) || r.qImages > 0)
+    || ((snap.debate && snap.debate.timeline) || []).some((it) => it.att && it.att.length));
   state.shares = {}; // SHARE_MAP_KEY as last read: sessionId → {id, title, updatedAt, kind}
 
   // ── the local map ──
@@ -402,7 +407,12 @@ export function installShare(ctx) {
     for (const r of Object.values(dlg.vis)) r.disabled = !!existing;
     dlg.passwordInput.hidden = !priv || !!existing;
     dlg.authorSet.hidden = priv;
-    dlg.warn.textContent = t(priv ? 'share_warn_private' : 'share_warn') + (incognitoShared() ? ` ${t('share_incognito_note')}` : '');
+    paintWarn();
+  }
+  /** The warning line under the form: visibility, plus incognito answers / files when they apply. The snapshot is the preview's (repaintPreview repaints this too). */
+  function paintWarn() {
+    const priv = dlg.share ? dlg.share.vis === 'private' : privateChosen();
+    dlg.warn.textContent = t(priv ? 'share_warn_private' : 'share_warn') + (incognitoShared() ? ` ${t('share_incognito_note')}` : '') + (sharesAttachments(dlg.snapshot) ? ` ${t('share_attach_note')}` : '');
   }
   function setError(code) {
     dlg.error.textContent = code ? t(SHARE_ERR_CODES.includes(code) ? `share_err_${code}` : 'share_err_generic') : '';
@@ -538,6 +548,7 @@ export function installShare(ctx) {
     const built = build(dlg.entry, dlg.titleInput.value, dlg.focus);
     clear(dlg.preview);
     dlg.snapshot = built.error ? null : built.snapshot; // what 「링크 만들기 / 업데이트」 sends — exactly this
+    paintWarn();
     dlg.submitBtn.disabled = busy || !!built.error;
     if (built.error) { setError(built.error); return; }
     setError(null);
@@ -554,6 +565,16 @@ export function installShare(ctx) {
     const byKey = Object.fromEntries(snap.columns.map((c) => [c.key, c]));
     const colName = (c) => (c.model ? `${PROVIDER_META[c.provider].label} ${c.model}` : PROVIDER_META[c.provider].label);
     let focusNode = null;
+    // A question's files, by KIND (the share carries no names): 「(첨부: PDF · 이미지 ×2)」. A
+    // snapshot always has `att` when it has files; `qImages` alone would be a share from before it.
+    const attLine = (att, qImages) => {
+      const kinds = Array.isArray(att) && att.length ? att : Array.from({ length: qImages || 0 }, () => ATTACH_KIND_IMAGE);
+      if (!kinds.length) return '';
+      const counts = new Map();
+      for (const k of kinds) counts.set(k, (counts.get(k) || 0) + 1);
+      const label = (k) => (k === ATTACH_KIND_IMAGE ? t('share_att_image') : k === ATTACH_KIND_FILE ? t('share_att_file') : k.toUpperCase());
+      return `\n${t('share_att', [...counts].map(([k, n]) => (n > 1 ? `${label(k)} ×${n}` : label(k))).join(' · '))}`;
+    };
     const bubble = (cls, name, text, markdown, state) => {
       const b = el('div', `cmp-share-msg ${cls}`);
       b.appendChild(el('div', 'cmp-share-msg-who', name));
@@ -570,7 +591,7 @@ export function installShare(ctx) {
     if (snap.kind === 'compare') {
       snap.rounds.forEach((r, i) => {
         dlg.preview.appendChild(el('p', 'cmp-share-round', r.kind === 'summary' ? t('share_round_summary') : t('share_round', i + 1)));
-        const q = bubble('is-me', who, r.q + (r.qImages ? `\n${t('share_images', r.qImages)}` : ''), false, 'ok');
+        const q = bubble('is-me', who, r.q + attLine(r.att, r.qImages), false, 'ok');
         if (snap.focus && snap.focus.round === i && !snap.focus.col) focusNode = q;
         for (const c of snap.columns) {
           const a = r.answers[c.key];
@@ -584,7 +605,7 @@ export function installShare(ctx) {
       d.timeline.forEach((it, i) => {
         const c = byKey[it.who];
         const name = it.who === 'user' ? who : `${d.aliases[it.who] || colName(c)}${it.role === 'mod' ? ` · ${t('debate_role_moderator')}` : ''}`;
-        const n = bubble(it.who === 'user' ? 'is-me' : '', name, it.text, it.who !== 'user', it.state || 'ok');
+        const n = bubble(it.who === 'user' ? 'is-me' : '', name, it.who === 'user' ? it.text + attLine(it.att, 0) : it.text, it.who !== 'user', it.state || 'ok');
         if (snap.focus && snap.focus.t === i) focusNode = n;
       });
     }
@@ -857,6 +878,9 @@ export function installShare(ctx) {
     const incog = el('p', 'cmp-sharepop-incog', t('share_incognito_note'));
     incog.hidden = true;
     node.appendChild(incog); // from the click on (Codex stage 3 1R 후속): said while the link is being made, not after
+    const attNote = el('p', 'cmp-sharepop-att', t('share_attach_note'));
+    attNote.hidden = true;
+    node.appendChild(attNote);
 
     const linkRow = el('div', 'cmp-sharepop-link');
     const url = el('input', 'cmp-sharepop-url');
@@ -1001,7 +1025,7 @@ export function installShare(ctx) {
     ctx.root.appendChild(node);
     return {
       node, mark, status, close, sub, linkRow, url, copyBtn, openSlot, pw, pwAdd, pwOn, pwChange, pwRemove, pwForm, pwInput, pwSave,
-      author, radios, who, error, foot, scope, incog, actions, deleteBtn, mineBtn, confirm, confirmYes,
+      author, radios, who, error, foot, scope, incog, attNote, actions, deleteBtn, mineBtn, confirm, confirmYes,
       phase: 'working', statusKey: '', subKey: '', askedAuthor: null, share: null, sessionId: null, snapshot: null, settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false, pwEditing: false, confirming: false,
     };
   }
@@ -1046,6 +1070,7 @@ export function installShare(ctx) {
     pop.foot.hidden = !href;
     pop.scope.textContent = t(priv ? 'share_scope_private' : 'share_scope_public');
     pop.incog.hidden = !incognitoShared();
+    pop.attNote.hidden = !sharesAttachments(pop.snapshot);
     pop.actions.hidden = pop.confirming;
     pop.confirm.hidden = !pop.confirming;
     // Nothing is pressed twice while a write runs; the inputs of that write are already taken.

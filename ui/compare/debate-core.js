@@ -14,6 +14,7 @@
 import { neutraliseQuoted, mdInlineText } from './helpers.js';
 import { CLAUDE_FAST_MODEL, CLAUDE_SONNET_MODEL, isPaidClaudePlan } from '../../vendor-ai/models.js';
 import { TURN_KIND_DEBATE, COMPARE_PROVIDERS, colIdOf, DEBATE_BALANCED_MIN_TURNS, DEBATE_MAX_ASKS, DEBATE_BUDGET_CONTINUE } from './constants.js';
+import { usagePeak } from './usage-floor.js';
 
 export const DEBATE_ALIAS_MAX = 20;
 // Characters an alias may not hold: line breaks / controls, and everything that is structure in a
@@ -217,7 +218,8 @@ export function problemInSettings(key) {
 // The debate tab's default is three debaters (one per service) plus a moderator column. The
 // moderator speaks between every turn — about half a run's sends — so it is a FAST mid-tier model
 // (a reasoning model costs 20–60 s and the user's limit per call; a too-light one breaks the
-// `NEXT:` line). Its service: a paid plan first, then this order (user decision, 2026-09-27).
+// `NEXT:` line). Its service: a paid plan first, then this order (user decision, 2026-09-27) — both after
+// the usage left (moderatorOrder, #2082).
 export const MODERATOR_RANK = ['chatgpt', 'claude', 'gemini'];
 // Claude's moderator model by plan — asked for explicitly, so it is its own column beside the Claude
 // debater's `claude:auto`. Paid: Sonnet 5.5 — vendor-ai's FAST_MODEL since v0.22.0 (claude.ai's
@@ -259,6 +261,35 @@ export function planTier(provider, label) {
 }
 /** A plan label is a known paid plan (planTier) — the moderator seat's 「paid first」. */
 export const isPaidPlan = (label, provider) => planTier(provider, label) === 'paid';
+// ── the moderator's usage (#2082) ──
+// The moderator answers after every debater turn: in one all-Free debate (2026-10-04) it was 26 of the
+// Gemini Free account's 40 requests (~3x a debater), and Gemini's 5h window went 0 → 100% in ~50 min while
+// the other two showed nothing. So WHEN a moderator is picked (never during a run — a debate keeps the
+// moderator it started with) the services are ordered by the room they have left, in two classes:
+//   roomy — a live usage peak below MOD_BUSY_PCT, or NOTHING known: Claude Free has published no usage since
+//           2026-08-21, and a service without a snapshot says nothing. Unknown reads as 「not exhausted」, the
+//           same reading as usage-floor.js (never a decision on a guess) — it keeps its plan / rank place;
+//   busy  — a live window at or past MOD_BUSY_PCT (any plan): last, the lowest peak first.
+// Within a class the 2026-09-27 rule is unchanged: a paid plan first, then MODERATOR_RANK. Gemini Free — the
+// smallest window (0.25x, metered by throughput: ~2.5%p per moderator call measured) — is therefore already
+// the last roomy choice: Gemini is last in the rank and a Free plan never outranks a paid one. A service is
+// only REORDERED, never dropped — when it is the only one that can moderate, it still does.
+export const MOD_BUSY_PCT = 70;
+/**
+ * MODERATOR_RANK re-ordered for picking a moderator from the status (`providers[p]` = { plan, usage }):
+ * roomy before busy, busy by the lower peak, then paid first, then the rank. `usage: false` leaves usage out
+ * (the plan / rank order alone — what the pick was before #2082).
+ */
+export function moderatorOrder(providers, { now = Date.now(), usage = true } = {}) {
+  const ps = providers || {};
+  const keyed = MODERATOR_RANK.map((p, rank) => {
+    const s = ps[p] || {};
+    const peak = usage ? usagePeak(s.usage, { now }) : null;
+    return { p, rank, busy: peak !== null && peak >= MOD_BUSY_PCT, peak, paid: isPaidPlan(s.plan, p) ? 1 : 0 };
+  });
+  keyed.sort((a, b) => a.busy - b.busy || (a.busy && b.busy ? a.peak - b.peak : 0) || b.paid - a.paid || a.rank - b.rank);
+  return keyed.map((k) => k.p);
+}
 const catalogIds = (list) => (Array.isArray(list) ? list.filter((m) => m && typeof m === 'object' && m.id != null && m.id !== '').map((m) => ({ id: String(m.id), label: String(m.label || ''), default: m.default === true, role: typeof m.role === 'string' ? m.role : null })) : []);
 /**
  * Where the default moderator sits, from the status (`providers[p]` = { loggedIn, permitted, plan },
@@ -266,14 +297,21 @@ const catalogIds = (list) => (Array.isArray(list) ? list.filter((m) => m && type
  * explicit id (an `auto` column takes the stored model seed, which may be a slow one — plan §18.9 ②);
  * `debaterModel` = the model the SAME service's debater then uses instead of Auto (ChatGPT on a catalog
  * whose default IS the Instant the moderator takes: its debater moves to Thinking), else null.
- * Null when no signed-in service offers a moderator model.
+ * Null when no signed-in service offers a moderator model. The services are tried in moderatorOrder —
+ * the usage left first (#2082), then paid, then the rank; `now` = the clock the usage windows are read by.
  */
-export function pickModeratorSeat({ providers, catalogs }) {
+export function pickModeratorSeat({ providers, catalogs, now = Date.now() }) {
   const ps = providers || {};
-  const cats = catalogs || {};
-  const ready = MODERATOR_RANK.filter((p) => ps[p] && ps[p].loggedIn === true && ps[p].permitted === true);
-  // Stable: paid first, the rank order within each group.
-  const order = [...ready.filter((p) => isPaidPlan(ps[p].plan, p)), ...ready.filter((p) => !isPaidPlan(ps[p].plan, p))];
+  const ready = (p) => ps[p] && ps[p].loggedIn === true && ps[p].permitted === true;
+  const seat = seatFrom(moderatorOrder(ps, { now }).filter(ready), ps, catalogs || {});
+  if (!seat) return null;
+  // `passed` (#2082): the service the plan / rank order alone would have seated, when usage moved the seat
+  // past it — the ⚙ panel says why another AI moderates. Absent when usage changed nothing.
+  const plain = seatFrom(moderatorOrder(ps, { usage: false }).filter(ready), ps, catalogs || {});
+  return plain && plain.provider !== seat.provider ? { ...seat, passed: plain.provider } : seat;
+}
+/** The first service of `order` whose catalog offers its moderator model (pickModeratorSeat), or null. */
+function seatFrom(order, ps, cats) {
   for (const p of order) {
     const list = catalogIds(cats[p]);
     const tierOfRow = (m) => defaultAliasOf(p, m.id, m.label, m.role);
@@ -306,7 +344,53 @@ export function defaultDebateLayout(pick) {
   const ids = COMPARE_PROVIDERS.map((p) => colIdOf(p, pick && pick.provider === p ? pick.debaterModel : null));
   if (!pick) return { ids, seat: null };
   const seat = colIdOf(pick.provider, pick.model);
-  return ids.includes(seat) ? { ids, seat: null } : { ids: [...ids, seat], seat };
+  if (ids.includes(seat)) return { ids, seat: null };
+  return pick.passed ? { ids: [...ids, seat], seat, passed: pick.passed } : { ids: [...ids, seat], seat };
+}
+/** The services signed in AND permitted on a status (`providers[p]`) — the seat's candidates (pickModeratorSeat). */
+export function readyServices(providers) {
+  const ps = providers || {};
+  return MODERATOR_RANK.filter((p) => ps[p] && ps[p].loggedIn === true && ps[p].permitted === true);
+}
+/**
+ * The default debate layout picked from a status — defaultDebateLayout(pickModeratorSeat) plus `ready`: the
+ * services that were candidates for it (readyServices), so a later status can tell a service that has
+ * BECOME ready since (repickSeat, #2087).
+ */
+export function pickDebateDefault({ providers, catalogs, now = Date.now() }) {
+  return { ...defaultDebateLayout(pickModeratorSeat({ providers, catalogs, now })), ready: readyServices(providers) };
+}
+/**
+ * #2087: the default layout once more services are ready than when it was picked (a new user's first status
+ * reaches the page before Claude's login / site access does — the seat went to Gemini, then Claude was there).
+ * `prev` = the layout picked (pickDebateDefault). Re-picked only when a service that was NOT ready at any
+ * earlier pick is ready now AND the pick from this status seats exactly that service — i.e. a better candidate
+ * per moderatorOrder became ready. Readiness is the only trigger: a catalog or usage that changed meanwhile
+ * moves nothing (§18.9 ⑥, Codex U2 1R: no re-pick on a tab round trip), and `ready` only grows (merged on
+ * every call), so each service can move the seat at most once — bounded, never back and forth.
+ * Returns `prev` itself when nothing changed; a layout with the merged `ready` (same ids) when a service
+ * became ready without taking the seat; else the new layout with `repicked: true`.
+ * The caller decides whether the page may follow (pre-session, nothing the user chose — compare.js).
+ */
+export function repickSeat(prev, { providers, catalogs, now = Date.now() }) {
+  if (!prev) return prev;
+  const before = Array.isArray(prev.ready) ? prev.ready : [];
+  const fresh = readyServices(providers).filter((p) => !before.includes(p));
+  if (!fresh.length) return prev;
+  const ready = MODERATOR_RANK.filter((p) => before.includes(p) || fresh.includes(p));
+  const pick = pickModeratorSeat({ providers, catalogs, now });
+  const seatProv = prev.seat ? String(prev.seat).split(':')[0] : null;
+  if (!pick || !fresh.includes(pick.provider) || pick.provider === seatProv) return { ...prev, ready };
+  return { ...defaultDebateLayout(pick), ready, repicked: true };
+}
+/**
+ * The service the seat was picked past for its usage (`layout.passed`, defaultDebateLayout) — only for the
+ * layout's own seat, and only while that service still has a column among `targets`: with its columns removed
+ * it was not 「passed over」, it is not taking part (Codex #2082 1R). Null otherwise.
+ */
+export function seatPassed(layout, seat, targets) {
+  if (!layout || !seat || layout.seat !== seat || !layout.passed) return null;
+  return (Array.isArray(targets) ? targets : []).some((id) => String(id).split(':')[0] === layout.passed) ? layout.passed : null;
 }
 /**
  * The moderator a debate starts with when the user never chose one (`modChosen` false): the seat,
@@ -314,24 +398,27 @@ export function defaultDebateLayout(pick) {
  * leaves three — the seat still moderates rather than debating its own service). Without the seat on
  * the page but with 3+ AIs, one of them moderates (#1909, 2026-09-29 user decision: an unmoderated
  * debate has nobody to check facts or conclude — a shared one ran 100 turns): fallbackModerator. Fewer → auto.
- * `tierKeyOf(colId)` = a column's model-group key (for the fallback's pick), optional.
+ * `tierKeyOf(colId)` = a column's model-group key (for the fallback's pick), optional. `order` = the services
+ * in the order the fallback tries them (moderatorOrder over the status — #2082), MODERATOR_RANK when absent.
  */
-export function defaultModerator(seat, targets, tierKeyOf = null) {
+export function defaultModerator(seat, targets, tierKeyOf = null, order = null) {
   const list = Array.isArray(targets) ? targets : [];
   if (list.length < DEFAULT_MOD_MIN_TARGETS) return { moderator: MOD_AUTO, modCol: null };
   if (seat && list.includes(seat)) return { moderator: MOD_AI, modCol: seat };
-  return { moderator: MOD_AI, modCol: fallbackModerator(list, tierKeyOf) };
+  return { moderator: MOD_AI, modCol: fallbackModerator(list, tierKeyOf, order) };
 }
 /**
  * Which of the page's own columns moderates when the seat is not there: a FAST one (the moderator
- * speaks between every turn — not a high-end or reasoning model) of the first service in
- * MODERATOR_RANK that has one; else the first column of that rank; else the last column.
+ * speaks between every turn — not a high-end or reasoning model) of the first service in `order`
+ * (MODERATOR_RANK, or moderatorOrder's usage-aware order) that has one; else the first column of that
+ * order; else the last column.
  */
-export function fallbackModerator(targets, tierKeyOf = null) {
+export function fallbackModerator(targets, tierKeyOf = null, order = null) {
+  const ranks = Array.isArray(order) && order.length ? order : MODERATOR_RANK;
   const provOf = (id) => String(id).split(':')[0];
   const slow = (id) => [TIER_HIGH, TIER_REASONING].includes(tierKeyOf ? tierKeyOf(id) : null);
-  for (const p of MODERATOR_RANK) { const fast = targets.find((id) => provOf(id) === p && !slow(id)); if (fast) return fast; }
-  for (const p of MODERATOR_RANK) { const any = targets.find((id) => provOf(id) === p); if (any) return any; }
+  for (const p of ranks) { const fast = targets.find((id) => provOf(id) === p && !slow(id)); if (fast) return fast; }
+  for (const p of ranks) { const any = targets.find((id) => provOf(id) === p); if (any) return any; }
   return targets[targets.length - 1];
 }
 // Two debaters plus the seat — the same floor as a chosen AI moderator (planCast). A seat exists only

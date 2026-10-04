@@ -909,6 +909,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-debate-modpicks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .cmp-debate-modpicks-label { font-size: 12px; font-weight: 650; color: var(--text-secondary); }
 .cmp-debate-modpicks-note { font-size: 12px; color: var(--text-secondary); }
+.cmp-debate-modpicks-cost { flex-basis: 100%; font-size: 12px; color: var(--text-secondary); }
 .cmp-debate-modpick { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px 0 4px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12.5px; cursor: pointer; }
 .cmp-debate-modpick.is-checked { border-color: var(--accent); background: var(--accent-light); color: var(--accent); font-weight: 650; }
 .cmp-debate-modpick:disabled { opacity: .55; cursor: default; }
@@ -1268,8 +1269,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-sharepop-foot { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--border); }
 .cmp-sharepop-scope { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
 /* #1985 decision 3: 「시크릿 대화의 답도 공유 링크에 포함돼요」 — shown from the click on, while incognito was in the session. */
-.cmp-sharepop-incog { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
-.cmp-sharepop-incog[hidden] { display: none; }
+.cmp-sharepop-incog, .cmp-sharepop-att { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
+.cmp-sharepop-incog[hidden], .cmp-sharepop-att[hidden] { display: none; }
 .cmp-sharepop-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cmp-sharepop-textbtn { padding: 3px 0; border: 0; background: transparent; font-size: 12.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
 .cmp-sharepop-textbtn:hover:not(:disabled) { text-decoration: underline; }

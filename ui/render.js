@@ -6,6 +6,7 @@ import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
+import { renderResetPassChip } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from './recommend.js';
 import { _providerOrgLabel, renderAdditionalLimits } from './org-selector.js';
 import { _authedFetch } from './auth.js';
@@ -389,6 +390,7 @@ export function _updateUICore(status) {
     // snapshot again here would be a second source that could disagree with selectOrg's.
     const _primaryOrgEntry = (state.collectedOrgs || []).find(o => o.uuid === s.claude_org_uuid);
     renderAdditionalLimits(_primaryOrgEntry?.additionalLimits);
+    renderResetPassChip(_primaryOrgEntry); // #2092 P1-1 — same stored org as the line above
 
     // Reset the headline; the gauge branches below re-show it via
     // renderGaugePrediction('5h'), or leave it hidden (usage-based Enterprise).
@@ -490,7 +492,7 @@ export function _updateUICore(status) {
 
     // If a window is already maxed out, overwrite the strip with a plain "limit reached — wait
     // until {reset}" message (overrides the collecting teaser renderGaugePrediction may have set).
-    renderLimitReachedHeadline(util5h, s.five_hour?.resets_at, util7d, s.seven_day?.resets_at, s.five_hour?.window_seconds, s.seven_day?.window_seconds);
+    renderLimitReachedHeadline(util5h, s.five_hour?.resets_at, util7d, s.seven_day?.resets_at, s.five_hour?.window_seconds, s.seven_day?.window_seconds, _primaryOrgEntry);
 
     // === Extra usage (collapsible) ===
     const extraSection = document.getElementById('extra-usage-section');

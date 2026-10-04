@@ -851,6 +851,170 @@
   };
   function cgUsageNote(lang) { return CG_USAGE_NOTE[lang] || CG_USAGE_NOTE.en; }
 
+  // ── Usage-limit reset pass holdings chip (#2092 P1-1) ────────────────────────────────────────
+  //
+  // 🔴 CANONICAL COPY FOR THE EXTENSION. The popup / side panel (ESM, loads this file — see
+  // popup.html) and the in-page sidebars (classic content scripts) draw the SAME one-line chip from
+  // the org's `resetPasses` summary (bg/reset-pass-model.js shape). Building it here once is what
+  // keeps the two from disagreeing about whether a pass exists.
+  //
+  // Rules (docs/plans/usage-reset-passes.md §3 P1-1):
+  //   · `known:false` (field absent / ineligible / unreadable) and `available: 0` both render
+  //     NOTHING. 「모름」 must never read as 「0장」, and 0 passes is not worth a line.
+  //   · kinds with a zero count are left out; when the kinds are not known (ChatGPT before its
+  //     detail read) the chip says only the total.
+  //   · expiry is a DATE (10/23), never "N days left": a countdown would change the HTML on every
+  //     collection and re-render the surfaces (and drop a hovered tooltip) for nothing.
+  //   · the link is NOT built here: the caller passes it, made by bg/reset-pass-model.js
+  //     resetPassSiteUrl (the one place the two settings pages are spelled — ESM, which this classic
+  //     script cannot import; the SW hands it to the in-page panels as payload `rpUrl`). No url →
+  //     no chip, so a stale caller can never point it somewhere else. Passes are spent on the
+  //     provider's page, never from the extension (§4).
+  //
+  // 🪤 No double quote in any string below: the title is interpolated into title="...".
+  const RESET_PASS_WARN_DAYS = 3;
+  const RESET_PASS_DAY_MS = 86400000;
+  const RESET_PASS_KINDS = ['full', 'five_hour', 'weekly'];
+  const RP_UI_TEXT = {
+    ko: {
+      rp_ui_chip_name: '초기화 패스',
+      rp_ui_kind_full: '전체 {n}',
+      rp_ui_kind_five_hour: '5시간 {n}',
+      rp_ui_kind_weekly: '주간 {n}',
+      rp_ui_chip_total: '{n}장 보유',
+      rp_ui_chip_expires: '{d} 만료',
+      rp_ui_chip_cg_scope: 'Codex·Work 한도만',
+      rp_ui_tip_held: '사용 한도 초기화 패스 {n}장 보유',
+      rp_ui_tip_kinds: '종류: {k}',
+      rp_ui_tip_expires: '가장 빠른 만료: {d}',
+      rp_ui_tip_cg_scope: 'ChatGPT 패스는 Codex·Work 한도에만 적용돼요(채팅 한도 제외)',
+      rp_ui_tip_click: '클릭하면 사용량 설정이 열려요 — 거기서 바로 사용할 수 있어요',
+      rp_ui_help_tip_claude: '전체 초기화는 5시간 및 주간 사용량 제한을 다시 채웁니다. 5시간 초기화는 5시간 사용량 제한을 다시 채웁니다.',
+      rp_ui_help_tip_chatgpt: '초기화를 사용해 5시간 한도나 주간 한도, 또는 두 한도를 모두 복원하세요. Codex·Work 한도에만 적용됩니다(채팅 제외).',
+      rp_ui_help_more: '? 를 누르면 도움말이 열립니다.',
+    },
+    en: {
+      rp_ui_chip_name: 'Reset passes',
+      rp_ui_kind_full: 'Full {n}',
+      rp_ui_kind_five_hour: '5-hour {n}',
+      rp_ui_kind_weekly: 'Weekly {n}',
+      rp_ui_chip_total: '{n} held',
+      rp_ui_chip_expires: 'expires {d}',
+      rp_ui_chip_cg_scope: 'Codex & Work limits only',
+      rp_ui_tip_held: 'Usage limit reset passes held: {n}',
+      rp_ui_tip_kinds: 'Kinds: {k}',
+      rp_ui_tip_expires: 'Earliest expiry: {d}',
+      rp_ui_tip_cg_scope: 'ChatGPT passes apply to Codex & Work limits only (not chat)',
+      rp_ui_tip_click: 'Click to open the usage settings — you can use a pass right there',
+      rp_ui_help_tip_claude: 'A full reset refills your 5-hour and weekly usage limits. A 5-hour reset refills your 5-hour usage limit.',
+      rp_ui_help_tip_chatgpt: 'Use a reset to restore your 5-hour limit, weekly limit, or both. Applies to Codex & Work limits only (not chat).',
+      rp_ui_help_more: 'Click ? to open the help article.',
+    },
+  };
+  function rpText(lang, key, vars) {
+    const table = RP_UI_TEXT[lang] || RP_UI_TEXT.en;
+    let s = table[key] || RP_UI_TEXT.en[key] || '';
+    for (const k in (vars || {})) s = s.replace('{' + k + '}', String(vars[k]));
+    return s;
+  }
+  function rpCount(n) { return Number.isInteger(n) && n > 0 ? n : 0; }
+  /**
+   * The chip as data — `{ text, title, url, warn }` — or null when nothing may be shown.
+   * `url` = resetPassSiteUrl(provider, SITE_ORIGINS) from the caller; `provider` defaults to the
+   * summary's own.
+   */
+  function resetPassChip(summary, lang, nowMs, provider, url) {
+    const s = summary;
+    if (!s || typeof s !== 'object' || s.known !== true) return null;
+    const total = rpCount(s.available);
+    if (!total) return null;
+    const pv = provider || s.provider;
+    if (typeof url !== 'string' || !/^https:\/\//.test(url)) return null;
+    const kinds = s.by_kind || {};
+    const kindParts = RESET_PASS_KINDS
+      .filter((k) => rpCount(kinds[k]) > 0)
+      .map((k) => rpText(lang, 'rp_ui_kind_' + k, { n: rpCount(kinds[k]) }));
+    // Kinds are shown only when the summary says it knows them AND they carry a count — a
+    // ChatGPT summary read before its detail fetch has `available` but all-zero kinds.
+    const kindsKnown = s.kinds_known !== false && kindParts.length > 0;
+    const parts = [rpText(lang, 'rp_ui_chip_name')];
+    if (kindsKnown) parts.push(...kindParts);
+    else parts.push(rpText(lang, 'rp_ui_chip_total', { n: total }));
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const expMs = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
+    let warn = false;
+    if (Number.isFinite(expMs)) {
+      const d = new Date(expMs);
+      parts.push(rpText(lang, 'rp_ui_chip_expires', { d: `${d.getMonth() + 1}/${d.getDate()}` }));
+      warn = expMs - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
+    }
+    // ChatGPT passes clear the Codex / Work limits only — the same meaning as its gauge, but a
+    // user reading "초기화 패스" beside a chat they cannot send would otherwise expect it to help.
+    if (pv === 'chatgpt') parts.push(rpText(lang, 'rp_ui_chip_cg_scope'));
+    return { text: '🎟 ' + parts.join(' · '), title: resetPassDetailTip(s, lang, pv), url, warn };
+  }
+  const pad2 = (n) => String(n).padStart(2, '0');
+  /**
+   * The hover text of every holdings line (chip, 7d note, headline link): count, kinds, the
+   * earliest expiry as date AND local time, the ChatGPT scope, and what a click does. Static for
+   * an unchanged summary (no countdown), so a re-render with the same data keeps the tooltip.
+   * Empty string when the summary may not be shown (「모름」 / 0 passes).
+   */
+  function resetPassDetailTip(summary, lang, provider) {
+    const s = summary;
+    if (!s || typeof s !== 'object' || s.known !== true) return '';
+    const total = rpCount(s.available);
+    if (!total) return '';
+    const pv = provider || s.provider;
+    const lines = [rpText(lang, 'rp_ui_tip_held', { n: total })];
+    const kinds = s.by_kind || {};
+    const kindParts = RESET_PASS_KINDS
+      .filter((k) => rpCount(kinds[k]) > 0)
+      .map((k) => rpText(lang, 'rp_ui_kind_' + k, { n: rpCount(kinds[k]) }));
+    if (s.kinds_known !== false && kindParts.length) lines.push(rpText(lang, 'rp_ui_tip_kinds', { k: kindParts.join(', ') }));
+    const expMs = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
+    if (Number.isFinite(expMs)) {
+      const d = new Date(expMs);
+      lines.push(rpText(lang, 'rp_ui_tip_expires',
+        { d: `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` }));
+    }
+    if (pv === 'chatgpt') lines.push(rpText(lang, 'rp_ui_tip_cg_scope'));
+    lines.push(rpText(lang, 'rp_ui_tip_click'));
+    return lines.join('\n');
+  }
+  /** The 「?」 help link HTML (empty unless `helpUrl` is https). Shared by every holdings line. */
+  function buildResetPassHelpHtml(lang, helpUrl, provider) {
+    if (typeof helpUrl !== 'string' || !/^https:\/\//.test(helpUrl)) return '';
+    // What a pass DOES, in the provider's own words (claude.ai 「5시간 및 주간 사용량 제한을 다시
+    // 채웁니다」 · chatgpt.com 「5시간 한도나 주간 한도, 또는 두 한도를 모두 복원하세요」), then
+    // where the click goes. ChatGPT passes cover Codex/Work only.
+    const what = rpText(lang, provider === 'chatgpt' ? 'rp_ui_help_tip_chatgpt' : 'rp_ui_help_tip_claude');
+    const tip = escapeHtml(what + '\n' + rpText(lang, 'rp_ui_help_more'));
+    return '<a class="ct-rp-help" href="' + escapeHtml(helpUrl) + '" target="_blank" rel="noopener noreferrer"'
+      + ' title="' + tip + '" aria-label="' + tip + '"'
+      + ' style="flex:none;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;'
+      + 'border-radius:50%;border:1px solid currentColor;font-size:9px;line-height:1;text-decoration:none;'
+      + 'color:inherit;opacity:0.6;cursor:help">?</a>';
+  }
+  /** The chip as one HTML line (empty string when hidden). `cls` = the surface's extra class. */
+  function buildResetPassChipHtml(summary, lang, nowMs, provider, url, cls, helpUrl) {
+    const chip = resetPassChip(summary, lang, nowMs, provider, url);
+    if (!chip) return '';
+    const title = escapeHtml(chip.title);
+    // One row: the chip link (ellipsis) + the 「?」 help link. The row, not the chip, carries `cls`.
+    return '<div class="ct-rp-row' + (cls ? ' ' + escapeHtml(cls) : '') + '"'
+      + ' style="display:flex;align-items:center;gap:4px;min-width:0">'
+      + '<a class="ct-rp-chip' + (chip.warn ? ' is-warn' : '') + '"'
+      + ' href="' + escapeHtml(chip.url) + '" target="_blank" rel="noopener noreferrer"'
+      + ' title="' + title + '" aria-label="' + escapeHtml(chip.text) + ' — ' + title + '"'
+      + ' style="display:block;min-width:0;font-size:11px;line-height:1.4;text-decoration:none;cursor:pointer;'
+      + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+      + (chip.warn ? 'color:#d97706;font-weight:600' : 'color:inherit;opacity:0.75') + '">'
+      + escapeHtml(chip.text) + '</a>'
+      + buildResetPassHelpHtml(lang, helpUrl, provider || (summary && summary.provider))
+      + '</div>';
+  }
+
   // Why an in-page panel has nothing to draw, as one short sentence (#852 in-page remainder, #1592).
   //
   // The panels used to say "수집 중..." for every empty answer, which is a claim — that data is
@@ -1199,6 +1363,11 @@
     extraGaugeDrawn,
     windowLabel,
     cgUsageNote,
+    // ── Reset pass chip (#2092 P1-1) ──
+    resetPassChip,
+    buildResetPassChipHtml,
+    resetPassDetailTip,
+    buildResetPassHelpHtml,
     noDataReason,
     fitCompareButton,
     observeCompareFit,

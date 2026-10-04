@@ -19,6 +19,9 @@
 // Extracted from bg/collect-chatgpt.js with NO behaviour change — the #1316 contract's 149 case
 // outputs were captured before and after the move and compared byte for byte.
 import { normalizeResetTime } from './api.js';
+import {
+  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, unknownResetPassSummary,
+} from './reset-pass-model.js';
 
 // Capitalize first letter: "plus" → "Plus"
 function capitalizeFirst(s) {
@@ -593,5 +596,177 @@ export function pickScopedModel(additionalLimits) {
     // 🔴 The whole point. Without this the server stores a 5h bucket's utilization in a slot named
     // seven_day_* with no way to tell, which is the mis-persist the old guard existed to prevent.
     window_seconds: isKnownSpan(chosen) ? chosen.windowSeconds : null,
+  };
+}
+
+// Reset-credit summary from the `/wham/usage` response we already fetch (#2092) → { summary, passes }
+// (ResetPassSummary / ResetPass[], bg/reset-pass-model.js). Pure; never throws.
+//
+// The block carries counts only — `{available_count, applicable_available_count}`. Kinds and
+// expiry live in the separate `/wham/rate-limit-reset-credits` detail, so here `by_kind` stays all
+// zero, `next_expires_at` null and `passes` empty; `available` is the provider's own total
+// (it cannot exclude *_shadow credits — only the detail can tell them apart).
+//
+// 🔴 「모름」 IS NOT 0장. An absent block, or a count that is not a non-negative integer, is
+// known:false — a missing field must not render as "you hold no passes".
+export function parseChatGPTResetSummary(usage, now = Date.now()) {
+  try {
+    const rc = usage?.rate_limit_reset_credits;
+    if (!rc || typeof rc !== 'object' || Array.isArray(rc) || !isPassCount(rc.available_count)) {
+      return { summary: unknownResetPassSummary('chatgpt', now), passes: [] };
+    }
+    return {
+      summary: {
+        provider: 'chatgpt',
+        known: true,
+        available: rc.available_count,
+        // Meaning inferred ("passes that would help right now") — kept raw, not reinterpreted.
+        usable_now: isPassCount(rc.applicable_available_count) ? rc.applicable_available_count : null,
+        by_kind: emptyResetPassKinds(),
+        next_expires_at: null,
+        blocked_by_other: false,
+        cooldown_until: null,
+        observed_at: now,
+        eligible: null,
+        ineligible_reason: null,
+        // Kinds come only from the detail endpoint (mergeChatGPTResetDetail flips this).
+        kinds_known: false,
+        usable_by_kind: emptyUsableKinds(),
+      },
+      passes: [],
+    };
+  } catch {
+    return { summary: unknownResetPassSummary('chatgpt', now), passes: [] };
+  }
+}
+
+// ── Reset-credit DETAIL (`GET /backend-api/wham/rate-limit-reset-credits`, #2092 P1-4) ──────────
+// reset_type → our kind (docs/plans/usage-reset-passes.md §2). Anything else — `*_shadow` (applies
+// to nothing) or a type we have not seen — is `unknown`: kept for observation, never shown or summed.
+const CHATGPT_RESET_TYPE_KIND = {
+  codex_rate_limits: 'full',
+  codex_five_hour: 'five_hour',
+  codex_weekly: 'weekly',
+};
+// The slots each kind clears, in our ChatGPT slot names (classifyWindows: 300 min → five_hour,
+// 10080 min → seven_day). A Free/Go 30-day window is not a `codex_weekly` target (§1.2).
+const CHATGPT_KIND_CLEARS = {
+  full: [FIVE_HOUR_SLOT, 'seven_day'],
+  five_hour: [FIVE_HOUR_SLOT],
+  weekly: ['seven_day'],
+  unknown: [],
+};
+const CHATGPT_CREDIT_AVAILABLE = 'available';
+// reset_type is a provider enum; only an enum-shaped token is kept as raw_type.
+const CHATGPT_RESET_TYPE_RE = /^[a-z0-9_]{1,60}$/;
+const CHATGPT_PASS_KEY_PREFIX = 'cg_';
+
+const isIsoTime = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
+
+// FNV-1a 32-bit → 8 hex chars. Not security: it only keeps the credit's raw id out of storage while
+// still letting P2 notice "a pass we have not seen before".
+function chatgptPassKey(id) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return CHATGPT_PASS_KEY_PREFIX + h.toString(16).padStart(8, '0');
+}
+
+/**
+ * The reset-credit detail → { passes: ResetPass[] } | null. Pure; never throws.
+ *
+ * Dropped: `is_supported_by_plan === false`, `status !== 'available'`, already expired.
+ * Kept per credit: kind (from reset_type), expiry, a hash of the id. 🔴 Never kept: the raw id,
+ * `title` / `description` (locale display strings), `profile_*`.
+ * null = unreadable (top level or ANY credit malformed) — the caller keeps the summary as it was
+ * rather than claiming kinds it could not read.
+ */
+export function parseChatGPTResetDetail(json, now = Date.now()) {
+  try {
+    if (!json || typeof json !== 'object' || Array.isArray(json) || !Array.isArray(json.credits)) return null;
+    const passes = [];
+    for (const c of json.credits) {
+      if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.id !== 'string' || !c.id
+        || typeof c.reset_type !== 'string' || !isIsoTime(c.expires_at)) {
+        return null;
+      }
+      if (c.is_supported_by_plan === false || c.status !== CHATGPT_CREDIT_AVAILABLE) continue;
+      if (Date.parse(c.expires_at) <= now) continue;
+      const kind = CHATGPT_RESET_TYPE_KIND[c.reset_type] || 'unknown';
+      passes.push({
+        provider: 'chatgpt',
+        kind,
+        clears: [...CHATGPT_KIND_CLEARS[kind]],
+        left: 1,
+        total: 1,
+        starts_at: isIsoTime(c.granted_at) ? c.granted_at : null,
+        expires_at: c.expires_at,
+        usable_now: null,
+        requires_limit: null,
+        pass_key: chatgptPassKey(c.id),
+        raw_type: CHATGPT_RESET_TYPE_RE.test(c.reset_type) ? c.reset_type : 'other',
+      });
+    }
+    // `total` counts every credit BEFORE exclusion — the merge checks it against the summary.
+    // `availableCount` is the detail response's own count: the merge requires it to EQUAL the
+    // summary's, so a detail answered for another account (the active workspace switched between
+    // the two GETs — batch review 1.55.0) is not folded into this account's summary.
+    return { passes, total: json.credits.length, availableCount: isPassCount(json.available_count) ? json.available_count : null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fold a parsed detail into the `/wham/usage` summary → a new ResetPassSummary. Pure.
+ *
+ * The detail is authoritative for counts: `available` is recomputed from it, which drops the
+ * `*_shadow` credits the summary's `available_count` cannot tell apart.
+ *
+ * 🔴 …but only a detail that can explain the summary. Every available credit is in the detail's
+ * list (excluded ones included), so fewer credits in total than `available_count` is a
+ * contradiction — a partial or wrong-account answer. Merging it would turn held passes into a
+ * known 0장 (Codex 1R); the summary is kept as it was instead (kinds_known stays false). A
+ * shadow-only list with a matching total is NOT a contradiction and merges to 0 held. Passes that expired since
+ * the detail was fetched are dropped here, at `now`.
+ *
+ * usable_by_kind: the provider gives one applicable count, not per credit. It is assigned to kinds
+ * only when that is unambiguous — every held pass is applicable, or only one kind is held (then
+ * min(applicable, held)). Otherwise 0: canClearNow must not promise a kind the count may not mean.
+ */
+export function mergeChatGPTResetDetail(summary, detail, now = Date.now()) {
+  if (summary?.known !== true || !detail || !Array.isArray(detail.passes)) return summary;
+  if (!isPassCount(detail.total) || detail.total < summary.available) return summary;
+  // Same account check: both endpoints report the held count; a mismatch (or a stored detail from
+  // before this field) is not merged — the summary stays as it was (kinds unknown, 「N장 보유」).
+  if (detail.availableCount !== summary.available) return summary;
+  const live = detail.passes.filter((p) => isIsoTime(p?.expires_at) && Date.parse(p.expires_at) > now);
+  const byKind = emptyResetPassKinds();
+  let available = 0;
+  let nextExpires = null;
+  for (const p of live) {
+    const kind = Object.hasOwn(byKind, p.kind) ? p.kind : 'unknown';
+    byKind[kind] += 1;
+    if (kind === 'unknown') continue;
+    available += 1;
+    if (nextExpires === null || Date.parse(p.expires_at) < Date.parse(nextExpires)) nextExpires = p.expires_at;
+  }
+  const usableByKind = emptyUsableKinds();
+  const applicable = isPassCount(summary.usable_now) ? summary.usable_now : 0;
+  const heldKinds = Object.keys(usableByKind).filter((k) => byKind[k] > 0);
+  if (applicable > 0 && applicable >= available) {
+    for (const k of heldKinds) usableByKind[k] = byKind[k];
+  } else if (applicable > 0 && heldKinds.length === 1) {
+    usableByKind[heldKinds[0]] = Math.min(applicable, byKind[heldKinds[0]]);
+  }
+  return {
+    ...summary,
+    available,
+    by_kind: byKind,
+    next_expires_at: nextExpires,
+    kinds_known: true,
+    usable_by_kind: usableByKind,
   };
 }

@@ -18,6 +18,9 @@ import {
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
+import { blockedSlotsOf, canClearNow, holdsAny, resetPassSiteUrl } from '../bg/reset-pass-model.js';
+import { SITE_ORIGINS } from '../vendor-ai/sites.js';
+import { passUseRelearning } from './reset-pass-ui.js';
 
 // Drag-reorder state (module-level so the cross-device onChanged handler can tell a
 // drag is in progress and skip a re-render that would yank the card mid-gesture).
@@ -125,14 +128,16 @@ function _predictBadge(cur, pred, approx) {
 // org/plan (Free/Team 7d, unused Gemini window).
 // `label` is the RESOLVED window label, not an i18n key: the 7d slot can hold a 30-day window
 // (ChatGPT Free/Go, #954), so the caller decides via windowLabel() and this only renders it.
-function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds) {
+function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds, forecastPaused = false) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
   // ONE decision for this row: null when there is no measured forecast AND no coarse one worth
   // speaking. Badge and forecast line both read it (#1090). `spanSeconds` is this org's reported
   // window length — the card already labels the row from it, so it must also PROJECT from it or
   // the label and the number describe different windows (#978).
-  const approx = pred ? null : degradedApprox(current, key, resetAt, spanSeconds);
+  // `forecastPaused` (a reset-pass cycle, see _renderCard): no measured forecast AND no coarse one —
+  // the coarse projection would speak exactly what the detail view withholds (batch review 1.55.0 2R).
+  const approx = pred || forecastPaused ? null : degradedApprox(current, key, resetAt, spanSeconds);
   const valColor = gaugeColor(cur);
   let predFill = '';
   // Same gate as the badge above and as the detail gauge's fill: whatever counts as "stable"
@@ -242,8 +247,49 @@ function _scopedEscalationRow(org) {
     + `${escHtml(worst.name)} ${pct}%</div>`;
 }
 
-// `hist` is this org's pre-bucketed history slice (see _historyByOrg).
-function _renderCard(org, hist) {
+// Reset-pass icon (#2092 P1-5). The overview adds no text — one 🎟 with a count, details in the
+// tooltip, click = the provider's own usage settings (the user spends a pass there; we never do).
+// 「모름」 (known:false) and 0 held draw nothing, so most cards are unchanged.
+const RP_EXPIRING_MS = 3 * 24 * 60 * 60 * 1000;
+const RP_KINDS = ['full', 'five_hour', 'weekly'];
+
+// Expiry as a calendar date only (10/23). A "N days left" string would change between renders, and
+// renderOverview() rebuilds the DOM whenever the HTML changes — the tooltip would vanish under
+// the cursor on every collection.
+function _rpDate(iso) {
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? `${d.getMonth() + 1}/${d.getDate()}` : '';
+}
+
+function _resetPassIcon(org, sameProviderCount) {
+  const rp = org.resetPasses;
+  const provider = org.provider || 'claude';
+  if (!holdsAny(rp) || !resetPassSiteUrl(provider, SITE_ORIGINS)) return '';
+  const now = canClearNow(rp, blockedSlotsOf(org));
+  const exp = rp.next_expires_at ? Date.parse(rp.next_expires_at) : NaN;
+  const expiring = Number.isFinite(exp) && exp - Date.now() <= RP_EXPIRING_MS;
+  const lines = [t('rp_ov_title', rp.available)];
+  if (rp.kinds_known) {
+    const kinds = RP_KINDS.filter(k => rp.by_kind?.[k] > 0).map(k => t(`rp_ov_kind_${k}`, rp.by_kind[k]));
+    if (kinds.length) lines.push(kinds.join(' · '));
+  }
+  const date = rp.next_expires_at ? _rpDate(rp.next_expires_at) : '';
+  if (date) lines.push(t('rp_ov_expires', date));
+  if (provider === 'chatgpt') lines.push(t('rp_ov_chatgpt_scope'));
+  if (now) lines.push(t('rp_ov_can_clear'));
+  // The deep link opens whichever org/workspace is ACTIVE on the site — only worth saying when
+  // the user has more than one card for this service.
+  if (sameProviderCount >= 2) lines.push(t(`rp_ov_switch_${provider}`, org.name || ''));
+  lines.push(t('rp_ov_open_site'));
+  const label = escHtml(lines.join('\n'));
+  const cls = now ? ' ov-rp-now' : (expiring ? ' ov-rp-warn' : '');
+  return `<button type="button" class="ov-rp${cls}" data-provider="${escHtml(provider)}" title="${label}" aria-label="${label}">`
+    + `🎟<span class="ov-rp-n">${rp.available}</span></button>`;
+}
+
+// `hist` is this org's pre-bucketed history slice (see _historyByOrg). `sameProviderCount` is how
+// many cards this service has (the reset-pass tooltip's account-switch note needs it).
+function _renderCard(org, hist, sameProviderCount = 1) {
   const provider = org.provider || 'claude';
   const isEnterprise = /Enterprise/i.test(org.plan);
   const isUsageBased = isEnterprise && org.h5 == null && org.d7 == null;
@@ -270,9 +316,14 @@ function _renderCard(org, hist) {
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
     rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
-    const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
+    // A cycle in which a reset pass was used (detected locally, ui/reset-pass-ui.js) has no
+    // trustworthy 7d forecast — the detail view shows 「예측 재학습 중」 there, so the card must not
+    // keep projecting from the same history (batch review 1.55.0).
+    const p7Paused = passUseRelearning(org, org.resetsAt7d);
+    const p7 = p7Paused ? null : calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
       { windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
-    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'), org.w7s);
+    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d,
+      p7Paused ? null : estimateCapHitTime(hist, 'd7'), org.w7s, p7Paused);
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`
@@ -281,6 +332,7 @@ function _renderCard(org, hist) {
     + _providerLogo(provider)
     + `<span class="ov-plan">${escHtml(planDisplayName(org.plan, provider))}</span>${beta}`
     + `<span class="ov-name">${escHtml(org.name || '')}</span>${pin}`
+    + _resetPassIcon(org, sameProviderCount)
     + '<span class="ov-chevron" aria-hidden="true">›</span>'
     + '</div>'
     + `<div class="ov-gauges">${rows}</div>`
@@ -384,6 +436,14 @@ function _bindDelegation(sec) {
     // The grip is a drag handle only — clicking it must NOT drill into the detail view
     // (this replaces the grip's stopPropagation listener).
     if (e.target.closest('.ov-grip')) return;
+    // The reset-pass icon opens the provider's usage settings in a new tab — and does NOT drill
+    // into the detail view. Only the fixed URLs are reachable; an unknown provider opens nothing.
+    const rp = e.target.closest('.ov-rp');
+    if (rp) {
+      const url = resetPassSiteUrl(rp.dataset.provider, SITE_ORIGINS);
+      if (url) chrome.tabs.create({ url });
+      return;
+    }
     const card = e.target.closest('.ov-card');
     if (card) enterDetail(card.dataset.orgId);
   };
@@ -459,7 +519,9 @@ export function renderOverview() {
     ? ''
     : `<div class="ov-hint" id="ov-hint"><span>💡 ${escHtml(t('ov_click_hint'))}</span>`
       + `<button class="ov-hint-x" id="ov-hint-x" aria-label="dismiss">✕</button></div>`;
-  const html = hint + orgs.map(o => _renderCard(o, byOrg.get(o.uuid) || [])).join('');
+  const perProvider = new Map();
+  for (const o of orgs) perProvider.set(o.provider || 'claude', (perProvider.get(o.provider || 'claude') || 0) + 1);
+  const html = hint + orgs.map(o => _renderCard(o, byOrg.get(o.uuid) || [], perProvider.get(o.provider || 'claude'))).join('');
 
   // renderOverview() re-runs on every storage change (background collection, cross-device
   // order sync, ...). When the markup is unchanged, skip the innerHTML teardown entirely —

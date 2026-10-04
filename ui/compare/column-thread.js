@@ -9,7 +9,7 @@ import { HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, PROVIDER_META, COPY_KIND_TUR
 import { autoGrow } from './helpers.js';
 import { SAVE_PROVIDERS } from './save-mode.js';
 import { retryNeedsAttachment } from './attachments.js';
-import { imageIdsOf, docCountOf } from './image-store.js';
+import { imageIdsOf, docCountOf, markerKinds } from './image-store.js';
 import { renderAnswer } from '../md-render.js';
 import { COMPARE_I18N } from '../compare-i18n.js';
 
@@ -226,6 +226,7 @@ export function installColumnThread(ctx) {
         ...(Number.isFinite(extra.img.more) && extra.img.more > 0 ? { more: extra.img.more } : {}),
         ...(imageIdsOf(extra.img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(extra.img.ids, ATTACH_MAX_FILES) } : {}),
         ...(docCountOf(extra.img.docs, ATTACH_MAX_FILES) ? { docs: docCountOf(extra.img.docs, ATTACH_MAX_FILES) } : {}),
+        ...markerKinds(extra.img),
       };
     }
     return out;

@@ -618,6 +618,13 @@ export const EMBED_THEME_DARK = 'dark';
 // TOTAL is the bound that actually protects the worker, and it is unchanged from when the count
 // was one — five 2 MB screenshots cost exactly what one 10 MB image did.
 export const ATTACH_MAX_FILES = 5;
+// What KIND each of a round's files was, as its marker keeps it (`kinds`, 2026-10-05) and a share
+// carries it (`att` — worker/src/utils/compare-share.ts ATT_KINDS is the same list, the snapshot
+// probe holds the two together): enough for a reader to tell a picture from a PDF from a Word file
+// by its icon, never the name. 'file' = a document an older marker did not say the kind of.
+export const ATTACH_KINDS = Object.freeze(['image', 'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'csv', 'file']);
+export const ATTACH_KIND_IMAGE = 'image';
+export const ATTACH_KIND_FILE = 'file';
 export const ATTACH_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 // RAW bytes, not the base64 length — what `File.size` reports.
 // 🪤 LINE comments here and below, never a JSDoc block: the provider origins above end in a slash

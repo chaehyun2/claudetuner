@@ -9,6 +9,7 @@
 
 import { PROVIDERS, attachmentTypesFor } from '../../vendor-ai/index.js';
 import { MIME_BY_EXTENSION, isImageInputType } from '../../vendor-ai/mime.js';
+import { ATTACH_KINDS, ATTACH_KIND_IMAGE, ATTACH_KIND_FILE } from './constants.js';
 
 const TYPES_BY_PROVIDER = Object.freeze(Object.fromEntries(PROVIDERS.map((p) => [p, attachmentTypesFor(p)])));
 
@@ -28,6 +29,16 @@ export function providerTakesTypes(provider, types) {
 
 export function isImageType(type) {
   return isImageInputType(type);
+}
+
+/**
+ * The marker KIND of a file that travels as `type` (ATTACH_KINDS): 'image' for any picture, else
+ * the extension the type is spelled with (`markdown` reads as `md`), else 'file'.
+ */
+export function attachKindOf(type) {
+  if (isImageInputType(type)) return ATTACH_KIND_IMAGE;
+  const ext = Object.keys(MIME_BY_EXTENSION).find((e) => MIME_BY_EXTENSION[e] === type);
+  return ext && ATTACH_KINDS.includes(ext) ? ext : ATTACH_KIND_FILE;
 }
 
 /** Extensions per accepted type, `.png` style — the picker's `accept` names both, see ATTACH_ACCEPT. */

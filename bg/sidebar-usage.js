@@ -6,6 +6,8 @@ import { hasProviderPermission } from './providers.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
+import { resetPassSiteUrl, resetPassHelpUrl } from './reset-pass-model.js';
+import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Sidebar Usage: build data for content script ===
 export async function buildSidebarUsageData(reqOrgId, provider) {
@@ -167,6 +169,14 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     plan, h5, d7, r5, r7, w5s, w7s, noUsage, noUsageFree, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
     addl: addl && addl.length ? addl : null,
     gates: gates && gates.length ? gates : null,
+    // Reset-pass summary of THIS org (#2092 P1-1), drawn by usage-shared.js buildResetPassChipHtml.
+    // Never from the snapshot fallback: the summary lives on the org entry only.
+    rp: orgData?.resetPasses ?? null,
+    // Its link, built here because the panels are classic scripts that cannot import the one
+    // builder (bg/reset-pass-model.js resetPassSiteUrl). null for Gemini → no chip.
+    rpUrl: resetPassSiteUrl(wantProvider, SITE_ORIGINS),
+    // The provider's "what is a reset pass" article for the chip's 「?」 (same reason: one builder).
+    rpHelpUrl: resetPassHelpUrl(wantProvider),
     // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now
     // collect — the provider's own answer to "is anything actually exhausted", which is the
     // question behind 문의 #195/#196 — but no panel reads it yet, and a populated field with no

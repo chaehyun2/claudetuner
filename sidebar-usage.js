@@ -428,6 +428,12 @@
     if (_ads.length > 0) renderInlineAd();
   }
 
+  // Capability-guarded like every core lookup: a stale core without the builder draws no chip.
+  function resetPassChipHtml(d) {
+    return d && CORE && typeof CORE.buildResetPassChipHtml === 'function'
+      ? CORE.buildResetPassChipHtml(d.rp, _lang, Date.now(), 'claude', d.rpUrl, '', d.rpHelpUrl) : '';
+  }
+
   function renderContent() {
     renderPanelBody();
     syncBanners();
@@ -484,6 +490,16 @@
     if (extraGaugeDrawn(_data)) {
       frag.appendChild(buildExtraUsageRow(_data.eu, _data.el));
       usageRows++;
+    }
+
+    // Reset pass holdings (#2092 P1-1) — the shared builder decides visibility (「모름」/0 → '').
+    // Not a usage row: it says nothing about usage, so it does not count toward `usageRows`.
+    const rpHtml = resetPassChipHtml(_data);
+    if (rpHtml) {
+      const rpRow = document.createElement('div');
+      rpRow.className = 'ct-sb-rp';
+      rpRow.innerHTML = rpHtml;
+      frag.appendChild(rpRow);
     }
 
     // 🔴 THE INVARIANT, AND IT IS NARROW ON PURPOSE: when OUR OWN capability is what went missing,
@@ -671,7 +687,8 @@
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
             _data.noUsage === res.noUsage && _data.noUsageFree === res.noUsageFree &&
-            _data.eu === res.eu && _data.plan === res.plan) return;
+            _data.eu === res.eu && _data.plan === res.plan &&
+            resetPassChipHtml(_data) === resetPassChipHtml(res)) return;
         _data = res;
         renderContent();
       });

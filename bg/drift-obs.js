@@ -297,6 +297,12 @@ export const CHATGPT_USAGE_KNOWN = [
   'rate_limit', 'additional_rate_limits', 'model_usage', 'rate_limit_reached_type',
   'plan_type', 'account_id',
   'email', 'user_id',
+  // Top-level /wham/usage fields that arrive on every account but that nothing parses yet
+  // (docs/CHATGPT-USAGE-SEMANTICS.md). Unlisted, these five were EXACTLY the 5-name cap, so a
+  // genuinely new key could never be named — the permanent-floor failure described above.
+  // `rate_limit_reset_credits` is the reset-pass summary (#2092). Naming a field here does not
+  // touch the cg1 signature (that is DRIFT_KEYSETS), so no new keyset id is needed.
+  'rate_limit_reset_credits', 'credits', 'spend_control', 'promo', 'code_review_rate_limit',
 ];
 export const CLAUDE_USAGE_KNOWN = [
   'five_hour', 'seven_day', 'limits', 'extra_usage', 'seven_day_omelette', 'seven_day_sonnet',
@@ -306,6 +312,9 @@ export const CLAUDE_USAGE_KNOWN = [
   // appeared" is always true, a real addition is indistinguishable from the floor.
   'nimbus_quill', 'spend', 'seven_day_opus', 'seven_day_cowork', 'seven_day_oauth_apps',
   'seven_day_breakdown',
+  // Reset-pass block, sent when the collector asks `/usage?cedar_ember=1` (#2092). Known, not
+  // watched: adding a name here leaves the cl2 signature unchanged, so no new keyset id.
+  'cedar_ember',
 ];
 
 /**
@@ -358,11 +367,15 @@ export function claudeUsageShape(usageData) {
 
 // ── Claude org capability NAMES (#2054 item 2) ───────────────────────────────────────────────
 //
-// WHY. vendor-ai `claudeOrgPlan` decides a claude.ai org's plan by SUBSTRINGS of its `capabilities`
-// names (`max`, `pro`, `raven`, `team`, `enterprise`, `free`). The day claude.ai gives Free orgs a
-// capability like `projects`, the collector AND the cross-check both read Pro — and we cannot tell
-// whether narrowing to exact names (`claude_pro`, `claude_max`) is safe, because the names that
-// exist in the field were never collected. This reports them: NAMES only, never values.
+// WHY. Until vendor-ai v0.43.0 `claudeOrgPlan` decided a claude.ai org's plan by SUBSTRINGS of its
+// `capabilities` names (`max`, `pro`, `raven`, `team`, `enterprise`, `free`): the day claude.ai gave
+// Free orgs a capability like `projects`, the collector AND the cross-check would both read Pro. We
+// could not tell whether narrowing to exact names was safe, because the names that exist in the field
+// were never collected. This reports them: NAMES only, never values. The data (#2062, 2026-10-04,
+// 1,123 accounts) answered it — every observed org keeps its plan under exact names, and the substring
+// already misread `nonprofit_approved`/`labs_approved` — so v0.43.0 matches `claude_pro`, `claude_max`,
+// `raven`, `raven_enterprise` exactly. The report stays: now a trigger bit means "an unknown name the
+// OLD rule would have followed" — the sign of a renamed tier the exact rule no longer reads.
 //
 // 🔴 NOT A *Shape FUNCTION, ON PURPOSE. The worker's DRIFT_SOURCE_ALLOWLIST is compared against the
 // sources of every exported `*Shape` function (drift-contract-probe [4d]); this report rides its
@@ -393,7 +406,7 @@ export const CLAUDE_CAPS_KEYSET = 'cc1';
 /** Distinct from every `*Shape` source — see above. The worker names caps only for this source. */
 export const CLAUDE_CAPS_SOURCE = 'claude_org_caps';
 /**
- * The substrings claudeOrgPlan tests, in its order. Bit i of `trigger_mask` = some UNKNOWN name
+ * The substrings claudeOrgPlan tested before v0.43.0 (#2062), in its order. Bit i of `trigger_mask` = some UNKNOWN name
  * contains TRIGGERS[i]. Computed over every unknown name, INCLUDING the ones withheld from naming —
  * so "an unrecognised capability is steering the plan" survives even when we refuse to say what it
  * was called. That is the primary question of #2054 item 2, answerable without any name at all.
@@ -406,7 +419,7 @@ const CLAUDE_CAPS_NAMES_MAX = 5;
  *
  * `orgPlan` is the caller's vendor-ai `claudeOrgPlan(org)` key — passed in because this file imports
  * nothing (see the header). It is the RULE's verdict on these capabilities, before the collector's
- * seat refinement, so a reader can line the names up against what the substring rule concluded.
+ * seat refinement, so a reader can line the names up against what the rule concluded.
  *
  * @returns {null | {keyset: string, source: string, total: number, knownMask: number,
  *   unknownNames: string[], unknownWithheld: number, triggerMask: number, orgPlan: string}}

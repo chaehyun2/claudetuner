@@ -30,7 +30,10 @@ import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, s
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import
 // it (#1315). Names unchanged — the call sites below are what the guards match on.
-import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows, claudeUsageWithheld } from './parse-claude.js';
+import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows, claudeUsageWithheld, parseClaudeResetPasses } from './parse-claude.js';
+import { unknownResetPassSummary } from './reset-pass-model.js';
+import { resetPassField } from './reset-pass-payload.js';
+import { claudeUsagePath, isCedarEmberQueryOn } from './claude-usage-path.js';
 import { claudeUsageShape, claudeCapsReport } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
 
@@ -171,6 +174,24 @@ function buildHistoryPoint(snapshot, plan) {
     eu: snapshot.extra_usage?.used_credits ?? null,
     el: snapshot.extra_usage?.monthly_limit ?? null,
   };
+}
+
+/**
+ * Reset-pass summary (#2092) of one org's RAW usage response, for collectedOrgs only.
+ *
+ * 🔴 The object itself is LOCAL ONLY: it goes on the org objects the popup / in-page panels render
+ * from. A snapshot carries only resetPassField(summary) — the fields /privacy section 2 discloses
+ * (#2092 P0b). buildUsageFields below deliberately does not read `cedar_ember`.
+ * The parser is pure and documented never to throw; the catch is the #1592 rule anyway — an
+ * optional decoration must not be able to fail the collection it rides.
+ */
+function readClaudeResetPasses(usageData) {
+  try {
+    return parseClaudeResetPasses(usageData).summary;
+  } catch (e) {
+    console.warn('[Claude Tuner] Claude reset passes skipped:', e && e.message);
+    return unknownResetPassSummary('claude');
+  }
 }
 
 /** Build common usage window fields shared by primary & extra org snapshots */
@@ -815,9 +836,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     let org = bestOrg;
     let orgId = bestOrg?.uuid;
     let usageData = null;
+    // One read per cycle, shared by the primary and extra-org fetches (bg/claude-usage-path.js).
+    const withResetPasses = await isCedarEmberQueryOn();
     try {
       _ts = performance.now();
-      usageData = await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${orgId}/usage`);
+      usageData = await fetchClaudeApi(claudeUsagePath(orgId, withResetPasses));
       _timings['4_usage'] = Math.round(performance.now() - _ts);
     } catch (e) {
       console.warn(`[Claude Tuner] Usage fetch failed for ${bestOrg.name}: ${e.message}`);
@@ -828,6 +851,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     if (!org || !usageData) {
       throw new Error('err_usage_failed');
     }
+    // Read once from the raw response; carried to collectedOrgs by BOTH writers below (the
+    // local-only upsert and the synced rebuild). `snapshot` gets only resetPassField()'s
+    // disclosed summary (#2092 P0b), never this object.
+    const resetPasses = readClaudeResetPasses(usageData);
 
     const plan = bestPlan;
     console.log(`[Claude Tuner] User: ${userEmail}, Plan: ${plan}, UsageOrg: ${org.name} (${orgId})`);
@@ -902,6 +929,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // Schema-drift observation (#1322). Rides this POST; never causes one. Attached before the
       // send and committed after it, mirroring the provider collectors.
       ...(claudeDriftRider ? { drift_obs: claudeDriftRider } : {}),
+      // Reset-pass summary (#2092 P0b) — the disclosed fields only, built in one place.
+      ...resetPassField(resetPasses),
       grove_enabled: groveEnabled,
       grove_detected: groveDetected,
       // Always sent. null = not observed this cycle (seat tiers unknown) — the server then CLEARS a
@@ -1036,7 +1065,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // 🔴 The RAW response, same source as the synced path below. This branch returns before that
       // computation, so without passing it here a gated/paused/Boost install never learns that the
       // provider served nothing — and its popup falls back to the stale plan-specific string.
-      const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot, Date.now(), claudeUsageWithheld(usageData));
+      const updatedOrgs = upsertClaudeOrg(prevOrgs, bestOrg, snapshot, Date.now(), claudeUsageWithheld(usageData), resetPasses);
       await chrome.storage.local.set({ collectedOrgs: updatedOrgs });
       await appendUsageHistory(buildHistoryPoint(snapshot, plan));
       await refreshRecNotice();
@@ -1076,6 +1105,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       // the extra path's skip branch repaints from this cache. Without it the scoped gauge blinks
       // out until that org's next due poll. Inert for the gates (named-field comparison).
       scopedLimits: scopedLimitsForDisplay(snapshot),
+      resetPasses, // same carry, same reason (#2092); its observed_at says how old it is
     };
     // force (manual/welcome) always posts. Otherwise the shared gate decides:
     // changed (10min min-interval) OR the 1h heartbeat floor.
@@ -1559,6 +1589,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         resetsAt7d: snapshot.seven_day?.resets_at || null,
         extraUsage: snapshot.extra_usage || null,
         additionalLimits: scopedLimitsForDisplay(snapshot),
+        resetPasses,
       };
       const failedOrgs = [];
       const skippedOrgs = []; // Orgs skipped by adaptive polling
@@ -1600,13 +1631,17 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
               // Cached alongside the rest: adaptive polling can skip this org for hours, and
               // dropping the scoped gauge on a skipped tick would make it blink in and out.
               additionalLimits: pollState.lastValues.scopedLimits || [],
+              // The cached summary keeps the `observed_at` of the poll that read it, so a skipped
+              // tick reads as 「오래됨」 (old observed_at), never as a fresh reading — and an org
+              // cached before this field existed reads as 「모름」 (null), never as 0 passes.
+              resetPasses: pollState.lastValues.resetPasses ?? null,
             };
           }
           continue;
         }
 
         try {
-          const extraUsage = await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${extraOrg.uuid}/usage`);
+          const extraUsage = await fetchClaudeApi(claudeUsagePath(extraOrg.uuid, withResetPasses));
           if (!extraUsage) {
             failedOrgs.push({ uuid: extraOrg.uuid, name: extraOrg.name, reason: 'empty_usage' });
             continue;
@@ -1624,6 +1659,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             seven_day_omelette: extraScoped.omelette,
             seven_day_sonnet: extraScoped.sonnet,
           });
+          const extraResetPasses = readClaudeResetPasses(extraUsage);
 
           // Adaptive polling: compare current values with previous
           const currentValues = {
@@ -1639,6 +1675,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             // shouldSendSnapshot compare named fields (h5/d7/extraUsed/resets*), never the
             // whole object — so adding a key here cannot perturb tier or heartbeat.
             scopedLimits: extraScopedLimits,
+            // Same display-only carry for the reset-pass summary (#2092) — local storage only
+            // (orgPollState is never sent), inert for both gates for the same reason.
+            resetPasses: extraResetPasses,
           };
           // Tier uses change-vs-last-poll (consecutive flat polls → back off).
           const usageChanged = hasOrgUsageChanged(pollState.lastValues, currentValues);
@@ -1667,6 +1706,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             grove_detected: false,
             claude_org_uuid: extraOrg.uuid,
             claude_org_name: extraOrg.name || null,
+            // Reset-pass summary (#2092 P0b) — same single builder as the primary snapshot.
+            ...resetPassField(extraResetPasses),
             // Heartbeat = unchanged vs what the server last received (last sent),
             // matching the gate — NOT vs last poll, or a changed snapshot sent
             // after a rate-limited window would be mislabeled and re-deduped.
@@ -1691,6 +1732,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             resetsAt7d: normalizeResetTime(extraUsage.seven_day?.resets_at) || null,
             extraUsage: normalizeExtraUsage(extraUsage.extra_usage),
             additionalLimits: extraScopedLimits,
+            resetPasses: extraResetPasses,
           };
           // Save extra org history too (for per-org view)
           await appendUsageHistory(buildHistoryPoint(extraSnapshot, extraPlan));
@@ -1846,6 +1888,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           // Model-scoped weekly limits (Fable, #1181). Same field ChatGPT/Codex already uses,
           // so ui/org-selector.js renders it with no provider branch.
           additionalLimits: orgUsageMap[o.uuid]?.additionalLimits ?? null,
+          // Reset-pass summary (#2092): rebuilt field by field like everything here, so it must be
+          // named or it is silently dropped. null = never read (「모름」), not 0 passes.
+          resetPasses: orgUsageMap[o.uuid]?.resetPasses ?? null,
           updatedAt: Date.now(),
         });
       }

@@ -12,6 +12,7 @@
 // user's text (the link frame is composed in the SW and never stored). So every field below is read
 // from the one place that holds what was SAID, per the §9.4 table:
 //   compare round   q = the round's user turn text (first round: entry.question) · qImages = count
+//                   · att = each file's KIND (image / pdf / docx …, never its name)
 //                   answers = each column's LAST assistant turn in the round: text + state
 //                   (+ ms {first, total?} — its timing, complete answers only)
 //   summary round   q = summary.question · the judge column's answer only (kind 'summary', judge).
@@ -19,7 +20,7 @@
 //                   written before structures is stored as bare text — the assembled prompt, other
 //                   columns' answers inside — and normalizeEntry reads it as a plain user turn, so
 //                   the request's text is never trusted as a question (Codex U3a 1R blocker).
-//   debate          timeline = [topic (entry.question)] + transcriptFromRecord order: user = log[].u,
+//   debate          timeline = [topic (entry.question) + att] + transcriptFromRecord order: user = log[].u,
 //                   AI = the turn's text (a moderator's without its control line), error = '' + state
 //                   avatars = each speaker's avatar EMOJI (the page's, else the default alias's) —
 //                   never a custom profile photo
@@ -28,8 +29,9 @@
 // Never sent: errorText, model ids, continuation, attachment names/bytes/ids, generated images,
 // the summary's attachments, composed debate prompts, control lines, the session id, `src`.
 
-import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES, SHARE_TITLE_MAX } from './constants.js';
-import { docCountOf } from './image-store.js';
+import { TURN_KIND_SUMMARY, ATTACH_MAX_FILES, SHARE_TITLE_MAX, ATTACH_KIND_IMAGE, ATTACH_KIND_FILE } from './constants.js';
+import { docCountOf, attachKindsOf } from './image-store.js';
+import { attachTypeOf, attachKindOf } from './attach-types.js';
 import { readTiming } from './helpers.js';
 import { transcriptFromRecord, SPEAKER_USER, ROLE_MODERATOR, servedModelText, defaultAliasOf } from './debate-core.js';
 
@@ -104,6 +106,31 @@ const timingOf = (turn) => {
  * (#1944 `docs`). A document is not counted as an image on a public card; its name is never sent.
  */
 const imageCount = (img) => (img ? Math.min(SHARE_Q_IMAGES_MAX, Math.max(0, 1 + (Number.isInteger(img.more) ? img.more : 0) - docCountOf(img.docs, ATTACH_MAX_FILES))) : 0);
+/**
+ * The KIND of each file a stored marker stands for (ATTACH_KINDS — `att`, 2026-10-05): the icons a
+ * reader tells a picture from a PDF from a Word file by. A marker from before `kinds` is rebuilt
+ * from what it does hold — the first file's extension, the image count, the document count (the
+ * documents past the first are 'file': their kind was never kept). Never a name.
+ */
+function attachKinds(img) {
+  if (!img) return [];
+  const files = 1 + (Number.isInteger(img.more) && img.more > 0 ? img.more : 0);
+  const kept = attachKindsOf(img.kinds, files);
+  if (kept.length) return kept.slice(0, SHARE_Q_IMAGES_MAX);
+  let docs = docCountOf(img.docs, ATTACH_MAX_FILES);
+  let images = Math.max(0, files - docs);
+  docs = files - images;
+  const out = [];
+  const type = attachTypeOf({ name: typeof img.name === 'string' ? img.name : '' });
+  const first = type ? attachKindOf(type) : '';
+  if (first === ATTACH_KIND_IMAGE && images) { out.push(first); images -= 1; }
+  else if (first && first !== ATTACH_KIND_IMAGE && docs) { out.push(first); docs -= 1; }
+  for (; images > 0; images -= 1) out.push(ATTACH_KIND_IMAGE);
+  for (; docs > 0; docs -= 1) out.push(ATTACH_KIND_FILE);
+  return out.slice(0, SHARE_Q_IMAGES_MAX);
+}
+/** `{att}` for a marker with files, else `{}`. */
+const attOf = (img) => { const att = attachKinds(img); return att.length ? { att } : {}; };
 const roundKey = (turn) => (Number.isInteger(turn.round) ? turn.round : null);
 
 /**
@@ -187,7 +214,7 @@ function compareBody(entry, colIds, keyOf, summaryQuestion, focusIn) {
     const q = userTurn ? userTurn.text : first ? entry.question : '';
     const img = userTurn ? userTurn.img : first ? entry.questionImg : null;
     indexOfRound.set(r, rounds.length);
-    rounds.push({ q: cut(q), qImages: imageCount(img), answers });
+    rounds.push({ q: cut(q), qImages: imageCount(img), ...attOf(img), answers });
   }
   if (!rounds.length) return { error: 'empty' };
   if (rounds.length > SHARE_ROUNDS_MAX) rounds.splice(0, rounds.length - SHARE_ROUNDS_MAX);
@@ -214,7 +241,8 @@ function debateBody(entry, record, keyOf, aliasOf, emojis, focusIn) {
     const turn = turnAt(id, round);
     return turn ? (turn.errorText ? '' : turn.text) : null;
   });
-  const timeline = [{ who: 'user', role: 'speak', text: cut(entry.question) }];
+  // The opening's files (#1961) ride the topic — the only debate turn that can carry any.
+  const timeline = [{ who: 'user', role: 'speak', text: cut(entry.question), ...attOf(entry.questionImg) }];
   const indexOfSeq = new Map();
   const seqOfTurn = new Map(); // `${colId}|${round}` → record seq: a turn's share button knows only its column and round
   for (const e of transcript) {

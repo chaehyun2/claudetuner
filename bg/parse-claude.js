@@ -11,6 +11,9 @@
 // Extracted from bg/collect.js with NO behaviour change; verified against the #1316 contract's
 // captured case outputs.
 import { normalizeResetTime } from './api.js';
+import {
+  emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, unknownResetPassSummary, WEEKLY_SLOT_RE,
+} from './reset-pass-model.js';
 
 /** Normalize raw extra_usage API response into a consistent shape */
 export function normalizeExtraUsage(raw) {
@@ -155,4 +158,145 @@ export function parseClaudeUsageWindows(usageData) {
     seven_day_sonnet: scopedSlots.sonnet,
     extra_usage: normalizeExtraUsage(usageData.extra_usage),
   };
+}
+
+// Which windows a grant clears decides its kind — the grant carries no kind field, and the
+// claude.ai bundle classifies it from `clears[]` the same way (docs/plans/usage-reset-passes.md
+// §1.1). The values are already our slot names (five_hour / seven_day / seven_day_*).
+//
+// 🔴 STRICT, because a kind is a promise about what one pass clears (canClearNow reads the kind,
+// not the grant): `full` must clear five_hour AND the plain seven_day, `weekly` the plain seven_day
+// without five_hour, `five_hour` five_hour alone. A grant clearing five_hour + only a scoped weekly
+// (seven_day_opus) is none of them — calling it `full` claimed it lifts the plain 7d limit (Codex
+// 1R). Such combinations are `unknown`: observed, never counted or offered.
+const SEVEN_DAY_SLOT = 'seven_day';
+function claudeResetPassKind(clears) {
+  const fiveHour = clears.includes(FIVE_HOUR_SLOT);
+  const sevenDay = clears.includes(SEVEN_DAY_SLOT);
+  const anyWeekly = clears.some((c) => WEEKLY_SLOT_RE.test(c));
+  if (fiveHour && sevenDay) return 'full';
+  if (!fiveHour && sevenDay) return 'weekly';
+  if (fiveHour && !anyWeekly) return 'five_hour';
+  return 'unknown';
+}
+
+const isTimestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
+
+// `ineligible_reason` is a provider enum. Only the values the claude.ai bundle lists (plan §1.1) are
+// kept; anything else — a new value, free text — collapses to 'other', so P0b counts a closed
+// vocabulary and never carries provider prose.
+const INELIGIBLE_REASONS = new Set([
+  'config_off', 'tier', 'seat', 'mobile', 'surface', 'cli_version', 'no_grant', 'tenure',
+  'other_experiment', 'control', 'not_enrolled', 'plan_changed', 'unavailable',
+]);
+const INELIGIBLE_REASON_OTHER = 'other';
+
+function claudeEligibility(ce) {
+  const eligible = typeof ce.eligible === 'boolean' ? ce.eligible : null;
+  let reason = null;
+  if (eligible !== true && ce.ineligible_reason != null) {
+    reason = INELIGIBLE_REASONS.has(ce.ineligible_reason) ? ce.ineligible_reason : INELIGIBLE_REASON_OTHER;
+  }
+  return { eligible, ineligible_reason: reason };
+}
+
+/**
+ * Reset passes from Claude's `/usage?cedar_ember=1` response → { summary, passes }
+ * (ResetPassSummary / ResetPass[], bg/reset-pass-model.js). Pure; never throws.
+ *
+ * 🔴 「모름」 IS NOT 0장. A missing/null `cedar_ember` (the bare `/usage` sends null),
+ * `eligible !== true`, or an unreadable block all answer known:false — the renderer hides the
+ * pass row instead of claiming the user holds none.
+ *
+ * Kept: grant id (a global promotion id, not personal) as pass_key, counts, window names, times,
+ * `eligible` and `ineligible_reason` (enum token or 'other' — P0b counts reasons; filled on the
+ * known:false summary too). Never kept: `label`, `event_props` (tier / tenure / billing),
+ * `blocking` contents — only whether blocking is non-empty.
+ *
+ * usable_by_kind counts a grant only if it is `usable_now`, blocks on nothing, and — when the
+ * response names one — is `next_grant_id`: claude.ai spends exactly that grant, so a usable full
+ * grant behind a five_hour `next_grant_id` would not be the one the button uses.
+ *
+ * Unknown kinds (clears names no window we know) stay in `passes` and `by_kind.unknown` for
+ * observation but are not added to `available` / `usable_now`, matching the ChatGPT rule.
+ */
+export function parseClaudeResetPasses(usageData, now = Date.now()) {
+  try {
+    const ce = usageData?.cedar_ember;
+    if (!ce || typeof ce !== 'object' || Array.isArray(ce)) return { summary: unknownResetPassSummary('claude', now), passes: [] };
+    const eligibility = claudeEligibility(ce);
+    const unknown = () => ({ summary: { ...unknownResetPassSummary('claude', now), ...eligibility }, passes: [] });
+    if (ce.eligible !== true || !Array.isArray(ce.grants)) return unknown();
+    const nextGrantId = typeof ce.next_grant_id === 'string' ? ce.next_grant_id : null;
+
+    const passes = [];
+    const usableByKind = emptyUsableKinds();
+    let blocked = false;
+    for (const g of ce.grants) {
+      // 🔴 A MALFORMED grant makes the whole summary 「모름」. Skipping it and answering
+      // known:true would report "0장" for a pass we simply could not read.
+      if (!g || typeof g !== 'object' || Array.isArray(g) || typeof g.id !== 'string' || !g.id
+        || !isPassCount(g.resets_left) || (g.ends_at !== null && !isTimestamp(g.ends_at))) {
+        return unknown();
+      }
+      // Well-formed but not held: used up, expired, or an explicit `ends_at: null` (claude.ai drops
+      // those itself — expiry is mandatory). A MISSING ends_at key is malformed (caught above).
+      if (g.resets_left === 0 || g.ends_at === null || Date.parse(g.ends_at) <= now) continue;
+      // A HELD grant whose `clears` is missing or unreadable is malformed too: without it we cannot
+      // say what the pass is, and counting it as an uncounted `unknown` would read as "0장".
+      if (!Array.isArray(g.clears) || !g.clears.every((c) => typeof c === 'string')) return unknown();
+      const rawClears = g.clears;
+      const clears = rawClears.filter((c) => c === FIVE_HOUR_SLOT || WEEKLY_SLOT_RE.test(c));
+      const kind = claudeResetPassKind(clears);
+      passes.push({
+        provider: 'claude',
+        kind,
+        clears,
+        left: g.resets_left,
+        total: isPassCount(g.resets_total) ? g.resets_total : null,
+        starts_at: isTimestamp(g.starts_at) ? g.starts_at : null,
+        expires_at: g.ends_at,
+        usable_now: typeof g.usable_now === 'boolean' ? g.usable_now : null,
+        requires_limit: typeof g.use_requires_limit === 'boolean' ? g.use_requires_limit : null,
+        pass_key: g.id.slice(0, 100),
+        raw_type: rawClears.join(',').slice(0, 200),
+      });
+      const grantBlocked = Array.isArray(g.blocking) && g.blocking.length > 0;
+      if (kind !== 'unknown' && grantBlocked) blocked = true;
+      if (kind !== 'unknown' && g.usable_now === true && !grantBlocked && (nextGrantId === null || g.id === nextGrantId)) {
+        usableByKind[kind] += g.resets_left;
+      }
+    }
+
+    const byKind = emptyResetPassKinds();
+    let available = 0;
+    let usableNow = null;
+    let nextExpires = null;
+    for (const p of passes) {
+      byKind[p.kind] += p.left;
+      if (p.kind === 'unknown') continue;
+      available += p.left;
+      if (p.usable_now !== null) usableNow = (usableNow ?? 0) + (p.usable_now ? p.left : 0);
+      if (nextExpires === null || Date.parse(p.expires_at) < Date.parse(nextExpires)) nextExpires = p.expires_at;
+    }
+    return {
+      summary: {
+        provider: 'claude',
+        known: true,
+        available,
+        usable_now: usableNow,
+        by_kind: byKind,
+        next_expires_at: nextExpires,
+        blocked_by_other: blocked,
+        cooldown_until: isTimestamp(ce.cooldown_until) ? ce.cooldown_until : null,
+        observed_at: now,
+        ...eligibility,
+        kinds_known: true,
+        usable_by_kind: usableByKind,
+      },
+      passes,
+    };
+  } catch {
+    return { summary: unknownResetPassSummary('claude', now), passes: [] };
+  }
 }

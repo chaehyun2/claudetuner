@@ -109,12 +109,20 @@ export function shouldKeepSkippedOrg(pollState) {
  * sync) writes collectedOrgs via this function and RETURNS before collect.js computes the flag for
  * the synced path. Without it those installs kept showing two unexplained N/As — and, on the
  * primary popup path, the stale "Free 플랜: 7일 사용률 제공 안 됨" (inquiry #198, Codex).
+ *
+ * @param resetPasses  The reset-pass summary (#2092, bg/reset-pass-model.js) read from the same raw
+ *   response. Sixth for the same reason `noUsage` is fifth: existing callers keep their binding.
+ *   🔴 It has to come through here for the same reason too — this is the only collectedOrgs writer
+ *   on the local-only branch, which returns before collect.js rebuilds the list. It is the latest
+ *   observation (like `noUsage`, not `?? prev`); `undefined` = this caller did not read it, and an
+ *   existing entry keeps whatever it had. It never reaches `snapshot`, i.e. never the server.
  */
-export function upsertClaudeOrg(prevOrgs, bestOrg, snapshot, now = Date.now(), noUsage = false) {
+export function upsertClaudeOrg(prevOrgs, bestOrg, snapshot, now = Date.now(), noUsage = false, resetPasses = undefined) {
   const list = Array.isArray(prevOrgs) ? prevOrgs : [];
   if (!bestOrg || !bestOrg.uuid) return list;
+  const passes = resetPasses === undefined ? {} : { resetPasses: resetPasses ?? null };
   if (list.some((o) => o.uuid === bestOrg.uuid)) {
-    return list.map((o) => (o.uuid === bestOrg.uuid ? { ...o, ...freshFields(snapshot, o, now, !!noUsage), noUsage: !!noUsage, noUsagePlan: noUsage ? (snapshot.plan ?? null) : null } : o));
+    return list.map((o) => (o.uuid === bestOrg.uuid ? { ...o, ...freshFields(snapshot, o, now, !!noUsage), noUsage: !!noUsage, noUsagePlan: noUsage ? (snapshot.plan ?? null) : null, ...passes } : o));
   }
   return [...list, {
     uuid: bestOrg.uuid,
@@ -133,5 +141,6 @@ export function upsertClaudeOrg(prevOrgs, bestOrg, snapshot, now = Date.now(), n
     // then print "Claude isn't providing usage on the Pro plan" about a Free account. Reproduced by
     // Codex. Storing the plan AS OBSERVED makes the sentence's two halves come from one reading.
     noUsagePlan: noUsage ? (snapshot.plan ?? null) : null,
+    ...passes,
   }];
 }

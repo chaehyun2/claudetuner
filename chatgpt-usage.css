@@ -432,3 +432,6 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
   opacity: 1; color: var(--text-primary, var(--ct-cg-text));
   background: color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 10%, transparent);
 }
+
+/* Reset pass holdings line (#2092 P1-1); the <a> inside is styled inline by usage-shared.js. */
+.ct-cg-rp { margin-top: 4px; min-width: 0; }
