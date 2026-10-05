@@ -254,7 +254,8 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
     const dp = calcPredictedAtReset(orgRows, 'd7', currentUtil, resetsAt, {
       windowSeconds, tzOffsetMin: -new Date().getTimezoneOffset(), provider: provider || 'claude',
     });
-    if (!dp || !(dp.rate > 0)) return null;
+    // `paused`: a reset pass cleared this cycle — no forecast until the next one (#2092).
+    if (!dp || dp.paused || !(dp.rate > 0)) return null;
     // A forecast that says "you will hit the limit" is shown however little it adds — 98% -> 100
     // grows by 2pt and would otherwise be hidden by the "< 3pt" rule below (Codex R1, #1681).
     const hitsCap = dp.willHit === true || (dp.predicted >= 100 && currentUtil < 100);

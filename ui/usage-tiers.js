@@ -133,6 +133,16 @@ export function isAtRiskOfCap(predicted, rate, currentUtil) {
   return crossesCap(predicted) && _forecastApplies(rate, currentUtil);
 }
 
+// Hours until an at-risk window reaches the cap — the moment the wait block names — or null when
+// the forecast does not put it there. `pred` is a calcPredictedAtReset() result: the 7d projectors
+// report their own diurnal-aware hoursTo100; the flat 5h path does not, so it falls back to the
+// flat rate. The popup gauge, the overview card and the mobile widget's server all ask this, so
+// "when do I hit 100%" has one answer per forecast.
+export function capEtaHours(pred, currentUtil) {
+  if (!pred || !isAtRiskOfCap(pred.predicted, pred.rate, currentUtil)) return null;
+  return pred.hoursTo100 != null ? pred.hoursTo100 : (_tierMin('critical') - currentUtil) / pred.rate;
+}
+
 // PRESSING: projected close to the cap without cleanly crossing it → the red near-limit line.
 export function isNearLimit(predicted, rate, currentUtil) {
   return !isAtRiskOfCap(predicted, rate, currentUtil) &&

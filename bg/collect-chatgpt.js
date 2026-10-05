@@ -9,6 +9,7 @@ import {
 } from './parse-chatgpt.js';
 import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
+import { attachResetPassDetail } from './reset-pass-wire.js';
 import { chatgptUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
@@ -644,9 +645,15 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // several snapshots (primary + extra workspaces); clearing on each success let a later workspace
   // 2xx erase the primary's failure, so the user was told everything was fine while their main
   // account never reached the server (Codex DEPLOY-BLOCKER).
-  return await postSnapshot(config, payload, (code) => {
+  // Per-pass detail (#2092 P3) — only on a snapshot that is actually being sent.
+  const commitResetPassDetail = await attachResetPassDetail(payload, org.resetPasses);
+  const posted = await postSnapshot(config, payload, (code) => {
     if (!sendOutcome) return;
     if (code) sendOutcome.failed = sendOutcome.failed || code;
     else sendOutcome.ok += 1;
   });
+  // postSnapshot returns null when it withheld or failed the POST, else the server's reply — the
+  // detail counts as sent only when that reply says it was stored (reset_pass_stored).
+  await commitResetPassDetail(posted);
+  return posted;
 }

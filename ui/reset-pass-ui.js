@@ -16,6 +16,7 @@ import {
   canClearNow, clearNowCall, holdsAny, blockedSlotsOf, resetPassSiteUrl, resetPassHelpUrl, resetPassAdvice, pastWeeklyBlocks,
 } from '../bg/reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
+import { P7_PASS_DROP_PTS } from './diurnal.js';
 
 const core = () => globalThis.__ctUsageCore || {};
 
@@ -141,8 +142,9 @@ export function resetPassTip(org) {
 export const RP_PASS_USE_KEY = 'rpPassUseObs';
 // Same jitter tolerance p7Cycles uses to call two resets_at values one cycle (ui/diurnal.js).
 const RP_SAME_CYCLE_TOL_MS = 6 * 3600000;
-// A same-cycle 7d fall this large is a cleared window, not an adjustment or rounding.
-const RP_UTIL_DROP_PTS = 20;
+// A same-cycle 7d fall this large is a cleared window, not an adjustment or rounding — the same
+// threshold the 7d forecast pauses and drops prior cycles on (ui/diurnal.js P7_PASS_DROP_PTS).
+const RP_UTIL_DROP_PTS = P7_PASS_DROP_PTS;
 // (b) needs the restart observed at least this long before the old scheduled reset.
 const RP_EARLY_MARGIN_MS = 3600000;
 

@@ -516,6 +516,9 @@ const P7_MASS_FLOOR_FRAC = 0.1;          // mass floor (fraction of wall hours) 
 const P7_MIN_OBS_MASS = 6;               // absolute floor (~6 average hours) so minutes-old windows cannot explode a rate
 export const P7_SNAP_AT = 97;            // projections this close to the cap report 100
 const P7_IDLE_MIN_SPAN_H = 72;           // idle guard: min observed history span
+// A same-cycle fall this large between consecutive samples means the window was cleared mid-cycle
+// (a usage-limit reset pass keeps resets_at and zeroes util; a plan change rescales it the same way).
+export const P7_PASS_DROP_PTS = 20;
 
 // Global activity weight per UTC hour-of-week (index = getUTCDay()*24 + getUTCHours(), mean 1),
 // from ALL keys' short (<=12h) positive increments, 2026-09-10..09-22 (Chuseok excluded).
@@ -637,6 +640,15 @@ function p7UtilAt(pts, tMs) {
   return null;
 }
 
+// True when the cycle's util fell by >= P7_PASS_DROP_PTS between consecutive samples taken before its
+// reset (a sample at/after the reset still carrying the old resets_at is the scheduled reset, not a pass).
+function p7HasPassDrop(c) {
+  for (let i = 1; i < c.pts.length; i++) {
+    if (c.pts[i].tMs < c.resetMs && c.pts[i].util <= c.pts[i - 1].util - P7_PASS_DROP_PTS) return true;
+  }
+  return false;
+}
+
 // Newest-last finals of completed prior cycles: explicit summary rows (daily_usage) merged with
 // cycles observed in the samples near their reset. A sample-derived cycle counts only once its reset
 // has passed (<= nowMs): a reset that moved later without a util drop leaves an older cycle id whose
@@ -660,6 +672,9 @@ function p7PriorFinals(cycles, current, priorCycles, resetMs, nowMs, cycleH) {
   for (let i = 0; i < cycles.length; i++) {
     const c = cycles[i];
     if (c === current || c.resetMs > nowMs || c.resetMs > resetMs - P7_SAME_CYCLE_TOL_MS || c.pts.length < 2) continue;
+    // A cleared cycle's final is post-pass usage, not a week's: no prior. (Its daily_usage summary,
+    // when the caller has one, stays: dropping it too backtested worse, 9.70 -> 9.84 on #2092's set.)
+    if (p7HasPassDrop(c)) continue;
     const last = c.pts[c.pts.length - 1];
     if ((c.resetMs - last.tMs) / P7_HOUR_MS > P7_PRIOR_END_GAP_H) continue;
     // A cycle cut short by a moved reset (previous reset < ~5/7 window earlier) has a partial final.
@@ -844,6 +859,16 @@ function p7CycleHours(windowSeconds) {
   return Number.isFinite(windowSeconds) && windowSeconds > 0 ? windowSeconds / 3600 : P7_DEFAULT_CYCLE_H;
 }
 
+// True when the cycle ending at resetMs was cleared mid-cycle (p7HasPassDrop): a reset pass zeroes
+// util but keeps resets_at, so the pace, the recent rate and the cap verdict would all read the
+// cleared window as missing usage until the next reset. Data-driven — independent of the popup's
+// local pass-use detection (ui/reset-pass-ui.js), which only sees passes used while it was watching.
+export function p7CycleHasPassDrop(samples, resetMs, nowMs) {
+  if (![resetMs, nowMs].every(Number.isFinite)) return false;
+  const current = p7Cycles(samples, nowMs).find((c) => Math.abs(c.resetMs - resetMs) < P7_SAME_CYCLE_TOL_MS);
+  return !!current && p7HasPassDrop(current);
+}
+
 // The runtime entry point. Pure; returns null when inputs are insufficient.
 //   samples       : [{ tMs, util, resetMs }] this org's history, ascending (more = more prior cycles)
 //   currentUtil   : latest utilization %
@@ -862,11 +887,21 @@ function p7CycleHours(windowSeconds) {
 //                     `rate > 0` holds exactly when the projection rises (the verdict predicates
 //                     gate on it)
 //   hoursTo100      : when willHit, hours until the cap (<= hoursToReset); else null
+//   paused          : true when the current cycle was cleared mid-cycle (p7CycleHasPassDrop). The
+//                     forecast is withheld until the next cycle — predicted = current util, rate 0,
+//                     willHit false — and every surface renders it as "no forecast". It is a result,
+//                     not null, so callers do not fall back to the window-average projection.
 export function p7ProjectAtReset({ samples, currentUtil, resetMs, nowMs, windowSeconds, tzOffsetMin, priorCycles }) {
   if (![currentUtil, resetMs, nowMs].every(Number.isFinite)) return null;
   const hoursToReset = (resetMs - nowMs) / 3600000;
-  if (hoursToReset < 0.05) return null;
   const sorted = Array.isArray(samples) ? samples.slice().sort((a, b) => a.tMs - b.tMs) : [];
+  // Before the near-reset cutoff: a null there sends callers to the window-average fallback, which
+  // would speak for a cleared cycle in its last minutes (Codex 1R).
+  if (hoursToReset > 0 && p7CycleHasPassDrop(sorted, resetMs, nowMs)) {
+    const cur = Math.max(0, Math.min(P7_UTIL_CAP, currentUtil));
+    return { predicted: cur, predictedMedian: cur, willHit: false, rate: 0, hoursDiff: 0, hoursToReset, hoursTo100: null, paused: true };
+  }
+  if (hoursToReset < 0.05) return null;
   const r = p7Predict(
     { samples: sorted, nowMs, resetMs, currentUtil, priorCycles },
     { tzOffsetMin, cycleHours: p7CycleHours(windowSeconds) },
@@ -899,6 +934,9 @@ export function p7PriorFinalsFromSamples(samples, resetMs, nowMs, windowSeconds)
 //          order, ONE org/provider (the caller filters)
 // Splits the per-day util series into cycles at reset drops and keeps only the segments that end
 // on/before the current cycle's start day — the current cycle must never be read as a prior one.
+// Segments outside the one-cycle span (P7_SUMMARY_SPAN_D) are dropped BEFORE taking the newest K:
+// p7PriorFinals would reject them anyway, and a pass-split short segment must not push out an older
+// valid cycle.
 // Returns [{ resetMs|null, startDate, endDate, peakUtil, finalUtil }], oldest first, at most K.
 export function p7PriorCyclesFromDaily(rows, resetMs, windowSeconds) {
   if (!Array.isArray(rows) || !Number.isFinite(resetMs)) return [];
@@ -929,7 +967,11 @@ export function p7PriorCyclesFromDaily(rows, resetMs, windowSeconds) {
   const cycleMs = p7CycleHours(windowSeconds) * 3600000;
   const cycleStartDate = new Date(resetMs - cycleMs).toISOString().slice(0, 10);
   return segs
-    .filter((s) => s.endDate <= cycleStartDate)
+    .filter((s) => {
+      if (s.endDate > cycleStartDate) return false;
+      const spanD = (Date.parse(s.endDate) - Date.parse(s.startDate)) / P7_DAY_MS;
+      return spanD >= P7_SUMMARY_SPAN_D[0] && spanD <= P7_SUMMARY_SPAN_D[1];
+    })
     .slice(-P7_PRIOR_K)
     .map((s) => {
       // Tag the reset instant when the segment ends on the date of an earlier in-phase reset.

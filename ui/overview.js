@@ -14,7 +14,7 @@ import { popupForecastCache } from './prediction-core.js';
 import { planOrderRank } from './plan-order.js';
 import {
   calcPredictedAtReset, estimateCapHitTime, tierColor, isAlertTier, degradedApprox,
-  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, viewerTzOffsetMin,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, viewerTzOffsetMin, capEtaHours,
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
@@ -156,7 +156,7 @@ function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds, fo
   if (current >= 100) {
     facts = buildCappedFactsHtml(resetAt, capHitMs != null ? capHitMs : null, true);
   } else if (atRisk) {
-    const hoursTo100 = pred.hoursTo100 != null ? pred.hoursTo100 : (100 - current) / pred.rate;
+    const hoursTo100 = capEtaHours(pred, current);
     facts = buildWaitFactsHtml(resetAt, hoursTo100, pred.hoursToReset, true);
   } else {
     facts = buildResetFactsHtml(resetAt, true);
@@ -325,12 +325,14 @@ function _renderCard(org, hist, sameProviderCount = 1) {
   } else {
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
     rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
-    // A cycle in which a reset pass was used (detected locally, ui/reset-pass-ui.js) has no
-    // trustworthy 7d forecast — the detail view shows 「예측 재학습 중」 there, so the card must not
-    // keep projecting from the same history (batch review 1.55.0).
-    const p7Paused = passUseRelearning(org, org.resetsAt7d);
-    const p7 = p7Paused ? null : calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
+    // A cycle in which a reset pass was used has no trustworthy 7d forecast — the detail view shows
+    // 「예측 재학습 중」 there, so the card must not keep projecting from the same history (batch
+    // review 1.55.0). Detected locally (ui/reset-pass-ui.js) or from the samples (`paused`).
+    const p7Relearning = passUseRelearning(org, org.resetsAt7d);
+    const p7Raw = p7Relearning ? null : calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
       { windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
+    const p7Paused = p7Relearning || !!(p7Raw && p7Raw.paused);
+    const p7 = p7Paused ? null : p7Raw;
     rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d,
       p7Paused ? null : estimateCapHitTime(hist, 'd7'), org.w7s, p7Paused);
   }

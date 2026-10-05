@@ -33,6 +33,7 @@ import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 import { normalizeExtraUsage, resolveScopedWeeklySlots, parseClaudeUsageWindows, claudeUsageWithheld, parseClaudeResetPasses } from './parse-claude.js';
 import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
+import { attachResetPassDetail } from './reset-pass-wire.js';
 import { claudeUsagePath, isCedarEmberQueryOn } from './claude-usage-path.js';
 import { claudeUsageShape, claudeCapsReport } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
@@ -1152,7 +1153,11 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // === Server POST: fire-and-forget (don't wait for response) ===
     // Send server save in background, proceed with local UI update first.
     // Preflight-free simple request (storage.js simplePost) — auth in body.
+    // Per-pass detail only now, past the send gate (#2092 P3, bg/reset-pass-wire.js).
+    const commitResetPassDetail = await attachResetPassDetail(body, resetPasses);
     simplePost(config, `${config.serverUrl}/api/snapshots`, body).then(async ({ response, sentToken }) => {
+      // Detail counts as sent only when the server says it stored it (reset_pass_stored).
+      if (response.ok) response.clone().json().then(commitResetPassDetail).catch(() => {});
       if (response.status === 403) {
         // 403 = email mismatch: this Claude snapshot's account email differs from
         // the Tuner login identity bound to the ext_token, so the server rejects it.
@@ -1776,6 +1781,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             } else {
             // Server POST: fire-and-forget. Preflight-free simple request
             // (auth in body) with authedFetch's 401 auto-clear semantics.
+            const commitExtraDetail = await attachResetPassDetail(extraSnapshot, extraResetPasses); // #2092 P3, past the gate
             simpleAuthedPost(config, `${config.serverUrl}/api/snapshots`,
               force ? { ...extraSnapshot, force: true } : extraSnapshot,
             ).then(r => {
@@ -1785,6 +1791,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
                 console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
                 if (r.status >= 500) { rollbackExtra(); noteServerFailure().catch(() => {}); }
               } else if (r && r.ok) {
+                r.clone().json().then(commitExtraDetail).catch(() => {}); // only on reset_pass_stored
                 noteServerSuccess().catch(() => {}); // healthy POST clears backoff
                 // Extra-org responses used to be read for status ONLY, so an extra org could
                 // never receive a cadence override — and with per-stream standby (design 안 B)

@@ -1024,7 +1024,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* The OpenAI mark is monochrome on its own site — dark on the light disc reads as ChatGPT at a glance. */
 .cmp-debate-ava[data-provider="chatgpt"] .cmp-debate-ava-badge svg { fill: var(--debate-logo-fg); }
 /* The letter tile (no usable mark): dark letters on the light disc, ringed in the service colour. */
-.cmp-debate-ava-badge.is-word { color: var(--debate-logo-fg); box-shadow: inset 0 0 0 1.5px var(--brand-chatgpt), 0 0 0 2px var(--debate-room-bg); font-size: 5.5px; font-weight: 800; letter-spacing: -.03em; }
+.cmp-debate-ava-badge.is-word { color: var(--debate-logo-fg); box-shadow: inset 0 0 0 1.5px var(--brand-chatgpt), 0 0 0 2px var(--debate-room-bg); font-size: 5.5px; font-weight: 700; letter-spacing: -.03em; }
 
 /* An AI message row = turn.root itself (debate.js decorateTurn), laid out by named areas (§14.1 ③):
    avatar | name line / process panel / bubble + time beside it / copy icon. Anything else a turn
@@ -1249,7 +1249,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-sharepop[data-phase="ready"] .cmp-sharepop-mark { background: var(--success-bg); animation: cmp-sharepop-check .22s cubic-bezier(.2, .9, .3, 1.3) both; }
 .cmp-sharepop[data-phase="ready"] .cmp-sharepop-mark::after { content: ''; position: absolute; left: 8.5px; top: 5.5px; width: 5px; height: 9px; border: solid var(--success); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .cmp-sharepop[data-phase="error"] .cmp-sharepop-mark { background: var(--danger-bg); }
-.cmp-sharepop[data-phase="error"] .cmp-sharepop-mark::after { content: '!'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--danger); font-size: 14px; font-weight: 800; }
+.cmp-sharepop[data-phase="error"] .cmp-sharepop-mark::after { content: '!'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--danger); font-size: 14px; font-weight: 700; }
 .cmp-sharepop-status { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 650; line-height: 1.35; color: var(--text-primary); }
 .cmp-sharepop-close { flex: 0 0 28px; width: 28px; height: 28px; margin: -4px -6px -4px 0; border: 0; background: transparent; color: var(--text-secondary); font-size: 19px; line-height: 1; border-radius: var(--radius-ctl); cursor: pointer; }
 .cmp-sharepop-close:hover { background: var(--bg-hover); color: var(--text-primary); }

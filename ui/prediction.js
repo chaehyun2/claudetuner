@@ -38,11 +38,11 @@ import {
   PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
   isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap, windowAverageProjection,
   projectFlatWindow, FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
-  etaWithinWindow, pickWorstWindow, degradedApprox,
+  etaWithinWindow, pickWorstWindow, degradedApprox, capEtaHours,
 } from './usage-tiers.js';
 export {
   PROJECTION_TIERS, AT_LIMIT_TIER, projectionTier, tierSeverity, TIER_COLOR, tierColor, isAlertTier,
-  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap,
+  isAtRiskOfCap, isNearLimit, isRisingNotice, isStableLook, crossesCap, capEtaHours,
   etaWithinWindow, pickWorstWindow, projectFlatWindow, windowAverageProjection, degradedApprox,
   FLAT_LOOKBACKS_H, FLAT_MIN_SPAN_H,
 };
@@ -209,7 +209,10 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
   // A reset pass was used in this 7d cycle (#2092 P1-3): the forecast maths would read the
   // cleared window as a shortened cycle or as missing usage, so it does not speak until the next
   // cycle. The base reset line rendered before this call stays; no wait block, no projection.
-  if (id === '7d' && passUseRelearning(currentResetPassOrg(), resetsAt)) {
+  // Two triggers: the popup's own pass-use detection (here) and the samples themselves
+  // (calcPredictedAtReset -> `paused`, below) — the latter also covers a pass used while no popup
+  // was open to see the pass count drop.
+  const showRelearning = () => {
     hide();
     if (inlineEl) {
       inlineEl.style.display = 'inline';
@@ -222,18 +225,16 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
     // No line under the gauge (user, 2026-10-05: two lines saying 「relearning」 were not worth the
     // space) — the grey ▸⏳ badge above carries the reason in its tooltip.
     if (lineEl) lineEl.style.display = 'none';
+  };
+  if (id === '7d' && passUseRelearning(currentResetPassOrg(), resetsAt)) {
+    showRelearning();
     return;
   }
 
-  // Insufficient history: show collecting indicator + day-1 teaser headline.
-  // The forecast needs 2-3 data points, so a new user's first session has none —
-  // the teaser conveys the (unique) upcoming value and a reason to come back.
-  if (!history || history.length < 3) {
-    // The headline only speaks after history has actually loaded, else the teaser flashes on
-    // every popup open before the async fetch resolves — showFallback keeps that gate.
-    showFallback();
-    return;
-  }
+  // Insufficient history → the core returns null and the `!pred` branch below shows the collecting
+  // indicator + day-1 teaser (showFallback keeps the "history loaded" gate). The minimum-history
+  // rule lives ONLY in calcPredictedAtReset: a second copy here ran first and kept a reset-pass
+  // cycle with two samples from ever reaching the core's pause check (1.55.3 batch review 2R).
 
   // Use common prediction function
   // Scope the cache to the org currently selected in the popup. One popup only ever shows one
@@ -246,8 +247,12 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
     showFallback();
     return;
   }
+  if (pred.paused) {
+    showRelearning();
+    return;
+  }
 
-  const { rate, predicted, hoursToReset, hoursDiff, hoursTo100: predHoursTo100 } = pred;
+  const { rate, predicted, hoursToReset, hoursDiff } = pred;
   const clampedPos = Math.min(predicted, 100);
   console.log(`[GaugePred:${id}] rate=${rate.toFixed(3)}/h, hoursDiff=${hoursDiff.toFixed(2)}h, predicted=${predicted.toFixed(1)}%`);
 
@@ -258,7 +263,7 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
   let limitTimeStr = '';
   if (atRisk) {
     // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
-    const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
+    const hoursTo100 = capEtaHours(pred, currentUtil);
     if (id === '7d' && hoursTo100 < hoursToReset) noteResetPassForecast(resetsAt, hoursTo100);
     // For the badge tooltip only (the wait block shows this time itself).
     limitTimeStr = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
@@ -355,10 +360,14 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
   // window that gets there sooner. This used to be hand-rolled here with a `>=` that always
   // preferred 5h on a tie — a different rule from the one the shared helper documents, which is
   // how 'both banners agree' quietly stops being true.
+  let paused7d = false;
   const candidate = (util, key, resetsAt, label, spanSeconds) => {
-    const fc = windowForecast(util, key, resetsAt, history, spanSeconds,
-      { tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider() });
-    if (!fc) return null;
+    const fc = windowForecast(util, key, resetsAt, history, spanSeconds, {
+      tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider(),
+      relearning: key === 'd7' && passUseRelearning(currentResetPassOrg(), resetsAt),
+    });
+    if (fc && fc.paused) paused7d = true;
+    if (!fc || !fc.tier) return null;
     const hoursToReset = resetsAt ? (new Date(resetsAt).getTime() - Date.now()) / 3600000 : null;
     return { tier: fc.tier, eta: etaWithinWindow(fc.hoursTo100, hoursToReset), label };
   };
@@ -390,6 +399,13 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
       tier = { id: 'comfortable', css: 'green' };
       text = t('pace_comfortable');
     }
+  }
+
+  // 7d forecast paused (#2092, Codex 1R): the 7d window is unknown, so no all-clear. A 5h warning
+  // or the static near-limit rule still speaks; anything green becomes a neutral 「relearning」.
+  if (paused7d && tier.css === 'green') {
+    tier = { id: 'relearning', css: 'gray' };
+    text = t('pace_relearning_7d', windowUnitLabel(span7d) || t('win_7d'));
   }
 
   banner.className = 'status-banner sb-' + tier.css;

@@ -248,7 +248,9 @@ const BLOCK_HIT_GAP_MS = 6 * HOUR_MS;
 const MIN_CYCLE_SPAN_FRAC = 5 / 7;
 // A fall this large inside one cycle is a cleared window (a pass used — the same threshold the
 // popup's pass-use detection uses): its later 100% samples are a second, unrelated wall.
-const SAME_CYCLE_FALL_PTS = 20;
+// A copy of ui/diurnal.js P7_PASS_DROP_PTS (this file imports nothing); test/pred7d-pace-how-guard.mjs
+// asserts the two are equal.
+export const SAME_CYCLE_FALL_PTS = 20;
 const WEEKLY_PASS_KINDS = new Set(['full', 'weekly']);
 
 /**

@@ -256,6 +256,7 @@ const TRANSLATIONS = {
     'login_cta_google_err': 'Google 로그인에 실패했습니다. 아래 이메일 코드로 시도해 주세요.',
     // Status banner (6-tier pace)
     'pace_comfortable': '여유 — 마음껏 사용하세요!',
+    'pace_relearning_7d': '{0} 예측 재학습 중 — 이번 주기에 초기화 패스를 쓴 것으로 보여요',
     'pace_ontrack': '순조로움 — 적절한 페이스입니다',
     'pace_warming': '주의 — {0} 사용 속도가 빨라지고 있습니다',
     'pace_pressing': '빠듯함 — 이 페이스면 {0} 한도 근처 도달',
@@ -397,6 +398,7 @@ const TRANSLATIONS = {
     'chart_min': '{0}분',
     'chart_hour': '{0}시간',
     'chart_stable': '안정',
+    'chart_pred_paused': '⏳ 예측 쉼',
     'chart_pace_comfortable': '여유',
     'chart_pace_ontrack': '순조',
     'chart_pace_warming': '주의',
@@ -1019,6 +1021,7 @@ const TRANSLATIONS = {
     'login_cta_google_err': 'Google sign-in failed. Try the email code below.',
     // Status banner (6-tier pace)
     'pace_comfortable': 'Comfortable — use freely!',
+    'pace_relearning_7d': '{0} forecast relearning — a reset pass seems to have been used this cycle',
     'pace_ontrack': 'On Track — sustainable pace',
     'pace_warming': 'Warming Up — {0} usage pace is rising',
     'pace_pressing': 'Pressing — {0} may hit the limit at this pace',
@@ -1153,6 +1156,7 @@ const TRANSLATIONS = {
     'chart_min': '{0}m',
     'chart_hour': '{0}h',
     'chart_stable': 'Stable',
+    'chart_pred_paused': '⏳ Paused',
     'chart_pace_comfortable': 'Easy',
     'chart_pace_ontrack': 'OK',
     'chart_pace_warming': 'Warm',

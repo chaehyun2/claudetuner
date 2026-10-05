@@ -203,7 +203,7 @@ export async function renderLoginCta() {
     row.style.cssText = 'display:flex;gap:7px;align-items:flex-start;font-size:11.5px;line-height:1.4;color:var(--text-secondary)';
     const check = document.createElement('span');
     check.textContent = '✓';
-    check.style.cssText = 'color:#22c55e;font-weight:800;flex-shrink:0';
+    check.style.cssText = 'color:#22c55e;font-weight:700;flex-shrink:0';
     const txt = document.createElement('span');
     txt.textContent = f;
     row.appendChild(check); row.appendChild(txt);

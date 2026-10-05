@@ -277,7 +277,9 @@
        that a near miss does not fall through to the card (= detail view). Quiet outlined 「RESET N」
        while held, amber when a pass expires within 3 days, and only when one pass clears every
        blocked window now does it fill solid and gain the ↻. */
-    .ov-rp { flex-shrink: 0; display: inline-flex; align-items: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 5px; padding: 3px 6px; margin: -3px 0; cursor: pointer; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; line-height: 1; white-space: nowrap; color: var(--accent); background: var(--accent-light); }
+    /* Weight 600, not 800: Segoe UI (Windows) has no 800 and the browser picks the HEAVIER 900 Black —
+       the badge looked crude there while it was fine on macOS SF (user, 2026-10-05). 600 exists in both. */
+    .ov-rp { flex-shrink: 0; display: inline-flex; align-items: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 5px; padding: 3px 6px; margin: -3px 0; cursor: pointer; font-size: 9.5px; font-weight: 600; letter-spacing: .03em; line-height: 1; white-space: nowrap; color: var(--accent); background: var(--accent-light); }
     .ov-rp-i { display: block; flex-shrink: 0; }
     .ov-rp-n { margin-left: 1px; }
     .ov-rp:hover, .ov-rp:focus-visible { outline: none; border-color: var(--accent); }
@@ -361,11 +363,13 @@
     .sb-red { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
     .sb-orange { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; }
     .sb-darkred { background: #fef2f2; border: 1px solid #f87171; color: #7f1d1d; }
+    .sb-gray { background: #f9fafb; border: 1px solid #e5e7eb; color: #4b5563; }
     [data-theme="dark"] .sb-green { background: #052e16; border-color: #166534; color: #86efac; }
     [data-theme="dark"] .sb-yellow { background: #1a1500; border-color: #854d0e; color: #fde68a; }
     [data-theme="dark"] .sb-orange { background: #1c0f00; border-color: #9a3412; color: #fdba74; }
     [data-theme="dark"] .sb-red { background: #2a0a0a; border-color: #991b1b; color: #fca5a5; }
     [data-theme="dark"] .sb-darkred { background: #350a0a; border-color: #b91c1c; color: #f87171; }
+    [data-theme="dark"] .sb-gray { background: #1f2937; border-color: #374151; color: #d1d5db; }
 
     /* 차트 탭 */
     .chart-tabs { display: flex; gap: 0; }
