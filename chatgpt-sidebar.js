@@ -412,6 +412,12 @@
   // 🪤 `gated_until` is a template, not a prefix. 「까지」 is a POSTposition — the old
   // `${t('gated_until')} ${until}` printed 「까지 9/22(화) … 리셋」, and the English read
   // "until Resets Sep 22 …" because the verbose form already carries its own verb.
+  // One display seam for a gated model's name (#1213 ①): the slug rotates on OpenAI's schedule, so
+  // it goes through the same mapper as the bucket rows — an unmapped slug falls through to itself.
+  function gateDisplayName(gate) {
+    return CORE.bucketDisplayName ? CORE.bucketDisplayName(gate.model) : gate.model;
+  }
+
   function buildGateRow(gate) {
     const row = document.createElement('div');
     row.className = 'ct-cg-limit ct-cg-limit-sub ct-cg-gate';
@@ -419,7 +425,7 @@
     labelRow.className = 'ct-cg-label-row';
     labelRow.innerHTML = `
       <span class="ct-cg-label-left">
-        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(gate.model)}</span>
+        <span class="ct-cg-name text-token-text-tertiary">${CORE.escapeHtml(gateDisplayName(gate))}</span>
         <span class="ct-cg-pct" style="color:#f59e0b">${CORE.escapeHtml(t('gated'))}</span>
       </span>
     `;
@@ -536,7 +542,7 @@
       // numbers the expanded rows disagree with.
       head.dataset.ctSummary = [
         ...addl.map((b) => `${CORE.bucketDisplayName ? CORE.bucketDisplayName(b.name) : b.name} ${Math.max(0, Math.min(Math.round(b.used), 100))}%`),
-        ...(_data.gates || []).map((g) => `${g.model} · ${t('gated')}`),
+        ...(_data.gates || []).map((g) => `${gateDisplayName(g)} · ${t('gated')}`),
       ].join(' · ');
       head.addEventListener('click', toggleExtras);
       frag.appendChild(head);

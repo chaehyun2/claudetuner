@@ -108,6 +108,19 @@ export function installOutputImages(ctx) {
       if (saveButtons.has(old)) labelSave(saveButtons.get(old), false);
     }
   }
+  /**
+   * Drop every original this page holds (#1695 ②): the screen is being replaced (new chat, a stored
+   * session opened), so no 「저장」 button can reach them any more. Without this they lived until the
+   * page closed — up to OUT_IMAGE_ORIGINALS_MAX_BYTES of blobs behind object URLs.
+   */
+  function releaseOutputImages() {
+    for (const o of originals.values()) {
+      try { urls.revokeObjectURL(o.url); } catch { /* already gone */ }
+    }
+    originals.clear();
+    originalBytes = 0;
+    saveButtons.clear();
+  }
   const mintId = () => {
     try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* no crypto */ }
     return `o-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -198,5 +211,5 @@ export function installOutputImages(ctx) {
     return turn.outStrip;
   }
 
-  Object.assign(ctx, { addOutputImage, restoreOutputImages, outImageIds, outImageCount, outImageStrip });
+  Object.assign(ctx, { addOutputImage, restoreOutputImages, outImageIds, outImageCount, outImageStrip, releaseOutputImages });
 }

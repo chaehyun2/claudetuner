@@ -1581,6 +1581,12 @@ export function sanitizeOutcomeResults(results) {
 }
 
 const JSON_HEADERS = Object.freeze({ 'Content-Type': 'application/json' });
+/** gzip of a string with the platform's CompressionStream, or null when there is none (or it fails). */
+const HTTP_STATUS_BAD_REQUEST = 400;
+async function gzipBytes(str) {
+  if (typeof CompressionStream !== 'function') return null;
+  try { return new Uint8Array(await new Response(new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer()); } catch { return null; }
+}
 
 // What an ERROR tells the page beyond `code`: the client's machine-readable `reason` (a no_tab's
 // cause, package v0.2.3) and its developer-facing message as `detail`. Absent fields are omitted,
@@ -2842,6 +2848,12 @@ export function createCompareController({
       return u.protocol === 'chrome-extension:' && u.host === runtime.id && u.pathname === '/options.html';
     } catch { return false; }
   };
+  /** THIS browser's history-sync switch is on and its first-screen notice was shown (chrome.storage.local). */
+  async function uploadSwitchOpen() {
+    let local = null;
+    try { local = await storage.get([HISTORY_SYNC_PREF_KEY, HISTORY_SYNC_NOTICED_KEY]); } catch { local = null; }
+    return !!local && local[HISTORY_SYNC_PREF_KEY] !== false && local[HISTORY_SYNC_NOTICED_KEY] === true;
+  }
   async function historyRequest(message, sender) {
     const op = message.op;
     if (!HISTORY_SYNC_OPS.includes(op) || !(fromSharePage(sender) || (op === 'clear' && fromOptionsPage(sender)))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
@@ -2852,13 +2864,18 @@ export function createCompareController({
     try { token = await getExtToken(); } catch { token = null; }
     if (!token) return { ok: false, status: 0, code: 'ext_token_required' };
     let init = { method: 'GET' };
+    let plainBody = null;
     if (op === 'put') {
       const entry = message.entry;
       if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.id !== id || !Number.isInteger(message.baseRev) || message.baseRev < 0) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
       if (findImageKey(entry) !== null) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
       const body = JSON.stringify({ baseRev: message.baseRev, entry });
       if (new TextEncoder().encode(body).byteLength > HISTORY_SYNC_ENTRY_MAX_BYTES + 1024) return { ok: false, status: 413, code: 'payload_too_large' };
-      init = { method: 'PUT', headers: { ...JSON_HEADERS }, body };
+      // gzip on the wire (#2183): the server inflates it (bounded) and stores it brotli-compressed. Without
+      // CompressionStream the plain JSON goes — the server takes both.
+      const gz = await gzipBytes(body);
+      plainBody = body;
+      init = gz ? { method: 'PUT', headers: { ...JSON_HEADERS, 'Content-Encoding': 'gzip' }, body: gz } : { method: 'PUT', headers: { ...JSON_HEADERS }, body };
     } else if (op === 'delete' || op === 'clear') init = { method: 'DELETE' };
     // 🔴 Every request from the compare page is for ONE account (decision A / batch r7, data not time): the owner the
     // page says it acts for — an upload's entry stamp, a delete's ledger, a list's view — must be the pinned token's.
@@ -2868,6 +2885,7 @@ export function createCompareController({
     if (!(op === 'clear' && fromOptionsPage(sender))) {
       if (!tokenOwner || typeof message.owner !== 'string' || !OWNER_RE.test(message.owner) || message.owner !== tokenOwner) return { ok: false, status: 0, code: 'history_sync_other_account' };
     }
+    const path = `/api/compare/history${op === 'list' || op === 'clear' ? '' : `/${id}`}`;
     let resp;
     try {
       const config = await getConfig();
@@ -2875,13 +2893,20 @@ export function createCompareController({
       // await between this read and the fetch (batch r5 / G1 #3). The page checked them once, then waited behind
       // other requests; login and the flag were checked above. A delete never needs the switch.
       if (op === 'put') {
-        let local = null;
-        try { local = await storage.get([HISTORY_SYNC_PREF_KEY, HISTORY_SYNC_NOTICED_KEY]); } catch { local = null; }
-        if (!local || local[HISTORY_SYNC_PREF_KEY] === false || local[HISTORY_SYNC_NOTICED_KEY] !== true) return { ok: false, status: 0, code: 'history_sync_paused' };
+        if (!(await uploadSwitchOpen())) return { ok: false, status: 0, code: 'history_sync_paused' };
       }
       // 🔴 The token checked above, PINNED (Codex 1R #1): authedFetch re-reads it and falls back to the
       // shared key when it is gone by then (a logout between the two reads) — this path never sends that.
-      resp = await fetchImpl(`${config.serverUrl}/api/compare/history${op === 'list' || op === 'clear' ? '' : `/${id}`}`, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+      resp = await fetchImpl(`${config.serverUrl}${path}`, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+      // A worker from before #2183 reads a gzip body as text → 400, and the page then stops uploading that
+      // conversation for good (Codex hist-z 1R #1: an extension shipped ahead of the worker, or a worker rollback).
+      // One retry with the plain JSON tells that apart from a body the server really refuses.
+      if (op === 'put' && resp.status === HTTP_STATUS_BAD_REQUEST && init.headers['Content-Encoding'] === 'gzip') {
+        // The same last-thing-before-the-send re-check as the first PUT (Codex hist-z 2R): the switch may have been
+        // turned off while the first one was in flight.
+        if (!(await uploadSwitchOpen())) return { ok: false, status: 0, code: 'history_sync_paused' };
+        resp = await fetchImpl(`${config.serverUrl}${path}`, { method: 'PUT', headers: { ...JSON_HEADERS, Authorization: `Bearer ${token}` }, body: plainBody });
+      }
     } catch {
       return { ok: false, status: 0, code: SW_CODES.NETWORK_ERROR };
     }

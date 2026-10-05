@@ -417,6 +417,7 @@
     [data-theme="dark"] .nt-warning { color: #fde68a; }
     [data-theme="dark"] .nt-critical { color: #fca5a5; }
     .notice-chevron { font-size: 10px; color: var(--text-muted); transition: transform .2s; flex-shrink: 0; line-height: 16px; }
+    .extra-usage-chevron { font-size: 12px; color: var(--text-muted); transition: transform .2s; flex-shrink: 0; }
     .notice-chevron.open { transform: rotate(90deg); }
     .notice-close { background: none; border: none; font-size: 14px; color: var(--text-muted); cursor: pointer; padding: 0; line-height: 1; }
     .notice-body { font-size: 10px; color: var(--text-secondary); margin-top: 3px; margin-left: 18px; line-height: 15px; display: none; }
@@ -606,3 +607,10 @@
 
     /* 숨김 요소들 */
     .hidden { display: none; }
+
+    /* Honour the OS "reduce motion" setting (#1474 item 6): state changes still happen, they just
+       snap instead of sliding. Spinners are left alone — they are the only "working" affordance. */
+    @media (prefers-reduced-motion: reduce) {
+      .gauge-fill, .ov-card, .ct-chevron, .notice-chevron, .extra-usage-chevron,
+      .org-option, .org-chip, .org-chip-pin { transition: none; }
+    }

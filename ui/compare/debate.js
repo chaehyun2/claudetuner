@@ -2056,6 +2056,9 @@ export function installDebate(ctx) {
       if (q.mention) d.forced = q.mention; // the latest explicit mention wins
     }
     if (![PHASE_SPEAKING, PHASE_AWAIT].includes(d.phase) && !d.forced) { renderBar(); return; }
+    // Signed out is not over (#2012): a kept debate opened while logged out pauses and says so, and ▶
+    // picks it up after sign-in — PHASE_DEAD would end a session that is still resumable.
+    if (!ctx.canFollowUp() && ctx.followUpNeedsLogin()) { d.phase = PHASE_PAUSED; renderBar(); return; }
     if (!ctx.canFollowUp()) { d.phase = PHASE_DEAD; reportFinish('dead'); notify(NOTIFY_STOPPED); renderBar(); return; }
     // No compares left: pause instead of sending a round the server will refuse (the quota line and
     // its CTA already say why; 「계속」 after the reset — or a Premium upgrade — picks it up).
@@ -2363,6 +2366,7 @@ export function installDebate(ctx) {
     else if (d.phase === PHASE_BUDGET) status = t(canConclude(d) ? 'debate_status_budget' : 'debate_status_budget_auto', d.sendsUsed, d.sendBudget);
     else if (d.phase === PHASE_HIDDEN) status = t('debate_status_away');
     else if (d.phase === PHASE_HARD_STOP) status = d.hardStop && d.hardStop.reason === HARD_USAGE ? t('debate_status_usage', (PROVIDER_META[d.hardStop.provider] || {}).label || d.hardStop.provider, d.hardStop.pct) : t('debate_status_cap', DEBATE_HARD_CAP);
+    else if (d.phase === PHASE_PAUSED && ctx.followUpNeedsLogin()) status = t('debate_status_login');
     else if (d.phase === PHASE_PAUSED && d.slept) status = t('debate_status_slept');
     // Point at the Conclusion card only when one is ON SCREEN — not when the log merely says so: a
     // record finished before the card existed has no `end`, and a marked turn evicted by the history

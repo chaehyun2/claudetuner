@@ -6,7 +6,13 @@ import { sendCodeReasonFromMessage, sendCodeErrorCopy, verifyCodeErrorCopy } fro
 import { serverSyncWithheldReason } from '../bg/storage.js';
 import { noteCtaShown, AUTH_BLOCKED_MARKER, bindCodeInput, mountGoogleButton } from './auth-widgets.js';
 
+// Same stale-render guard as renderReauthWidget (#791): this is driven by storage.onChanged, so two
+// renders overlap and a superseded one resuming last would HIDE the CTA on state it read before the
+// newer render showed it — and on a gated fresh install the CTA is the only way in. Each render is
+// stamped and re-checked after every await that precedes a DOM write.
+let _loginCtaRenderSeq = 0;
 export async function renderLoginCta() {
+  const seq = ++_loginCtaRenderSeq;
   // Copy for the collapsed reminder bar.
   //
   // 🔴 STATE first, benefits second, whenever sync is actually withheld. The collapsed bar is the
@@ -54,6 +60,8 @@ export async function renderLoginCta() {
   // pitching features. Read from the gate, not from `showLoginPrompt`, so a stale prompt flag
   // cannot make the bar claim a block that is over.
   const withheldMini = !!(await serverSyncWithheldReason());
+  // Superseded while awaiting → a newer render holds the truth. Bail BEFORE touching the DOM.
+  if (seq !== _loginCtaRenderSeq) return;
 
   // The CTA (verify prompt) — trapped independent accounts go to renderReauthWidget; this is the
   // new-user path. NEVER fully dismissed: "Use locally only" COLLAPSES to a persistent mini
@@ -78,6 +86,7 @@ export async function renderLoginCta() {
   if (blocked && scopeCtaShownFor !== scopeMarker) {
     collapsed = false;
     await chrome.storage.local.set({ scopeCtaShownFor: scopeMarker, loginCtaCollapsed: false });
+    if (seq !== _loginCtaRenderSeq) return;
   }
 
   // Collapsed → show only the compact reminder bar with a login button that re-expands.
@@ -161,6 +170,7 @@ export async function renderLoginCta() {
       }
       accounts.push(a);
     }
+    if (seq !== _loginCtaRenderSeq) return;
     if (accounts.length) {
       // Built as DOM NODES, not a string — the addresses get their own colour so the sentence can
       // be scanned for "which accounts" without reading it whole (four lines of dense text was

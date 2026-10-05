@@ -774,16 +774,14 @@ export function mergeChatGPTResetDetail(summary, detail, now = Date.now()) {
 }
 
 // ── VAT verdict of the personal ChatGPT subscription (#2157) ─────────────────────────────────────
-// ChatGPT's subscription APIs carry no amount or tax; the only priced, tax-split read is the plan-change
-// PREVIEW the upgrade dialog makes (`GET /backend-api/subscriptions/update/preview` — changes nothing).
-// Stripe computes tax there for the account's billing setup: with a business tax ID it is 0.
-// 🔴 It must be called with the accounts/check account id (UUID); the `/wham/usage` account id is a
-// different value and answers 500 (live check 2026-10-05).
+// Source: `GET /backend-api/payments/billing_info?account_id=<UUID>` — what chatgpt.com/settings/billing
+// shows as 「세금 식별 번호」. A tax ID on the account = VAT not charged (reverse charge).
+// 🪤 NOT the plan-change preview: its `tax_amount` was 0 for everyone (1.55.5 data: 27 members paying
+// VAT on Claude read `none` there), so it says nothing about the business number.
+// 🔴 Call with the accounts/check account id (UUID), as the billing page does.
 
-// Personal paid tiers, ascending, with the `updated_plan` value the preview takes for each.
-const CHATGPT_VAT_TIERS = [
-  ['go', 'chatgptgoplan'], ['plus', 'chatgptplusplan'], ['prolite', 'chatgptprolite'], ['pro', 'chatgptpro'],
-];
+// Personal paid tiers. Team/Business seats are billed to the company.
+const CHATGPT_VAT_PLANS = ['go', 'plus', 'prolite', 'pro'];
 
 /** The member's own paid personal account in an accounts/check response, or null. */
 export function pickChatGPTVatAccount(data) {
@@ -794,7 +792,7 @@ export function pickChatGPTVatAccount(data) {
     if (key === 'default') continue;               // an alias of a real entry
     const acc = a?.account;
     if (!acc || acc.structure !== 'personal' || acc.is_deactivated) continue;
-    if (!CHATGPT_VAT_TIERS.some(([p]) => p === acc.plan_type)) continue;
+    if (!CHATGPT_VAT_PLANS.includes(acc.plan_type)) continue;
     const ent = a.entitlement || {};
     if (!ent.has_active_subscription || ent.is_active_subscription_gratis) continue;
     if (typeof acc.account_id !== 'string' || !acc.account_id) continue;
@@ -803,21 +801,22 @@ export function pickChatGPTVatAccount(data) {
   return null;
 }
 
-/** `updated_plan` values strictly above `planType`, cheapest first. Empty for the top tier. */
-export function chatgptVatUpgradeTargets(planType) {
-  const i = CHATGPT_VAT_TIERS.findIndex(([p]) => p === planType);
-  return i < 0 ? [] : CHATGPT_VAT_TIERS.slice(i + 1).map(([, target]) => target);
-}
-
 /**
- * Verdict from one preview: only its POSITIVE line items (the new plan's charge) — the proration credit
- * is negative and carries its own tax. Nothing positive (a downgrade previews as all zeros) → null.
- * @returns {{ status: 'charged'|'none' } | null}
+ * Verdict from billing_info. Tax ID present → 'none'. No tax ID → 'charged' only when the billing
+ * country is Korea (where a consumer is always charged 10% VAT); elsewhere "no tax ID" does not tell
+ * whether VAT applies → null (undecidable). Unreadable body → undefined (a failed read, not a verdict).
+ * Only the verdict leaves this function — never the number.
+ * @returns {{ status: 'charged'|'none' } | null | undefined}
  */
-export function parseChatGPTVatPreview(preview) {
-  if (!preview || typeof preview !== 'object') return null;
-  const pos = preview.positive_line_item_total;
-  const net = preview.positive_line_item_total_excluding_tax;
-  if (!Number.isFinite(pos) || !Number.isFinite(net) || pos <= 0) return null;
-  return { status: pos - net > 0 ? 'charged' : 'none' };
+export function parseChatGPTBillingInfo(info) {
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined;
+  const tax = info.tax_id;
+  if (tax != null) {
+    // A tax ID entry whose value we cannot read is an unreadable answer, not "no tax ID" (Codex — a
+    // malformed `value` must not turn into a confident 'charged').
+    if (typeof tax !== 'object' || typeof tax.value !== 'string' || !tax.value.trim()) return undefined;
+    return { status: 'none' };
+  }
+  const country = info.address && typeof info.address === 'object' ? info.address.country : null;
+  return country === 'KR' ? { status: 'charged' } : null;
 }

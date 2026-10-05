@@ -1,7 +1,7 @@
 // VAT verdict of the member's personal subscriptions (#2157) — for the team dashboard.
 //
-// Claude: the latest paid invoice (`/api/stripe/{org}/invoices`). ChatGPT: Stripe's tax on the
-// plan-change preview (parse-chatgpt.js — its subscription APIs carry no amount). Both are read at most
+// Claude: the latest paid invoice (`/api/stripe/{org}/invoices`). ChatGPT: whether the personal
+// account's billing info carries a tax ID (`/backend-api/payments/billing_info`, parse-chatgpt.js). Both are read at most
 // once a day per account, and the verdict is PUT to /api/users/vat (with its `provider`) only when it
 // CHANGES (or weekly, to heal a lost write). It deliberately does not ride the snapshot: `users` is at
 // D1's column cap and the ingest hot path must not grow a statement. Parsing is chrome-free, under the
@@ -17,7 +17,7 @@
 import { fetchClaudeApi } from './api.js';
 import { fetchChatGPTApi } from './api-chatgpt.js';
 import { parseClaudeVatStatus } from './parse-claude.js';
-import { pickChatGPTVatAccount, chatgptVatUpgradeTargets, parseChatGPTVatPreview } from './parse-chatgpt.js';
+import { pickChatGPTVatAccount, parseChatGPTBillingInfo } from './parse-chatgpt.js';
 import { claudeOrgPlan } from '../vendor-ai/models.js';
 import { authedFetch, extTokenEmailRaw, getConfig, getExtToken, isServerSyncPaused, isAuthBlockSuppressed } from './storage.js';
 import { isUpgradePostSuppressed } from './upgrade-gate.js';
@@ -33,13 +33,24 @@ const VAT_READ_TIMEOUT_MS = 15_000;
 const CLAUDE_PERSONAL_PAID_PLANS = new Set(['pro', 'max', 'max_5x', 'max_20x']);
 const CLEAR = Object.freeze({ vat_status: null });
 const CHATGPT_ACCOUNTS_PATH = '/backend-api/accounts/check/v4-2023-04-27';
-const CHATGPT_PREVIEW_PATH = '/backend-api/subscriptions/update/preview';
+const CHATGPT_BILLING_INFO_PATH = '/backend-api/payments/billing_info';
 
 // Storage keys. Claude's keep their 1.55.4 names so an update does not re-read and re-send everything.
 const KEYS = {
   claude: { cache: 'vatCache', sent: 'vatSent' },
-  chatgpt: { cache: 'vatCacheChatgpt', sent: 'vatSentChatgpt' },
+  // New cache name: 1.55.5 cached plan-change-preview verdicts under 'vatCacheChatgpt' (a signal that
+  // turned out to read `none` for everyone) — they must not be replayed as billing_info verdicts.
+  // Same for the sent record: a 1.55.5 'none' must not suppress the first billing_info 'none' — the server
+  // row it describes came from the invalid signal and has to be replaced (Codex).
+  chatgpt: { cache: 'vatCacheChatgptBi', sent: 'vatSentChatgptBi' },
 };
+
+// Log a code only: a provider error message can carry part of the response body (api-chatgpt.js), and a
+// billing response may hold the member's tax ID (Codex).
+function vatErrCode(e) {
+  const m = typeof e?.message === 'string' ? e.message : '';
+  return /^(err_|vat_)[a-z0-9_]+$/.test(m) ? m : 'error';
+}
 
 function withTimeout(promise) {
   let timer;
@@ -78,7 +89,7 @@ async function cachedRead(provider, accountKey, read) {
     try {
       next = { result: (await read()).result, ok: true, ts: Date.now() };
     } catch (e) {
-      console.warn(`[Claude Tuner] VAT ${provider} read failed (non-critical):`, e?.message);
+      console.warn(`[Claude Tuner] VAT ${provider} read failed (non-critical):`, vatErrCode(e));
       next = { result: entry?.result ?? null, ok: false, ts: Date.now() };
     }
     await chrome.storage.local.set({ [key]: { ...cache, [accountKey]: next } });
@@ -102,13 +113,13 @@ export async function readVatFields(orgList) {
       return { result: r ? { ...r, orgUuid: org.uuid } : null };
     });
   } catch (e) {
-    console.warn('[Claude Tuner] VAT read skipped:', e?.message);
+    console.warn('[Claude Tuner] VAT read skipped:', vatErrCode(e));
     return {};
   }
 }
 
 /**
- * ChatGPT: payload fields from the plan-change preview of the paid personal account. Never throws.
+ * ChatGPT: payload fields from the paid personal account's billing info (tax ID present?). Never throws.
  * @param {string|null} activeUsageAccountId `/wham/usage` account id — the org key ChatGPT snapshots
  *   (and so the team-sharing policy) use for the ACTIVE account; other accounts use their UUID.
  * @param {string|null} activeUsagePlanType `/wham/usage` plan_type, to confirm that id IS the personal
@@ -130,26 +141,23 @@ export async function readChatGPTVatFields(activeUsageAccountId, activeUsagePlan
       }
       const acct = pickChatGPTVatAccount(data);
       if (!acct) return { result: null };
-      for (const target of chatgptVatUpgradeTargets(acct.planType)) {
-        const q = `?account_id=${encodeURIComponent(acct.accountId)}&updated_plan=${encodeURIComponent(target)}`;
-        const verdict = parseChatGPTVatPreview(await withTimeout(fetchChatGPTApi(CHATGPT_PREVIEW_PATH + q)));
-        if (verdict) {
-          // The org key must be the one the team-sharing policy hides by, or a hidden personal account
-          // would show. Active account → the `/wham/usage` id, but only when usage is visibly reporting
-          // THIS account (same plan); if accounts/check and usage disagree, judge nothing (Codex).
-          let orgUuid = acct.accountId;
-          if (acct.isDefault) {
-            if (!activeUsageAccountId || activeUsagePlanType !== acct.planType) return { result: 'undecidable' };
-            orgUuid = activeUsageAccountId;
-          }
-          return { result: { status: verdict.status, invoiceAt: new Date().toISOString(), orgUuid } };
-        }
+      // The org key must be the one the team-sharing policy hides by, or a hidden personal account would
+      // show. Active account → the `/wham/usage` id, but only when usage is visibly reporting THIS account
+      // (same plan); if accounts/check and usage disagree, judge nothing (Codex).
+      let orgUuid = acct.accountId;
+      if (acct.isDefault) {
+        if (!activeUsageAccountId || activeUsagePlanType !== acct.planType) return { result: 'undecidable' };
+        orgUuid = activeUsageAccountId;
       }
-      // Top tier (nothing to upgrade to) or no priced preview: a paid personal plan we cannot judge.
-      return { result: 'undecidable' };
+      const info = await withTimeout(fetchChatGPTApi(`${CHATGPT_BILLING_INFO_PATH}?account_id=${encodeURIComponent(acct.accountId)}`));
+      const verdict = parseChatGPTBillingInfo(info);
+      if (verdict === undefined) throw new Error('vat_unreadable');   // failed read → keep
+      // No tax ID outside Korea: whether VAT applies is unknown → judge nothing.
+      if (verdict === null) return { result: 'undecidable' };
+      return { result: { status: verdict.status, invoiceAt: new Date().toISOString(), orgUuid } };
     });
   } catch (e) {
-    console.warn('[Claude Tuner] VAT ChatGPT read skipped:', e?.message);
+    console.warn('[Claude Tuner] VAT ChatGPT read skipped:', vatErrCode(e));
     return {};
   }
 }
@@ -172,7 +180,7 @@ async function sendableIdentity(ingestEmail) {
 async function sendVat(provider, fields, email) {
   if (!('vat_status' in fields)) return;               // unknown this cycle → nothing to say
   const body = { provider, ...fields };
-  // ChatGPT's date is the day of the preview, so it moves daily; only the verdict and the account decide
+  // ChatGPT's date is the day of the read, so it moves daily; only the verdict and the account decide
   // whether this is news (the weekly resend refreshes the date).
   const sig = JSON.stringify(provider === 'chatgpt' ? { ...body, vat_invoice_at: undefined } : body);
   const sentKey = KEYS[provider].sent;
@@ -200,7 +208,7 @@ export async function syncVatStatus(orgList, ingestEmail) {
     if (!email) return;
     await sendVat('claude', await readVatFields(orgList), email);
   } catch (e) {
-    console.warn('[Claude Tuner] VAT sync skipped:', e?.message);
+    console.warn('[Claude Tuner] VAT sync skipped:', vatErrCode(e));
   }
 }
 
@@ -211,6 +219,6 @@ export async function syncChatGPTVatStatus(activeUsageAccountId, activeUsagePlan
     if (!email) return;
     await sendVat('chatgpt', await readChatGPTVatFields(activeUsageAccountId, activeUsagePlanType), email);
   } catch (e) {
-    console.warn('[Claude Tuner] VAT ChatGPT sync skipped:', e?.message);
+    console.warn('[Claude Tuner] VAT ChatGPT sync skipped:', vatErrCode(e));
   }
 }

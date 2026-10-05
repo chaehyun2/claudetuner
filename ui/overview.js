@@ -323,14 +323,18 @@ function _renderCard(org, hist, sameProviderCount = 1) {
     // Gemini plan with no 5h/7d limits: single "no usage limits" row.
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {
-    const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h);
+    // Per-org memo scope (#1268): the overview renders every org in one pass, so the key must name
+    // the org. The `ov:` prefix keeps these entries apart from the detail view's (scoped by the bare
+    // selectedOrgId) — the two feed different history slices into a lossy fingerprint.
+    const memo = { cache: popupForecastCache, scope: `ov:${org.uuid}` };
+    const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h, memo);
     rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
     // A cycle in which a reset pass was used has no trustworthy 7d forecast — the detail view shows
     // 「예측 재학습 중」 there, so the card must not keep projecting from the same history (batch
     // review 1.55.0). Detected locally (ui/reset-pass-ui.js) or from the samples (`paused`).
     const p7Relearning = passUseRelearning(org, org.resetsAt7d);
     const p7Raw = p7Relearning ? null : calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
-      { windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
+      { ...memo, windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
     const p7Paused = p7Relearning || !!(p7Raw && p7Raw.paused);
     const p7 = p7Paused ? null : p7Raw;
     rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d,

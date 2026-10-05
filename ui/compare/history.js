@@ -920,6 +920,7 @@ export function installHistory(ctx) {
     state.firstRound = entry.firstRound; // the SEND round — the only round whose request is the question card
     state.pendingFollowup = ''; state.roundTargets = []; state.roundStartedAt = null;
     ctx.bumpStatusEpoch();
+    ctx.releaseOutputImages(); // the replaced session's answer-image originals (#1695)
     for (const col of state.columns.values()) ctx.resetColumn(col);
     ctx.clearCopyFeedback();
     for (const c of ctx.composers) { c.input.value = ''; autoGrow(c.input); }

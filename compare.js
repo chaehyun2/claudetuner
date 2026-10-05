@@ -2895,8 +2895,13 @@ export function mountComparePage(deps) {
   // Follow-ups need the same login the first send needed: a 401/403 on a follow-up consume flips
   // `loggedIn` to false and must stop the next click too (Codex #5). And no port ⇒ no session —
   // unless the session can be resumed on a new one (canResume).
-  const canFollowUp = () => state.sessionStarted && !state.disabled && !!(state.status && state.status.loggedIn) && ((!state.sessionEnded && !!state.port) || canResume());
+  // Everything a follow-up needs except being signed in — split out so a kept session opened while
+  // logged out can say 「log in to continue」 instead of being treated as over (#2012).
+  const followableIfLoggedIn = () => state.sessionStarted && !state.disabled && ((!state.sessionEnded && !!state.port) || canResume());
+  const loggedIn = () => !!(state.status && state.status.loggedIn);
+  const canFollowUp = () => loggedIn() && followableIfLoggedIn();
   ctx.canFollowUp = canFollowUp;
+  ctx.followUpNeedsLogin = () => !loggedIn() && followableIfLoggedIn();
 
   /**
    * { targets, skipped } for the current follow-up routing set (AC21 + item 2). Every participant
@@ -3232,6 +3237,7 @@ export function mountComparePage(deps) {
     closeHistoryPanel();
     syncHistoryButton(null); // count re-read from the last good list (Codex hist 1R #9)
     statusEpoch++; // a status answer asked before the reset describes the old session
+    ctx.releaseOutputImages(); // the answer images' originals belonged to the session being left (#1695)
     for (const col of state.columns.values()) resetColumn(col);
     applyLayout(); // the tab's own layout — not the columns a loaded entry brought (plan §17.11 ③)
     renderColumns(); // a column closed in the session is back (resetColumn cleared `closed`)

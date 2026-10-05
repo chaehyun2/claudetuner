@@ -469,9 +469,10 @@ export const HISTORY_SYNC_WIPE_KEY = 'compareHistorySyncWipeAt';
 export const HISTORY_SYNC_LOCK_NAME = 'ctcmp-history-sync';
 // The runtime message the page asks the SW with (bg/compare.js historyRequest).
 export const HISTORY_SYNC_MSG_TYPE = 'COMPARE_HISTORY';
-// An uploaded entry's JSON stays under this (the server refuses an item over 512 KB; the margin is the
-// request's own wrapper). Fitted with history.js fitEntry, like the local bound.
-export const HISTORY_SYNC_ENTRY_MAX_BYTES = 500 * 1024;
+// An uploaded entry's JSON stays under this (the server refuses an item over 2 MB — #2183 raised it from
+// 512 KB; the margin is the request's own wrapper). Fitted with history.js fitEntry, like the local bound.
+// 🔴 Needs the #2183 worker: an older one refuses anything over 512 KB (413) and cannot read a gzip body.
+export const HISTORY_SYNC_ENTRY_MAX_BYTES = 2000 * 1024;
 // The server keeps this many per account (oldest dropped) — the list GET answers at most this many.
 export const HISTORY_SYNC_SERVER_MAX = 50;
 // Bounds on the bookkeeping lists (a queue that can never drain must not grow without end).

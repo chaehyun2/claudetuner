@@ -184,9 +184,20 @@ export function selectOrg(orgId, container) {
 
   // Look up selected org data from collectedOrgs (+ lastStatus for recommendation restore)
   chrome.storage.local.get({ collectedOrgs: [], lastStatus: null }, (local) => {
+    // A later selectOrg() owns the view now. Without this, a removed org's late callback ran the
+    // fallback below AFTER the user picked another org and switched the view to the primary
+    // (1.55.6 batch review).
+    if (state.selectedOrgId !== orgId) return;
     state.collectedOrgs = local.collectedOrgs || [];
     const orgData = state.collectedOrgs.find(o => o.uuid === orgId);
-    if (!orgData) return;
+    if (!orgData) {
+      // The viewed org left collectedOrgs (cap drop, org removed — #813). Returning here left the
+      // gone org's stale charts on screen, and every later selectOrg(sameId) — e.g. a resize —
+      // returned at the same spot. Fall back by popup.js's stillValid rule: primary, else first.
+      const fallback = state.collectedOrgs.find(o => o.isPrimary) || state.collectedOrgs[0];
+      if (fallback && fallback.uuid !== orgId) selectOrg(fallback.uuid, container);
+      return;
+    }
     // Clear the prediction headline up front; the 5h-gauge branch below re-shows
     // it. Usage-based Enterprise / no-5h orgs never call renderGaugePrediction,
     // so without this a headline from a previous org would linger.
