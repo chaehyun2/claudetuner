@@ -398,3 +398,12 @@
 
 /* Reset pass holdings line (#2092 P1-1); the <a> inside is styled inline by usage-shared.js. */
 .ct-sb-rp { margin-top: 4px; min-width: 0; }
+/* Reset-pass line emphasis (#2092): readable amber per theme. claude.ai's OWN theme setting wins over
+   the OS (Codex 2R: OS dark + site light put #fbbf24 on white, 1.67:1) — the same signals
+   input-usage.js isDarkTheme() reads; the OS preference only decides when the site says nothing. */
+.ct-sb-rp .ct-rp-hot { color: #b45309; }
+@media (prefers-color-scheme: dark) {
+  .ct-sb-rp .ct-rp-hot { color: #fbbf24; }
+}
+html.dark .ct-sb-rp .ct-rp-hot, html[data-theme="dark"] .ct-sb-rp .ct-rp-hot, html[data-mode="dark"] .ct-sb-rp .ct-rp-hot { color: #fbbf24; }
+html.light .ct-sb-rp .ct-rp-hot, html[data-theme="light"] .ct-sb-rp .ct-rp-hot, html[data-mode="light"] .ct-sb-rp .ct-rp-hot { color: #b45309; }

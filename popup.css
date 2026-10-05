@@ -230,6 +230,7 @@
     body.ct-view-overview #predict-headline,
     body.ct-view-overview #gauge-section,
     body.ct-view-overview #reset-pass-chip,
+    body.ct-view-overview #reset-pass-advice,
     body.ct-view-overview #extra-usage-section,
     body.ct-view-overview #additional-limits-section,
     body.ct-view-overview #fitness-section,
@@ -272,14 +273,20 @@
     /* Chevron: persistent "this card opens a detail view" affordance. */
     .ov-chevron { flex-shrink: 0; color: var(--text-muted); font-size: 16px; font-weight: 700; line-height: 1; margin-left: 2px; }
     .ov-card:hover .ov-chevron { color: var(--accent); }
-    /* Reset-pass icon (#2092): a button inside the clickable card. Padding + negative margin give it
-       a generous hit area so a near miss does not fall through to the card (= detail view). */
-    .ov-rp { flex-shrink: 0; display: inline-flex; align-items: center; gap: 1px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 5px; margin: -3px -2px; cursor: pointer; font-size: 11px; line-height: 1; color: var(--text-secondary); }
-    .ov-rp:hover, .ov-rp:focus-visible { border-color: var(--accent); background: var(--accent-light); }
-    .ov-rp-n { font-size: 10px; font-weight: 700; }
-    .ov-rp-warn { color: #b45309; }
-    [data-theme="dark"] .ov-rp-warn { color: #fbbf24; }
-    .ov-rp-now { color: var(--accent); border-color: var(--accent); }
+    /* Reset-pass badge (#2092, user choice 2026-10-05): a button inside the clickable card, big enough
+       that a near miss does not fall through to the card (= detail view). Quiet outlined 「RESET N」
+       while held, amber when a pass expires within 3 days, and only when one pass clears every
+       blocked window now does it fill solid and gain the ↻. */
+    .ov-rp { flex-shrink: 0; display: inline-flex; align-items: center; gap: 3px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 5px; padding: 3px 6px; margin: -3px 0; cursor: pointer; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; line-height: 1; white-space: nowrap; color: var(--accent); background: var(--accent-light); }
+    .ov-rp-i { display: block; flex-shrink: 0; }
+    .ov-rp-n { margin-left: 1px; }
+    .ov-rp:hover, .ov-rp:focus-visible { outline: none; border-color: var(--accent); }
+    .ov-rp-warn { color: #b45309; background: #fef3c7; border-color: #f59e0b; }
+    [data-theme="dark"] .ov-rp-warn { color: #fbbf24; background: #3b2a0a; border-color: #b45309; }
+    .ov-rp-warn:hover, .ov-rp-warn:focus-visible { border-color: #d97706; }
+    .ov-rp-now { color: #fff; background: var(--accent); border-color: var(--accent); }
+    .ov-rp-now:hover, .ov-rp-now:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+    [data-theme="dark"] .ov-rp-now { color: #0f1419; }
     /* One-time hint banner teaching the card→detail interaction. */
     .ov-hint { display: flex; align-items: center; gap: 6px; background: var(--accent-light); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px 6px 10px; font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
     .ov-hint span { flex: 1; }
@@ -513,10 +520,13 @@
     /* Reset pass holdings line under the gauges (#2092 P1-1). The <a> itself is styled inline by
        usage-shared.js so the in-page sidebars draw the same line. */
     .reset-pass-chip { margin: -4px 2px 10px; color: var(--text-secondary); }
-    /* 7d forecast pass note / relearning line (#2092 P1-3). */
-    .rp-pred-note { font-size: 10.5px; color: var(--text-secondary); margin-top: 2px; }
-    .rp-pred-note .rp-note-link { color: inherit; text-decoration: none; cursor: pointer; }
-    .rp-pred-note .rp-note-link:hover, .ct-rp-chip:hover { text-decoration: underline; }
+    /* 「지금 쓰세요 / 아껴두세요」 line under the chip (#2092): quiet for hold, accent for use. */
+    .reset-pass-advice { margin: -6px 2px 10px; font-size: 11px; line-height: 1.4; color: var(--text-secondary); }
+    .reset-pass-advice.is-use { color: var(--accent); font-weight: 600; }
+    .reset-pass-advice.is-neutral { color: var(--text-primary); }
+    .reset-pass-advice .rp-note-link { color: inherit; text-decoration: none; cursor: pointer; }
+    .reset-pass-advice .rp-note-link:hover { text-decoration: underline; }
+    .ct-rp-chip:hover { text-decoration: underline; }
     .ct-rp-help:hover { opacity: 1 !important; }
     .ct-rp-ticket:hover, .ct-rp-ticket:focus-visible, .ct-rp-more:hover { filter: brightness(1.08); outline: 2px solid currentColor; outline-offset: 1px; }
     .ct-rp-head:hover { text-decoration: underline; }

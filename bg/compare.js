@@ -211,6 +211,8 @@ import { detectPlan } from './plan-label.js';
 import { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, SHARE_ID_RE, SHARE_LINK_PATH_RE, SHARE_SITE_ORIGIN, SHARE_PASSWORD_MIN, SESSION_ID_RE, MODEL_ID_RE, SHARE_AUTHOR_MODES, SHARE_TITLE_MAX, SHARE_PASSWORD_MAX, SHARE_AUTHOR_NAME_MAX, CWS_EXT_ID } from '../ui/compare/constants.js';
 import { CUT_STREAM_ERROR, CUT_RETRACTED, RETRACTION_MAX } from '../ui/compare/constants.js';
 export { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, SHARE_ID_RE, SHARE_LINK_PATH_RE, SHARE_SITE_ORIGIN, SHARE_PASSWORD_MIN, SESSION_ID_RE, MODEL_ID_RE, SHARE_AUTHOR_MODES, SHARE_TITLE_MAX, SHARE_PASSWORD_MAX, SHARE_AUTHOR_NAME_MAX };
+import { findImageKey, ownerOfExtToken, OWNER_RE } from '../ui/compare/history-sync.js';
+import { HISTORY_SYNC_MSG_TYPE, HISTORY_SYNC_ENTRY_MAX_BYTES, HISTORY_SYNC_SERVER_MAX, HISTORY_SYNC_WIPE_KEY, HISTORY_SYNC_PREF_KEY, HISTORY_SYNC_NOTICED_KEY } from '../ui/compare/constants.js';
 import { COMPARE_INCOGNITO_KEY, COMPARE_INCOGNITO_BY_KEY, isSaveBy, normalizeSaveBy, keptFor, legacySaveHistory, readIncognitoPref, incognitoPrefWrite, saveByFromMessage, uniformSaveBy } from '../ui/compare/save-mode.js';
 
 // Dev-only runtime messages (unpacked builds): the two-conversations-one-session probe, see probeMulti.
@@ -307,6 +309,12 @@ const CLAUDE_ORGS_MAX = 20;
 // round trip at the same value; this one is the SW's, so the status probe never waits on a client's
 // promise it does not own. On expiry the provider's STATIC list is answered.
 export const LIST_MODELS_TIMEOUT_MS = 5000;
+// Bounds on the COMPARE_STATUS steps that had none (#2117): a page with no status draws no column and
+// cannot send, silently. Each step answers its "unknown" on expiry — a provider probe: permission
+// as read (or not permitted) with sign-in unknown (the page's 「다시 확인」 gate, not a login prompt);
+// the extension token: signed out; the server quota: a network error (the page's error notice).
+export const STATUS_PROBE_TIMEOUT_MS = 5000;
+export const STATUS_QUOTA_TIMEOUT_MS = 8000;
 
 // chrome.storage.sync key: { [provider]: string|null } — the model the user picked per provider.
 // Missing provider = null = the provider's Auto/default (see the package README "Models").
@@ -352,6 +360,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'open', 'send', 'column_done', 'column_error', 'round_done', 'consume_fail', 'copy', 'stop', 'new_chat',
   'model_change', 'target_change', 'provider_link_click', 'open_in_provider', 'gate_shown', 'permission_result', 'session_lost',
   'incognito_toggle', 'quota_exhausted', 'jump_to_latest', 'history_open', 'history_load', 'history_delete', 'history_clear', 'consume',
+  // #2081: the history's server copy — the first-screen notice (`action`), a server item opened, the panel switch / server clear.
+  'history_sync_notice', 'history_remote_open', 'history_sync_toggle', 'history_sync_server_clear',
   // SW-side, from openCompare: the in-page button was clicked (`src` + `placement`, nothing else).
   'button_click',
   // 「요약·비교」 (chathub batch 1, C5): the page reports the judge as a provider id (`judge`), never
@@ -375,6 +385,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // Feedback / report link (topbar): the user left for the inquiry form. Shapes only — whether the
   // page was framed and how many rounds they had run, never the prefill (it carries their email).
   'feedback_open',
+  // #2117: the page waited STATUS_REPLY_TIMEOUT_MS for COMPARE_STATUS without an answer (`late` 0/1 = it came after all).
+  'status_timeout',
   // 「닫은 열 다시 열기」 (the count of columns brought back). Emitted since 2026-09-26, dropped here until now.
   'column_reopen',
   // Mode tabs (#1769 plan §17): which tab (`mode`) and how (`via`: click / history).
@@ -538,6 +550,12 @@ export const COMPARE_FACT_CHIP_FLAG_FIELD = 'compare_fact_chip';
 // #2026: the suggested-question chips (COMPARE_STATUS.suggestOn) — the hidden 「what to ask next」 send to the
 // fastest column and the questions the 「요약·비교」 verdict ends with. Lives on the round footer, like the fact chip.
 export const COMPARE_SUGGEST_FLAG_FIELD = 'compare_suggest';
+// #2081: the history's server copy (ui/compare/history-sync.js) — same contract (needs `compare`, missing /
+// non-boolean = false; default OFF until the privacy statement ships). Answered as COMPARE_STATUS.historySyncOn.
+// It gates UPLOADING, listing and downloading; deleting never needs it (taking a copy down must always work).
+export const COMPARE_HISTORY_SYNC_FLAG_FIELD = 'compare_history_sync';
+// The ops of runtime message COMPARE_HISTORY (see historyRequest).
+export const HISTORY_SYNC_OPS = Object.freeze(['list', 'get', 'put', 'delete', 'clear']);
 // The user's own switch for them (options page 「AI 크로스체크」 card, chrome.storage.sync — options.js saves it with the
 // rest of the config): absent = ON (2026-10-03 user: on by default, can be turned off). Off = no hidden send, no rows.
 export const COMPARE_SUGGEST_ENABLED_KEY = 'compareSuggestEnabled';
@@ -1981,6 +1999,8 @@ function fetchWithDeadline(fetchImpl, url, ms, handle) {
  * @param {number} [deps.examplesTimeoutMs] — defaults to COMPARE_EXAMPLES_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.flagTimeoutMs] — defaults to COMPARE_FLAG_TIMEOUT_MS (tests shorten it)
  * @param {number} [deps.selectedModelsReadTimeoutMs] — defaults to SELECTED_MODELS_READ_TIMEOUT_MS (tests shorten it)
+ * @param {number} [deps.statusProbeTimeoutMs] — defaults to STATUS_PROBE_TIMEOUT_MS (tests shorten it, #2117)
+ * @param {number} [deps.statusQuotaTimeoutMs] — defaults to STATUS_QUOTA_TIMEOUT_MS (tests shorten it, #2117)
  * @param {Function} [deps.drainPendingHides] — vendor-ai `drainPendingHides(deps)`, called once per
  *   worker life, DRAIN_STARTUP_DELAY_MS after construction (= service-worker start), unless
  *   `storage` holds DRAIN_DISABLED_KEY true
@@ -2016,6 +2036,8 @@ export function createCompareController({
   examplesTimeoutMs = COMPARE_EXAMPLES_TIMEOUT_MS,
   flagTimeoutMs = COMPARE_FLAG_TIMEOUT_MS,
   selectedModelsReadTimeoutMs = SELECTED_MODELS_READ_TIMEOUT_MS,
+  statusProbeTimeoutMs = STATUS_PROBE_TIMEOUT_MS,
+  statusQuotaTimeoutMs = STATUS_QUOTA_TIMEOUT_MS,
 }) {
   // `storage` is optional in the package and only the ChatGPT client uses it: the durable backlog
   // of conversations still to hide (see drainPendingHides below).
@@ -2157,20 +2179,20 @@ export function createCompareController({
       // {on:true, at:<+1y>} row hid the strip button and 「요약·비교」 for good).
       // `cta` / `summary` are read as conjunctions with `on` (Codex batch-1 #5): a row written as
       // {on:false, summary:true} must not answer a gate the page itself does not have.
-      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.footer === 'boolean' && typeof cached.factChip === 'boolean' && typeof cached.suggest === 'boolean' && typeof cached.at === 'number') {
+      if (cached && typeof cached.on === 'boolean' && typeof cached.cta === 'boolean' && typeof cached.summary === 'boolean' && typeof cached.debate === 'boolean' && typeof cached.share === 'boolean' && typeof cached.footer === 'boolean' && typeof cached.factChip === 'boolean' && typeof cached.suggest === 'boolean' && typeof cached.historySync === 'boolean' && typeof cached.at === 'number') {
         const age = now() - cached.at;
-        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true, footer: cached.on && cached.footer === true, factChip: cached.on && cached.factChip === true, suggest: cached.on && cached.suggest === true };
+        if (age < COMPARE_FLAG_TTL_MS && age > -COMPARE_FLAG_FUTURE_SKEW_MS) return { on: cached.on, cta: cached.on && cached.cta === true, summary: cached.on && cached.summary === true, debate: cached.on && cached.debate === true, share: cached.on && cached.share === true, footer: cached.on && cached.footer === true, factChip: cached.on && cached.factChip === true, suggest: cached.on && cached.suggest === true, historySync: cached.on && cached.historySync === true };
       }
     } catch { /* unreadable cache = miss */ }
     return null;
   }
   async function writeFlagCache(flags) {
-    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, footer: flags.footer === true, factChip: flags.factChip === true, suggest: flags.suggest === true, at: now() } }); } catch { /* best effort */ }
+    try { await storage.set({ [COMPARE_FLAG_CACHE_KEY]: { on: flags.on === true, cta: flags.cta === true, summary: flags.summary === true, debate: flags.debate === true, share: flags.share === true, footer: flags.footer === true, factChip: flags.factChip === true, suggest: flags.suggest === true, historySync: flags.historySync === true, at: now() } }); } catch { /* best effort */ }
   }
   // FAIL-SAFE like fetchFolderAvailable: any fetch/parse error, non-2xx or a missing/invalid
   // `compare` field reads as dark. A network error does not poison the cache. Neither `cta` nor
   // `summary` can be true while `on` is false (both are buttons that need the page).
-  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false, footer: false, factChip: false, suggest: false });
+  const DARK = Object.freeze({ on: false, cta: false, summary: false, debate: false, share: false, footer: false, factChip: false, suggest: false, historySync: false });
   async function fetchCompareFlags() {
     const cached = await readFlagCache();
     if (cached !== null) return cached;
@@ -2191,6 +2213,7 @@ export function createCompareController({
             footer: on && !!(json && json[COMPARE_ROUND_FOOTER_FLAG_FIELD] === true),
             factChip: on && !!(json && json[COMPARE_FACT_CHIP_FLAG_FIELD] === true),
             suggest: on && !!(json && json[COMPARE_SUGGEST_FLAG_FIELD] === true),
+            historySync: on && !!(json && json[COMPARE_HISTORY_SYNC_FLAG_FIELD] === true),
           };
           await writeFlagCache(flags);
           return flags;
@@ -2264,14 +2287,18 @@ export function createCompareController({
     const site = PROVIDER_SITES[provider];
     let permitted = true;
     if (site.optionalHost) {
-      try { permitted = (await hasProviderPermission(provider)) === true; } catch { permitted = false; }
+      try { permitted = (await withTimeout(Promise.resolve().then(() => hasProviderPermission(provider)), statusProbeTimeoutMs, false)) === true; } catch { permitted = false; }
     }
     // `null` when we cannot even look: without the host permission the cookie and tab probes
     // answer "nothing" for a signed-in user too, and the page must render that as "grant",
     // not "sign in".
     let loggedIn = null;
     if (permitted) {
-      try { loggedIn = (await loginChecks[provider]()) === true; } catch { loggedIn = false; }
+      // Expiry = unknown (null), never "signed out": a slow Gemini HEAD is not a logout (#2117).
+      try {
+        const v = await withTimeout(Promise.resolve().then(() => loginChecks[provider]()), statusProbeTimeoutMs, null);
+        loggedIn = v === null ? null : v === true;
+      } catch { loggedIn = false; }
     }
     return { permitted, loggedIn };
   }
@@ -2551,6 +2578,7 @@ export function createCompareController({
     const summaryOn = flagOn && flags.summary === true;
     const debateOn = flagOn && flags.debate === true; // 「토론 모드」 toggle (#1769), same shape
     const shareOn = flagOn && flags.share === true; // 「공유」 (#1784 U3), same shape
+    const historySyncOn = flagOn && flags.historySync === true; // the history's server copy (#2081), same shape
     const roundFooterOn = flagOn && flags.footer === true; // round footer (#1976), same shape
     const factChipOn = roundFooterOn && flags.factChip === true; // its 「확인이 필요한 사실」 chip lives on the footer
     // #2026: the suggested-question chips, on the footer too — and only while the user's setting is on (unread / a failed read = on).
@@ -2560,7 +2588,17 @@ export function createCompareController({
       ? withTimeout(Promise.resolve().then(() => storageSync.get(COMPARE_SUGGEST_ENABLED_KEY)).then((r) => r?.[COMPARE_SUGGEST_ENABLED_KEY] !== false, () => true), SELECTED_MODELS_READ_TIMEOUT_MS, true)
       : Promise.resolve(false);
     let loggedIn = false;
-    try { loggedIn = !!(await getExtToken()); } catch { loggedIn = false; }
+    // #2081 decision A: the signed-in account's owner stamp rides the status (the page stamps an entry's first write
+    // with it — no round trip at write time, no wait inside the history lock: Codex J1).
+    let owner = null;
+    // #2117 (Codex 1R): a token read past its bound is UNKNOWN (null), never "signed out" — a signed-in
+    // user must not be told to sign in. The page holds the send and offers 「다시 확인」 instead.
+    const TOKEN_UNREAD = Symbol('token-unread');
+    try {
+      const tok = await withTimeout(Promise.resolve().then(() => getExtToken()), statusProbeTimeoutMs, TOKEN_UNREAD);
+      loggedIn = tok === TOKEN_UNREAD ? null : !!tok;
+      owner = tok && tok !== TOKEN_UNREAD ? await ownerOfExtToken(tok) : null; // a local JWT decode — nothing to wait on
+    } catch { loggedIn = false; owner = null; }
     const providers = {};
     // 🔴 NOT WHEN DARK (#1463 ①). These are the provider LOGIN PROBES, and with no provider tab
     // open the Gemini one is a credentialed HEAD over the network — so a page that will only ever
@@ -2602,11 +2640,13 @@ export function createCompareController({
     // Dark = nothing else to show (AC24); do not touch the server for a page that will only say
     // "coming soon". Otherwise the server's answer is the truth, including 401 for a missing
     // ext_token (authedFetch falls back to the shared key, which the route refuses by design).
-    const { quota, quotaError, betaReset } = flagOn ? await readQuota() : { quota: null, quotaError: null, betaReset: false };
+    const { quota, quotaError, betaReset } = flagOn
+      ? await withTimeout(readQuota(), statusQuotaTimeoutMs, { quota: null, quotaError: { status: 0, code: SW_CODES.NETWORK_ERROR }, betaReset: false })
+      : { quota: null, quotaError: null, betaReset: false };
     let examples = null;
     try { examples = await examplesPending; } catch { examples = null; }
     const suggestOn = suggestAvailable && (await suggestPrefP);
-    return { ok: true, flagOn, summaryOn, debateOn, shareOn, roundFooterOn, factChipOn, suggestOn, suggestAvailable, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
+    return { ok: true, owner, flagOn, summaryOn, debateOn, shareOn, historySyncOn, roundFooterOn, factChipOn, suggestOn, suggestAvailable, betaReset, examples, loggedIn, providers, quota, quotaError, models, modelsSource, modelsPending, selectedModels, saveHistory, saveHistoryBy };
   }
 
   // `GET /api/compare/status` → `{ quota, quotaError, betaReset }` — the quota object the page renders
@@ -2782,6 +2822,109 @@ export function createCompareController({
     };
   }
 
+  /**
+   * COMPARE_HISTORY (#2081) — the history's server copy, for the compare page (ui/compare/history-sync.js):
+   *   list                       → {ok, items}          GET /api/compare/history
+   *   get {id}                   → {ok, rev, entry}     GET /api/compare/history/:id
+   *   put {id, baseRev, entry}   → {ok, rev} | {ok:false, status:409, rev}   PUT /api/compare/history/:id
+   *   delete {id}                → {ok}                 DELETE /api/compare/history/:id
+   *   clear                      → {ok}                 DELETE /api/compare/history
+   *   failure                    → {ok:false, status, code}
+   * 🔴 Only with the user's own ext_token, pinned in the request — never the shared key authedFetch
+   * falls back to (the route refuses it anyway; nothing is sent). list / get / put also need the `compare_history_sync` flag;
+   * delete / clear never do. A put whose entry carries an image key anywhere is refused HERE (the page
+   * builds it with syncEntryOf; the server refuses it too). The compare page only; `clear` also from
+   * the options page (「서버 기록도 삭제」).
+   */
+  const fromOptionsPage = (sender) => {
+    try {
+      const u = new URL(String(sender && sender.url));
+      return u.protocol === 'chrome-extension:' && u.host === runtime.id && u.pathname === '/options.html';
+    } catch { return false; }
+  };
+  async function historyRequest(message, sender) {
+    const op = message.op;
+    if (!HISTORY_SYNC_OPS.includes(op) || !(fromSharePage(sender) || (op === 'clear' && fromOptionsPage(sender)))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+    const id = message.id;
+    if ((op === 'get' || op === 'put' || op === 'delete') && !(typeof id === 'string' && SESSION_ID_RE.test(id))) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+    if ((op === 'list' || op === 'get' || op === 'put') && !(await fetchCompareFlags()).historySync) return { ok: false, status: 0, code: 'history_sync_off' };
+    let token = null;
+    try { token = await getExtToken(); } catch { token = null; }
+    if (!token) return { ok: false, status: 0, code: 'ext_token_required' };
+    let init = { method: 'GET' };
+    if (op === 'put') {
+      const entry = message.entry;
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.id !== id || !Number.isInteger(message.baseRev) || message.baseRev < 0) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+      if (findImageKey(entry) !== null) return { ok: false, status: 0, code: SW_CODES.BAD_REQUEST };
+      const body = JSON.stringify({ baseRev: message.baseRev, entry });
+      if (new TextEncoder().encode(body).byteLength > HISTORY_SYNC_ENTRY_MAX_BYTES + 1024) return { ok: false, status: 413, code: 'payload_too_large' };
+      init = { method: 'PUT', headers: { ...JSON_HEADERS }, body };
+    } else if (op === 'delete' || op === 'clear') init = { method: 'DELETE' };
+    // 🔴 Every request from the compare page is for ONE account (decision A / batch r7, data not time): the owner the
+    // page says it acts for — an upload's entry stamp, a delete's ledger, a list's view — must be the pinned token's.
+    // Another account's entry or queue, or a request with no owner, is never sent with the token signed in now. The
+    // options page's 「서버 기록도 삭제」 alone is account-wide by nature (the token's account).
+    const tokenOwner = await ownerOfExtToken(token);
+    if (!(op === 'clear' && fromOptionsPage(sender))) {
+      if (!tokenOwner || typeof message.owner !== 'string' || !OWNER_RE.test(message.owner) || message.owner !== tokenOwner) return { ok: false, status: 0, code: 'history_sync_other_account' };
+    }
+    let resp;
+    try {
+      const config = await getConfig();
+      // 🔴 An upload re-checks THIS browser's switch and first-screen notice as the LAST thing before it goes — no
+      // await between this read and the fetch (batch r5 / G1 #3). The page checked them once, then waited behind
+      // other requests; login and the flag were checked above. A delete never needs the switch.
+      if (op === 'put') {
+        let local = null;
+        try { local = await storage.get([HISTORY_SYNC_PREF_KEY, HISTORY_SYNC_NOTICED_KEY]); } catch { local = null; }
+        if (!local || local[HISTORY_SYNC_PREF_KEY] === false || local[HISTORY_SYNC_NOTICED_KEY] !== true) return { ok: false, status: 0, code: 'history_sync_paused' };
+      }
+      // 🔴 The token checked above, PINNED (Codex 1R #1): authedFetch re-reads it and falls back to the
+      // shared key when it is gone by then (a logout between the two reads) — this path never sends that.
+      resp = await fetchImpl(`${config.serverUrl}/api/compare/history${op === 'list' || op === 'clear' ? '' : `/${id}`}`, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+    } catch {
+      return { ok: false, status: 0, code: SW_CODES.NETWORK_ERROR };
+    }
+    const body = await readJson(resp);
+    if (!resp.ok) {
+      // `code` first (400 bad_* / 403 account_deleted), else `error` (409 rev_conflict, 429 rate_limited, 503 busy vs
+      // history_sync_disabled — the page tells those two apart by this value).
+      const code = typeof body?.code === 'string' ? body.code.slice(0, OUTCOME_CODE_MAX) : typeof body?.error === 'string' ? body.error.slice(0, OUTCOME_CODE_MAX) : 'http_error';
+      return { ok: false, status: resp.status, code, ...(resp.status === 409 && Number.isInteger(body?.rev) ? { rev: body.rev } : {}) };
+    }
+    if (op === 'delete') return { ok: true };
+    if (op === 'clear') return { ok: true, ...(tokenOwner ? { owner: tokenOwner } : {}) }; // whose server it emptied (historyWipe marks it)
+    if (op === 'list') return { ok: true, items: (Array.isArray(body?.items) ? body.items : []).slice(0, HISTORY_SYNC_SERVER_MAX) };
+    if (op === 'put') return Number.isInteger(body?.rev) ? { ok: true, rev: body.rev } : { ok: false, status: resp.status, code: 'bad_response' };
+    // get: the entry is re-validated by the page (normalizeEntry) before anything is kept.
+    if (!body || body.id !== id || !Number.isInteger(body.rev) || !body.entry || typeof body.entry !== 'object') return { ok: false, status: resp.status, code: 'bad_response' };
+    return { ok: true, rev: body.rev, entry: body.entry };
+  }
+
+  /**
+   * 「서버 기록도 삭제」 (the 「최근」 panel or the options page — `wipe: true`; batch review r2): the server
+   * empties the account (a `wipe` tombstone: baseRev 0 is accepted again, baseRev > 0 answers 410), and
+   * marks it for THIS browser (HISTORY_SYNC_WIPE_KEY = now) — no lock, nothing waited for (Codex C1·C2).
+   * Each page's engine takes the mark into the ledger under the history lock before its next decision
+   * (history-sync.js ledgerAfterWipe: conflict / 410 marks forgotten, revs kept — a pre-wipe rev heals
+   * itself through the server's 410 `wiped`). 「동기화 안 함」 and queued deletes stay; nothing is
+   * re-uploaded in bulk. A failed mark write costs only the forgotten marks, never a wrong upload.
+   */
+  async function historyWipe(message, sender) {
+    const r = await historyRequest(message, sender);
+    if (r && r.ok) {
+      try {
+        // Strictly increasing whatever the clock does (Codex C3 #3): a mark not above the last one is never taken in.
+        // Per ACCOUNT (batch r7): `{ [owner]: at }` — only that account's ledger takes the wipe in.
+        const owner = typeof r.owner === 'string' && OWNER_RE.test(r.owner) ? r.owner : null; // the very token the DELETE went with
+        const marks = (await storage.get(HISTORY_SYNC_WIPE_KEY))?.[HISTORY_SYNC_WIPE_KEY];
+        const all = marks && typeof marks === 'object' && !Array.isArray(marks) ? { ...marks } : {};
+        if (owner) { all[owner] = Math.max(now(), (Number(all[owner]) || 0) + 1); await storage.set({ [HISTORY_SYNC_WIPE_KEY]: all }); }
+      } catch { /* see above */ }
+    }
+    return r;
+  }
+
   // ── Open the compare page from a provider tab (content script → SW) ───────────────────────
   // The ONE `tabs.create` outside the vendored clients, and it opens our own site shell only
   // (COMPARE_SITE_URL, which frames compare.html — see the constant).
@@ -2887,6 +3030,11 @@ export function createCompareController({
       const answer = (ok) => { try { sendResponse({ ok }); } catch { /* page gone */ } };
       if (!fromSharePage(_sender)) { answer(false); return true; }
       recordReviewNudgeAction(message.action, { storage, getConfig, authedFetch, now }).then(answer, () => answer(false));
+      return true;
+    }
+    // The history's server copy (#2081): see historyRequest.
+    if (message.type === HISTORY_SYNC_MSG_TYPE) {
+      (message.op === 'clear' && message.wipe === true ? historyWipe(message, _sender) : historyRequest(message, _sender)).then(sendResponse, () => sendResponse({ ok: false, status: 0, code: SW_CODES.UNKNOWN }));
       return true;
     }
     // Share links (#1784 U3): see shareRequest — the compare page only.

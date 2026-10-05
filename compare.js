@@ -59,7 +59,7 @@
 
 import { makeT, resolveLang } from './ui/compare-i18n.js';
 import { createImageStore, idbBackend, imageIdsOf } from './ui/compare/image-store.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, CODE_AUTH_REQUIRED, GATE_CODES, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
+import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, ColumnMap, PROVIDER_META, LOGIN_URL, PRO_URL, QUOTA_LOW_REMAINING, FOLLOWUP_ALL, COPY_KIND_QUESTION, COPY_KIND_COLUMN, COPY_KIND_ALL, EVENT_MSG_TYPE, SEND_KIND_SEND, SEND_KIND_FOLLOWUP, SEND_KIND_SUMMARY, SEND_KIND_RETRY, SEND_KIND_RESUME, SEND_KIND_DEBATE, SEND_KIND_DEBATE_TURN, SEND_KIND_DEBATE_MOD, RESET_MSG_TYPE, RESET_CODE_STATUS_UNAVAILABLE, FOLLOWUP_ID_BOTTOM, SVG_NS, MODEL_SOURCE_REQUESTED, FOLLOW_AT_BOTTOM_PX, AUTO_REFRESH_MIN_MS, STATUS_REPLY_TIMEOUT_MS, GATE_JOINED, NOTICE_OWNER_PAGE, NOTICE_OWNER_STATUS, NOTICE_OWNER_LOGIN, NOTICE_OWNER_QUOTA, AUTO_REFRESH_LISTENERS, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, CODE_NETWORK_ERROR, BADGE_STALLED_CLS, CODE_AUTH_REQUIRED, GATE_CODES, HISTORY_TEXT_MAX, HISTORY_SEARCH_DEBOUNCE_MS, EXAMPLE_CHIP_COUNT, EXAMPLE_Q_MAX, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, BADGE_WAITING, BADGE_UPLOADING, WAIT_TICK_MS, WAIT_ELAPSED_SHOW_MS, MS_PER_SECOND } from './ui/compare/constants.js';
 import { ATTACH_MAX_BYTES, ATTACH_MAX_FILES, ATTACH_MAX_TOTAL_BYTES, ATTACH_ERR_READ, ATTACH_ERR_TYPE, ATTACH_ERR_COUNT } from './ui/compare/constants.js';
 import { ATTACH_ACCEPT, ATTACH_FORMATS_LABEL, attachTypeOf, isImageType } from './ui/compare/attach-types.js';
 import { FEEDBACK_URL, FEEDBACK_SOURCE } from './ui/compare/constants.js';
@@ -75,6 +75,7 @@ import { findLink, textWithoutLink, mayOfferLink, linkChipText, linkErrorText } 
 import { sendMessage, localHHMM, autoGrow, bindComposer, embedHostOf, listenEmbedTheme, sendableTargets, feedbackContext, feedbackColumn, feedbackUrl, lockedInCatalog, lockedSuffix, exampleCode, answerTiming } from './ui/compare/helpers.js';
 import { NARROW_MEDIA, REDUCED_MOTION_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
+import { installHistorySync } from './ui/compare/history-sync.js';
 import { installSummary } from './ui/compare/summary.js';
 import { installColumnGate } from './ui/compare/column-gate.js';
 import { installModelPicker } from './ui/compare/model-picker.js';
@@ -222,6 +223,12 @@ export function mountComparePage(deps) {
     sessionId: null,      // local history entry of this session (assigned at the first CONSUME_OK or when a stored session is loaded)
     persistedId: null,    // the sessionId an entry was last written / loaded for — sessionId === persistedId ⇔ this session is in the history
     frozenDebate: false,  // a loaded debate entry shown as columns (debate not offered): read-only, not shareable (history.js loadSession)
+    remoteViewId: null,   // #2081 §7.8: another device's conversation shown read-only (its server id) — forked on its first write
+    forkOf: null,         // #2081 §7.8: { id: this session's id, from: the server id it continues } — kept as the entry's `forkedFrom`
+    mixedIds: new Map(),  // #2081 pre-CWS batch r2: session id → the Set of mixedEpochs it was marked in — that conversation holds more than one account's words, its entries are `mixed` (never uploaded)
+    mixedEpoch: 0,        // moves on every open of a stored entry (history.js loadSession): a mark binds the conversation as it was on screen
+    splitOf: null,        // #2081 batch r8: { from: the id of another account's (or a signed-out) entry this one continues, ids: { [owner or '']: that account's split id } } — `splitFrom`
+    historyRemote: [],    // the server's items this browser does not have (#2081, history-sync.js) — painted beside historyCache
     historyCache: [],     // the last history list read for the panel — the search filters this, never storage (C2)
     // The signed-in account, read once at mount (readFeedbackAccount) and used for nothing but
     // prefilling the feedback form and drawing the debate room's own avatar (`mePhoto` = the
@@ -245,6 +252,7 @@ export function mountComparePage(deps) {
     summaryConsent: {},   // #1976 R4: { [judgeProvider]: true } — 「다음부터 묻지 않고 바로 정리」, chrome.storage.local (summary.js loadSummaryConsent)
     roundSeq: 0,          // monotonic id of the last round beginSend put on the wire — every turn it draws carries it (C5 provenance)
     roundInFlight: null,  // the round of the send awaiting its CONSUME_OK (a retry names the round it repeats)
+    statusStalled: false, // #2117: the status answer is past STATUS_REPLY_TIMEOUT_MS (the notice is up; focus retries)
     quotaGen: 0,          // bumped at a beta reset's request AND its completion (cmp-beta-contract §5, Codex 2R): a round that began under an older gen carries a pre-reset quota snapshot in its CONSUME_OK/FAIL — settled, but its count is not applied (refreshQuota instead)
     roundGen: 0,          // quotaGen as it was when the in-flight round went out
     activeRound: null,    // the round of the last ACCEPTED non-summary send — the comparison the user is working on (a retry of round 1 makes round 1 active again; a summary never moves it)
@@ -286,6 +294,8 @@ export function mountComparePage(deps) {
    * repaint, the rollback and a reload.
    */
   function attachMark(img) {
+    // #2081: a file that stayed on the browser it was sent from (an entry opened from the server copy).
+    if (img && img.omitted === true) return el('span', 'cmp-turn-attach cmp-turn-attach-omitted', t('hist_sync_attach_omitted'));
     const w = el('span', 'cmp-turn-attach');
     // The images themselves (2026-09-26, user request: the name alone did not say which picture it
     // was). One thumbnail per id, filled in when the image store answers; a click opens the viewer.
@@ -441,6 +451,7 @@ export function mountComparePage(deps) {
   // Install the slices (they only register functions on ctx; nothing runs here), then take the
   // names this file calls bare. Every slice function is also reachable as ctx.name(...).
   installHistory(ctx);
+  installHistorySync(ctx);
   installConsent(ctx);
   installSummary(ctx);
   installRoundFooter(ctx);
@@ -3282,6 +3293,8 @@ export function mountComparePage(deps) {
   historySharesBtn.hidden = true;
   historySharesBtn.addEventListener('click', () => { closeHistoryPanel(); ctx.openMyShares(historyBtn); });
   historyPanel.appendChild(historySharesBtn);
+  // #2081: the server-sync switch + 「서버 기록도 삭제」, always reachable here (history-sync.js decides when it shows).
+  if (ctx.historySyncPanelControls) historyPanel.appendChild(ctx.historySyncPanelControls());
   root.appendChild(historyPanel);
   Object.assign(ctx, { historyPanel, historyHead, historySearch, historyClearBtn, historyList, historyNote, historySharesBtn });
   let historySearchTimer = null;
@@ -3463,6 +3476,23 @@ export function mountComparePage(deps) {
     setChecking(true);
     return promise;
   }
+  /** #2117: the status answer is overdue — a status-owned notice with 「다시 확인」 (a fresh read under a new epoch). */
+  function showStatusTimeout() {
+    state.statusStalled = true;
+    if (!statusOwnsNotice()) return;
+    const btn = el('button', 'cmp-btn cmp-btn-sm cmp-status-retry', t('gate_check_again'));
+    btn.type = 'button';
+    btn.addEventListener('click', retryStatus);
+    showNotice('error', [t('status_timeout'), t('status_timeout_desc')], btn, NOTICE_OWNER_STATUS);
+  }
+  /** A new read that does not join the overdue one (refreshStatus shares an in-flight read of the same epoch). */
+  // Mid-session too (Codex 2R): a status read there is the beta reset's own path, and an unknown token
+  // after it holds every follow-up until a read finds the token — this button must be able to ask.
+  function retryStatus() {
+    if (state.disabled || state.sending) return;
+    bumpStatusEpoch();
+    refreshStatus();
+  }
   function setChecking(on) {
     state.checking = on;
     for (const col of state.columns.values()) syncGateStatus(col);
@@ -3474,15 +3504,38 @@ export function mountComparePage(deps) {
   function currentStatusReadSeq() { return statusReadSeq; }
   async function readStatus(epoch) {
     const seq = ++statusReadSeq;
-    const res = await sendMessage(chrome, { type: 'COMPARE_STATUS' });
+    // #2117: no answer within STATUS_REPLY_TIMEOUT_MS → say so (a page without a status has no column
+    // and a dead 「보내기」). The read keeps listening: a late answer is applied as usual.
+    let timedOut = false;
+    const timer = clock.setTimeout(() => {
+      if (epoch !== statusEpoch) return;
+      timedOut = true;
+      showStatusTimeout();
+      track('status_timeout', { late: 0, framed: !!embedHost });
+    }, STATUS_REPLY_TIMEOUT_MS);
+    let res;
+    try { res = await sendMessage(chrome, { type: 'COMPARE_STATUS' }); } finally { clock.clearTimeout(timer); }
     if (epoch !== statusEpoch) return; // stale (see statusEpoch) — nothing of it is applied
+    if (timedOut) {
+      track('status_timeout', { late: res && res.ok ? 1 : 0, framed: !!embedHost });
+      // A late FAILURE (the SW died with the request) is not "the flag is off": the timeout notice and
+      // its 「다시 확인」 stay, rather than a terminal coming-soon page.
+      if (!(res && res.ok)) return;
+    }
+    state.statusStalled = false;
     state.status = res && res.ok ? res : { ok: false, flagOn: false };
+    // The history's account (#2081) — even from a read that ends the page below (Codex gate 1R follow-up).
+    if (ctx.noteStatusAccount) ctx.noteStatusAccount();
     const qe = state.status.quotaError;
     if (!state.status.flagOn || (qe && Number(qe.status) === HTTP_NOT_FOUND)) { renderComingSoon(); return; }
     // The notice slot: a status read clears / replaces only what a status read put there. A
     // consume error or the quota notice (page-owned) stays through an auto-reconnect read — the
     // one exception is the extension-login notice, which replaces anything (see showLoginRequired).
-    const signedOut = !state.status.loggedIn || (qe && (Number(qe.status) === HTTP_UNAUTHORIZED || Number(qe.status) === HTTP_FORBIDDEN));
+    const authRefused = !!(qe && (Number(qe.status) === HTTP_UNAUTHORIZED || Number(qe.status) === HTTP_FORBIDDEN));
+    // #2117: `loggedIn: null` = the SW could not read the token in time — unknown, not signed out. No target
+    // either way (currentTargets reads loggedIn), but the notice is the overdue one with 「다시 확인」, not 「로그인」.
+    const tokenUnknown = state.status.loggedIn === null && !authRefused;
+    const signedOut = (!state.status.loggedIn && !tokenUnknown) || authRefused;
     // …and a consume-time login notice is resolved by a read that finds the extension signed in.
     if (statusOwnsNotice() || (state.notice.owner === NOTICE_OWNER_LOGIN && !signedOut)) clearNotice();
     renderQuota(state.status.quota, qe);
@@ -3493,10 +3546,14 @@ export function mountComparePage(deps) {
     if (signedOut) {
       state.status.loggedIn = false;
       showLoginRequired();
+    } else if (tokenUnknown) {
+      showStatusTimeout();
     } else if (qe && statusOwnsNotice()) {
       // bg/compare.js reports a failed status call as {status:0, code:'network_error'}.
       showNotice('error', [t(qe.code === CODE_NETWORK_ERROR ? 'err_network_error' : 'err_generic')], null, NOTICE_OWNER_STATUS);
     }
+    // The history's account (#2081): known from THIS read, or — unknown (`loggedIn: null`) — the one last known.
+    if (ctx.noteStatusAccount) ctx.noteStatusAccount();
     // The stored preference seeds the toggle until the user touches it on this page.
     // Never while a SEND is in flight or a session exists: the value on the wire is fixed, and a
     // late answer must not flip the toggle out from under it (Codex wire 1R #1).
@@ -3514,10 +3571,12 @@ export function mountComparePage(deps) {
     }
     syncZeroTargetsNotice();
     updateControls();
-    if (ctx.pendingLoad && state.columns.size) { const entry = ctx.pendingLoad; ctx.pendingLoad = null; loadSession(entry); }
+    if (ctx.pendingLoad && state.columns.size) { const entry = ctx.pendingLoad; const opts = ctx.pendingLoadOpts || {}; ctx.pendingLoad = null; ctx.pendingLoadOpts = null; loadSession(entry, opts); }
     // A link that arrived WITH the page (`q` — a share page's 「이어서 질문하기」, #1784 U4) is offered
     // like a pasted one once the page can take it; the user still presses 「이어서」 (idempotent).
     if (!state.sessionStarted) offerLinkFrom(qInput.value);
+    // The history server-sync notice (#2081): once per browser, on the first screen the gates allow it on.
+    if (ctx.historySyncStatus) ctx.historySyncStatus();
   }
 
   // ── auto-reconnect (login guidance) ──
@@ -3533,11 +3592,13 @@ export function mountComparePage(deps) {
     // focus as well — the day rolls over at UTC midnight while the tab sits in the background,
     // and the gate must open without a reload. Mid-session that is the quota-only read.
     const exhausted = quotaExhausted();
-    if (!exhausted && (state.sessionStarted || !anyGate())) return;
+    // #2117: an overdue status (no columns yet) is retried on focus too — anyGate() has no column to see.
+    const stalled = !!state.statusStalled && !state.sessionStarted;
+    if (!exhausted && !stalled && (state.sessionStarted || !anyGate())) return;
     const now = clock.now();
     if (now - lastAutoRefreshAt < AUTO_REFRESH_MIN_MS) return;
     lastAutoRefreshAt = now;
-    if (state.sessionStarted) refreshQuota(); else refreshStatus();
+    if (state.sessionStarted) refreshQuota(); else if (stalled) retryStatus(); else refreshStatus();
   }
   // This mount's identity in the registry: a teardown removes only its OWN entry — a late
   // coming-soon of a replaced mount must not strip the replacement's listeners (Codex b2 3R #3).

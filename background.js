@@ -17,6 +17,8 @@ import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } f
 import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
+import { CWS_EXT_ID } from './ui/compare/constants.js';
+import { isGrantable, GRANT_PAGE } from './bg/grantable.js';
 import { updateBadgeForSelectedOrg, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
@@ -294,6 +296,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } catch (e) { /* fall through with no param */ }
     const welcomeUrl = new URL('/welcome/', SITE_URL);
     if (explicitLang) welcomeUrl.searchParams.set('lang', explicitLang);
+    // An unpacked (dev) build has its own id. Without this the welcome page (it reads ?ext=,
+    // site/welcome/index.html) hands the sign-in token to the store id — a disabled or absent
+    // extension — and login "fails" right after a correct code.
+    if (chrome.runtime.id !== CWS_EXT_ID) welcomeUrl.searchParams.set('ext', chrome.runtime.id);
     chrome.tabs.create({ url: welcomeUrl.toString() });
     // Allow auto-open side panel on first Claude.ai visit (fresh install only)
     await chrome.storage.local.set({ sidePanelAutoOpened: false });
@@ -378,6 +384,20 @@ async function resolveSyncIdentity() {
   if (email && email === accountCache?.email) name = accountCache.name || '';
   else if (email && email === independentAccount?.email) name = independentAccount.name || '';
   return { email, name };
+}
+
+// Opens grant.html for one provider next to the tab that asked (#2126). Deliberately a NEW tab
+// every time — reusing "the" grant tab (Codex 1R) overwrote pages the user had navigated that tab
+// to and replaced a pending ChatGPT prompt with Gemini (Codex 2R). The flood that reuse was meant
+// to stop is closed by the origin rule at the call site instead.
+function openGrantTab(provider, opener) {
+  const url = new URL(chrome.runtime.getURL(GRANT_PAGE));
+  url.searchParams.set('p', provider);
+  if (opener && Number.isInteger(opener.id)) url.searchParams.set('from', String(opener.id));
+  return chrome.tabs.create({
+    url: url.toString(),
+    ...(opener && Number.isInteger(opener.index) ? { index: opener.index + 1 } : {}),
+  });
 }
 
 // Handle messages from welcome page + dashboard login
@@ -644,9 +664,34 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         lastStatus: status,
         providers,
         anyCollected,
+        // This build answers OPEN_PERMISSION_PAGE (below). The welcome page shows its one-click
+        // grant buttons only when this is true; an older build gets the popup instructions.
+        canOpenGrant: true,
       });
     })();
     return true; // async sendResponse
+  }
+
+  // Welcome page's [Grant] button (#2126). A web page cannot request a host permission, so open
+  // grant.html — an extension page, where one click is the gesture chrome.permissions.request
+  // needs. Only the providers bg/grantable.js names; the opener tab rides along so the page can
+  // hand focus back after granting.
+  // 🔴 Only production may ask (Codex 1R): PR previews are externally_connectable too, and any
+  // of them could otherwise open tabs in a loop. An unpacked build accepts previews — that is how
+  // a preview gets tested, and only its developer runs it.
+  if (message && message.type === 'OPEN_PERMISSION_PAGE') {
+    const fromProd = sender && sender.origin === SITE_URL;
+    if (!fromProd && chrome.runtime.id === CWS_EXT_ID) {
+      sendResponse({ ok: false, error: 'origin_not_allowed' });
+      return false;
+    }
+    if (!isGrantable(message.provider)) {
+      sendResponse({ ok: false, error: 'unknown_provider' });
+      return false;
+    }
+    openGrantTab(message.provider, sender && sender.tab)
+      .then(() => sendResponse({ ok: true }), (e) => sendResponse({ ok: false, error: e && e.message }));
+    return true;
   }
 
   // Return every org the extension has locally detected (Claude + ChatGPT + Gemini),
@@ -1757,7 +1802,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           // `status` is what the caller classifies on: only the server knows the difference
           // between "we could not mail it" (503) and "you asked too often" (429), and the string
           // body alone never carried it.
-          sendResponse({ success: false, status: resp.status, error: data?.error || 'server_error' });
+          // `retryAfter`: seconds until a new code can be issued (429 only) — the popup names it.
+          sendResponse({ success: false, status: resp.status, error: data?.error || 'server_error', retryAfter: data?.retry_after });
           return;
         }
         // 🔴 A 2xx is NOT success — `{ sent: true }` is (worker/src/routes/auth.ts). Tolerating an

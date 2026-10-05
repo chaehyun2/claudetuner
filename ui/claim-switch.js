@@ -175,8 +175,8 @@ async function renderClaimSwitchWidget() {
       } else {
         // See the re-auth widget above: lastError is read inside the callback, and the reason →
         // copy step lives in bg/send-code-error.js rather than here (#1172).
-        const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError));
-        status.textContent = t(copy.key) || copy.fallback;
+        const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError), res);
+        status.textContent = t(copy.key, ...copy.args) || copy.fallback;
       }
     });
   };

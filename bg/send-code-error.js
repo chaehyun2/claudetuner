@@ -58,6 +58,9 @@ export const SEND_CODE_REASON = {
 
 // reason → [i18n key, English fallback]. RATE, BAD_EMAIL and UNKNOWN reuse keys that already exist
 // and already read correctly; the states that had no words of their own got new copy.
+/** RATE with a known wait — `{0}` is whole minutes. */
+export const RATE_WAIT_KEY = 'code_err_rate_wait';
+
 const COPY = {
   // 🔴 NO "check the server address in the options" — `server-url` is a HIDDEN input
   // (options.html), so that sentence sends the user to a field they cannot see, which is the #967
@@ -137,9 +140,17 @@ export function sendCodeReasonFromThrown(err) {
  * reason → the copy to paint. Returns the i18n key plus the English fallback the call sites
  * already pass to `t(key) || fallback`, so this stays a drop-in for what it replaced.
  */
-export function sendCodeErrorCopy(reason) {
+export function sendCodeErrorCopy(reason, res) {
+  // Name the wait when the server said how long (magic-link 429 carries `retry_after` seconds —
+  // the SW forwards it as `retryAfter`). "A few minutes" left people pressing again, which only
+  // re-hits the ceiling. Rounded UP so the stated time is never too short.
+  const sec = Number(res && res.retryAfter);
+  if (reason === SEND_CODE_REASON.RATE && Number.isFinite(sec) && sec > 0) {
+    const min = String(Math.max(1, Math.ceil(sec / 60)));
+    return { key: RATE_WAIT_KEY, fallback: `Too many requests. Please try again in ${min} min.`, args: [min] };
+  }
   const [key, fallback] = COPY[reason] || COPY[SEND_CODE_REASON.UNKNOWN];
-  return { key, fallback };
+  return { key, fallback, args: [] };
 }
 
 /**

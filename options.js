@@ -178,6 +178,9 @@ function syncCompareMsgButtonRow() {
   }
 }
 
+// #2081: set once the history-sync switch changed anywhere while this page is open — the initial read never overrides it.
+let _histSyncSeenChange = false;
+
 function autoSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(doSave, 800);
@@ -387,6 +390,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
       document.getElementById('compare-msg-button-enabled').checked = config.compareMsgButtonEnabled !== false;
       document.getElementById('compare-suggest-enabled').checked = config.compareSuggestEnabled !== false;
+      // A change seen meanwhile (onChanged below) is newer than this read — it wins (Codex G2).
+      chrome.storage.local.get({ compareHistorySync: true }, (v) => { if (!_histSyncSeenChange) document.getElementById('compare-history-sync').checked = !v || v.compareHistorySync !== false; });
       syncCompareMsgButtonRow();
       document.getElementById('notify-reset-soon').checked = config.notifyResetSoon !== false;
       document.getElementById('notify-reset-done').checked = config.notifyResetDone !== false;
@@ -442,6 +447,35 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('compare-enabled').addEventListener('change', () => { syncCompareMsgButtonRow(); autoSave(); });
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-suggest-enabled').addEventListener('change', autoSave);
+  // #2081: the history's server copy — per BROWSER (chrome.storage.local, never the synced config) and written AT
+  // ONCE by its own change only (batch r5 G1: written by the debounced autosave of any setting, a stale checkbox
+  // turned back on a switch the 「최근」 panel had turned off, and an 「off」 waited 800 ms while an upload went).
+  // Key = ui/compare/constants.js HISTORY_SYNC_PREF_KEY (this page is a classic script).
+  document.getElementById('compare-history-sync').addEventListener('change', (e) => {
+    chrome.storage.local.set({ compareHistorySync: !!e.target.checked });
+  });
+  // …and it follows a change made elsewhere (the 「최근」 panel, the first-screen banner) while this page is open.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.compareHistorySync) return;
+    _histSyncSeenChange = true;
+    document.getElementById('compare-history-sync').checked = changes.compareHistorySync.newValue !== false;
+  });
+  // 「서버 기록도 삭제」 (#2081): every server copy of the cross-check / debate history — through the SW
+  // (COMPARE_HISTORY op `clear`, ext_token only). This browser's own history is untouched.
+  const histClearBtn = document.getElementById('compare-history-server-clear');
+  const histClearMsg = document.getElementById('compare-history-server-clear-msg');
+  if (histClearBtn) histClearBtn.addEventListener('click', () => {
+    if (!confirm(t('compare_hist_server_clear_confirm'))) return;
+    histClearBtn.disabled = true;
+    histClearMsg.textContent = '';
+    // `wipe`: the SW also resets this browser's sync ledger (the next settle uploads as new — #2081 batch r2).
+    chrome.runtime.sendMessage({ type: 'COMPARE_HISTORY', op: 'clear', wipe: true }, (res) => {
+      void chrome.runtime.lastError;
+      histClearBtn.disabled = false;
+      const ok = !!(res && res.ok);
+      histClearMsg.textContent = t(ok ? 'compare_hist_server_clear_done' : res && res.code === 'ext_token_required' ? 'compare_hist_server_clear_login' : 'compare_hist_server_clear_failed');
+    });
+  });
   // AI Cross-Check page link (2026-09-22): the SW builds the shell URL (src-less OPEN_COMPARE,
   // placement `options`) so the utm/GA shape stays in bg/compare.js; nothing is saved here.
   const compareOpenLink = document.getElementById('compare-open-link');

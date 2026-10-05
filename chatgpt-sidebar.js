@@ -446,9 +446,10 @@
   }
 
   // Capability-guarded like every core lookup: a stale core without the builder draws no chip.
+  let _rpDrawn = ''; // the reset-pass line HTML the panel last drew
   function resetPassChipHtml(d) {
-    return d && typeof CORE.buildResetPassChipHtml === 'function'
-      ? CORE.buildResetPassChipHtml(d.rp, _lang, Date.now(), 'chatgpt', d.rpUrl, '', d.rpHelpUrl) : '';
+    return d && typeof CORE.buildResetPassLineHtml === 'function'
+      ? CORE.buildResetPassLineHtml(d.rp, _lang, Date.now(), 'chatgpt', d.rpUrl, 'text-token-text-secondary', d.rpNow === true) : '';
   }
 
   function renderContent() {
@@ -476,9 +477,12 @@
     if (_data.h5 != null) frag.appendChild(buildLimitRow('5h', CORE.windowLabel(_data.w5s, _lang, t('session')), _data.h5, _data.r5, _data.pred5h));
     if (_data.d7 != null) frag.appendChild(buildLimitRow('7d', CORE.windowLabel(_data.w7s, _lang, t('weekly')), _data.d7, _data.r7, _data.pred7d));
 
-    // Reset pass holdings (#2092 P1-1) — the shared builder decides visibility (「모름」/0 → '')
-    // and appends the 「Codex·Work 한도만」 scope for ChatGPT.
+    // Reset pass holdings (#2092 P1-1) — one native-looking line from the shared builder, which
+    // decides visibility (「모름」/0 → ''); the 「Codex·Work 한도만」 scope is in its tooltip.
     const rpHtml = resetPassChipHtml(_data);
+    // Compared against on the next answer: re-rendering the OLD data at the new time would match the
+    // new data and skip the redraw when only the clock crossed the 3-day line (Codex 1R).
+    _rpDrawn = rpHtml;
     if (rpHtml) {
       const rpRow = document.createElement('div');
       rpRow.className = 'ct-cg-rp';
@@ -743,7 +747,7 @@
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
             _data.plan === res.plan && sameExtras && _data.err === res.err &&
-            resetPassChipHtml(_data) === resetPassChipHtml(res)) return;
+            _rpDrawn === resetPassChipHtml(res)) return;
         _data = res;
         // Note: _lang is driven by the user's extension language setting
         // (chrome.storage.sync `lang`, navigator fallback), not res.lang — the

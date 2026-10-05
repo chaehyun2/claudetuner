@@ -460,6 +460,19 @@
         </label>
         <div class="form-hint" data-i18n="compare_suggest_hint"></div>
       </div>
+      <!-- #2081: the history's server copy (ui/compare/history-sync.js) — chrome.storage.sync `compareHistorySync`, default on.
+           Not tied to the master toggle: it decides where the history lives, whatever the buttons do. -->
+      <div class="form-group">
+        <label class="check-label">
+          <input type="checkbox" id="compare-history-sync" checked>
+          <span data-i18n="compare_hist_sync_desc"></span>
+        </label>
+        <div class="form-hint" data-i18n="compare_hist_sync_hint"></div>
+        <div class="form-hint">
+          <button type="button" class="btn-reset-sm" id="compare-history-server-clear" data-i18n="compare_hist_server_clear"></button>
+          <span id="compare-history-server-clear-msg" role="status"></span>
+        </div>
+      </div>
     </div>
   </section>
 

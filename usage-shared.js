@@ -873,6 +873,12 @@
   //
   // 🪤 No double quote in any string below: the title is interpolated into title="...".
   const RESET_PASS_WARN_DAYS = 3;
+  // ↻ in currentColor — the same mark as the popup overview's 「↻ RESET」 badge. Replaces 🎟, which
+  // renders as a grey slanted ticket on most systems (user, 2026-10-05: 「어글리」).
+  const RP_ICON_SVG = '<svg width=\'11\' height=\'11\' viewBox=\'0 0 16 16\' fill=\'none\' stroke=\'currentColor\''
+    + ' stroke-width=\'2.4\' stroke-linecap=\'round\' stroke-linejoin=\'round\' aria-hidden=\'true\''
+    + ' style=\'flex:none;vertical-align:-1px;margin-right:3px\'><path d=\'M13.5 8a5.5 5.5 0 1 1-1.8-4.1\'/>'
+    + '<path d=\'M13.5 2.5v3.2h-3.2\'/></svg>';
   const RESET_PASS_DAY_MS = 86400000;
   const RESET_PASS_KINDS = ['full', 'five_hour', 'weekly'];
   const RP_UI_TEXT = {
@@ -883,6 +889,7 @@
       rp_ui_kind_weekly: '주간 {n}',
       rp_ui_chip_total: '{n}장 보유',
       rp_ui_chip_expires: '{d} 만료',
+      rp_ui_line_now: '지금 풀 수 있어요',
       rp_ui_chip_cg_scope: 'Codex·Work 한도만',
       rp_ui_tip_held: '사용 한도 초기화 패스 {n}장 보유',
       rp_ui_tip_kinds: '종류: {k}',
@@ -912,6 +919,7 @@
       rp_ui_kind_weekly: 'Weekly {n}',
       rp_ui_chip_total: '{n} held',
       rp_ui_chip_expires: 'expires {d}',
+      rp_ui_line_now: 'clear it now',
       rp_ui_chip_cg_scope: 'Codex & Work limits only',
       rp_ui_tip_held: 'Usage limit reset passes held: {n}',
       rp_ui_tip_kinds: 'Kinds: {k}',
@@ -975,7 +983,7 @@
     // ChatGPT passes clear the Codex / Work limits only — the same meaning as its gauge, but a
     // user reading "초기화 패스" beside a chat they cannot send would otherwise expect it to help.
     if (pv === 'chatgpt') parts.push(rpText(lang, 'rp_ui_chip_cg_scope'));
-    return { text: '🎟 ' + parts.join(' · '), title: resetPassDetailTip(s, lang, pv), url, warn };
+    return { text: parts.join(' · '), title: resetPassDetailTip(s, lang, pv), url, warn };
   }
   const pad2 = (n) => String(n).padStart(2, '0');
   /**
@@ -1053,7 +1061,7 @@
     const link = (inner, title, style, extraCls) => '<a class="' + extraCls + '" href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer"'
       + ' title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title.replace(/\n/g, ' · ')) + '" style="' + style + '">' + inner + '</a>';
     const head = '<div style="display:flex;align-items:center;gap:5px;min-width:0;font-size:11px;line-height:1.4">'
-      + link('🎟 ' + escapeHtml(rpText(lang, 'rp_ui_tk_head', { n: total }))
+      + link(RP_ICON_SVG + escapeHtml(rpText(lang, 'rp_ui_tk_head', { n: total }))
           + (pv === 'chatgpt' ? '<span style="opacity:0.65;font-weight:400"> · ' + escapeHtml(rpText(lang, 'rp_ui_chip_cg_scope')) + '</span>' : ''),
         resetPassDetailTip(s, lang, pv), 'color:inherit;text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0', 'ct-rp-head')
       + buildResetPassHelpHtml(lang, helpUrl, pv)
@@ -1088,6 +1096,55 @@
     return '<div class="ct-rp-row ct-rp-tickets' + (cls ? ' ' + escapeHtml(cls) : '') + '" style="display:grid;gap:4px;min-width:0">'
       + head + '<div style="display:flex;flex-wrap:wrap;gap:4px">' + chips + '</div></div>';
   }
+  // The in-page sidebars' version (user, 2026-10-05: the ticket chips 「too loud」 inside
+  // chatgpt.com / claude.ai): ONE line in the site's own secondary text colour (`textClass`, the
+  // class the panel already uses for its labels), the label size, no tint, no border, no 「?」 —
+  // 「↻ 초기화 패스 3장 · 10/5 만료」. Each pass and its expiry, the ChatGPT scope and the click
+  // target live in the tooltip. Emphasis only when it matters, in amber via the `ct-rp-hot` class
+  // (each sidebar's CSS picks a dark amber on light pages, a light one on dark — #f59e0b at 12px on
+  // white is 2.15:1, Codex 1R): the date of a pass expiring within
+  // 3 days, or 「· 지금 풀 수 있어요」 when one pass clears every window blocked now (`clearNow`,
+  // decided in bg/sidebar-usage.js by canClearNow — this classic script cannot import it). The
+  // popup keeps the ticket chips (buildResetPassChipHtml) — that surface is ours.
+  function buildResetPassLineHtml(summary, lang, nowMs, provider, url, textClass, clearNow) {
+    const s = summary;
+    if (!s || typeof s !== 'object' || s.known !== true) return '';
+    const total = rpCount(s.available);
+    if (!total || typeof url !== 'string' || !/^https:\/\//.test(url)) return '';
+    const pv = provider || s.provider;
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const tickets = s.kinds_known === true && Array.isArray(s.tickets)
+      ? s.tickets.filter((x) => x && Object.hasOwn(RP_TICKET_COLORS, x.kind) && Number.isFinite(Date.parse(x.expires_at))) : [];
+    const exps = (tickets.length ? tickets.map((x) => x.expires_at) : [s.next_expires_at])
+      .map((x) => (x ? Date.parse(x) : NaN)).filter((x) => Number.isFinite(x) && x > now);
+    const first = exps.length ? Math.min(...exps) : NaN;
+    const soon = Number.isFinite(first) && first - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
+    let date = '';
+    if (Number.isFinite(first)) {
+      const d = new Date(first);
+      date = escapeHtml(rpText(lang, 'rp_ui_chip_expires', { d: `${d.getMonth() + 1}/${d.getDate()}` }));
+      if (soon) date = '<b class="ct-rp-hot" style="font-weight:600">' + date + '</b>';
+    }
+    const tip = [rpText(lang, 'rp_ui_tk_head', { n: total })]
+      .concat(tickets.slice(0, RESET_PASS_TICKETS_SHOWN).map((x) => rpText(lang, 'rp_ui_tk_label_' + x.kind)
+        + ' · ' + rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(Date.parse(x.expires_at)) })))
+      .concat(tickets.length > RESET_PASS_TICKETS_SHOWN ? [rpText(lang, 'rp_ui_tk_more', { n: tickets.length - RESET_PASS_TICKETS_SHOWN })] : [])
+      .concat(!tickets.length ? [resetPassDetailTip(s, lang, pv)] : [])
+      .concat(pv === 'chatgpt' && tickets.length ? [rpText(lang, 'rp_ui_tip_cg_scope')] : [])
+      .concat(tickets.length ? [rpText(lang, 'rp_ui_tip_click')] : [])
+      .filter(Boolean).join('\n');
+    return '<a class="ct-rp-line' + (textClass ? ' ' + escapeHtml(textClass) : '') + '" href="' + escapeHtml(url) + '"'
+      + ' target="_blank" rel="noopener noreferrer" title="' + escapeHtml(tip) + '" aria-label="' + escapeHtml(tip.replace(/\n/g, ' · ')) + '"'
+      + ' style="display:flex;align-items:center;min-width:0;font-size:12px;line-height:1.4;text-decoration:none">'
+      + RP_ICON_SVG
+      + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">'
+      // In the 「clear it now」 state the date gives way to the action: a ~250px sidebar would
+      // otherwise ellipsize exactly the part that matters (the date stays in the tooltip).
+      + escapeHtml(rpText(lang, 'rp_ui_tk_head', { n: total })) + (date && clearNow !== true ? ' · ' + date : '')
+      + (clearNow === true ? ' · <b class="ct-rp-hot" style="font-weight:600">'
+        + escapeHtml(rpText(lang, 'rp_ui_line_now')) + ' ↗</b>' : '')
+      + '</span></a>';
+  }
   function buildResetPassChipHtml(summary, lang, nowMs, provider, url, cls, helpUrl) {
     const tickets = buildResetPassTicketsHtml(summary, lang, nowMs, provider, url, cls, helpUrl);
     if (tickets) return tickets;
@@ -1103,7 +1160,7 @@
       + ' style="display:block;min-width:0;font-size:11px;line-height:1.4;text-decoration:none;cursor:pointer;'
       + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
       + (chip.warn ? 'color:#d97706;font-weight:600' : 'color:inherit;opacity:0.75') + '">'
-      + escapeHtml(chip.text) + '</a>'
+      + RP_ICON_SVG + escapeHtml(chip.text) + '</a>'
       + buildResetPassHelpHtml(lang, helpUrl, provider || (summary && summary.provider))
       + '</div>';
   }
@@ -1459,6 +1516,7 @@
     // ── Reset pass chip (#2092 P1-1) ──
     resetPassChip,
     buildResetPassChipHtml,
+    buildResetPassLineHtml,
     resetPassDetailTip,
     buildResetPassHelpHtml,
     noDataReason,

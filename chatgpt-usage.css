@@ -435,3 +435,6 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 
 /* Reset pass holdings line (#2092 P1-1); the <a> inside is styled inline by usage-shared.js. */
 .ct-cg-rp { margin-top: 4px; min-width: 0; }
+/* Reset-pass line emphasis (#2092): readable amber per theme (≥4.5:1 on ChatGPT's sidebar). */
+.ct-cg-rp .ct-rp-hot { color: #b45309; }
+html.dark .ct-cg-rp .ct-rp-hot, html.dark-oled .ct-cg-rp .ct-rp-hot, html[data-theme="dark"] .ct-cg-rp .ct-rp-hot { color: #fbbf24; }

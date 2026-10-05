@@ -6,7 +6,7 @@ import { _isDark, formatResetAbsolute, windowUnitLabel } from './util.js';
 import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
 import {
   blockedSlots, resetPassHeadlineLink, appendResetPassHeadlineLink, currentResetPassOrg,
-  weeklyPassesHeld, passUseRelearning, buildResetPassNoteEl,
+  passUseRelearning, noteResetPassForecast, renderResetPassAdvice,
 } from './reset-pass-ui.js';
 // The forecast maths moved to a pure module so the Worker can import it too (#1026). Re-exported
 // here so every existing call site keeps working unchanged.
@@ -69,13 +69,16 @@ export function setPredictHeadline(html, tone) {
 // EVERY window at its limit (blockedSlots), not over capped[0]: the headline names the window
 // that resets last, but a pass that clears only that one leaves the user blocked by the other.
 export function renderLimitReachedHeadline(util5h, resets5h, util7d, resets7d, span5h, span7d, org) {
+  // The 「지금 쓰세요 / 아껴두세요」 line reads the same values and the 7d forecast the gauges just
+  // noted; it renders on every call (blocked or not), so it sits before the early return.
+  renderResetPassAdvice(org, util5h, resets5h, util7d, resets7d, span5h, span7d);
   const capped = [];
   if (util5h != null && util5h >= 100 && resets5h) capped.push({ label: windowUnitLabel(span5h) || t('win_5h'), reset: resets5h });
   if (util7d != null && util7d >= 100 && resets7d) capped.push({ label: windowUnitLabel(span7d) || t('win_7d'), reset: resets7d });
   if (!capped.length) return false;
   capped.sort((a, b) => new Date(b.reset) - new Date(a.reset)); // latest reset = the binding window
   setPredictHeadline(t('predict_headline_reached', capped[0].label, formatResetAbsolute(capped[0].reset)), 'is-alert');
-  const link = org ? resetPassHeadlineLink(org, blockedSlots(util5h, util7d, span5h, span7d)) : null;
+  const link = org ? resetPassHeadlineLink(org, blockedSlots(util5h, util7d, span5h, span7d), resets5h, resets7d) : null;
   if (link && typeof document !== 'undefined') appendResetPassHeadlineLink(document.getElementById('predict-headline'), link);
   return true;
 }
@@ -132,6 +135,8 @@ function _renderProjectionLine(lineEl, predicted, rate, currentUtil) {
 // branch uses it; pass null/undefined and it falls back to the 5h/7d constants, which is right
 // for every provider that does not report one.
 export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, spanSeconds) {
+  // Every exit below without a projected wall leaves this null; the at-risk branch sets it.
+  if (id === '7d') noteResetPassForecast(null, null);
   const marker = document.getElementById(`gauge-${id}-predict`);
   const label = document.getElementById(`gauge-${id}-predict-label`);
   const inlineEl = document.getElementById(`gauge-${id}-predict-inline`);
@@ -209,19 +214,14 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
     if (inlineEl) {
       inlineEl.style.display = 'inline';
       inlineEl.style.color = '#9ca3af';
+      inlineEl.style.background = ''; // a forecast drawn before the pass use left its tint (Codex)
       inlineEl.textContent = '\u25b8\u23f3';
       inlineEl.title = t('rp_ui_pred_relearning_tip');
       inlineEl.style.cursor = 'help';
     }
-    if (lineEl) {
-      lineEl.style.display = 'block';
-      lineEl.innerHTML = '';
-      const note = document.createElement('div');
-      note.className = 'gpl-main rp-pred-note';
-      note.textContent = t('rp_ui_pred_relearning');
-      note.title = t('rp_ui_pred_relearning_tip');
-      lineEl.appendChild(note);
-    }
+    // No line under the gauge (user, 2026-10-05: two lines saying 「relearning」 were not worth the
+    // space) — the grey ▸⏳ badge above carries the reason in its tooltip.
+    if (lineEl) lineEl.style.display = 'none';
     return;
   }
 
@@ -259,24 +259,16 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
   if (atRisk) {
     // Prefer the diurnal-aware time-to-100 (7d); fall back to flat rate (5h / null).
     const hoursTo100 = predHoursTo100 != null ? predHoursTo100 : (100 - currentUtil) / rate;
+    if (id === '7d' && hoursTo100 < hoursToReset) noteResetPassForecast(resetsAt, hoursTo100);
     // For the badge tooltip only (the wait block shows this time itself).
     limitTimeStr = formatResetAbsolute(new Date(Date.now() + hoursTo100 * 3600000));
     // The wait block (headline = wait span, evidence = limit/reset times) replaces
     // the reset line in #gauge-{id}-reset. The separate warn line is hidden so the
     // limit-hit time isn't shown twice.
     renderGaugeWait(id, resetsAt, hoursTo100, hoursToReset, currentUtil !== null);
-    // Held passes that clear the 7d window (#2092 P1-3): one quiet line under the wait block. The
-    // forecast itself is unchanged — holding a pass does not mean the user will spend it.
-    // The line links to the usage settings (where the pass is spent) with the detail tooltip, and
-    // carries the 「?」 help link — same as the chip.
-    const rpOrg = id === '7d' ? currentResetPassOrg() : null;
-    const held = rpOrg ? weeklyPassesHeld(rpOrg) : 0;
-    if (lineEl && held > 0) {
-      lineEl.style.display = 'block';
-      lineEl.innerHTML = '';
-      const note = buildResetPassNoteEl(rpOrg, t('rp_ui_pred_held', held), 'gpl-main rp-pred-note');
-      if (note) lineEl.appendChild(note);
-    } else if (lineEl) lineEl.style.display = 'none';
+    // No reset-pass note here (user, 2026-10-05: it cluttered every 「리셋 전 소진 예상」): the pass
+    // block under the gauges speaks once the user is actually blocked (renderResetPassAdvice).
+    if (lineEl) lineEl.style.display = 'none';
   } else {
     // Not projected to hit the cap: keep the plain reset line rendered earlier and let the
     // graded forecast line speak for the near-limit / warming bands on its own.

@@ -20,11 +20,12 @@
 import { imageIdsOf, docCountOf, markerKinds } from './image-store.js';
 import { createEntryStore } from './history-store.js';
 import { outImagesMarker, readOutImagesMarker, outImageCountOf } from './output-images.js';
-import { COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED, RETRACTION_MAX } from './constants.js';
+import { SESSION_ID_RE, COMPARE_PROVIDERS, MAX_COLUMNS, colIdOf, parseColId, normalizeColId, MODEL_ID_RE, HISTORY_KEY_PREFIX, HISTORY_LOCK_NAME, HISTORY_LOCK_WAIT_MS, HISTORY_MAX, HISTORY_TEXT_MAX, CONTINUATION_MAX_KEYS, CONTINUATION_MAX_VALUE_CHARS, HISTORY_QUESTION_PREVIEW, SUMMARY_MIN_COLUMNS, SUMMARY_QUESTION_MAX, SUMMARY_MODEL_LABEL_MAX, HISTORY_ATTACH_NAME_MAX, ATTACH_MAX_FILES, TURN_KIND_SUMMARY, TURN_KIND_DEBATE, OUT_IMAGE_PERSIST_WAIT_MS, CODE_RESTORED, RETRACTION_MAX } from './constants.js';
 import { autoGrow, readTiming } from './helpers.js';
 import { readDebateRecord, legacyDebateRecord } from './debate-core.js';
 import { foldSaveBy, uniformSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
 import { SUGGEST_COUNT, SUGGEST_Q_MAX } from './suggest.js';
+import { markHistorySnapshot, contentCount } from './history-sync.js';
 
 /** Installs the history slice onto `ctx` (see the header and compare.js for the ctx contract). */
 /**
@@ -47,6 +48,10 @@ export function clipDebatePrompts(entry, over) {
   }
 }
 const DEBATE_PROMPT_CLIP_MIN = 200; // = fitEntry's floor for an answer
+// The marker of an attachment that stayed on the browser it was sent from (#2081): an entry opened from
+// the server copy (`attachOmitted`) keeps its request's 「there was a file」 — the retry gate reads it
+// (compare.js roundHadImage), so such a round is never re-sent without its file.
+const OMITTED_IMG = Object.freeze({ name: '', bytes: 0, omitted: true });
 
 export function installHistory(ctx) {
   const { chrome, deps, state, t, clock, nav, con, src, el, clear, dot, track } = ctx;
@@ -85,7 +90,46 @@ export function installHistory(ctx) {
       if (timer != null) clock.clearTimeout(timer);
     }
   }
-  let lastHistoryCount = 0; // from the last SUCCESSFUL read — what the button shows
+  let lastHistoryCount = 0; // from the last SUCCESSFUL read — what the button shows (this account's view)
+  // The account the status reads have told this page (#2081): a string = that account, null = signed out, undefined =
+  // never known. 🔴 UNKNOWN is not signed out (#2117 `loggedIn: null` — the token read timed out; or no status yet):
+  // it leaves the account last known as it was.
+  let knownAccount;
+  /** Take the current status into the known account — called on every status read (compare.js) and on each use. */
+  function noteStatusAccount() {
+    const st = state.status;
+    if (st && st.loggedIn === true && typeof st.owner === 'string' && /^[0-9a-f]{16}$/.test(st.owner)) knownAccount = st.owner;
+    else if (st && st.loggedIn === false) knownAccount = null;
+    return knownAccount;
+  }
+  /** The account signed in now, as last known (null signed out or never known) — #2081 decision A / batch r7. */
+  function viewerOwner() {
+    return noteStatusAccount() || null;
+  }
+  /**
+   * Whether the history is seen per account (batch r7 view, batch r8 split): only with the server sync offered
+   * (`compare_history_sync`) AND the account known. Otherwise everything is as before #2081 — every entry listed,
+   * opened, searched, deleted; no split at save (pre-CWS batch review: a flag-off page must not hide anyone's history).
+   */
+  function accountScoped() {
+    const st = state.status;
+    return !!(st && st.historySyncOn === true && st.flagOn === true) && noteStatusAccount() !== undefined;
+  }
+  /**
+   * What this account sees of the local history (batch r7, user decision): its own entries and the ones written signed
+   * out (no owner). Another account's entries stay on disk, hidden — listed, opened, searched, deleted only by it.
+   * Unscoped (see accountScoped): every entry.
+   */
+  function visibleToMe(entry) {
+    return !!entry && (!accountScoped() || !entry.owner || entry.owner === viewerOwner());
+  }
+  /**
+   * This account's view as listed: its visible entries, newest first, at most HISTORY_MAX (Codex K2: entries written
+   * signed out and an account's own could add up past the cap; the next write of this account evicts the rest).
+   */
+  function myView(list) {
+    return (Array.isArray(list) ? list : []).filter(visibleToMe).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, HISTORY_MAX);
+  }
   const lastErr = () => { try { return chrome && chrome.runtime ? chrome.runtime.lastError : null; } catch { return null; } };
   // The entries themselves (#1877): IndexedDB, compressed — chrome.storage.local only as the fallback
   // (and for an injected test storage, which keeps the old behaviour). `historyStorage` stays the
@@ -142,8 +186,9 @@ export function installHistory(ctx) {
     const step = historyChain.then(() => underHistoryLock(async () => {
       const read = await storageReadAll();
       if (!read.ok) return read;
-      const change = mutate ? mutate(read.list, read.keys) : null;
-      if (!change) { lastHistoryCount = read.list.length; return read; }
+      // `mutate` may be async (#2081: a delete queues its server DELETE inside this same lock op).
+      const change = mutate ? await mutate(read.list, read.keys) : null;
+      if (!change) { lastHistoryCount = myView(read.list).length; return read; }
       // Rows the validator rejected are deleted with a WRITING op (save / delete / clear — never a
       // read-only open), so an invalid row does not linger as a physical key re-validated on every
       // open (6R #3) — but only after a compare-and-delete (7R #2): another tab may have re-saved
@@ -160,7 +205,7 @@ export function installHistory(ctx) {
       // then tab A's late image write, resurrected the images of an entry that no longer exists).
       if (ok && typeof change.afterWrite === 'function') { try { await change.afterWrite(); } catch { /* the sweep catches it */ } }
       const after = await storageReadAll();
-      if (after.ok) lastHistoryCount = after.list.length;
+      if (after.ok) lastHistoryCount = myView(after.list).length;
       return ok && after.ok ? after : { ok: false, list: after.list };
     })).catch(() => ({ ok: false, list: [] }));
     historyChain = step.then(() => undefined, () => undefined);
@@ -200,7 +245,16 @@ export function installHistory(ctx) {
     if (!Object.keys(columns).length) return null;
     // A debate session's record (#1769 후속) — what reopens it as the debate, not as columns.
     const debate = ctx.debateSnapshot ? ctx.debateSnapshot(clipText) : null;
-    return { ...(debate ? { debate } : {}), id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), ...(state.questionImg ? { questionImg: storedImg(state.questionImg) } : {}), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
+    // `forkedFrom` (#2081 §7.8 ③): this session continues another device's conversation — a copy owned here.
+    const forked = state.forkOf && state.forkOf.id === state.sessionId ? state.forkOf.from : null;
+    // `splitFrom` (batch r8): this session continues an entry of another account (or a signed-out one) — see persistSession.
+    const split = state.splitOf && Object.values(state.splitOf.ids).includes(state.sessionId) ? state.splitOf.from : null;
+    // `mixed` (pre-CWS batch r2): this session holds words written under more than one account — see persistSession.
+    const mixed = isMixedId(state.sessionId, state.mixedEpoch);
+    const snap = { ...(debate ? { debate } : {}), ...(forked ? { forkedFrom: forked } : {}), ...(split ? { splitFrom: split } : {}), ...(mixed ? { mixed: true } : {}), id: state.sessionId, updatedAt: clock.now(), question: clipText(state.question), ...(state.questionImg ? { questionImg: storedImg(state.questionImg) } : {}), src, columns, rounds: state.rounds, ...(Number.isFinite(state.activeRound) ? { activeRound: state.activeRound } : {}), ...(Number.isFinite(state.firstRound) ? { firstRound: state.firstRound } : {}) };
+    // #2081: only the LOCAL history's snapshot (all-kept, never `anyMode`) is one the server sync may
+    // read (history-sync.js syncEntryOf) — the share's snapshot of an incognito session is never marked.
+    return anyMode ? snap : markHistorySnapshot(snap);
   }
   /**
    * A turn as stored. `kind` / `round` / `model` only when set (an entry written before a field,
@@ -214,10 +268,12 @@ export function installHistory(ctx) {
       const sm = turn.summary;
       return { ...base, summary: { judge: sm.judge, round: sm.round, question: clipText(sm.question), attachments: (sm.attachments || []).map((a) => ({ col: a.col, provider: a.provider, model: a.model ? { id: a.model.id, label: a.model.label } : null, text: clipText(a.text), partial: !!a.partial, clipped: !!a.clipped })), ...(sm.suggest ? { suggest: { avoid: storedAvoid(sm.suggest.avoid) } } : {}) } };
     }
-    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.errorText && turn.openTabLink ? { openTab: true } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.retracted ? { retracted: true, ...(turn.retraction ? { retraction: String(turn.retraction).slice(0, RETRACTION_MAX) } : {}) } : {}), ...(turn.role === 'assistant' && readTiming(turn.ms) ? { ms: readTiming(turn.ms) } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
+    return { ...base, text: clipText(turn.text), ...(turn.errorText ? { errorText: clipText(turn.errorText) } : {}), ...(turn.errorText && turn.openTabLink ? { openTab: true } : {}), ...(turn.stalled ? { stalled: true } : {}), ...(turn.cutError ? { cutError: true } : {}), ...(turn.retracted ? { retracted: true, ...(turn.retraction ? { retraction: String(turn.retraction).slice(0, RETRACTION_MAX) } : {}) } : {}), ...(turn.role === 'assistant' && readTiming(turn.ms) ? { ms: readTiming(turn.ms) } : {}), ...(turn.img ? { img: storedImg(turn.img) } : {}), ...(outImagesMarker(turn.outImages) ? { images: outImagesMarker(turn.outImages) } : {}), ...(turn.role === 'assistant' && turn.attachOmitted === true ? { attachOmitted: true } : {}), ...(turn.model ? { model: { id: turn.model.id == null ? null : String(turn.model.id).slice(0, SUMMARY_MODEL_LABEL_MAX), label: String(turn.model.label || '').slice(0, SUMMARY_MODEL_LABEL_MAX) } } : {}) };
   }
   /** The attachment MARKER a turn keeps — name (clipped) and size. Never the image; see HISTORY_ATTACH_NAME_MAX. */
   function storedImg(img) {
+    // An attachment that stayed on another browser (#2081 — the server copy never carries one): only that it was there.
+    if (img.omitted === true) return { ...OMITTED_IMG };
     return {
       name: String(img.name || '').slice(0, HISTORY_ATTACH_NAME_MAX),
       bytes: Number.isFinite(img.bytes) ? img.bytes : 0,
@@ -247,8 +303,9 @@ export function installHistory(ctx) {
    * is then NOT persisted (the caller logs once) rather than written over the bound.
    */
   const jsonBytes = (v) => { const str = JSON.stringify(v); try { return new TextEncoder().encode(str).length; } catch { return str.length * 3; } };
-  function fitEntry(entry) {
-    const over = () => jsonBytes(entry) > entryStore.maxEntryBytes;
+  function fitEntry(entry, maxBytes = entryStore.maxEntryBytes) {
+    // `maxBytes`: the local store's bound, or the server copy's (#2081, HISTORY_SYNC_ENTRY_MAX_BYTES).
+    const over = () => jsonBytes(entry) > maxBytes;
     clipDebatePrompts(entry, over);
     let cap = HISTORY_TEXT_MAX;
     for (let i = 0; i < 12 && over(); i++) {
@@ -302,16 +359,81 @@ export function installHistory(ctx) {
     unfittableLogged = true;
     if (con && typeof con.warn === 'function') { try { con.warn('[compare] history entry over the size bound even with every turn evicted — not persisted'); } catch { /* logging is not the write */ } }
   }
+  // The session ids whose conversation holds more than one account's words (pre-CWS batch r2), each with the
+  // `state.mixedEpoch`s it was marked in. The epoch moves on every open of a stored entry (loadSession): a mark binds the
+  // conversation as it was on screen then — every save snapshotted in that epoch finds it, in the lock too (a split or
+  // an eviction never loses it: Codex mixed 1R #1); an entry opened later starts from what is stored (2R / 3R #1).
+  // Every epoch an id was marked in is kept (Codex mixed 4R #1): a save of an older epoch landing late adds its own,
+  // never replacing the one an open marked since.
+  const isMixedId = (id, epoch) => !!id && state.mixedIds instanceof Map && state.mixedIds.has(id) && state.mixedIds.get(id).has(epoch);
+  function markMixedId(id, epoch) {
+    if (!id) return;
+    if (!(state.mixedIds instanceof Map)) state.mixedIds = new Map();
+    if (!state.mixedIds.has(id)) state.mixedIds.set(id, new Set());
+    state.mixedIds.get(id).add(epoch);
+  }
   function persistSession() {
+    // Another device's conversation, opened read-only (#2081 §7.8 ②③): it is never written here under ITS id —
+    // the first write of it (the user continued it) FORKS it: a new session id, owned by this browser.
+    if (state.remoteViewId && state.sessionId === state.remoteViewId) {
+      state.forkOf = { id: newSessionId(), from: state.remoteViewId };
+      state.sessionId = state.forkOf.id;
+      state.remoteViewId = null;
+    }
     const snap = snapshotSession();
     if (!snap || !historyStorage) return;
+    // `owner` (#2081, decision A / batch r8 (a)): the content belongs to the account of the SCREEN it was written on —
+    // the account the page's status says at this snapshot, taken with it into the lock and never read again there
+    // (a switch while the save waits does not re-attribute it). An entry written signed out has none and never uploads;
+    // whether anything uploads is the SW's call (it compares the stamp with the token).
+    // Scoped or not is taken with it too: unscoped (sync not offered, or the account never known) saves as before
+    // #2081 — no split, the cap counts every entry.
+    const snapOwner = viewerOwner();
+    const snapScoped = accountScoped();
+    const snapEpoch = state.mixedEpoch;
     historyUpdate((list) => {
-      const prev = list.find((e) => e.id === snap.id);
+      let prev = list.find((e) => e.id === snap.id);
+      // 🔴 `mixed` (pre-CWS batch r2, local only): unscoped, an entry continued by an account other than its owner (or
+      // by one not known) holds both accounts' words. Its owner stays (it is listed, and its server copy deleted, as
+      // that account's) but it is NEVER uploaded again — nor is anything split or rotated from it (the taint follows
+      // the session ids: `state.mixedIds`, read here too — Codex mixed 1R #1: a snapshot taken before an earlier save's
+      // lock op marked the id, landing after the entry was evicted, still finds the mark).
+      const tainted = !!snap.mixed || isMixedId(snap.id, snapEpoch) || !!(prev && prev.mixed) || (!snapScoped && !!prev && (prev.owner || null) !== snapOwner);
+      // 🔴 One rule (batch r8): the stored entry's owner (none included) differs from the snapshot's → SPLIT: a new
+      // session id owned by the snapshot's account (`splitFrom` = the old id, local only); the old entry is not touched.
+      if (snapScoped && prev && (prev.owner || null) !== snapOwner) {
+        const from = snap.id;
+        // A save of the same conversation already split it for this same account (Codex L1 #2: a debate round saves
+        // twice, both snapshots under the old id) — that split id again, even if its first write failed or it was
+        // deleted since (L2 #2): the screen is on it. Kept PER ACCOUNT (Codex L3 #1): saves queued under B, signed out,
+        // then B again still land in B's one split — a split for another account in between does not displace it.
+        const key = snapOwner || '';
+        const known = state.splitOf && state.splitOf.from === from ? state.splitOf.ids : {};
+        const reuse = Object.prototype.hasOwnProperty.call(known, key) ? known[key] : null;
+        const target = reuse ? list.find((e) => e.id === reuse && (e.owner || null) === snapOwner) || null : null;
+        snap.id = reuse || newSessionId();
+        if (!reuse) state.splitOf = { from, ids: { ...known, [key]: snap.id } };
+        snap.splitFrom = from;
+        if (state.forkOf && state.forkOf.id === from) state.forkOf = { id: snap.id, from: state.forkOf.from };
+        if (state.sessionId === from) state.sessionId = snap.id;
+        prev = target || null;
+      }
+      if (tainted) {
+        snap.mixed = true;
+        markMixedId(snap.id, snapEpoch);
+      }
+      // Unscoped, an entry keeps the owner it was first stamped with (as before #2081 — `mixed` marks the rest).
+      const owner = snapScoped || !prev ? snapOwner : prev.owner || null;
       // The COMPLETE object is what gets fitted (6R #4): createdAt is on it before it is measured.
-      const entry = fitEntry({ ...snap, createdAt: prev && prev.createdAt > 0 ? prev.createdAt : snap.updatedAt });
+      // Object.assign, not a spread (#2081): the fitted entry stays the very snapshot object, so its
+      // history-snapshot mark (syncEntryOf's only door) survives — a spread copy would lose it.
+      const entry = fitEntry(Object.assign(snap, { createdAt: prev && prev.createdAt > 0 ? prev.createdAt : snap.updatedAt, ...(owner ? { owner } : {}) }));
       if (!entry) { logUnfittable(); return null; }
       // Newest first, HISTORY_MAX kept: the oldest beyond the cap are removed in the same write.
-      const rest = list.filter((e) => e.id !== snap.id);
+      // The cap is per account VIEW (Codex K1 #1, K3): only entries the signed-in account sees (its own + ownerless) are
+      // evicted — another account's entries and images are never pushed out by this one's writes.
+      const rest = list.filter((e) => e.id !== snap.id && (!snapScoped || !e.owner || e.owner === snapOwner));
+      // The entry written is always in that view (the split above) — it takes one slot (Codex K4 / batch r8).
       const evicted = rest.slice(HISTORY_MAX - 1).map((e) => e.id);
       // The images follow the entry (2026-09-26): this session's previews reach the disk only with
       // its write — a session never written (incognito, nothing to store) never puts one there —
@@ -345,6 +467,9 @@ export function installHistory(ctx) {
       // overwrite the mark of the one on screen now (a loaded entry is marked by loadSession).
       if (r.ok && state.sessionId === snap.id && r.list.some((e) => e && e.id === snap.id)) state.persistedId = snap.id;
       syncHistoryButton(r.ok ? r.list : null);
+      // The server copy (#2081): only after the local write landed — `snap` is the object written
+      // (fitted in place); the sync slice re-checks under the lock that it is still what is stored.
+      if (r.ok && ctx.historySyncPush && r.list.some((e) => e && e.id === snap.id)) ctx.historySyncPush(snap);
     });
   }
   /**
@@ -379,6 +504,24 @@ export function installHistory(ctx) {
     }
     return [...new Set(ids)];
   }
+  /** The updatedAt of the entry stored NOW under `id` (null: none / unreadable). Call under the history lock (#2081). */
+  /** contentCount of the entry stored NOW under `id` (null: none / unreadable). Call under the history lock (#2081). */
+  async function storedCount(id) {
+    let r = null;
+    try { r = await entryStore.getOne(historyKey(id)); } catch { r = null; }
+    if (!r || !r.ok || r.value === undefined) return null;
+    let e = null;
+    try { e = normalizeEntry(r.value); } catch { e = null; }
+    return e ? contentCount(e) : null;
+  }
+  async function storedUpdatedAt(id) {
+    let r = null;
+    try { r = await entryStore.getOne(historyKey(id)); } catch { r = null; }
+    if (!r || !r.ok || r.value === undefined) return null;
+    let e = null;
+    try { e = normalizeEntry(r.value); } catch { e = null; }
+    return e ? e.updatedAt : null;
+  }
   /** Case-insensitive substring match over the question and every stored turn (answers and error lines are text too). */
   function historyMatches(entry, term) {
     if (String(entry.question || '').toLowerCase().includes(term)) return true;
@@ -391,7 +534,11 @@ export function installHistory(ctx) {
     return false;
   }
   function syncHistoryButton(list) {
-    const n = Array.isArray(list) ? list.length : lastHistoryCount;
+    // + the server's items this browser does not have (#2081) — the count is what the panel lists.
+    const local = Array.isArray(list) ? myView(list) : state.historyCache || [];
+    const ids = new Set(local.map((e) => e && e.id));
+    const remoteOnly = (state.historyRemote || []).filter((r) => !ids.has(r.id)).length;
+    const n = (Array.isArray(list) ? local.length : lastHistoryCount) + remoteOnly;
     // Always visible once storage is reachable: an empty panel says 「저장된 대화가 없어요」 — a
     // button that only appears after the first saved conversation was invisible to a fresh install.
     ctx.historyBtn.hidden = !historyStorage;
@@ -413,7 +560,7 @@ export function installHistory(ctx) {
   }
   /** A fresh read from storage: cache it, then paint through the current search term. */
   function renderHistoryList(list) {
-    state.historyCache = Array.isArray(list) ? list : [];
+    state.historyCache = myView(list); // this account's view (batch r7), at most HISTORY_MAX (K2)
     paintHistoryList();
   }
   /** A stored debate: its record, or (written before records) a debate turn in any column. */
@@ -424,7 +571,10 @@ export function installHistory(ctx) {
     return cols.some((c) => c && Array.isArray(c.turns) && c.turns.some((turn) => turn && turn.kind === TURN_KIND_DEBATE));
   }
   function paintHistoryList() {
-    const all = state.historyCache;
+    // This browser's entries + the server's items it does not have (#2081) — merged for painting only.
+    const local = state.historyCache;
+    const have = new Set(local.map((e) => e.id));
+    const all = [...local, ...(state.historyRemote || []).filter((r) => !have.has(r.id))].sort((a, b) => b.updatedAt - a.updatedAt);
     clear(ctx.historyList);
     if (!all.length) { ctx.historyList.appendChild(el('p', 'cmp-history-empty', t('history_empty'))); ctx.historyClearBtn.disabled = true; return; }
     ctx.historyClearBtn.disabled = false;
@@ -440,8 +590,16 @@ export function installHistory(ctx) {
       const q = String(entry.question || '').split('\n')[0];
       open.appendChild(el('span', 'cmp-history-q', q.length > HISTORY_QUESTION_PREVIEW ? `${q.slice(0, HISTORY_QUESTION_PREVIEW)}…` : q));
       const meta = el('span', 'cmp-history-meta');
+      // Only on the server (#2081): kept by another browser (or dropped from this one's 20).
+      if (entry.remoteOnly) {
+        const badge = el('span', 'cmp-history-remote', t('history_remote_badge'));
+        badge.title = t('history_remote_title');
+        meta.appendChild(badge);
+      }
+      // Continued here from another device's conversation (§7.8 ③) — a copy this browser owns.
+      if (entry.forkedFrom) meta.appendChild(el('span', 'cmp-history-remote', t('history_forked_badge')));
       // A debate says so (plan §17.7) — opening it switches the page to the 토론 tab.
-      if (isDebateEntry(entry) && ctx.debateOn && ctx.debateOn()) { // flag off: it opens as columns — no 토론 label
+      if ((isDebateEntry(entry) || entry.remoteKind === 'debate') && ctx.debateOn && ctx.debateOn()) { // flag off: it opens as columns — no 토론 label
         const badge = el('span', 'cmp-history-debate');
         const glyph = el('span', null, '\u{1F5E3}\u{FE0F}');
         glyph.setAttribute('aria-hidden', 'true');
@@ -459,11 +617,12 @@ export function installHistory(ctx) {
       }
       for (const key of Object.keys(entry.columns || {})) { const parsed = parseColId(key); if (parsed) meta.appendChild(dot(parsed.provider)); }
       // A debate entry opens frozen (read-only) while the debate is not offered — say so, not 「이어서」.
-      const resumable = !!(entry.columns && Object.values(entry.columns).some((c) => c && c.continuation)) && !(isDebateEntry(entry) && !(ctx.debateOn && ctx.debateOn()));
-      meta.appendChild(el('span', null, [relativeTime(entry.updatedAt), resumable ? t('history_resumable') : t('history_readonly')].filter(Boolean).join(' · ')));
+      const resumable = !entry.remoteOnly && !!(entry.columns && Object.values(entry.columns).some((c) => c && c.continuation)) && !(isDebateEntry(entry) && !(ctx.debateOn && ctx.debateOn()));
+      meta.appendChild(el('span', null, [relativeTime(entry.updatedAt), entry.remoteOnly ? '' : resumable ? t('history_resumable') : t('history_readonly')].filter(Boolean).join(' · ')));
       open.appendChild(meta);
       open.setAttribute('aria-label', t('history_open_aria', q));
-      open.addEventListener('click', () => { loadSession(entry); });
+      // A server item is downloaded, validated and kept here first (history-sync.js historySyncOpenRemote).
+      open.addEventListener('click', () => { if (entry.remoteOnly) ctx.historySyncOpenRemote(entry.id); else loadSession(entry); });
       row.appendChild(open);
       // 「이어서 →」 (C2): the resumable state as a verb — loads the session and puts the caret in
       // the bottom composer. Only where a continuation survived; the row click still just opens.
@@ -490,28 +649,87 @@ export function installHistory(ctx) {
     ctx.historyBtn.setAttribute('aria-expanded', 'true');
     track('history_open');
     if (ctx.syncMySharesEntry) ctx.syncMySharesEntry();
+    if (ctx.historySyncPanelSync) ctx.historySyncPanelSync(); // #2081: the switch shows the stored value
     ctx.historySearch.value = ''; // every open starts unfiltered — a stale term would hide the list behind 「검색 결과 없음」
-    historyUpdate(null).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); });
+    historyUpdate(null).then((r) => {
+      renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null);
+      // The server's items come after the local list is on screen (a server read never delays it, #2081).
+      if (!r.ok || !ctx.historySyncReadRemote) return;
+      ctx.historySyncReadRemote(r.list).then((rows) => {
+        if (rows === null) return; // outdated on arrival (a delete / wipe / switch since): what is shown stays
+        state.historyRemote = rows;
+        syncHistoryButton(null);
+        if (!ctx.historyPanel.hidden) paintHistoryList();
+      }, () => {});
+    });
   }
   function closeHistoryPanel() {
     ctx.historyPanel.hidden = true;
     ctx.historyBtn.setAttribute('aria-expanded', 'false');
   }
+  /**
+   * A new id for the session on screen (a delete of its entry). Another device's conversation shown read-only
+   * keeps its origin (Codex F1 #3): continuing it after the rotation is still a fork of it (`forkedFrom`).
+   */
+  function rotateSessionId() {
+    // Another device's conversation on screen (read-only), or a fork of one: its origin moves with the id (Codex F1 #3, F2 #3).
+    const from = state.remoteViewId && state.sessionId === state.remoteViewId ? state.remoteViewId
+      : state.forkOf && state.forkOf.id === state.sessionId ? state.forkOf.from : null;
+    const oldId = state.sessionId;
+    state.sessionId = newSessionId();
+    if (from) { state.forkOf = { id: state.sessionId, from }; state.remoteViewId = null; }
+    if (isMixedId(oldId, state.mixedEpoch)) markMixedId(state.sessionId, state.mixedEpoch);
+    if (state.splitOf) {
+      const ids = {};
+      for (const [k, v] of Object.entries(state.splitOf.ids)) ids[k] = v === oldId ? state.sessionId : v;
+      state.splitOf = { from: state.splitOf.from, ids };
+    }
+  }
   function deleteSession(id) {
     // The live session's id rotates NOW, before the delete is queued: a settle that lands while the
     // delete is in flight then writes under the new id instead of resurrecting the deleted one
     // (Codex hist 1R #3).
-    if (id === state.sessionId && state.sessionStarted) state.sessionId = newSessionId();
-    // Its images go with it (2026-09-26), under the same lock as the removal.
-    historyUpdate(() => ({ remove: [historyKey(id)], afterWrite: () => ctx.imageStore.forget([id]) })).then((r) => {
+    // Never undone, like before #2081 (Codex F3: an undo raced a settle already written under the new id) — a
+    // delete that fails leaves the old entry and the screen goes on under the new id, as any failed write did.
+    if (id === state.sessionId && state.sessionStarted) rotateSessionId();
+    // Its images go with it (2026-09-26), under the same lock as the removal. So does its server copy
+    // (#2081): the DELETE is queued inside this lock op, after the rotation above, and goes out before
+    // any later upload of that id (history-sync.js). A server-only row is removed from the panel now.
+    historyUpdate(async (list) => {
+      const own = list.find((e) => e.id === id);
+      // Another account's entry is not this account's to delete (it is hidden here — batch r7).
+      if (own && !visibleToMe(own)) return null;
+      if (ctx.historySyncNoteDelete) await ctx.historySyncNoteDelete([{ id, owner: own ? own.owner : null }]);
+      return { remove: [historyKey(id)], afterWrite: () => ctx.imageStore.forget([id]) };
+    }).then((r) => {
+      // Not done (a storage write — the sync's delete queue included — failed): the list is read again as it is.
+      if (!r.ok) { historyUpdate(null).then((rr) => { renderHistoryList(rr.list); syncHistoryButton(rr.ok ? rr.list : null); }); return; }
+      state.historyRemote = (state.historyRemote || []).filter((row) => row.id !== id);
       renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null);
       track('history_delete', { remaining: r.list.length });
+      if (ctx.historySyncDrain) ctx.historySyncDrain();
     });
   }
   function clearHistory() {
-    if (state.sessionStarted) state.sessionId = newSessionId();
+    if (state.sessionStarted) rotateSessionId();
     // Every history-prefixed key, valid or not (6R #3) — the read's `keys`, not the validated list.
-    historyUpdate((list, keys) => ({ remove: keys, afterWrite: () => ctx.imageStore.clear() })).then((r) => { renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); track('history_clear'); });
+    // …and the server's (#2081): with the sync on, everything the panel lists (this browser's and the
+    // server-only rows) is what 「모두 삭제」 clears; queued inside this lock op like a single delete.
+    historyUpdate(async (list, keys) => {
+      // This account's view only (batch r7): its entries and the ownerless ones, plus rows that did not validate;
+      // another account's entries (and their images) stay on disk for it.
+      const mine = list.filter(visibleToMe);
+      const valid = new Set(list.map((e) => historyKey(e.id)));
+      const remove = [...mine.map((e) => historyKey(e.id)), ...keys.filter((k) => !valid.has(k))];
+      if (ctx.historySyncNoteDelete) await ctx.historySyncNoteDelete([...mine.map((e) => ({ id: e.id, owner: e.owner || null })), ...(state.historyRemote || []).map((row) => ({ id: row.id, owner: null }))], { all: true });
+      const ids = mine.map((e) => e.id);
+      return { remove, afterWrite: () => (list.length === mine.length ? ctx.imageStore.clear() : ctx.imageStore.forget(ids)) };
+    }).then((r) => {
+      if (!r.ok) { historyUpdate(null).then((rr) => { renderHistoryList(rr.list); syncHistoryButton(rr.ok ? rr.list : null); }); return; }
+      state.historyRemote = [];
+      renderHistoryList(r.list); syncHistoryButton(r.ok ? r.list : null); track('history_clear');
+      if (ctx.historySyncDrain) ctx.historySyncDrain();
+    });
   }
   /**
    * Open a stored session in place of whatever is on screen: the question card freezes to its
@@ -554,6 +772,9 @@ export function installHistory(ctx) {
      */
     const readImg = (v) => {
       if (!plain(v)) return undefined;
+      // #2081: the marker of an attachment that stayed on another browser — nothing else about it is kept.
+      if (v.omitted !== undefined && v.omitted !== true) return undefined;
+      if (v.omitted === true) return { ...OMITTED_IMG };
       const name = str(v.name);
       const bytes = num(v.bytes);
       // 🔴 An INTEGER inside the cap (2R follow-up 2). `num()` alone accepted `1.5` and `1e100`,
@@ -570,13 +791,24 @@ export function installHistory(ctx) {
       const docs = docCountOf(v.docs, 1 + more);
       return { name: name.slice(0, HISTORY_ATTACH_NAME_MAX), bytes, ...(more > 0 ? { more } : {}), ...(ids.length ? { ids } : {}), ...(docs ? { docs } : {}), ...markerKinds({ more, kinds: v.kinds }) };
     };
-    const questionImg = entry.questionImg === undefined ? null : readImg(entry.questionImg);
+    // `attachOmitted` (#2081): the server copy's 「an attachment was here」 — the entry / a turn had a
+    // file that never left the browser it was sent from. Typed like every other field: a non-true value drops the entry.
+    const omittedFlag = (v) => (v === undefined ? false : v === true ? true : undefined);
+    const qOmitted = omittedFlag(entry.attachOmitted);
+    if (qOmitted === undefined) return null;
+    const questionImg = entry.questionImg === undefined ? (qOmitted ? { ...OMITTED_IMG } : null) : readImg(entry.questionImg);
     if (questionImg === undefined) return null;
     const question = str(entry.question);
     const updatedAt = num(entry.updatedAt);
     const createdAt = num(entry.createdAt);
     const rounds = num(entry.rounds);
     const src = entry.src == null ? null : (typeof entry.src === 'string' ? entry.src : undefined);
+    // #2081 decision A: the account the entry belongs to — optional, 16 hex; else the entry drops.
+    if (entry.owner !== undefined && (typeof entry.owner !== 'string' || !/^[0-9a-f]{16}$/.test(entry.owner))) return null;
+    // #2081 §7.8: the server id of another device's conversation this one forked — optional, a session id; else the entry drops.
+    if (entry.forkedFrom !== undefined && (typeof entry.forkedFrom !== 'string' || !SESSION_ID_RE.test(entry.forkedFrom))) return null;
+    if (entry.splitFrom !== undefined && (typeof entry.splitFrom !== 'string' || !SESSION_ID_RE.test(entry.splitFrom))) return null; // batch r8, same rule
+    if (entry.mixed !== undefined && entry.mixed !== true) return null; // pre-CWS batch r2: `true` or absent
     const activeRoundRaw = int(entry.activeRound);
     const firstRoundRaw = int(entry.firstRound);
     if ([question, updatedAt, createdAt, rounds, src, activeRoundRaw, firstRoundRaw].includes(undefined)) return null;
@@ -626,7 +858,10 @@ export function installHistory(ctx) {
         const tm = turn.model === undefined ? null : model(turn.model); // absent on a turn = never got a MODEL event
         const img = turn.img === undefined ? null : readImg(turn.img); // absent on every pre-#1616 turn
         const images = turn.images === undefined ? null : readOutImagesMarker(turn.images); // #1684, absent on every older turn
-        if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined || images === undefined) return null;
+        const omitted = omittedFlag(turn.attachOmitted); // #2081, see the entry's own above
+        if (round === undefined || text === undefined || errorText === undefined || tm === undefined || img === undefined || images === undefined || omitted === undefined) return null;
+        // A request's file that stayed elsewhere becomes the request's marker (the retry gate reads it); an answer's images, a flag.
+        const userImg = img || (omitted && turn.role === 'user' ? { ...OMITTED_IMG } : null);
         // A debate turn (#1769) keeps its kind on both roles: its request is the page's composed
         // prompt (it folds when the session is reloaded), its answer a speaker's turn.
         const kind = turn.kind === TURN_KIND_SUMMARY ? TURN_KIND_SUMMARY : turn.kind === TURN_KIND_DEBATE && turn.role !== 'skipped' ? TURN_KIND_DEBATE : null;
@@ -639,7 +874,7 @@ export function installHistory(ctx) {
         // Optional fields are OMITTED when empty (not written as null), so a normalised entry is
         // itself valid input — loadSession re-validates what the list hands it.
         const k = kind === TURN_KIND_DEBATE ? kind : kind && (turn.role === 'assistant' || summary) ? kind : null;
-        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(errorText && turn.openTab === true ? { openTab: true } : {}), ...(img && turn.role === 'user' ? { img } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}), ...(retracted ? { retracted: true, ...(turn.retraction ? { retraction: turn.retraction.slice(0, RETRACTION_MAX) } : {}) } : {}), ...(ms ? { ms } : {}) });
+        turns.push({ role: turn.role, text, round, model: tm, ...(k ? { kind: k } : {}), ...(summary ? { summary } : {}), ...(errorText ? { errorText } : {}), ...(errorText && turn.openTab === true ? { openTab: true } : {}), ...(userImg && turn.role === 'user' ? { img: userImg } : {}), ...(images && turn.role === 'assistant' && images.ids.length ? { images } : {}), ...(omitted && turn.role === 'assistant' ? { attachOmitted: true } : {}), ...(turn.stalled === true && turn.role === 'assistant' ? { stalled: true } : {}), ...(turn.cutError === true && turn.role === 'assistant' ? { cutError: true } : {}), ...(retracted ? { retracted: true, ...(turn.retraction ? { retraction: turn.retraction.slice(0, RETRACTION_MAX) } : {}) } : {}), ...(ms ? { ms } : {}) });
       }
       columns[colId] = { provider, colModel, turns, model: cm, continuation: cont };
     }
@@ -654,15 +889,18 @@ export function installHistory(ctx) {
     // entry; absent on a debate entry written before records = derived from its turns.
     const debate = entry.debate === undefined ? legacyDebateRecord(columns, firstRound) : readDebateRecord(entry.debate, Object.keys(columns), HISTORY_TEXT_MAX);
     if (debate === undefined) return null;
-    return { ...(debate ? { debate } : {}), id: entry.id, question, ...(questionImg ? { questionImg } : {}), rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src };
+    return { ...(debate ? { debate } : {}), id: entry.id, question, ...(questionImg ? { questionImg } : {}), rounds: rounds || 1, columns, activeRound, firstRound, updatedAt, createdAt, src, ...(entry.forkedFrom !== undefined ? { forkedFrom: entry.forkedFrom } : {}), ...(entry.splitFrom !== undefined ? { splitFrom: entry.splitFrom } : {}), ...(entry.mixed === true ? { mixed: true } : {}), ...(entry.owner !== undefined ? { owner: entry.owner } : {}) };
   }
-  function loadSession(raw) {
+  /** `remote`: another device's conversation, shown read-only from memory (#2081 §7.8 ②) — see persistSession's fork. */
+  function loadSession(raw, { remote = false } = {}) {
     if (state.disabled) return;
     const entry = normalizeEntry(raw);
     if (!entry) return; // not an entry: the session on screen is left as it is
+    // Another account's local entry never opens (Codex K1 #2: a row still painted from before an account switch).
+    if (!remote && !visibleToMe(entry)) return;
     ctx.closeViewer(); // an image of the session being replaced must not stay on top of the loaded one
     ctx.closeShareDialog(); // the share dialog was about the session being replaced
-    if (!state.columns.size) { ctx.pendingLoad = raw; closeHistoryPanel(); return; } // applied by readStatus once the columns exist
+    if (!state.columns.size) { ctx.pendingLoad = raw; ctx.pendingLoadOpts = { remote }; closeHistoryPanel(); return; } // applied by readStatus once the columns exist
     // Leave whatever is on screen — accepted or not: a first SEND still waiting for its CONSUME_OK
     // keeps a port whose late answer must never land in the loaded session (Codex hist 1R #1).
     if (state.sending && state.port) { try { state.port.postMessage({ type: 'ABORT' }); } catch { /* gone */ } }
@@ -689,7 +927,12 @@ export function installHistory(ctx) {
     state.question = String(entry.question || '');
     state.questionImg = entry.questionImg || null; // the first round's marker rides the entry, not a turn
     state.sessionId = entry.id;
-    state.persistedId = entry.id; // opened FROM the history: it has an entry
+    state.persistedId = entry.id; // opened FROM the history (or the server — nothing here to lose by leaving it)
+    state.remoteViewId = remote ? entry.id : null; // §7.8 ②: never written under this id
+    state.forkOf = entry.forkedFrom ? { id: entry.id, from: entry.forkedFrom } : null;
+    state.splitOf = entry.splitFrom ? { from: entry.splitFrom, ids: { [entry.owner || '']: entry.id } } : null;
+    state.mixedEpoch = (state.mixedEpoch || 0) + 1; // what is on screen now is this entry as stored
+    if (entry.mixed === true) markMixedId(entry.id, state.mixedEpoch);
     state.sessionStarted = true;
     state.sessionEnded = true;      // no port carries it: a follow-up resumes (canResume) or is refused
     state.sessionSaveBy = uniformSaveBy(true); // only all-kept sessions are stored
@@ -777,7 +1020,7 @@ export function installHistory(ctx) {
     // The tab follows what the entry opened AS — the debate room or the columns (plan §17.7).
     if (ctx.debateFollowEntry) ctx.debateFollowEntry(debating);
     ctx.updateControls();
-    ctx.showNotice(ctx.canResume() ? 'info' : 'warn', [t(ctx.canResume() ? 'history_loaded_resumable' : 'history_loaded_readonly')]);
+    ctx.showNotice(ctx.canResume() ? 'info' : 'warn', [t(ctx.canResume() ? 'history_loaded_resumable' : 'history_loaded_readonly'), remote ? t('hist_sync_remote_view') : '']);
     track('history_load', { resumable: ctx.canResume(), columns: targets.length, debate: debating });
     if (ctx.canResume()) ctx.focusQuietly(ctx.followup.input);
   }
@@ -821,10 +1064,12 @@ export function installHistory(ctx) {
     if (ms) turn.ms = ms;
     if (stored.retracted === true) { turn.retracted = true; if (stored.retraction) turn.retraction = String(stored.retraction).slice(0, RETRACTION_MAX); }
     if (stored.images) ctx.restoreOutputImages(turn, stored.images);
+    if (stored.attachOmitted === true) turn.attachOmitted = true; // #2081: its images stayed on another browser (kept on re-save)
     turn.node.classList.remove('is-streaming');
     col.status = 'done';
     ctx.paintAssistant(col);
     ctx.settleTurn(turn);
+    if (turn.attachOmitted) turn.node.appendChild(el('p', 'cmp-turn-attach-omitted', t('hist_sync_attach_omitted')));
     if (turn.activity) turn.activity.box.hidden = true;
   }
   // Everything another file reaches (compare.js destructures the names it calls bare).
@@ -832,6 +1077,6 @@ export function installHistory(ctx) {
     historyStorage, underHistoryLock, lastErr, storageReadAll, storageKeyInvalid, storageWrite, historyUpdate, historyKey,
     newSessionId, clipText, snapshotSession, storedTurn, jsonBytes, fitEntry, logUnfittable, persistSession, persistLateImages,
     historyMatches, syncHistoryButton, relativeTime, renderHistoryList, paintHistoryList, openHistoryPanel, closeHistoryPanel, deleteSession,
-    clearHistory, boundContinuation, normalizeEntry, loadSession, storedSummary, restoreAssistantTurn,
+    clearHistory, boundContinuation, normalizeEntry, loadSession, storedSummary, restoreAssistantTurn, storedUpdatedAt, storedCount, viewerOwner, visibleToMe, noteStatusAccount,
   });
 }

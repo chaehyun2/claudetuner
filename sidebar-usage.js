@@ -429,9 +429,10 @@
   }
 
   // Capability-guarded like every core lookup: a stale core without the builder draws no chip.
+  let _rpDrawn = ''; // the reset-pass line HTML the panel last drew
   function resetPassChipHtml(d) {
-    return d && CORE && typeof CORE.buildResetPassChipHtml === 'function'
-      ? CORE.buildResetPassChipHtml(d.rp, _lang, Date.now(), 'claude', d.rpUrl, '', d.rpHelpUrl) : '';
+    return d && CORE && typeof CORE.buildResetPassLineHtml === 'function'
+      ? CORE.buildResetPassLineHtml(d.rp, _lang, Date.now(), 'claude', d.rpUrl, 'text-text-300', d.rpNow === true) : '';
   }
 
   function renderContent() {
@@ -495,6 +496,9 @@
     // Reset pass holdings (#2092 P1-1) — the shared builder decides visibility (「모름」/0 → '').
     // Not a usage row: it says nothing about usage, so it does not count toward `usageRows`.
     const rpHtml = resetPassChipHtml(_data);
+    // Compared against on the next answer: re-rendering the OLD data at the new time would match the
+    // new data and skip the redraw when only the clock crossed the 3-day line (Codex 1R).
+    _rpDrawn = rpHtml;
     if (rpHtml) {
       const rpRow = document.createElement('div');
       rpRow.className = 'ct-sb-rp';
@@ -688,7 +692,7 @@
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
             _data.noUsage === res.noUsage && _data.noUsageFree === res.noUsageFree &&
             _data.eu === res.eu && _data.plan === res.plan &&
-            resetPassChipHtml(_data) === resetPassChipHtml(res)) return;
+            _rpDrawn === resetPassChipHtml(res)) return;
         _data = res;
         renderContent();
       });

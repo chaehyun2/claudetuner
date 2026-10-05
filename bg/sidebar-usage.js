@@ -6,7 +6,7 @@ import { hasProviderPermission } from './providers.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
-import { resetPassSiteUrl, resetPassHelpUrl } from './reset-pass-model.js';
+import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastWeeklyBlocks } from './reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Sidebar Usage: build data for content script ===
@@ -177,6 +177,10 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     rpUrl: resetPassSiteUrl(wantProvider, SITE_ORIGINS),
     // The provider's "what is a reset pass" article for the chip's 「?」 (same reason: one builder).
     rpHelpUrl: resetPassHelpUrl(wantProvider),
+    // One pass clears every window at its limit right now — the panel line's 「지금 풀 수 있어요」.
+    // Decided here, over the SAME values the panel draws, by the popup's own predicate.
+    rpNow: clearNowCall(orgData?.resetPasses, blockedSlotsOf({ h5, d7, w5s, w7s }), Date.parse(r5 || ''), Date.parse(r7 || ''),
+      pastWeeklyBlocks(orgHistory(history, reqOrgId || orgData?.uuid, legacyIsThisOrg), Date.now())),
     // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now
     // collect — the provider's own answer to "is anything actually exhausted", which is the
     // question behind 문의 #195/#196 — but no panel reads it yet, and a populated field with no
@@ -222,6 +226,12 @@ async function noDataReason(provider) {
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)
 // `windowSeconds` is the provider-reported 7d-slot span (org `w7s`), used by the 7d forecast only.
+// This org's history rows — the same rule calcSidebarPrediction and the popup's _filteredHistory use.
+function orgHistory(history, orgUuid, includeLegacy) {
+  if (!Array.isArray(history)) return [];
+  return orgUuid ? history.filter((p) => p.org === orgUuid || (includeLegacy && !p.org)) : history;
+}
+
 function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, includeLegacy, provider, windowSeconds) {
   if (!resetsAt || currentUtil == null || !history || history.length < 3) return null;
 
@@ -231,9 +241,7 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
 
   // Filter history for matching org. The legacy unscoped (no `org`) points are pre-multi-org
   // samples of the Claude PRIMARY org — the caller decides (includeLegacy), mirroring the popup.
-  const orgHistory = orgUuid
-    ? history.filter(p => p.org === orgUuid || (includeLegacy && !p.org))
-    : history;
+  const orgRows = orgHistory(history, orgUuid, includeLegacy);
 
   let rate = null;
   let hoursDiff = 0;
@@ -243,7 +251,7 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
     // this used to call the diurnal projector directly, a second copy of the core's sample mapping
     // that drifts the moment the core gains an input. Pass the org-scoped history so prior cycles
     // come from this org's own samples. The viewer's timezone is read here, at the edge.
-    const dp = calcPredictedAtReset(orgHistory, 'd7', currentUtil, resetsAt, {
+    const dp = calcPredictedAtReset(orgRows, 'd7', currentUtil, resetsAt, {
       windowSeconds, tzOffsetMin: -new Date().getTimezoneOffset(), provider: provider || 'claude',
     });
     if (!dp || !(dp.rate > 0)) return null;
@@ -256,7 +264,7 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
     let valid = [];
     for (const lb of lookbacks) {
-      valid = orgHistory.filter(p => p[key] != null && (lb === Infinity || p.t > now - lb));
+      valid = orgRows.filter(p => p[key] != null && (lb === Infinity || p.t > now - lb));
       if (valid.length >= 2) break;
     }
     if (valid.length < 2) return null;

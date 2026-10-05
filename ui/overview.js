@@ -18,7 +18,7 @@ import {
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
-import { blockedSlotsOf, canClearNow, holdsAny, resetPassSiteUrl } from '../bg/reset-pass-model.js';
+import { blockedSlotsOf, clearNowCall, holdsAny, pastWeeklyBlocks, resetPassSiteUrl } from '../bg/reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 import { passUseRelearning } from './reset-pass-ui.js';
 
@@ -247,7 +247,7 @@ function _scopedEscalationRow(org) {
     + `${escHtml(worst.name)} ${pct}%</div>`;
 }
 
-// Reset-pass icon (#2092 P1-5). The overview adds no text — one 🎟 with a count, details in the
+// Reset-pass badge (#2092 P1-5). The overview adds one short badge — 「RESET N」 — details in the
 // tooltip, click = the provider's own usage settings (the user spends a pass there; we never do).
 // 「모름」 (known:false) and 0 held draw nothing, so most cards are unchanged.
 const RP_EXPIRING_MS = 3 * 24 * 60 * 60 * 1000;
@@ -256,16 +256,25 @@ const RP_KINDS = ['full', 'five_hour', 'weekly'];
 // Expiry as a calendar date only (10/23). A "N days left" string would change between renders, and
 // renderOverview() rebuilds the DOM whenever the HTML changes — the tooltip would vanish under
 // the cursor on every collection.
+// The badge reads 「RESET N」 — the 🎟 emoji it replaces rendered as an unreadable pink smudge at
+// 11px (user, 2026-10-05). The ↻ is added only in the 「clear it now」 state, drawn in currentColor.
+const RP_RESET_SVG = '<svg class="ov-rp-i" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"'
+  + ' stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M13.5 8a5.5 5.5 0 1 1-1.8-4.1"/><path d="M13.5 2.5v3.2h-3.2"/></svg>';
+
 function _rpDate(iso) {
   const d = new Date(iso);
   return Number.isFinite(d.getTime()) ? `${d.getMonth() + 1}/${d.getDate()}` : '';
 }
 
-function _resetPassIcon(org, sameProviderCount) {
+function _resetPassIcon(org, sameProviderCount, hist) {
   const rp = org.resetPasses;
   const provider = org.provider || 'claude';
   if (!holdsAny(rp) || !resetPassSiteUrl(provider, SITE_ORIGINS)) return '';
-  const now = canClearNow(rp, blockedSlotsOf(org));
+  // Same 「clear it now」 rule as the headline and the sidebar (batch review 1.55.2).
+  const nowMs = Date.now();
+  const now = clearNowCall(rp, blockedSlotsOf(org), Date.parse(org.resetsAt5h || ''), Date.parse(org.resetsAt7d || ''),
+    pastWeeklyBlocks(hist || [], nowMs), nowMs);
   const exp = rp.next_expires_at ? Date.parse(rp.next_expires_at) : NaN;
   const expiring = Number.isFinite(exp) && exp - Date.now() <= RP_EXPIRING_MS;
   const lines = [t('rp_ov_title', rp.available)];
@@ -284,7 +293,7 @@ function _resetPassIcon(org, sameProviderCount) {
   const label = escHtml(lines.join('\n'));
   const cls = now ? ' ov-rp-now' : (expiring ? ' ov-rp-warn' : '');
   return `<button type="button" class="ov-rp${cls}" data-provider="${escHtml(provider)}" title="${label}" aria-label="${label}">`
-    + `🎟<span class="ov-rp-n">${rp.available}</span></button>`;
+    + `${now ? RP_RESET_SVG : ''}<span class="ov-rp-l">${escHtml(t('rp_ov_badge'))}</span><span class="ov-rp-n">${rp.available}</span></button>`;
 }
 
 // `hist` is this org's pre-bucketed history slice (see _historyByOrg). `sameProviderCount` is how
@@ -332,7 +341,7 @@ function _renderCard(org, hist, sameProviderCount = 1) {
     + _providerLogo(provider)
     + `<span class="ov-plan">${escHtml(planDisplayName(org.plan, provider))}</span>${beta}`
     + `<span class="ov-name">${escHtml(org.name || '')}</span>${pin}`
-    + _resetPassIcon(org, sameProviderCount)
+    + _resetPassIcon(org, sameProviderCount, hist)
     + '<span class="ov-chevron" aria-hidden="true">›</span>'
     + '</div>'
     + `<div class="ov-gauges">${rows}</div>`

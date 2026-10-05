@@ -241,6 +241,10 @@ export const SECONDS_PER_DAY = 86400;
 // Auto-reconnect (login guidance): a status re-read on focus / visibility / bfcache restore while
 // some column is gated, at most one per this many ms and never while a session runs.
 export const AUTO_REFRESH_MIN_MS = 3000;
+// #2117: how long the page waits for a COMPARE_STATUS answer before it says so. Without one the page
+// has no column and cannot send — silently. Past this the page shows a notice with 「다시 확인」 and
+// keeps listening: a late answer is still applied. Above the SW's own worst case (its steps are bounded).
+export const STATUS_REPLY_TIMEOUT_MS = 20000;
 // Gate kinds a column body can show before it takes part (renderColumnGate).
 export const GATE_PERMISSION = 'permission';
 export const GATE_LOGIN = 'login';
@@ -448,6 +452,32 @@ export const HISTORY_DB_VERSION = 1;
 // Set in chrome.storage.local once a page moved the entries to IndexedDB — after that storage.local is
 // never read as the history (an IndexedDB that will not open is an error, not an empty history).
 export const HISTORY_STORE_MARK_KEY = 'compareHistoryStore';
+// ── Server sync of the history (#2081, ui/compare/history-sync.js, docs/plans/compare-history-sync.md §7) ──
+// chrome.storage.LOCAL: the user's switch (options page / the 「최근」 panel) — per browser, absent = ON (batch r5:
+// never chrome.storage.sync, which Chrome sync would carry to the user's other browsers).
+export const HISTORY_SYNC_PREF_KEY = 'compareHistorySync';
+// chrome.storage.local: the first-screen notice was SHOWN in this browser (nothing uploads before it).
+export const HISTORY_SYNC_NOTICED_KEY = 'compareHistorySyncNoticed';
+// chrome.storage.local: this browser's sync bookkeeping `{revs, dels, conflicts, gone}` — read and
+// written only under the history lock (HISTORY_LOCK_NAME), beside the entries it describes.
+export const HISTORY_SYNC_STATE_KEY = 'compareHistorySyncState';
+// chrome.storage.local: when 「서버 기록도 삭제」 last succeeded in this browser (epoch ms) — written by the SW
+// with no lock; each engine takes it into the ledger under the history lock (history-sync.js ledgerAfterWipe).
+export const HISTORY_SYNC_WIPE_KEY = 'compareHistorySyncWipeAt';
+// Web Locks name the network side of the sync runs under (every tab): one request at a time, so a
+// delete queued in one tab can never overtake a PUT of the same id another tab already sent.
+export const HISTORY_SYNC_LOCK_NAME = 'ctcmp-history-sync';
+// The runtime message the page asks the SW with (bg/compare.js historyRequest).
+export const HISTORY_SYNC_MSG_TYPE = 'COMPARE_HISTORY';
+// An uploaded entry's JSON stays under this (the server refuses an item over 512 KB; the margin is the
+// request's own wrapper). Fitted with history.js fitEntry, like the local bound.
+export const HISTORY_SYNC_ENTRY_MAX_BYTES = 500 * 1024;
+// The server keeps this many per account (oldest dropped) — the list GET answers at most this many.
+export const HISTORY_SYNC_SERVER_MAX = 50;
+// Bounds on the bookkeeping lists (a queue that can never drain must not grow without end).
+export const HISTORY_SYNC_QUEUE_MAX = 200;
+// The meta question of a server list item, as painted (the server keeps ≤ 200 chars).
+export const HISTORY_SYNC_META_Q_MAX = 200;
 // Column metadata bounds (Codex 6R #4): a continuation is a handful of short ids (the SW's own
 // RESUME_* caps); anything larger is not one and is dropped (the column loads read-only).
 export const CONTINUATION_MAX_KEYS = 8;

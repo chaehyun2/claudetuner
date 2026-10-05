@@ -227,6 +227,8 @@ export function installColumnThread(ctx) {
         ...(imageIdsOf(extra.img.ids, ATTACH_MAX_FILES).length ? { ids: imageIdsOf(extra.img.ids, ATTACH_MAX_FILES) } : {}),
         ...(docCountOf(extra.img.docs, ATTACH_MAX_FILES) ? { docs: docCountOf(extra.img.docs, ATTACH_MAX_FILES) } : {}),
         ...markerKinds(extra.img),
+        // #2081: a file that stayed on another browser — the marker says only that (history.js OMITTED_IMG).
+        ...(extra.img.omitted === true ? { omitted: true } : {}),
       };
     }
     return out;

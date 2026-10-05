@@ -103,8 +103,8 @@ async function renderReauthWidget() {
           // return, and it is the only evidence that the message never reached the service worker.
           // All three send surfaces route through the same classifier so they cannot drift apart
           // again (#1172).
-          const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError));
-          status.textContent = t(copy.key) || copy.fallback;
+          const copy = sendCodeErrorCopy(sendCodeReasonFromMessage(res, chrome.runtime.lastError), res);
+          status.textContent = t(copy.key, ...copy.args) || copy.fallback;
         }
       }
     );

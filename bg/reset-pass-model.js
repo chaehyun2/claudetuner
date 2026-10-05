@@ -175,3 +175,261 @@ export function canClearNow(summary, blockedSlots) {
   return Object.keys(KIND_CLEARS).some((kind) => isPassCount(usable[kind]) && usable[kind] > 0
     && blockedSlots.every(KIND_CLEARS[kind]));
 }
+
+/**
+ * The ONE 「clear it now」 call every surface may emphasise (popup headline, overview badge, in-page
+ * sidebar line): canClearNow AND the blocked windows do not refill on their own within
+ * RP_ADVICE_RESET_SOON_H. Batch review 1.55.2: with 2h to a natural reset the headline, badge and
+ * sidebar said 「지금 풀 수 있어요」 while the advice line said 「아껴두세요 — 2시간 뒤 저절로」.
+ * A refill time we do not know leaves only the fact (canClearNow) to speak.
+ */
+export function clearNowWorthIt(summary, blockedSlots, resets5hMs, resets7dMs, nowMs = Date.now()) {
+  if (!canClearNow(summary, blockedSlots)) return false;
+  const ends = blockedSlots.map((sl) => (sl === FIVE_HOUR_SLOT ? resets5hMs : resets7dMs));
+  if (!ends.every(Number.isFinite)) return true;
+  return Math.max(...ends) - nowMs > RP_ADVICE_RESET_SOON_H * HOUR_MS;
+}
+
+// ── 「지금 쓰세요 / 아껴두세요」 — when spending a pass pays off (#2092, user idea 2026-10-05) ─────
+//
+// A pass is worth the most against a LONG block and nothing once it lapses. v2 (user ask + a design
+// debate, 2026-10-05) compares LENGTHS, not counts: the block in front of the user against the
+// blocks this account usually hits, discounted by the chance of hitting the limit again before the
+// pass expires. Local history only; nothing is sent anywhere for this. Pure: every input passed in.
+//
+// The comparison leans toward 「use the certain block now」 (debate consensus — 2~4 past cycles make
+// any finer model overconfident):
+//   P     = P(at least k more weekly walls before the passes expire), the per-cycle wall rate shrunk
+//           toward ½ as (walled+1)/(seen+2) with the current (walled) cycle counted in; k = passes
+//           that clear the weekly limit
+//   R     = hours until the blocked windows refill on their own
+//   lo/med = the shortest / median past block (hours from the estimated wall to the reset)
+//   hold  when P × lo  ≥ RP_ADVICE_HOLD_MARGIN × R   — even a short usual block, discounted, beats now
+//   use   when P × med ≤ R                           — now is at least as long as a usual one
+//   else  「비슷해요」 (similar) — no confident call either way
+// The current cycle's own block is NOT a sample: the user's case is exactly 「this week is short,
+// usually long」. A pattern that really changed is caught by the last-chance rule (no cycle left
+// before expiry → use now) and by the new short blocks entering the history.
+//
+// Verdicts (`null` = say nothing — the chip and the headline link already state the facts):
+//   use_now          reason last (no wall can come before the first pass expires) | longer
+//                    (R ≥ P × med) | five_hour (5h-only block, a 5h pass held) | no_weekly_ahead
+//                    (5h-only block, only a full pass, no weekly wall expected while it is valid)
+//   use_or_lose      not blocked, a 7d-clearing pass expires within RP_ADVICE_EXPIRY_DAYS, no wall
+//                    is forecast before it does, and the site lets it be spent now
+//   similar          blocked, neither rule is confident
+//   hold_for_wall    reason longer (P × lo ≥ margin × R) | save_full (5h-only block, only a full
+//                    pass, a weekly wall expected while it is valid)
+//   hold_until_wall  not blocked yet, but the 7d forecast hits 100% before the reset (`at`)
+//   hold_reset_soon  blocked, and the window refills on its own within RP_ADVICE_RESET_SOON_H
+//
+// 🪤 Whether a pass restarts the 7d window or keeps its resets_at is not measured yet (plan §6-1),
+// so no 「you regain N hours」 figure is claimed — the line shows R and the usual block, both facts.
+export const RP_ADVICE_RESET_SOON_H = 3;
+export const RP_ADVICE_EXPIRY_DAYS = 3;
+export const RP_ADVICE_HOLD_MARGIN = 1.5;
+// Past blocks needed before lengths are compared at all; fewer and only last / reset-soon speak.
+export const RP_ADVICE_MIN_BLOCKS = 2;
+// A wall happens late in its cycle, so a cycle whose end is at most this much after the pass
+// expires can still be walled while the pass is valid.
+const RP_ADVICE_WALL_LEAD_MS = 24 * 3600000;
+const HOUR_MS = 3600000;
+const WEEK_MS = SEVEN_DAY_SECONDS * 1000;
+// Two resets_at values this close are one cycle (the same jitter tolerance p7Cycles uses).
+const SAME_CYCLE_TOL_MS = 6 * HOUR_MS;
+// A completed cycle counts only if it was observed this close to its reset — else its peak is
+// a partial value and a missing wall would read as 「did not hit the limit」.
+const PAST_CYCLE_END_GAP_MS = 24 * HOUR_MS;
+// A block's length needs the wall pinned: the last <100% and first 100% samples at most this far
+// apart (the wall is taken as their midpoint). A wider gap still counts the wall, not its length.
+const BLOCK_HIT_GAP_MS = 6 * HOUR_MS;
+// A cycle shorter than this share of a week was cut short (a pass used, or a moved reset): its
+// wall and length do not describe a normal week, so it is skipped altogether.
+const MIN_CYCLE_SPAN_FRAC = 5 / 7;
+// A fall this large inside one cycle is a cleared window (a pass used — the same threshold the
+// popup's pass-use detection uses): its later 100% samples are a second, unrelated wall.
+const SAME_CYCLE_FALL_PTS = 20;
+const WEEKLY_PASS_KINDS = new Set(['full', 'weekly']);
+
+/**
+ * The completed weekly cycles in `points` (usage history rows `{ t, d7, r7 }`, one org): how many
+ * were seen, how many hit 100%, and the block lengths (hours from the estimated wall to the reset)
+ * of the walled ones whose wall is pinned. A cycle counts only once its reset has passed and it was
+ * observed within a day of it; one cut short is skipped.
+ */
+export function pastWeeklyBlocks(points, nowMs) {
+  const cycles = [];
+  const pts = (Array.isArray(points) ? points : [])
+    .map((p) => ({ t: Number(p && p.t), u: p && p.d7 != null ? Number(p.d7) : NaN, r: p && p.r7 ? Date.parse(p.r7) : NaN }))
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.u) && Number.isFinite(p.r) && p.t <= nowMs)
+    .sort((a, b) => a.t - b.t);
+  for (const p of pts) {
+    const c = cycles[cycles.length - 1];
+    if (!c || Math.abs(p.r - c.r) >= SAME_CYCLE_TOL_MS) cycles.push({ r: p.r, pts: [p] });
+    else c.pts.push(p);
+  }
+  let seen = 0, walled = 0;
+  const blocks = [];
+  for (let i = 0; i < cycles.length; i++) {
+    const c = cycles[i];
+    const last = c.pts[c.pts.length - 1].t;
+    if (c.r > nowMs || c.r - last > PAST_CYCLE_END_GAP_MS) continue;
+    if (i > 0 && c.r - cycles[i - 1].r < WEEK_MS * MIN_CYCLE_SPAN_FRAC) continue;
+    if (c.pts.some((p, j) => j > 0 && p.u <= c.pts[j - 1].u - SAME_CYCLE_FALL_PTS)) continue; // Codex v2 1R
+    seen++;
+    const hit = c.pts.findIndex((p) => p.u >= 100);
+    if (hit < 0) continue;
+    walled++;
+    const before = hit > 0 ? c.pts[hit - 1] : null;
+    if (!before || c.pts[hit].t - before.t > BLOCK_HIT_GAP_MS) continue;
+    blocks.push((c.r - (before.t + c.pts[hit].t) / 2) / HOUR_MS);
+  }
+  return { seen, walled, blocks };
+}
+
+/**
+ * Weekly cycles ending after `resets7dMs` whose wall can still fall before `expiresMs`. A wall comes
+ * `leadMs` before its cycle ends — at least a day, longer for a user whose blocks usually are (Codex
+ * v2 1R: a 100h-block user's next wall lands before a pass that outlives the cycle end by 0h).
+ */
+function cyclesBefore(expiresMs, resets7dMs, leadMs = RP_ADVICE_WALL_LEAD_MS) {
+  if (!Number.isFinite(expiresMs) || !Number.isFinite(resets7dMs)) return 0;
+  const lead = Math.max(RP_ADVICE_WALL_LEAD_MS, Number.isFinite(leadMs) ? leadMs : 0);
+  let n = 0;
+  for (let end = resets7dMs + WEEK_MS; end <= expiresMs + lead; end += WEEK_MS) n++;
+  return n;
+}
+
+/** P(X ≥ k) for X ~ Binomial(n, p). */
+function atLeast(n, p, k) {
+  if (k <= 0) return 1;
+  if (k > n) return 0;
+  let sum = 0, c = 1; // c = C(n, i)
+  for (let i = 0; i <= n; i++) {
+    if (i >= k) sum += c * p ** i * (1 - p) ** (n - i);
+    c = (c * (n - i)) / (i + 1);
+  }
+  return Math.min(1, Math.max(0, sum));
+}
+
+const median = (xs) => {
+  const a = xs.slice().sort((x, y) => x - y);
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+};
+
+/**
+ * The advice for one org, or null.
+ * @param {object} a
+ * @param {object} a.summary          ResetPassSummary (needs kinds_known + tickets)
+ * @param {string[]} a.blocked        blockedSlotsOf(...) for the values on screen
+ * @param {number|null} a.resets5hMs
+ * @param {number|null} a.resets7dMs
+ * @param {number|null} a.hoursTo100  7d forecast: hours until 100% when it lands before the reset
+ * @param {{seen:number, walled:number, blocks:number[]}|null} a.past  pastWeeklyBlocks(...)
+ * @param {number} a.nowMs
+ */
+export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hoursTo100, past, nowMs }) {
+  const s = summary;
+  if (!holdsAny(s) || s.kinds_known !== true || !Number.isFinite(nowMs)) return null;
+  const tickets = (Array.isArray(s.tickets) ? s.tickets : [])
+    .map((x) => ({ kind: x && x.kind, exp: x ? Date.parse(x.expires_at) : NaN }))
+    .filter((x) => TICKET_KINDS.has(x.kind) && Number.isFinite(x.exp) && x.exp > nowMs)
+    .sort((a, b) => a.exp - b.exp);
+  if (!tickets.length) return null;
+  const weekly = tickets.filter((x) => WEEKLY_PASS_KINDS.has(x.kind));
+  // Only a kind the provider says is usable now may be advised for use — an expiring pass that
+  // cannot be spent must not hurry the user into spending a different one (Codex 1R).
+  const usableNow = (x) => (s.usable_by_kind?.[x.kind] || 0) > 0;
+  // Usability is reported per KIND, expiry per ticket. When only some tickets of a kind are usable
+  // we cannot tell which, and every verdict below leans on a usable pass's expiry — so say nothing
+  // rather than guess (Codex 2R: an unusable 10/6 full beside a usable 10/15 full read as 「last」).
+  // Held = the provider's per-kind count, not the tickets (capped at RESET_PASS_TICKETS_MAX, Codex 3R).
+  const held = {};
+  for (const x of tickets) held[x.kind] = (held[x.kind] || 0) + 1;
+  for (const k of TICKET_KINDS) held[k] = Math.max(held[k] || 0, isPassCount(s.by_kind?.[k]) ? s.by_kind[k] : 0);
+  if (Object.keys(held).some((k) => { const u = s.usable_by_kind?.[k] || 0; return u > 0 && u < held[k]; })) return null;
+  const weeklyUsable = weekly.filter(usableNow);
+  const r7 = Number.isFinite(resets7dMs) ? resets7dMs : null;
+  const seen = past && Number.isInteger(past.seen) ? past.seen : 0;
+  const walledPast = past && Number.isInteger(past.walled) ? past.walled : 0;
+  const blocks = (past && Array.isArray(past.blocks) ? past.blocks : []).filter((h) => Number.isFinite(h) && h > 0);
+  const wallAt = Number.isFinite(hoursTo100) && hoursTo100 >= 0 ? nowMs + hoursTo100 * HOUR_MS : null;
+  const slots = Array.isArray(blocked) ? blocked : [];
+
+  if (slots.length) {
+    if (!canClearNow(s, slots)) return null;
+    const ends = slots.map((sl) => (sl === FIVE_HOUR_SLOT ? resets5hMs : r7)).filter(Number.isFinite);
+    if (ends.length !== slots.length) return null;
+    const hours = (Math.max(...ends) - nowMs) / HOUR_MS;
+    if (hours <= RP_ADVICE_RESET_SOON_H) return { verdict: 'hold_reset_soon', hours };
+    const weeklyBlocked = slots.some((sl) => WEEKLY_SLOT_RE.test(sl));
+    if (!weeklyBlocked) {
+      // Only the 5h window: a five_hour pass is made for this; a full pass is worth more later
+      // against the weekly limit when a weekly wall is expected while it is still valid (Codex 1R).
+      if ((s.usable_by_kind?.five_hour || 0) > 0) return { verdict: 'use_now', reason: 'five_hour', hours };
+      // The full pass the site would spend first (earliest-expiring usable), with the wall lead
+      // taken from this user's own blocks — the same basis as the weekly branch (Codex v2 2R).
+      const fullExp = tickets.find((x) => x.kind === 'full' && usableNow(x))?.exp;
+      const rate = seen >= RP_ADVICE_MIN_BLOCKS ? (walledPast + 1) / (seen + 2) : 0;
+      const leadMs = blocks.length >= RP_ADVICE_MIN_BLOCKS ? Math.min(...blocks) * HOUR_MS : 0;
+      const weeklyAhead = Number.isFinite(fullExp) && ((wallAt != null && wallAt < fullExp)
+        || (r7 != null && atLeast(cyclesBefore(fullExp, r7, leadMs), rate, 1) >= 0.5));
+      return weeklyAhead ? { verdict: 'hold_for_wall', reason: 'save_full', hours }
+        : { verdict: 'use_now', reason: 'no_weekly_ahead', hours };
+    }
+    if (!weeklyUsable.length || r7 == null) return null;
+    // The decision is about the pass the site would spend first: the earliest-expiring USABLE one
+    // (Codex v2 1R — unusable passes and later expiries must not dilute it).
+    const first = weeklyUsable[0];
+    const enough = blocks.length >= RP_ADVICE_MIN_BLOCKS;
+    const lo = enough ? Math.min(...blocks) : 0;
+    const leadMs = lo * HOUR_MS; // the shortest usual block: the conservative (latest) wall
+    const nFirst = cyclesBefore(first.exp, r7, leadMs);
+    // The first pass has no wall left before it lapses: this block is its last chance.
+    if (nFirst === 0) return { verdict: 'use_now', reason: 'last', hours, expiresAt: first.exp };
+    if (!enough) return null;
+    // The current cycle is walled (we are blocked), so it is one more seen + walled observation.
+    const rate = (walledPast + 1 + 1) / (seen + 1 + 2);
+    // Saving the first pass pays only if enough walls come before IT expires for every usable pass
+    // that expires by then too (they compete for the same walls); later passes have walls of their own.
+    const k = weeklyUsable.filter((x) => cyclesBefore(x.exp, r7, leadMs) <= nFirst).length;
+    const prob = atLeast(nFirst, rate, k);
+    const hi = Math.max(...blocks), med = median(blocks);
+    const facts = { hours, lo, hi, prob };
+    if (prob * lo >= RP_ADVICE_HOLD_MARGIN * hours) return { verdict: 'hold_for_wall', reason: 'longer', ...facts };
+    if (prob * med <= hours) return { verdict: 'use_now', reason: 'longer', ...facts };
+    return { verdict: 'similar', ...facts };
+  }
+
+  if (!weekly.length) return null;
+  const first = weekly[0];
+  if (first.exp - nowMs <= RP_ADVICE_EXPIRY_DAYS * 24 * HOUR_MS) {
+    if (wallAt != null && wallAt < first.exp) return { verdict: 'hold_until_wall', at: wallAt, expiresAt: first.exp };
+    // Not blocked and no wall before it lapses: say so only when the site lets it be spent now
+    // (ChatGPT reports nothing applicable off-limit) — otherwise the line would be an order the
+    // user cannot follow.
+    return usableNow(first) ? { verdict: 'use_or_lose', expiresAt: first.exp } : null;
+  }
+  if (wallAt != null) return { verdict: 'hold_until_wall', at: wallAt };
+  return null;
+}
+
+/**
+ * THE 「지금 풀 수 있어요」 call — the only function any surface (popup headline, overview badge,
+ * in-page sidebar line) may use to emphasise spending a pass now (batch review 1.55.2, 2 rounds:
+ * each surface deciding on its own put 「clear it now」 beside 「아껴두세요」). True only when
+ * clearNowWorthIt holds AND the advice for the same inputs is not a hold. Every caller passes the
+ * same local history (pastWeeklyBlocks over the org's own rows, legacy rows for the Claude primary).
+ */
+export function clearNowCall(summary, blockedSlots, resets5hMs, resets7dMs, past, nowMs = Date.now()) {
+  if (!clearNowWorthIt(summary, blockedSlots, resets5hMs, resets7dMs, nowMs)) return false;
+  // Only the 5h window blocked and no five_hour pass to spend: the call would be a FULL pass on a
+  // 5h block, whose advice also weighs the 7d forecast — which not every surface has. Never
+  // emphasise it (the detail advice line may still say use it). This keeps every verdict that reads
+  // the forecast out of clearNowCall, so 「clear now ⇒ advice not hold」 holds on every surface
+  // whatever forecast it has (batch review 1.55.2 R3).
+  if (!blockedSlots.some((sl) => WEEKLY_SLOT_RE.test(sl)) && !((summary.usable_by_kind?.five_hour || 0) > 0)) return false;
+  const adv = resetPassAdvice({ summary, blocked: blockedSlots, resets5hMs, resets7dMs, hoursTo100: null, past, nowMs });
+  return !(adv && typeof adv.verdict === 'string' && adv.verdict.startsWith('hold'));
+}
