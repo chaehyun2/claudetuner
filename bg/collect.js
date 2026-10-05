@@ -35,6 +35,7 @@ import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
 import { attachResetPassDetail } from './reset-pass-wire.js';
 import { claudeUsagePath, isCedarEmberQueryOn } from './claude-usage-path.js';
+import { syncVatStatus } from './vat.js';
 import { claudeUsageShape, claudeCapsReport } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
 
@@ -973,6 +974,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // never from the gate above: they hold a valid token, so `showLoginPrompt` must stay untouched
     // or a pause would raise a login CTA at someone who is already logged in.
     const userPaused = await isServerSyncPaused();
+
+    // #2157 — VAT verdict of the paid personal org (whatever org this snapshot is for: a member on a
+    // Team seat can still pay a personal Max), sent on its own route when it changes (bg/vat.js).
+    // 🔴 Same gate as the snapshot POST below — a local-only collect (boost, login required, paused)
+    // sends nothing — and NOT awaited: an invoice read must never delay or hang this cycle (1.55.4
+    // batch review). Filed under this snapshot's identity (`userEmail`, resolved above). Never throws.
+    if (!skipServer && !blockServerNewUser && !userPaused) void syncVatStatus(orgList, userEmail);
 
     // 4. Send to server (local save only when skipServer/boost, gated new user, or user-paused)
     if (skipServer || blockServerNewUser || userPaused) {

@@ -1,78 +1,43 @@
 // Pure leaf helpers shared across the popup UI.
 // No module-level mutable state — only arguments + global i18n (`t`, `getLang` from i18n.js, a classic script).
 // Extracted from popup.js (see refactor/popup-modular). Keep these dependency-free so any UI module can import them
-// (the one import is ui/usage-tiers.js, itself pure and import-free — the shared usage-level judgement, #2067).
+// (the one import is ui/card-view/format.js, itself runtime-neutral — see below).
 
-import { usageLevel } from './usage-tiers.js';
+import * as cv from './card-view/format.js';
+
+// ── Card-view compatibility wrappers (#2153) ──────────────────────────────────────────────────
+// The display rules below (window labels, gauge colour, countdown, duration, time-ago) live in
+// ui/card-view/format.js so the desktop app can bundle them without chrome/DOM/i18n.js. That
+// module takes its words as an injected `labels` object; these wrappers keep the popup's original
+// signatures and fill the labels from the global i18n `t`, so no call site changes.
+// Every member reads `t` at CALL time — a language switch is picked up without rebuilding this.
+const EXT_LABELS = Object.freeze({
+  windowHours: (n) => t('window_hours', n),
+  windowDays: (n) => t('window_days', n),
+  usageWindow: (unit) => t('usage_window', unit),
+  countdownSoon: () => t('countdown_soon'),
+  durM: (m) => t('gauge_dur_m', m),
+  durH: (h) => t('gauge_dur_h', h),
+  durD: (d) => t('gauge_dur_d', d),
+  durDH: (d, h) => t('gauge_dur_dhm', d, h),
+  agoJustNow: () => t('ago_just_now'),
+  agoMin: () => t('ago_min'),
+  agoHour: () => t('ago_hour'),
+  agoDay: () => t('ago_day'),
+});
+export function extLabels() { return EXT_LABELS; }
 
 export function escHtml(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ── Usage-window labels (#954) ────────────────────────────────────────────────────────────────
-//
-// The 5h / 7d slots are SLOTS, not window lengths. ChatGPT Free and Go report a **30-day** window
-// in the 7d slot (938 + 80 users; 98.5% / 99.9% of their rows, measured 2026-08-26), so
-// "7일 사용률" is a false label for them. The provider's own `limit_window_seconds` is the truth
-// and it rides every response; these helpers turn it into a label.
-//
-// 🔴 Do NOT derive the window from the provider or the plan name. Within ChatGPT alone Plus is 7
-// days and Free is 30, so a provider test is wrong in BOTH directions — which is exactly how the
-// team Race broke (#952). The span is a property of (plan, point in time); read it from the data.
-//
-// A null/absent span means "not reported" (an older client, or a provider that does not send one,
-// e.g. Claude) → callers fall back to the static usage_5h / usage_7d labels, so nothing changes
-// for anyone whose window really is the slot's nominal length.
-const WINDOW_HOUR = 3600;
-const WINDOW_DAY = 86400;
-
-/** True when `seconds` is a usable span. Rejects 0 and negatives, not merely non-numbers. */
-function isSpan(seconds) {
-  return typeof seconds === 'number' && isFinite(seconds) && seconds > 0;
-}
-
-/**
- * Short slot label for a chart tab: '5h' / '7d' / '30d'.
- * Returns null when there is no span, so the caller keeps its existing hard-coded label.
- */
-export function formatWindowShort(seconds) {
-  if (!isSpan(seconds)) return null;
-  if (seconds < WINDOW_DAY) return `${Math.round(seconds / WINDOW_HOUR)}h`;
-  return `${Math.round(seconds / WINDOW_DAY)}d`;
-}
-
-/**
- * Full gauge label: '30일 사용률' / '30-Day Usage'.
- * Returns null when there is no span (caller falls back to t('usage_5h') / t('usage_7d')).
- */
-/**
- * The reported window as a bare UNIT — '5시간' / '30일' / '5-Hour' / '30-Day' — or null when the
- * provider reported nothing. Split out of formatWindowLabel because the STATUS BANNER names the
- * window in a sentence and must use the same words as the gauge label above it: the banner used
- * static t('win_7d') while projecting from the real span, so a ChatGPT Free/Go user read a
- * "7일" verdict about a 30-day window (#978, caught in review).
- */
-export function windowUnitLabel(seconds) {
-  if (!isSpan(seconds)) return null;
-  return seconds < WINDOW_DAY
-    ? t('window_hours', Math.round(seconds / WINDOW_HOUR))
-    : t('window_days', Math.round(seconds / WINDOW_DAY));
-}
-
-export function formatWindowLabel(seconds) {
-  const unit = windowUnitLabel(seconds);
-  return unit == null ? null : t('usage_window', unit);
-}
-
-/**
- * THE way to label a usage gauge. Every caller goes through this rather than writing
- * `formatWindowLabel(x) || t('usage_7d')` itself — one rule, one place to change.
- *
- * `fallbackKey` is the slot's static label ('usage_5h' / 'usage_7d'), used when the provider
- * reported no span. That keeps Claude and every pre-span stored org rendering exactly as before.
- */
+// ── Usage-window labels (#954) — rules and rationale in ui/card-view/format.js ──────────────────
+export const formatWindowShort = cv.formatWindowShort;
+export function windowUnitLabel(seconds) { return cv.windowUnitLabel(seconds, extLabels()); }
+export function formatWindowLabel(seconds) { return cv.formatWindowLabel(seconds, extLabels()); }
+// `fallbackKey` is the slot's static i18n key ('usage_5h' / 'usage_7d').
 export function windowLabel(spanSeconds, fallbackKey) {
-  return formatWindowLabel(spanSeconds) || t(fallbackKey);
+  return cv.windowLabel(spanSeconds, () => t(fallbackKey), extLabels());
 }
 
 /**
@@ -248,29 +213,8 @@ export function _fmIcon(level) {
   return map[level] || map.nodata;
 }
 
-// The bar colour of a usage %: the shared 50/80 judgement (ui/usage-tiers.js usageLevel, #2067) on
-// the popup's palette. usage-shared.js (content scripts) answers the same from its synced copy.
-// No reading is the low shade, as before.
-const GAUGE_LEVEL_COLORS = { high: '#ef4444', mid: '#f59e0b', low: '#06b6d4' };
-export function gaugeColor(util) {
-  return GAUGE_LEVEL_COLORS[usageLevel(util)] || GAUGE_LEVEL_COLORS.low;
-}
-
-// Relative countdown, compact and language-neutral: "6h 29m" / "6d 13h" / "29m".
-// Only the "resetting soon" word is localized; the units stay d/h/m so the popup
-// and the three sidebars share one shape and the i18n surface stays tiny.
-export function formatCountdown(resetAt) {
-  const diff = new Date(resetAt).getTime() - Date.now();
-  if (diff <= 0) return t('countdown_soon');
-  const h = Math.floor(diff / 3600000);
-  const m = Math.floor((diff % 3600000) / 60000);
-  if (h >= 24) {
-    const d = Math.floor(h / 24), rem = h % 24;
-    return rem > 0 ? `${d}d ${rem}h` : `${d}d`;
-  }
-  if (h >= 1) return `${h}h ${m}m`;
-  return `${m}m`;
-}
+export const gaugeColor = cv.gaugeColor;
+export function formatCountdown(resetAt) { return cv.formatCountdown(resetAt, extLabels()); }
 
 // Localized day word for an instant relative to today: 어제/오늘/내일 (±1 day),
 // otherwise the "M/D(요일)" date. Near-term times read far better as "오늘/내일"
@@ -317,19 +261,7 @@ export function formatResetAbsolute(resetAt, opts) {
   return `${relativeDay(d, lang)} ${time}`;
 }
 
-// Approximate wait span for the headline ("약 3시간" reads as "3시간"; caller adds
-// 약/예상). Rounded to the hour (the wait is an estimate — a limit-hit derived from
-// a burn rate or a sampled history point), so no minute bucket: "3시간" / "4일 4시간".
-export function formatDuration(ms) {
-  const totalMin = Math.max(0, Math.round(ms / 60000));
-  if (totalMin < 60) return t('gauge_dur_m', totalMin);
-  const totalHours = Math.round(ms / 3600000);
-  if (totalHours >= 24) {
-    const days = Math.floor(totalHours / 24), rem = totalHours % 24;
-    return rem > 0 ? t('gauge_dur_dhm', days, rem) : t('gauge_dur_d', days);
-  }
-  return t('gauge_dur_h', totalHours);
-}
+export function formatDuration(ms) { return cv.formatDuration(ms, extLabels()); }
 
 // Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases
 // ("Prolite" = the $100 tier, "Pro" = the $200 tier); remap them to the user-facing
@@ -461,15 +393,7 @@ export function chartMaxY(dataMax, fixed, limitLines) {
   return Math.max(dataMax * 1.15, immediateLower ? immediateLower.value * 1.08 : 0);
 }
 
-export function formatTimeAgo(timestamp) {
-  const diff = Date.now() - timestamp;
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return t('ago_just_now');
-  if (minutes < 60) return `${minutes}${t('ago_min')}`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}${t('ago_hour')}`;
-  return `${Math.floor(hours / 24)}${t('ago_day')}`;
-}
+export function formatTimeAgo(timestamp) { return cv.formatTimeAgo(timestamp, extLabels()); }
 
 // REMOVED 2026-08-02 — calcPaceTier(). It projected end-of-window from the WINDOW AVERAGE
 // (current / fraction-of-window-elapsed), a second forecast that disagreed with the one the

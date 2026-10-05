@@ -351,6 +351,23 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
 // `span5h`/`span7d` are the provider-reported window lengths (#978) — the banner is the one
 // surface that speaks at EVERY tier, so a wrong denominator here is the loudest version of the
 // bug: a ChatGPT Free user 5 days from a 30-day reset read "105% — 한도 도달 예상" instead of 36%.
+// The 「relearning」 banner's close, remembered per ORG and per 7d cycle (its resets_at) in
+// localStorage — a per-device convenience; losing it only shows the note again. Keyed by org so
+// closing one account's note never hides another's (Codex 1R). Same jitter tolerance as the cycle
+// grouping elsewhere (resets_at can move by minutes between collections).
+const RELEARN_CLOSED_KEY = 'ct-rp-relearn-closed:';
+const RELEARN_SAME_CYCLE_MS = 6 * 3600000;
+const relearnOrgKey = (orgId) => RELEARN_CLOSED_KEY + (orgId || 'default');
+export function relearnBannerClosed(resets7d, orgId) {
+  try {
+    const r = Date.parse(resets7d || ''), c = Date.parse(globalThis.localStorage?.getItem(relearnOrgKey(orgId)) || '');
+    return Number.isFinite(r) && Number.isFinite(c) && Math.abs(r - c) < RELEARN_SAME_CYCLE_MS;
+  } catch { return false; }
+}
+export function closeRelearnBanner(resets7d, orgId) {
+  try { if (resets7d) globalThis.localStorage?.setItem(relearnOrgKey(orgId), String(resets7d)); } catch { /* storage blocked */ }
+}
+
 export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, span5h, span7d) {
   const banner = document.getElementById('status-banner');
   if (!banner) return;
@@ -402,10 +419,33 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
   }
 
   // 7d forecast paused (#2092, Codex 1R): the 7d window is unknown, so no all-clear. A 5h warning
-  // or the static near-limit rule still speaks; anything green becomes a neutral 「relearning」.
+  // or the static near-limit rule still speaks; anything green becomes a neutral 「relearning」 —
+  // which the user can close for the rest of that 7d cycle (user, 2026-10-05). Closed → no banner
+  // at all (never the green all-clear); a later cycle that is paused again shows it again.
   if (paused7d && tier.css === 'green') {
-    tier = { id: 'relearning', css: 'gray' };
-    text = t('pace_relearning_7d', windowUnitLabel(span7d) || t('win_7d'));
+    // The org id the pass code itself uses (currentResetPassOrg's choice) — taken directly so it is
+    // known before collectedOrgs arrives (Codex 2R: a primary render with no org list stored the
+    // close under 'default', and the same cycle's note came back once the list loaded).
+    const orgId = state.selectedOrgId || state.currentSnapshot?.claude_org_uuid || null;
+    if (relearnBannerClosed(resets7d, orgId)) { banner.className = 'status-banner hidden'; banner.textContent = ''; return; }
+    banner.className = 'status-banner sb-gray sb-closable';
+    banner.textContent = '';
+    const msg = document.createElement('span');
+    msg.textContent = t('pace_relearning_7d', windowUnitLabel(span7d) || t('win_7d'));
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'sb-close';
+    close.textContent = '\u00d7';
+    close.title = t('pace_relearning_close');
+    close.setAttribute('aria-label', t('pace_relearning_close'));
+    close.addEventListener('click', () => {
+      closeRelearnBanner(resets7d, orgId);
+      banner.className = 'status-banner hidden';
+      banner.textContent = '';
+    });
+    banner.append(msg, close);
+    banner.classList.remove('hidden');
+    return;
   }
 
   banner.className = 'status-banner sb-' + tier.css;

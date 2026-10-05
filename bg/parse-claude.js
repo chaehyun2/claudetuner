@@ -301,3 +301,25 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
     return { summary: unknownResetPassSummary('claude', now), passes: [] };
   }
 }
+
+/**
+ * VAT verdict of a personal subscription from claude.ai `GET /api/stripe/{org}/invoices` (#2157).
+ * Live shape (2026-10-05): an array of `{ total, total_excluding_tax, currency, status, created_ts, … }`
+ * in minor units. The verdict comes from the NEWEST paid invoice that actually charged something:
+ *   tax = total − total_excluding_tax  →  > 0 'charged' (no business number in Korea) · else 'none'.
+ * Zero-total invoices (credits, free switches) and unpaid ones say nothing about tax and are skipped.
+ * Only the verdict and that invoice's date leave this function — never an amount.
+ * @returns {{ status: 'charged'|'none', invoiceAt: string } | null} null = nothing to judge from
+ */
+export function parseClaudeVatStatus(invoices) {
+  if (!Array.isArray(invoices)) return null;
+  let newest = null;
+  for (const inv of invoices) {
+    if (!inv || typeof inv !== 'object' || inv.status !== 'paid') continue;
+    const { total, total_excluding_tax: net, created_ts: ts } = inv;
+    if (![total, net, ts].every(Number.isFinite) || total <= 0) continue;
+    if (!newest || ts > newest.ts) newest = { ts, tax: total - net };
+  }
+  if (!newest) return null;
+  return { status: newest.tax > 0 ? 'charged' : 'none', invoiceAt: new Date(newest.ts * 1000).toISOString() };
+}
