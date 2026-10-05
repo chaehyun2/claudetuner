@@ -772,3 +772,52 @@ export function mergeChatGPTResetDetail(summary, detail, now = Date.now()) {
     tickets: ticketsFromPasses(live, now),
   };
 }
+
+// ── VAT verdict of the personal ChatGPT subscription (#2157) ─────────────────────────────────────
+// ChatGPT's subscription APIs carry no amount or tax; the only priced, tax-split read is the plan-change
+// PREVIEW the upgrade dialog makes (`GET /backend-api/subscriptions/update/preview` — changes nothing).
+// Stripe computes tax there for the account's billing setup: with a business tax ID it is 0.
+// 🔴 It must be called with the accounts/check account id (UUID); the `/wham/usage` account id is a
+// different value and answers 500 (live check 2026-10-05).
+
+// Personal paid tiers, ascending, with the `updated_plan` value the preview takes for each.
+const CHATGPT_VAT_TIERS = [
+  ['go', 'chatgptgoplan'], ['plus', 'chatgptplusplan'], ['prolite', 'chatgptprolite'], ['pro', 'chatgptpro'],
+];
+
+/** The member's own paid personal account in an accounts/check response, or null. */
+export function pickChatGPTVatAccount(data) {
+  const accounts = data?.accounts;
+  if (!accounts || typeof accounts !== 'object') return null;
+  const defaultId = accounts.default?.account?.account_id || null;
+  for (const [key, a] of Object.entries(accounts)) {
+    if (key === 'default') continue;               // an alias of a real entry
+    const acc = a?.account;
+    if (!acc || acc.structure !== 'personal' || acc.is_deactivated) continue;
+    if (!CHATGPT_VAT_TIERS.some(([p]) => p === acc.plan_type)) continue;
+    const ent = a.entitlement || {};
+    if (!ent.has_active_subscription || ent.is_active_subscription_gratis) continue;
+    if (typeof acc.account_id !== 'string' || !acc.account_id) continue;
+    return { accountId: acc.account_id, planType: acc.plan_type, isDefault: acc.account_id === defaultId };
+  }
+  return null;
+}
+
+/** `updated_plan` values strictly above `planType`, cheapest first. Empty for the top tier. */
+export function chatgptVatUpgradeTargets(planType) {
+  const i = CHATGPT_VAT_TIERS.findIndex(([p]) => p === planType);
+  return i < 0 ? [] : CHATGPT_VAT_TIERS.slice(i + 1).map(([, target]) => target);
+}
+
+/**
+ * Verdict from one preview: only its POSITIVE line items (the new plan's charge) — the proration credit
+ * is negative and carries its own tax. Nothing positive (a downgrade previews as all zeros) → null.
+ * @returns {{ status: 'charged'|'none' } | null}
+ */
+export function parseChatGPTVatPreview(preview) {
+  if (!preview || typeof preview !== 'object') return null;
+  const pos = preview.positive_line_item_total;
+  const net = preview.positive_line_item_total_excluding_tax;
+  if (!Number.isFinite(pos) || !Number.isFinite(net) || pos <= 0) return null;
+  return { status: pos - net > 0 ? 'charged' : 'none' };
+}
