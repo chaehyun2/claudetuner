@@ -275,6 +275,9 @@ export const isPaidPlan = (label, provider) => planTier(provider, label) === 'pa
 // the last roomy choice: Gemini is last in the rank and a Free plan never outranks a paid one. A service is
 // only REORDERED, never dropped — when it is the only one that can moderate, it still does.
 export const MOD_BUSY_PCT = 70;
+const busyPeak = (peak) => peak !== null && peak >= MOD_BUSY_PCT;
+// The service whose Free plan has the smallest window (above) — a seat on it is 「crowded」 even when roomy (#2089).
+const SMALL_WINDOW_PROVIDER = 'gemini';
 /**
  * MODERATOR_RANK re-ordered for picking a moderator from the status (`providers[p]` = { plan, usage }):
  * roomy before busy, busy by the lower peak, then paid first, then the rank. `usage: false` leaves usage out
@@ -285,7 +288,7 @@ export function moderatorOrder(providers, { now = Date.now(), usage = true } = {
   const keyed = MODERATOR_RANK.map((p, rank) => {
     const s = ps[p] || {};
     const peak = usage ? usagePeak(s.usage, { now }) : null;
-    return { p, rank, busy: peak !== null && peak >= MOD_BUSY_PCT, peak, paid: isPaidPlan(s.plan, p) ? 1 : 0 };
+    return { p, rank, busy: busyPeak(peak), peak, paid: isPaidPlan(s.plan, p) ? 1 : 0 };
   });
   keyed.sort((a, b) => a.busy - b.busy || (a.busy && b.busy ? a.peak - b.peak : 0) || b.paid - a.paid || a.rank - b.rank);
   return keyed.map((k) => k.p);
@@ -346,6 +349,22 @@ export function defaultDebateLayout(pick) {
   const seat = colIdOf(pick.provider, pick.model);
   if (ids.includes(seat)) return { ids, seat: null };
   return pick.passed ? { ids: [...ids, seat], seat, passed: pick.passed } : { ids: [...ids, seat], seat };
+}
+/**
+ * #2089: a STORED layout's seat keeps its column and moderates as saved (§18.9 ① — nothing is moved for usage).
+ * When its service is busy (≥ MOD_BUSY_PCT) or on the smallest window (Gemini Free), the ⚙ only suggests another
+ * moderator: this returns that service — but only when another service among `targets` comes before it in
+ * moderatorOrder (else there is nothing better to switch to). Null otherwise.
+ */
+export function seatCrowded(seat, targets, providers, { now = Date.now() } = {}) {
+  if (!seat) return null;
+  const provOf = (id) => String(id).split(':')[0];
+  const p = provOf(seat);
+  const s = (providers || {})[p] || {};
+  if (!busyPeak(usagePeak(s.usage, { now })) && !(p === SMALL_WINDOW_PROVIDER && planTier(p, s.plan) === 'free')) return null;
+  const others = new Set((Array.isArray(targets) ? targets : []).map(provOf).filter((x) => x !== p));
+  const order = moderatorOrder(providers, { now });
+  return order.slice(0, order.indexOf(p)).some((x) => others.has(x)) ? p : null;
 }
 /** The services signed in AND permitted on a status (`providers[p]`) — the seat's candidates (pickModeratorSeat). */
 export function readyServices(providers) {

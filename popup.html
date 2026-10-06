@@ -591,12 +591,13 @@
        A DELIBERATELY SEPARATE surface from the three above, not a widened gate on any of them:
          · the login CTA and the re-auth widget both hide whenever a token exists, and these
            installs hold one (a login-proven `dash_claim` token);
-         · the footer "다른 계정으로 전환" renders only when serverSyncGrandfathered === false,
-           and an existing install is stamped `true` on update (background.js) — so a claimed
-           install of that vintage has NO entry point at all, which is the whole bug.
-       It is also a different ACTION: the footer control removes the token first, which for a
-       PROVEN_SRC install means everHadProvenToken keeps the api_key fallback withheld and, with
-       API_KEY_INGEST_ENABLED=enforce, nothing re-mints — collection just stops. This one only ever
+         · when this was written the footer "다른 계정으로 전환" rendered only for
+           serverSyncGrandfathered === false, so a claimed install of the grandfathered vintage had
+           NO entry point at all, which was the whole bug (since #800 the footer shows for any
+           verified install holding a token — this surface stays as the add-a-login path).
+       It is also a different ACTION: the footer control re-arms the gate
+       (serverSyncGrandfathered:false) and then removes the token, so the install becomes
+       login_first and collection stays local until the user logs in again. This one only ever
        ADDS a login (bg/storage.js setExtToken replaces the token in place). Nothing here clears a
        token, and nothing should be added that does.
        Collapsed to a single link by default: the population that meant to claim must not be nagged,

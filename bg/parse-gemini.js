@@ -14,12 +14,12 @@
 // performs them. The storage reads stay in collectGemini(), where they are visible next to the
 // awaits they cost.
 //
-// 🔴 KEEP THIS FILE IMPORTABLE UNDER PLAIN NODE. It may depend on bg/api.js's pure
+// 🔴 KEEP THIS FILE IMPORTABLE UNDER PLAIN NODE. It may depend on bg/reset-time.js's pure
 // normalizeResetTime and the zero-import bg/gemini-plan-labels.js, nothing else — an import that
 // touches chrome.* at module scope puts these functions back out of the contract runner's reach.
 //
 // Extracted from bg/collect-gemini.js with no behaviour change.
-import { normalizeResetTime } from './api.js';
+import { normalizeResetTime } from './reset-time.js';
 import {
   GEMINI_PLAN_MAP, GEMINI_POLICY_LABEL, geminiPolicyTierWord,
 } from './gemini-plan-labels.js';

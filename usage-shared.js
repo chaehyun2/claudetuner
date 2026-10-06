@@ -150,7 +150,7 @@
     const ko = lang === 'ko';
     if (seconds < WINDOW_DAY_S) {
       const n = Math.round(seconds / WINDOW_HOUR_S);
-      return ko ? `${n}시간` : `${n}-Hour`;
+      return ko ? `${n}시간` : `${n}h`; // #1372 short form — keep in step with i18n.js window_hours
     }
     const n = Math.round(seconds / WINDOW_DAY_S);
     return ko ? `${n}일` : `${n}-Day`;

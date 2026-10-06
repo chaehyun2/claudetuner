@@ -213,6 +213,7 @@ const TRANSLATIONS = {
     'account_switch_cta': '다른 계정으로 전환',
     'account_switch_confirm': '지금까지 수집된 사용량은 {0} 계정에 그대로 남습니다. 새 계정에는 전환 시점부터 쌓이며, 두 계정의 데이터는 합쳐지지 않습니다.',
     'account_switch_go': '전환하기',
+    'account_switch_waiting': '진행 중인 수집이 끝나면 전환합니다…',
     'account_switch_cancel': '취소',
     // 귀속(dash_claim)으로 수집 계정이 바뀐 설치의 되돌리기 진입점 (#1109).
     // 🔴 site/shared/ext-detect.js의 CT_CLAIM_TEXT와 같은 규칙을 지킨다: 「로그아웃하면 돌아간다」·
@@ -786,10 +787,12 @@ const TRANSLATIONS = {
     'status_local_only_tip': 'Saved in this browser only — sign in to sync to the dashboard and team report',
     'min_later_check': 'm',
     'ov_scoped_high': '{0} limit at {1}%',
-    'usage_5h': '5-Hour Usage',
+    // #1372: short form — the 5h gauge header also carries the forecast badge, so '5-Hour Usage'
+    // was ellipsized at 360px. window_hours must match so the derived label equals this one.
+    'usage_5h': '5h Usage',
     'usage_7d': '7-Day Usage',
     'usage_window': '{0} Usage',
-    'window_hours': '{0}-Hour',
+    'window_hours': '{0}h',
     'window_days': '{0}-Day',
     'ov_title': 'Overview',
     'ov_back': 'All accounts',
@@ -978,6 +981,7 @@ const TRANSLATIONS = {
     'account_switch_cta': 'Switch account',
     'account_switch_confirm': 'Usage collected so far stays under {0}. The new account starts from the moment you switch, and the two are never merged.',
     'account_switch_go': 'Switch account',
+    'account_switch_waiting': 'Switching once the current sync finishes…',
     'account_switch_cancel': 'Cancel',
     // The way back for an install whose collection was moved by a cross-label claim (#1109).
     // 🔴 Same rule as CT_CLAIM_TEXT in site/shared/ext-detect.js: "sign out and it goes back",

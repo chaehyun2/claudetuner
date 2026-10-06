@@ -206,7 +206,17 @@ export function _updateUICore(status) {
   if (!status || (!status.snapshot && !status.error)) {
     indicator.className = 'status-dot gray';
     statusText.textContent = t('no_data');
-    if (onboarding) { onboarding.classList.remove('hidden'); _applyTeamOnboarding(onboarding); }
+    // The getting-started block is for installs that have never collected anything. An install
+    // that already has orgs can still reach this branch with no snapshot (lastStatus cleared by an
+    // auth-failure path, or not yet rewritten), and opening the panel starts a collect
+    // (POPUP_OPENED) that hides the block again 10-20s later — so an existing user saw the
+    // first-run welcome flash on every reopen. A pending team invite (onboardOrgName, cleared on
+    // the first successful collect) still shows it, since that copy is addressed to the new team.
+    const showOnboarding = (state.collectedOrgs || []).length === 0 || !!state.onboardOrgName;
+    if (onboarding) {
+      onboarding.classList.toggle('hidden', !showOnboarding);
+      if (showOnboarding) _applyTeamOnboarding(onboarding);
+    }
     return;
   }
 

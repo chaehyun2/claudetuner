@@ -1,4 +1,5 @@
 import { sendGAEvent } from './analytics.js';
+import { trackPendingSend } from './collect-lock.js';
 import { platformField } from './platform.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
@@ -980,7 +981,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // 🔴 Same gate as the snapshot POST below — a local-only collect (boost, login required, paused)
     // sends nothing — and NOT awaited: an invoice read must never delay or hang this cycle (1.55.4
     // batch review). Filed under this snapshot's identity (`userEmail`, resolved above). Never throws.
-    if (!skipServer && !blockServerNewUser && !userPaused) void syncVatStatus(orgList, userEmail);
+    // Tracked like the snapshot POST: an account switch must wait for it, or a late send carries
+    // this account's billing facts under the next account's token (1.55.7 batch review).
+    if (!skipServer && !blockServerNewUser && !userPaused) void trackPendingSend(syncVatStatus(orgList, userEmail));
 
     // 4. Send to server (local save only when skipServer/boost, gated new user, or user-paused)
     if (skipServer || blockServerNewUser || userPaused) {
@@ -1162,10 +1165,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
     // Send server save in background, proceed with local UI update first.
     // Preflight-free simple request (storage.js simplePost) — auth in body.
     // Per-pass detail only now, past the send gate (#2092 P3, bg/reset-pass-wire.js).
+    // #2210: the POST below is tracked so the collect lock is held until it and its response
+    // handling settle (bg/collect-lock.js).
     const commitResetPassDetail = await attachResetPassDetail(body, resetPasses);
-    simplePost(config, `${config.serverUrl}/api/snapshots`, body).then(async ({ response, sentToken }) => {
+    trackPendingSend(simplePost(config, `${config.serverUrl}/api/snapshots`, body).then(async ({ response, sentToken }) => {
       // Detail counts as sent only when the server says it stored it (reset_pass_stored).
-      if (response.ok) response.clone().json().then(commitResetPassDetail).catch(() => {});
+      // Awaited so the tracked chain (#2210) covers this write too.
+      if (response.ok) await response.clone().json().then(commitResetPassDetail).catch(() => {});
       if (response.status === 403) {
         // 403 = email mismatch: this Claude snapshot's account email differs from
         // the Tuner login identity bound to the ext_token, so the server rejects it.
@@ -1446,7 +1452,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       console.warn('[Claude Tuner] Server POST fire-and-forget error:', e.message);
       rollbackPrimary().catch(() => {}); // transient network failure → retry next tick
       noteServerFailure().catch(() => {}); // network failure → extend shared backoff
-    });
+    }));
     } // end authBlocked backoff guard (inner body intentionally left at its original indent so
       // the guard reads as a diff of one condition, not a reflow of 240 lines)
     } // end primary adaptive gate (primaryDue)
@@ -1790,7 +1796,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             // Server POST: fire-and-forget. Preflight-free simple request
             // (auth in body) with authedFetch's 401 auto-clear semantics.
             const commitExtraDetail = await attachResetPassDetail(extraSnapshot, extraResetPasses); // #2092 P3, past the gate
-            simpleAuthedPost(config, `${config.serverUrl}/api/snapshots`,
+            // #2210: tracked (with its response follow-ups) so the collect lock outlives it.
+            trackPendingSend(simpleAuthedPost(config, `${config.serverUrl}/api/snapshots`,
               force ? { ...extraSnapshot, force: true } : extraSnapshot,
             ).then(r => {
               // 5xx/network → transient, roll back to retry. 4xx (401/403/410) →
@@ -1799,21 +1806,23 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
                 console.warn(`[Claude Tuner] Extra org ${extraOrg.name} server: ${r.status}`);
                 if (r.status >= 500) { rollbackExtra(); noteServerFailure().catch(() => {}); }
               } else if (r && r.ok) {
-                r.clone().json().then(commitExtraDetail).catch(() => {}); // only on reset_pass_stored
+                const follow = [r.clone().json().then(commitExtraDetail).catch(() => {})]; // only on reset_pass_stored
                 noteServerSuccess().catch(() => {}); // healthy POST clears backoff
                 // Extra-org responses used to be read for status ONLY, so an extra org could
                 // never receive a cadence override — and with per-stream standby (design 안 B)
                 // that would strand it at full cadence forever. Consume it here, scoped to
                 // THIS org's stream. Failure is non-fatal (cadence stays as-is).
-                r.json()
+                follow.push(r.json()
                   .then(body => applyServerCadence(body, Date.now(), { uuid: extraOrg.uuid, provider: 'claude', account: userEmail }))
-                  .catch(() => {});
+                  .catch(() => {}));
+                // Returned so the tracked chain settles only after these writes (#2210).
+                return Promise.allSettled(follow);
               }
             }).catch(e => {
               console.warn(`[Claude Tuner] Extra org ${extraOrg.name} POST failed:`, e.message);
               rollbackExtra();
               noteServerFailure().catch(() => {}); // network failure → extend shared backoff
-            });
+            }));
             } // end authBlocked backoff guard (inner body left at its original indent)
           } else {
             console.log(`[Claude Tuner] Extra org ${extraOrg.name} delta-gate skip (${extraGateReason})`);

@@ -1,17 +1,10 @@
 import { CLAUDE_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 import { CLAUDE_SESSION_COOKIE, isUsableTab } from '../vendor-ai/sites.js';
+import { normalizeResetTime } from './reset-time.js';
 
-// === Normalize resets_at (round to minute) ===
-// Claude API returns random 59.xxx / 00.xxx seconds, breaking same-window comparison
-// Round up to next minute if seconds >= 30, strip sub-seconds
-export function normalizeResetTime(t) {
-  if (!t) return null;
-  const d = new Date(t);
-  if (isNaN(d.getTime())) return t;
-  if (d.getUTCSeconds() >= 30) d.setUTCMinutes(d.getUTCMinutes() + 1);
-  d.setUTCSeconds(0, 0);
-  return d.toISOString().slice(0, 19) + '+00:00';
-}
+// normalizeResetTime moved verbatim to the pure ./reset-time.js (#2153 A0a) so bg/parse-*.js can
+// load under plain Node; re-exported here so importers of './api.js' keep working unchanged.
+export { normalizeResetTime };
 
 // === Claude.ai API call helper (hybrid: tab-first, cookie fallback) ===
 export async function fetchClaudeApi(path, options = {}) {

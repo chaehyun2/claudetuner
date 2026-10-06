@@ -5,12 +5,12 @@
 // runner had to slice them out of the source text by signature string. Placement mirrors the
 // ChatGPT side.
 //
-// 🔴 KEEP THIS FILE IMPORTABLE UNDER PLAIN NODE — bg/api.js's normalizeResetTime is the only
+// 🔴 KEEP THIS FILE IMPORTABLE UNDER PLAIN NODE — bg/reset-time.js's normalizeResetTime is the only
 // dependency it may take.
 //
 // Extracted from bg/collect.js with NO behaviour change; verified against the #1316 contract's
 // captured case outputs.
-import { normalizeResetTime } from './api.js';
+import { normalizeResetTime } from './reset-time.js';
 import {
   emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, ticketsFromPasses, unknownResetPassSummary, WEEKLY_SLOT_RE,
 } from './reset-pass-model.js';
@@ -322,4 +322,39 @@ export function parseClaudeVatStatus(invoices) {
   }
   if (!newest) return null;
   return { status: newest.tax > 0 ? 'charged' : 'none', invoiceAt: new Date(newest.ts * 1000).toISOString() };
+}
+
+/**
+ * Tax on the NEXT bill, from claude.ai `GET /api/stripe/{org}/upcoming_invoice` (#2157, shadow).
+ * Live shape (2026-10-06): `{ invoice: { total, currency, status: 'draft', lines: [{ total, proration, … }], … } }`
+ * — no tax field, so tax = total − Σ lines[].total. Stripe recomputes the preview with the customer's
+ * CURRENT tax IDs, so a business number entered today should show here at once, unlike the paid invoices
+ * (unverified on a taxed account — collected next to the invoice verdict to compare before use).
+ * Only the verdict leaves this function — never an amount.
+ * @returns {'charged'|'none'|null|undefined} null = nothing to judge (no upcoming bill, zero total) ·
+ *   undefined = unreadable body
+ */
+export function parseClaudeUpcomingVat(body) {
+  if (!body || typeof body !== 'object') return undefined;
+  const inv = body.invoice;
+  if (inv === null) return null;
+  if (!inv || typeof inv !== 'object' || !Array.isArray(inv.lines) || !Number.isFinite(inv.total)) return undefined;
+  if (inv.total <= 0 || inv.lines.length === 0) return null;
+  let lines = 0;
+  for (const l of inv.lines) {
+    if (!Number.isFinite(l?.total)) return undefined;
+    lines += l.total;
+  }
+  return inv.total - lines > 0 ? 'charged' : 'none';
+}
+
+/**
+ * Billing country from claude.ai `GET /api/organizations/{org}/address` (#2157): `billing_address.country`
+ * (ISO 3166-1 alpha-2, e.g. 'KR'). Decides whether a verdict is VAT at all — a US "tax" is sales tax,
+ * which a business number does not remove. Only the country code leaves this function.
+ * @returns {string|null} null = no billing address / unreadable
+ */
+export function parseClaudeBillingCountry(body) {
+  const c = body?.billing_address?.country;
+  return typeof c === 'string' && /^[A-Za-z]{2}$/.test(c) ? c.toUpperCase() : null;
 }

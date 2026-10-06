@@ -1,6 +1,7 @@
 // VAT verdict of the member's personal subscriptions (#2157) — for the team dashboard.
 //
-// Claude: the latest paid invoice (`/api/stripe/{org}/invoices`). ChatGPT: whether the personal
+// Claude: the latest paid invoice (`/api/stripe/{org}/invoices`), plus — shadow, not shown yet — the next
+// bill's tax (`upcoming_invoice`) and the billing country (`address`). ChatGPT: whether the personal
 // account's billing info carries a tax ID (`/backend-api/payments/billing_info`, parse-chatgpt.js). Both are read at most
 // once a day per account, and the verdict is PUT to /api/users/vat (with its `provider`) only when it
 // CHANGES (or weekly, to heal a lost write). It deliberately does not ride the snapshot: `users` is at
@@ -16,9 +17,10 @@
 //                                                  undecidable — e.g. ChatGPT's top tier): keep
 import { fetchClaudeApi } from './api.js';
 import { fetchChatGPTApi } from './api-chatgpt.js';
-import { parseClaudeVatStatus } from './parse-claude.js';
+import { parseClaudeVatStatus, parseClaudeUpcomingVat, parseClaudeBillingCountry } from './parse-claude.js';
 import { pickChatGPTVatAccount, parseChatGPTBillingInfo } from './parse-chatgpt.js';
 import { claudeOrgPlan } from '../vendor-ai/models.js';
+import { CLAUDE_ORGS_PATH } from '../vendor-ai/sites.js';
 import { authedFetch, extTokenEmailRaw, getConfig, getExtToken, isServerSyncPaused, isAuthBlockSuppressed } from './storage.js';
 import { isUpgradePostSuppressed } from './upgrade-gate.js';
 
@@ -67,13 +69,31 @@ export function pickVatOrg(orgList) {
 }
 
 // `accountKey` fills the org for entries 1.55.4 cached (keyed by org uuid, result without `orgUuid`).
+// Claude's shadow fields (next bill's tax, billing country) ride along only when the read produced them —
+// ChatGPT's results and entries cached before they existed send neither, and the server stores NULL.
 function vatFields(result, accountKey) {
   if (!result) return CLEAR;
-  return { vat_status: result.status, vat_invoice_at: result.invoiceAt, vat_org_uuid: result.orgUuid ?? accountKey };
+  const fields = { vat_status: result.status, vat_invoice_at: result.invoiceAt, vat_org_uuid: result.orgUuid ?? accountKey };
+  if ('next' in result) fields.vat_next_status = result.next;
+  if ('country' in result) fields.vat_billing_country = result.country;
+  return fields;
+}
+
+// Optional side reads next to the invoice verdict — never a failed verdict read. A failure or an
+// unreadable body keeps the value the last read saw (`prev`, null if none), so one bad day does not
+// erase what the comparison needs (Codex 1R); a readable "nothing to judge" is null.
+async function readOptional(path, parse, prev) {
+  try {
+    const v = parse(await withTimeout(fetchClaudeApi(path, { quiet: true })));
+    return v === undefined ? (prev ?? null) : v;
+  } catch (e) {
+    console.warn('[Claude Tuner] VAT side read failed (non-critical):', vatErrCode(e));
+    return prev ?? null;
+  }
 }
 
 /**
- * Day-cached read for one account. `read()` resolves to { result } where result is
+ * Day-cached read for one account. `read(prevResult)` (the last cached result, for fallbacks) resolves to { result } where result is
  * { status, invoiceAt, orgUuid } | null (nothing to judge → clear) | 'undecidable' (→ keep).
  * A failed read keeps the last verdict for that account (a failed read is not a changed bill).
  */
@@ -87,7 +107,7 @@ async function cachedRead(provider, accountKey, read) {
   let next = entry;
   if (!entry || age >= (entry.ok ? VAT_TTL_MS : VAT_FAIL_RETRY_MS)) {
     try {
-      next = { result: (await read()).result, ok: true, ts: Date.now() };
+      next = { result: (await read(entry?.result)).result, ok: true, ts: Date.now() };
     } catch (e) {
       console.warn(`[Claude Tuner] VAT ${provider} read failed (non-critical):`, vatErrCode(e));
       next = { result: entry?.result ?? null, ok: false, ts: Date.now() };
@@ -105,12 +125,20 @@ export async function readVatFields(orgList) {
   const org = pickVatOrg(orgList);
   if (!org) return CLEAR;
   try {
-    return await cachedRead('claude', org.uuid, async () => {
+    return await cachedRead('claude', org.uuid, async (prev) => {
       const invoices = await withTimeout(fetchClaudeApi(`/api/stripe/${org.uuid}/invoices`, { quiet: true }));
       // An unreadable body is a FAILED read (keep), not "no invoice to judge" (clear) — Codex.
       if (!Array.isArray(invoices)) throw new Error('vat_unreadable');
       const r = parseClaudeVatStatus(invoices);
-      return { result: r ? { ...r, orgUuid: org.uuid } : null };
+      if (!r) return { result: null };
+      // Shadow (#2157): the next bill's tax should flip as soon as a business number is entered, where the
+      // paid invoices lag up to a month; the billing country tells VAT from US sales tax. Collected to be
+      // compared against the invoice verdict before either is shown.
+      const [next, country] = await Promise.all([
+        readOptional(`/api/stripe/${org.uuid}/upcoming_invoice`, parseClaudeUpcomingVat, prev?.next),
+        readOptional(`${CLAUDE_ORGS_PATH}/${org.uuid}/address`, parseClaudeBillingCountry, prev?.country),
+      ]);
+      return { result: { ...r, orgUuid: org.uuid, next, country } };
     });
   } catch (e) {
     console.warn('[Claude Tuner] VAT read skipped:', vatErrCode(e));
@@ -189,9 +217,14 @@ async function sendVat(provider, fields, email) {
       && Date.now() - (sent.ts || 0) < (sent.ok ? VAT_RESEND_MS : VAT_REJECTED_RETRY_MS)) return;
   const config = await getConfig();
   if (!config?.serverUrl) return;
+  // The fields were read under `email`, and the billing reads can be slow. If the account changed
+  // meanwhile, these facts belong to the old one — authedFetch checks the token it actually attaches
+  // and sends nothing when it is another account's (1.55.7 batch review, 2R: a getExtToken() check
+  // before the call left a gap before authedFetch read the token again).
   const resp = await authedFetch(config, `${config.serverUrl}/api/users/vat`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
+  }, { requireTokenEmail: email });
+  if (!resp) return;
   // Only a 2xx counts as sent. A 4xx (malformed, no live account) cannot change by resending the same
   // body every poll, so it is retried after a few hours; 401/5xx are retried next cycle.
   if (resp.ok || (resp.status >= 400 && resp.status < 500 && resp.status !== 401)) {

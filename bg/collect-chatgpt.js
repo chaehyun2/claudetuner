@@ -14,6 +14,7 @@ import { chatgptUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { syncChatGPTVatStatus } from './vat.js';
+import { trackPendingSend } from './collect-lock.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
          noteProviderSendError, noteProviderSendOk } from './provider-state.js';
@@ -375,7 +376,8 @@ export async function collectChatGPT(force = false, userManual = false) {
     // #2157 — VAT verdict of the paid personal ChatGPT plan (Stripe tax on the plan-change preview, read
     // at most daily), sent on its own route when it changes (bg/vat.js) under the same identity and
     // blocks as this snapshot. NOT awaited: an optional read must never delay or hang the cycle.
-    void resolveIngestIdentity(email).then((ingest) => syncChatGPTVatStatus(accountId, usage.plan_type, ingest)).catch(() => {});
+    // Tracked so an account switch waits for it (see the Claude call in bg/collect.js).
+    void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTVatStatus(accountId, usage.plan_type, ingest)).catch(() => {}));
 
     // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
     // user belongs to beyond the active account. Per-workspace usage needs a

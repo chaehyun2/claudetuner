@@ -3,6 +3,7 @@ import { drawCharts, _switchChartTab, _startChartAutoRoll, _stopChartAutoRoll, _
 import { renderStatusBanner, initRunner } from './ui/prediction.js';
 import { state, _filteredHistory, isDetailHidden } from './ui/state.js';
 import { getRecDismiss } from './bg/rec-dismiss.js';
+import { withSwitchLock } from './bg/collect-lock.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY } from './bg/profile-photo.js';
 import { pinnedState } from './bg/analytics.js';
@@ -441,10 +442,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   } else {
     // Phase 2 단계 4: a login-first (gated-regime) user who VERIFIED has a provider account, so
     // isIndependent is false — but they still need a subtle "인증 해제" (de-verify → local-only) in
-    // the footer next to their email. Scoped to serverSyncGrandfathered===false so existing/
-    // grandfathered users are untouched. No prominent banner (user feedback).
-    const { serverSyncGrandfathered: _gf, extToken: _tok } = await chrome.storage.local.get(['serverSyncGrandfathered', 'extToken']);
-    if (_gf === false && !!_ia?.email && !!_tok) {
+    // the footer next to their email. No prominent banner (user feedback). Grandfathered installs
+    // get it too (#800): the control already requires an ext_token, and since api_key ingest is
+    // enforced a token-less install does not collect at all, so there is no "local-only" meaning
+    // left for them to lose.
+    const { extToken: _tok } = await chrome.storage.local.get(['extToken']);
+    if (!!_ia?.email && !!_tok) {
       const signOut = document.getElementById('independent-signout');
       if (signOut) {
         // Named for the GOAL, not the mechanism. "인증 해제 / Disconnect" describes what the code
@@ -468,8 +471,34 @@ document.addEventListener('DOMContentLoaded', async () => {
           // this is not the reversible "log out" it looks like. Name the account that keeps the
           // history: that is the fact the user needs and cannot see anywhere else.
           const doSwitch = async () => {
-            await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed', PROFILE_PHOTO_KEY]);
-            await chrome.storage.local.set({ showLoginPrompt: true });
+            // #2210: wait for any in-flight collection and keep new ones out while the gate and the
+            // token change (bg/collect-lock.js). Without it a collect that already decided
+            // "authenticated" can POST with the shared key (401) or repaint "synced" afterwards.
+            if (go) go.disabled = true;
+            const msgEl = document.getElementById('account-switch-msg');
+            if (msgEl) msgEl.textContent = t('account_switch_waiting') || 'Switching once the current sync finishes…';
+            try {
+            await withSwitchLock(async () => {
+              // #800: re-arm the gate BEFORE dropping the token, so no reader ever sees
+              // "no token, not withheld" for a grandfathered install. A deliberate switch is a
+              // fresh login, so the install joins the gated regime. The reload's own collect can
+              // be throttled (POPUP_OPENED), so mark the stored status withheld now — the next
+              // collect REPLACES lastStatus, so this cannot latch.
+              const { lastStatus } = await chrome.storage.local.get(['lastStatus']);
+              await chrome.storage.local.set({
+                serverSyncGrandfathered: false,
+                showLoginPrompt: true,
+                ...(lastStatus && typeof lastStatus === 'object'
+                  ? { lastStatus: { ...lastStatus, serverWithheld: 'login_first' } } : {}),
+              });
+              await chrome.storage.local.remove(['extToken', 'independentAccount', 'loginCtaCollapsed', PROFILE_PHOTO_KEY]);
+            });
+            } catch (e) {
+              // A storage failure leaves the switch retryable instead of a dead disabled button.
+              console.warn('[Claude Tuner] account switch failed:', e?.message || e);
+              if (go) go.disabled = false;
+              return;
+            }
             location.reload();
           };
           signOut.addEventListener('click', (e) => {

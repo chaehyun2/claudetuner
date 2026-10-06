@@ -4,7 +4,7 @@
 // top (api-chatgpt.js, storage.js, send-gate.js), so nothing can import it outside a browser
 // extension — not the contract runner, not a guard, not Node at all. Marking these functions
 // `export` would not have changed that: the barrier is the module's own import list, one line
-// above. So the parsing moved to a module whose only dependency is bg/api.js's pure
+// above. So the parsing moved to a module whose only dependency is bg/reset-time.js's pure
 // normalizeResetTime, and the collector imports it back.
 //
 // What that buys: test/provider-contract-guard.mjs calls these through a real `import` instead of
@@ -18,7 +18,7 @@
 //
 // Extracted from bg/collect-chatgpt.js with NO behaviour change — the #1316 contract's 149 case
 // outputs were captured before and after the move and compared byte for byte.
-import { normalizeResetTime } from './api.js';
+import { normalizeResetTime } from './reset-time.js';
 import {
   emptyResetPassKinds, emptyUsableKinds, FIVE_HOUR_SLOT, isPassCount, ticketsFromPasses, unknownResetPassSummary,
 } from './reset-pass-model.js';

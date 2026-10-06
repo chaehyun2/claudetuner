@@ -30,6 +30,7 @@ import {
   setCollectAndSendRef,
 } from './bg/plan.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
+import { withCollectLock } from './bg/collect-lock.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
 import { collectChatGPT } from './bg/collect-chatgpt.js';
 import { getProviderState, displayableProviderError, snoozeProviderError, reportClaudeCollectSkipped } from './bg/provider-state.js';
@@ -91,7 +92,12 @@ chrome.permissions.onRemoved.addListener((perm) => {
 
 // Wrap collectAndSend to suppress spurious cookie-change events during collection
 // ChatGPT/Gemini collection runs independently after Claude (regardless of Claude result)
-async function collectAndSend(opts) {
+// #2210: every collection holds the collect lock (shared) so the popup's account switch can wait
+// for in-flight ones instead of racing them — see bg/collect-lock.js.
+function collectAndSend(opts) {
+  return withCollectLock(() => collectAndSendUnlocked(opts));
+}
+async function collectAndSendUnlocked(opts) {
   _collecting = true;
   try {
     // Provider-incident collection pause (server circuit breaker), enforced for the

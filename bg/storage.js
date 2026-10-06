@@ -614,11 +614,15 @@ async function isExtTokenRejected(response) {
  * only raise `needsFullLogin` so the UI can surface the login CTA; the feature degrades to a
  * login prompt instead of a frozen/looping call.
  */
-export async function authedFetch(config, url, options = {}) {
+// `requireTokenEmail`: send only when the token attached to THIS request carries that identity, else
+// resolve null without sending. The check and the send use the same headers, so a token swapped in
+// between (an account switch) cannot slip through — a separate getExtToken() check beforehand could.
+export async function authedFetch(config, url, options = {}, { requireTokenEmail } = {}) {
   const auth = await getAuthHeaders(config);
   const sentToken = auth.Authorization?.startsWith('Bearer ')
     ? auth.Authorization.slice(7)
     : null;
+  if (requireTokenEmail !== undefined && (!sentToken || extTokenEmailRaw(sentToken) !== requireTokenEmail)) return null;
   const headers = { ...(options.headers || {}), ...auth };
   const response = await fetch(url, { ...options, headers });
   if (response.status === 401 && sentToken && await isExtTokenRejected(response)) {

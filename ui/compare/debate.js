@@ -28,7 +28,7 @@ import {
   openingPrompt, turnPrompt, moderatorPrompt, splitControl, tightenConclusion, conclusionLabels, mentionOf, autoNext, chooseAfterModerator, moderatorMayEnd, owedAfterForced, tierOf, secondsBetween, metaLine, servedModelText, subjectParticle, budgetStep, hiddenMsOf, finishReport, awayTooLong, idleAfter, hardCapStep,
   DEBATE_RECORD_LOG_MAX, transcriptFromRecord, trimRecordLog, debateMarkdown,
   MODE_CROSSCHECK, MODE_DEBATE, MODES, TAB_CONFIRM, TAB_LOCKED, initialMode, tabSwitchAction,
-  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, SETTING_AWAY, SETTING_BUDGET, SETTING_NOTIFY, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, moderatorOrder, seatPassed, tierSlug,
+  unsearchedLinks, SETTING_MODERATOR, SETTING_STANCE, SETTING_ROLES, SETTING_TONE, SETTING_PACE, SETTING_LENGTH, SETTING_AWAY, SETTING_BUDGET, SETTING_NOTIFY, LENGTHS, LENGTH_NORMAL, PACES, PACE_QUICK, PACE_DEFAULT, moderatorCanEnd, userSpokeSince, autoWrapDue, autoWrapTurns, pickConcluder, changedSettings, problemInSettings, defaultModerator, moderatorOrder, seatPassed, seatCrowded, tierSlug,
 } from './debate-core.js';
 import { REVIEW_SOURCE_DEBATE } from './review-nudge.js';
 import { foldSaveBy, SAVE_MODE_KEPT } from './save-mode.js';
@@ -812,7 +812,7 @@ export function installDebate(ctx) {
    * 「AI 진행자」's chip row: one chip per reachable AI, avatar + the name it will have as the
    * moderator (castOrder), the chosen one checked. Hidden for the other rules and below 3 AIs.
    */
-  function renderModPicks(targets, mod, need3) {
+  function renderModPicks(targets, mod, need3, crowded) {
     clear(modPicks);
     modPicks.hidden = mod.moderator !== MOD_AI || need3;
     if (modPicks.hidden) return;
@@ -834,7 +834,8 @@ export function installDebate(ctx) {
     modPicks.appendChild(el('span', 'cmp-debate-modpicks-note', t(mod.modCol && targets.includes(mod.modCol) ? 'debate_mod_pick_note' : 'debate_mod_pick_none')));
     // #2082: what moderating costs, and — while the default moderates — why this AI was picked.
     const cost = [t('debate_mod_pick_cost')];
-    if (!state.debatePrefs.modChosen && mod.modCol && targets.includes(mod.modCol)) {
+    if (crowded && PROVIDER_META[crowded]) cost.push(t('debate_mod_pick_crowded', PROVIDER_META[crowded].label));
+    else if (!state.debatePrefs.modChosen && mod.modCol && targets.includes(mod.modCol)) {
       const passed = passedOver(targets, mod);
       // #2087: a seat re-picked when its service became ready says so — the column swapped before the user's eyes.
       const repicked = !passed && state.debateDefault && state.debateDefault.repicked && state.debateSeat && mod.modCol === state.debateSeat && colOf(mod.modCol);
@@ -882,7 +883,11 @@ export function installDebate(ctx) {
     setup.hidden = !open && summaryBtn.hidden && setupErr.hidden;
     setup.classList.toggle('is-closed', !open);
     const { settingsOpen, ...shown } = state.debatePrefs;
-    const sig = JSON.stringify([targets, targets.map((id) => ctx.colLabel(colOf(id))), shown, mod, [...plan.names.entries()].map(([k, v]) => [k, v.name]), plan.problem, editing, aliasError, state.sending]);
+    // #2089: a stored layout's seat (§18.9 ①) on a busy / small-window service — the ⚙ suggests another moderator.
+    const stored = state.storedLayouts && state.storedLayouts[MODE_DEBATE];
+    const crowded = !p.modChosen && stored && stored.length && state.debateSeat && mod.modCol === state.debateSeat && targets.includes(mod.modCol)
+      ? seatCrowded(state.debateSeat, targets, state.status && state.status.providers, { now: ctx.clock.now() }) : null;
+    const sig = JSON.stringify([targets, targets.map((id) => ctx.colLabel(colOf(id))), shown, mod, [...plan.names.entries()].map(([k, v]) => [k, v.name]), plan.problem, editing, aliasError, state.sending, crowded]);
     // The slots live in the column nodes: a rebuilt layout (applyLayout) brings empty ones under an
     // unchanged signature, so an empty slot of the cast forces the redraw.
     const slotsDrawn = targets.every((id) => colOf(id) && colOf(id).debateSlot && colOf(id).debateSlot.firstChild);
@@ -906,7 +911,7 @@ export function installDebate(ctx) {
     paintGroup(budgetGroup, state.debatePrefs.budgetMode, (v) => t(`debate_budgetmode_desc_${v}`, v === DEBATE_BUDGET_CONTINUE ? DEBATE_HARD_CAP : DEBATE_SEND_BUDGET, USAGE_FLOOR_PCT));
     paintGroup(notifyGroup, state.debatePrefs.notify === false ? OPT_OFF : OPT_ON, (v) => t(`debate_notify_desc_${v}`));
     paintGroup(paceGroup, state.debatePrefs.pace, (v) => (noAi ? t('debate_pace_desc_needai') : paceDesc(v)), () => noAi);
-    renderModPicks(targets, mod, need3);
+    renderModPicks(targets, mod, need3, crowded);
     toneInput.hidden = state.debatePrefs.tone !== TONE_CUSTOM;
     toneInput.disabled = state.sending;
     if (toneInput.value !== state.debatePrefs.toneCustom && doc_active() !== toneInput) toneInput.value = state.debatePrefs.toneCustom;

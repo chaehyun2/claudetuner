@@ -1,5 +1,6 @@
 // ChatGPT/Gemini: permission check, content-script registration, and org merge.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
+import { withCollectLock } from './collect-lock.js';
 import { updateBadgeForSelectedOrg } from './badge.js';
 import { collectChatGPT } from './collect-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
@@ -253,7 +254,8 @@ export async function maybeCollectGeminiForTab() {
     const { collectGemini: geminiEnabled = true } = await chrome.storage.sync.get({ collectGemini: true });
     if (!geminiEnabled) return;
     if (!(await hasProviderPermission('gemini'))) return;
-    const ok = await mergeGeminiOrgs(false).catch(() => false);
+    // #2210: a collection entry point — hold the collect lock like collectAndSend does.
+    const ok = await withCollectLock(() => mergeGeminiOrgs(false)).catch(() => false);
     if (ok) {
       _lastGeminiTabCollect = Date.now();
       chrome.storage.local.set({ _lastGeminiTabCollect });
