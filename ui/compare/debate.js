@@ -18,7 +18,7 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, debateSlowFor, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_WAIT_MORE_MS, debateSlowFor, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import { answeredTurn, exampleSentCode, sendMessage, storageGet } from './helpers.js';
 import { usageFloorHit, USAGE_FLOOR_PCT, USAGE_MAX_AGE_MS } from './usage-floor.js';
@@ -1279,7 +1279,8 @@ export function installDebate(ctx) {
     turn.debateSentAt = ctx.clock.now();
     turn.debateFirst = isFirstTurn(col, turn);
     const slow = debateSlowFor(col.provider, turn.debateFirst);
-    turn.debateSkipMs = slow.skipMs;
+    // 「이 토론 내내 더 기다리기」 (#1943): every later turn of this debate gets the extra wait from its send.
+    turn.debateSkipMs = slow.skipMs + (state.debate && state.debate.waitMoreAll ? DEBATE_SLOW_WAIT_MORE_MS : 0);
     turn.debateSharePct = slow.pct;
     // When the auto-skip is due, from the send — moved later if the round gets under way late (checkSlow).
     turn.debateSkipAt = turn.debateSentAt + turn.debateSkipMs;
@@ -1341,18 +1342,54 @@ export function installDebate(ctx) {
     const held = waitingOn();
     if (!held || !held.includes(turn)) return;
     // At its skip time every turn still silent goes (several only in an opening where none has answered).
-    if (held.every((x) => x.debateSlowStage >= SLOW_SKIP && !x.debateLate)) { skipTurns(held, secsOf(turn.debateWasLate ? ctx.clock.now() - turn.debateSentAt : turn.debateSkipMs)); return; }
-    // The button skips one speaker: offered only on the one turn the round is left waiting for.
+    if (held.every((x) => x.debateSlowStage >= SLOW_SKIP && !x.debateLate)) { skipTurns(held, secsOf(turn.debateWasLate || turn.debateWaitedMore ? ctx.clock.now() - turn.debateSentAt : turn.debateSkipMs)); return; }
+    // The buttons act on one speaker: offered only on the one turn the round is left waiting for.
     if (held.length !== 1 || turn.debateSlowNote) return;
     const box = el('div', 'cmp-debate-slow');
-    box.appendChild(el('p', 'cmp-debate-slow-text', t('debate_slow_note', secsOf(DEBATE_SLOW_NOTE_MS), turn.debateSharePct, secsOf(turn.debateSkipAt - turn.debateSentAt))));
+    box.appendChild(el('p', 'cmp-debate-slow-text', slowNoteText(turn)));
     const btn = el('button', 'cmp-debate-slow-skip', t('debate_slow_skip'));
     btn.type = 'button';
     btn.addEventListener('click', () => { const now = waitingOn(); if (now && now.length === 1 && now[0] === turn) skipTurns(now, secsOf(ctx.clock.now() - turn.debateSentAt)); });
     box.appendChild(btn);
+    const wait = el('button', 'cmp-debate-slow-wait', t('debate_slow_wait', secsOf(DEBATE_SLOW_WAIT_MORE_MS)));
+    wait.type = 'button';
+    wait.addEventListener('click', () => { const now = waitingOn(); if (now && now.length === 1 && now[0] === turn) waitMore(turn); });
+    box.appendChild(wait);
+    if (!(state.debate && state.debate.waitMoreAll)) {
+      const all = el('button', 'cmp-debate-slow-wait-all', t('debate_slow_wait_all', secsOf(DEBATE_SLOW_WAIT_MORE_MS)));
+      all.type = 'button';
+      all.addEventListener('click', () => { const now = waitingOn(); if (now && now.length === 1 && now[0] === turn) waitMore(turn, { all: true }); });
+      box.appendChild(all);
+    }
     turn.root.appendChild(box);
     turn.debateSlowNote = box;
     follow();
+  }
+  const slowNoteText = (turn) => t('debate_slow_note', secsOf(DEBATE_SLOW_NOTE_MS), turn.debateSharePct, secsOf(turn.debateSkipAt - turn.debateSentAt));
+  /**
+   * 「더 기다리기」 (#1943): this turn's auto-skip moves DEBATE_SLOW_WAIT_MORE_MS later — every press, from the
+   * deadline it had. The old timers go (a pending SLOW_SKIP or a late lead would still skip at the old time) and
+   * one new one stands; the note stays, quoting the new deadline. The skipped line then names the seconds waited.
+   * `all` = 「이 토론 내내」: this turn too, and every later turn of this debate from its send (watchSlow) — the
+   * flag lives on state.debate, so a new debate starts without it.
+   */
+  function waitMore(turn, { all = false } = {}) {
+    if (!slowTurns.has(turn) || !turn.debateSlowNote) return;
+    if (all && state.debate) {
+      state.debate.waitMoreAll = true;
+      const b = turn.debateSlowNote.querySelector('.cmp-debate-slow-wait-all'); // the one note on screen (one held turn)
+      if (b) b.remove();
+    }
+    for (const id of turn.debateSlowTimers || []) ctx.clock.clearTimeout(id);
+    const now = ctx.clock.now();
+    turn.debateSkipAt = Math.max(turn.debateSkipAt, now) + DEBATE_SLOW_WAIT_MORE_MS;
+    turn.debateLate = false;
+    turn.debateWaitedMore = true;
+    turn.debateSlowStage = SLOW_NOTE;
+    turn.debateSlowTimers = [ctx.clock.setTimeout(() => { turn.debateSlowStage = SLOW_SKIP; checkSlow(turn); }, turn.debateSkipAt - now)];
+    const text = turn.debateSlowNote.querySelector('.cmp-debate-slow-text');
+    if (text) text.textContent = slowNoteText(turn);
+    track('debate_slow_wait', { provider: turn.debateCol ? turn.debateCol.provider : '', all: all ? 1 : 0 });
   }
   /**
    * Skip the turns the round waits for: the round's Stop (the same ABORT as 「중지」 — the SW aborts only

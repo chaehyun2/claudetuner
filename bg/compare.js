@@ -399,6 +399,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'debate_budget', 'debate_away_pause', 'debate_hard_stop', 'debate_mod_fallback', 'debate_tone', 'debate_alias', 'debate_ask', 'debate_finish',
   // #1971 §4.1: a debate page Chrome reloaded after discarding its tab (`phase` it was in, no params beyond).
   'debate_discarded',
+  // #1943: the slow note's 「더 기다리기」 pressed (`provider`, `all` 0/1 = 「이 토론 내내」) — each press moves that turn's auto-skip later.
+  'debate_slow_wait',
   // #1917: the rating and counts only (`rating`, `reasons` = how many chips, `note` = 0/1) — the note itself goes to our server, never GA.
   'debate_feedback',
   // 「내 공유 링크」 opened from the history panel (manage mode, no params).

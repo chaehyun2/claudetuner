@@ -522,6 +522,33 @@
           <div class="notify-desc" data-i18n="notify_usage_danger_desc"></div>
           <div class="notify-example" data-i18n="notify_usage_danger_ex"></div>
         </label>
+        <!-- #2092 P2 reset-pass toggles. No `checked` here on purpose: the state comes from
+             RP_NOTIFY_DEFAULTS (bg/constants.js), the same literal the service worker reads; disabled until that
+             state is shown, so a click cannot be overwritten by the late read. -->
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-rp-limit" disabled>
+            <span class="notify-name" data-i18n="notify_rp_limit"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_rp_limit_desc"></div>
+          <div class="notify-example" data-i18n="notify_rp_limit_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-rp-expiry" disabled>
+            <span class="notify-name" data-i18n="notify_rp_expiry"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_rp_expiry_desc"></div>
+          <div class="notify-example" data-i18n="notify_rp_expiry_ex"></div>
+        </label>
+        <label class="notify-item">
+          <div class="notify-toggle">
+            <input type="checkbox" id="notify-rp-new" disabled>
+            <span class="notify-name" data-i18n="notify_rp_new"></span>
+          </div>
+          <div class="notify-desc" data-i18n="notify_rp_new_desc"></div>
+          <div class="notify-example" data-i18n="notify_rp_new_ex"></div>
+        </label>
         <label class="notify-item">
           <div class="notify-toggle">
             <input type="checkbox" id="notify-weekly-report" checked>

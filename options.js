@@ -277,6 +277,8 @@ function syncCompareMsgButtonRow() {
 
 // #2081: set once the history-sync switch changed anywhere while this page is open — the initial read never overrides it.
 let _histSyncSeenChange = false;
+// #2092 P2: true once the reset-pass toggles show their stored (or default) state — see doSave.
+let _rpNotifyLoaded = false;
 
 function autoSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
@@ -324,6 +326,14 @@ function doSave() {
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
   const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  // #2092 P2 reset-pass toggles — written only once their stored state has been shown. Before that
+  // the boxes hold no decision (options.html leaves them unchecked), and saving them would turn
+  // every one OFF for a user who only touched another setting.
+  if (_rpNotifyLoaded) {
+    config.notifyRpLimit = document.getElementById('notify-rp-limit').checked;
+    config.notifyRpExpiry = document.getElementById('notify-rp-expiry').checked;
+    config.notifyRpNew = document.getElementById('notify-rp-new').checked;
+  }
 
   // Sync plan change request settings to server
   _syncAdminOrderSetting(config);
@@ -488,6 +498,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('notify-plan-change').checked = config.notifyPlanChange !== false;
       document.getElementById('notify-collect-fail').checked = config.notifyCollectFail !== false;
       document.getElementById('notify-authblock-followup').checked = config.notifyAuthBlockedFollowup !== false;
+      // #2092 P2: defaults from THE literal the service worker reads (RP_NOTIFY_DEFAULTS) — a second
+      // copy here is how #2235's warn toggle came to disagree with what bg actually does.
+      import('./bg/constants.js').then(({ RP_NOTIFY_DEFAULTS }) => chrome.storage.sync.get(RP_NOTIFY_DEFAULTS)).then((rp) => {
+        for (const [id, k] of [['notify-rp-limit', 'notifyRpLimit'], ['notify-rp-expiry', 'notifyRpExpiry'], ['notify-rp-new', 'notifyRpNew']]) {
+          const cb = document.getElementById(id);
+          cb.checked = rp[k] === true;
+          cb.disabled = false; // options.html ships them disabled until this read lands (Codex 1R)
+        }
+        _rpNotifyLoaded = true;
+      }).catch(() => {});
       updateBadgePreview();
       updateNotifyExamples();
     }

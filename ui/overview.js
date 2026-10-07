@@ -20,7 +20,6 @@ import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from '.
 import { selectOrg } from './org-selector.js';
 import { blockedSlotsOf, clearNowCall, holdsAny, pastWeeklyBlocks, resetPassSiteUrl } from '../bg/reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
-import { passUseRelearning } from './reset-pass-ui.js';
 
 // Drag-reorder state (module-level so the cross-device onChanged handler can tell a
 // drag is in progress and skip a re-render that would yank the card mid-gesture).
@@ -128,16 +127,14 @@ function _predictBadge(cur, pred, approx) {
 // org/plan (Free/Team 7d, unused Gemini window).
 // `label` is the RESOLVED window label, not an i18n key: the 7d slot can hold a 30-day window
 // (ChatGPT Free/Go, #954), so the caller decides via windowLabel() and this only renders it.
-function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds, forecastPaused = false) {
+function _gaugeRow(label, key, current, pred, resetAt, capHitMs, spanSeconds) {
   if (current === null || current === undefined) return '';
   const cur = Math.round(current);
   // ONE decision for this row: null when there is no measured forecast AND no coarse one worth
   // speaking. Badge and forecast line both read it (#1090). `spanSeconds` is this org's reported
   // window length — the card already labels the row from it, so it must also PROJECT from it or
   // the label and the number describe different windows (#978).
-  // `forecastPaused` (a reset-pass cycle, see _renderCard): no measured forecast AND no coarse one —
-  // the coarse projection would speak exactly what the detail view withholds (batch review 1.55.0 2R).
-  const approx = pred || forecastPaused ? null : degradedApprox(current, key, resetAt, spanSeconds);
+  const approx = pred ? null : degradedApprox(current, key, resetAt, spanSeconds);
   const valColor = gaugeColor(cur);
   let predFill = '';
   // Same gate as the badge above and as the detail gauge's fill: whatever counts as "stable"
@@ -329,16 +326,9 @@ function _renderCard(org, hist, sameProviderCount = 1) {
     const memo = { cache: popupForecastCache, scope: `ov:${org.uuid}` };
     const p5 = calcPredictedAtReset(hist, 'h5', org.h5 ?? null, org.resetsAt5h, memo);
     rows += _gaugeRow(windowLabel(org.w5s, 'usage_5h'), 'h5', org.h5, p5, org.resetsAt5h, estimateCapHitTime(hist, 'h5'), org.w5s);
-    // A cycle in which a reset pass was used has no trustworthy 7d forecast — the detail view shows
-    // 「예측 재학습 중」 there, so the card must not keep projecting from the same history (batch
-    // review 1.55.0). Detected locally (ui/reset-pass-ui.js) or from the samples (`paused`).
-    const p7Relearning = passUseRelearning(org, org.resetsAt7d);
-    const p7Raw = p7Relearning ? null : calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
+    const p7 = calcPredictedAtReset(hist, 'd7', org.d7 ?? null, org.resetsAt7d,
       { ...memo, windowSeconds: org.w7s, tzOffsetMin: viewerTzOffsetMin(), provider: org.provider || 'claude' });
-    const p7Paused = p7Relearning || !!(p7Raw && p7Raw.paused);
-    const p7 = p7Paused ? null : p7Raw;
-    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d,
-      p7Paused ? null : estimateCapHitTime(hist, 'd7'), org.w7s, p7Paused);
+    rows += _gaugeRow(windowLabel(org.w7s, 'usage_7d'), 'd7', org.d7, p7, org.resetsAt7d, estimateCapHitTime(hist, 'd7'), org.w7s);
   }
 
   return `<div class="ov-card${org.isPrimary ? ' primary' : ''}" data-org-id="${escHtml(org.uuid)}">`

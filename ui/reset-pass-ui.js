@@ -5,18 +5,16 @@
 //      builder the in-page sidebars draw with too; this file only places it
 //   2. the 「지금 풀 수 있어요 ↗」 suffix on the limit-reached headline — decided by
 //      canClearNow() over EVERY window at its limit, never only the one the headline names
-//   3. the 7d forecast guard: a held-pass note in the 「리셋 전 소진 예상」 state, and a
-//      「패스 사용 후 — 예측 재학습 중」 downgrade when a pass use is detected locally
+//   3. the 7d forecast guard: a held-pass note in the 「리셋 전 소진 예상」 state
 //
 // Loadable under plain Node (test/limit-eta-guard.mjs imports prediction.js, which imports this):
 // no chrome.* / document access at module load. `t`/`getLang` are i18n.js globals.
-import { state, _filteredHistory } from './state.js';
+import { _filteredHistory } from './state.js';
 import { formatResetAbsolute, formatDuration } from './util.js';
 import {
   canClearNow, clearNowCall, holdsAny, blockedSlotsOf, resetPassSiteUrl, resetPassHelpUrl, resetPassAdvice, pastWeeklyBlocks,
 } from '../bg/reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
-import { P7_PASS_DROP_PTS } from './diurnal.js';
 
 const core = () => globalThis.__ctUsageCore || {};
 
@@ -32,13 +30,6 @@ export function blockedSlots(util5h, util7d, span5h, span7d) {
 /** The provider's usage-settings page (the only place a pass is spent), or null. */
 export function resetPassLink(provider) {
   return resetPassSiteUrl(provider, SITE_ORIGINS);
-}
-
-// ── The org the detail view is showing ───────────────────────────────────────────────────────
-export function currentResetPassOrg() {
-  const id = state.selectedOrgId || state.currentSnapshot?.claude_org_uuid || null;
-  if (!id) return null;
-  return (state.collectedOrgs || []).find((o) => o.uuid === id) || null;
 }
 
 const providerOf = (org) => (org && org.provider) || 'claude';
@@ -116,118 +107,6 @@ export function resetPassTip(org) {
   const c = core();
   return org && typeof c.resetPassDetailTip === 'function'
     ? c.resetPassDetailTip(org.resetPasses, getLang(), providerOf(org)) : '';
-}
-
-// ── 3b. Local pass-use detection → 7d forecast downgrade ─────────────────────────────────────
-//
-// 🔴 WHY. p7Cycles (ui/diurnal.js) splits cycles by resets_at and never counts a drop inside one
-// cycle as activity. A pass that clears the window mid-cycle therefore either hides real usage
-// (same resets_at, util falls) or turns a shortened cycle's final into a "prior" (resets_at moves
-// early). Until §6-1 measures what the provider actually does, the safe move is to stop
-// forecasting that cycle rather than to correct the maths — so this lives here, at the popup
-// edge, and ui/diurnal.js (+ its generated dashboard twin site/shared/diurnal.js) is untouched.
-//
-// A use is declared only when BOTH hold between two observations of the same org:
-//   · the count of passes that clear 7d went DOWN (and no held pass had expired by then — an
-//     expiry explains a drop on its own), with the same kinds_known on both sides (ChatGPT's
-//     total → per-kind switch must not read as a decrease)
-//   · and the 7d window shows what a pass does — it ENDS the window early and starts a new one:
-//     (a) util fell by at least RP_UTIL_DROP_PTS inside the SAME cycle, or
-//     (b) kinds known only: observed more than an hour BEFORE the old resets_at, and the new
-//         resets_at is LATER than the old one (beyond jitter). A resets_at that only moved EARLIER
-//         is not evidence (Codex 1R: 8h earlier with util 80→81 was flagged), and a scheduled
-//         reset (observed at/after the old resets_at) never qualifies.
-//     With kinds unknown (ChatGPT before its detail read) the count may have dropped through a
-//     5h pass, so only (a) — a same-cycle 7d fall — is accepted.
-export const RP_PASS_USE_KEY = 'rpPassUseObs';
-// Same jitter tolerance p7Cycles uses to call two resets_at values one cycle (ui/diurnal.js).
-const RP_SAME_CYCLE_TOL_MS = 6 * 3600000;
-// A same-cycle 7d fall this large is a cleared window, not an adjustment or rounding — the same
-// threshold the 7d forecast pauses and drops prior cycles on (ui/diurnal.js P7_PASS_DROP_PTS).
-const RP_UTIL_DROP_PTS = P7_PASS_DROP_PTS;
-// (b) needs the restart observed at least this long before the old scheduled reset.
-const RP_EARLY_MARGIN_MS = 3600000;
-
-const finiteOr = (v, d = null) => (Number.isFinite(v) ? v : d);
-
-/** One org's observation, or null when its summary is 「모름」. */
-export function passUseObservation(org, nowMs) {
-  const s = org && org.resetPasses;
-  if (!s || s.known !== true || !Number.isInteger(s.available)) return null;
-  const kk = s.kinds_known === true;
-  const k = s.by_kind || {};
-  const n = kk ? (Number.isInteger(k.full) ? k.full : 0) + (Number.isInteger(k.weekly) ? k.weekly : 0) : s.available;
-  const x = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
-  const r7 = org.resetsAt7d ? Date.parse(org.resetsAt7d) : NaN;
-  const u7 = org.d7 == null ? NaN : Number(org.d7);
-  return {
-    n, k: kk ? 1 : 0,
-    t: finiteOr(s.observed_at, nowMs),
-    x: finiteOr(x), r7: finiteOr(r7), u7: finiteOr(u7),
-  };
-}
-
-export function detectPassUse(prev, cur) {
-  if (!prev || !cur) return false;
-  if (!(cur.t > prev.t) || prev.k !== cur.k) return false;
-  if (!(cur.n < prev.n)) return false;
-  if (prev.x != null && prev.x <= cur.t) return false;
-  if (prev.r7 == null || cur.r7 == null || prev.u7 == null || cur.u7 == null) return false;
-  if (Math.abs(cur.r7 - prev.r7) < RP_SAME_CYCLE_TOL_MS) return cur.u7 <= prev.u7 - RP_UTIL_DROP_PTS;
-  if (cur.k !== 1) return false;
-  return cur.t < prev.r7 - RP_EARLY_MARGIN_MS && cur.r7 > prev.r7;
-}
-
-// In-memory copy of the stored observations; null until primed, so an early observe cannot
-// overwrite stored state with an empty map.
-let _store = null;
-
-function persist() {
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) chrome.storage.local.set({ [RP_PASS_USE_KEY]: _store });
-  } catch { /* popup closing / context gone — the next open re-observes */ }
-}
-
-/** Updates the observations from the current org list. Returns true when anything changed. */
-export function observeResetPassUse(orgs, nowMs = Date.now()) {
-  if (!_store || !Array.isArray(orgs)) return false;
-  const before = JSON.stringify(_store);
-  const live = new Set();
-  for (const org of orgs) {
-    if (!org || !org.uuid) continue;
-    live.add(org.uuid);
-    const cur = passUseObservation(org, nowMs);
-    if (!cur) continue;
-    const entry = _store[org.uuid] || { o: null, hit: null };
-    if (detectPassUse(entry.o, cur)) entry.hit = cur.r7;
-    // A hit belongs to one cycle; once the window has moved on to a later one, drop it.
-    if (entry.hit != null && cur.r7 != null && cur.r7 - entry.hit >= RP_SAME_CYCLE_TOL_MS) entry.hit = null;
-    if (!entry.o || cur.t > entry.o.t) entry.o = cur;
-    _store[org.uuid] = entry;
-  }
-  if (live.size) for (const id of Object.keys(_store)) if (!live.has(id)) delete _store[id];
-  const changed = JSON.stringify(_store) !== before;
-  if (changed) persist();
-  return changed;
-}
-
-/** Seeds the store from storage (popup init), then observes the current orgs. */
-export function primeResetPassUse(stored, orgs, nowMs = Date.now()) {
-  _store = {};
-  if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
-    for (const [id, e] of Object.entries(stored)) {
-      if (e && typeof e === 'object') _store[id] = { o: e.o && typeof e.o === 'object' ? e.o : null, hit: finiteOr(e.hit) };
-    }
-  }
-  observeResetPassUse(orgs, nowMs);
-}
-
-/** True when the 7d cycle ending at `resetsAt7d` saw a pass use: its forecast must not speak. */
-export function passUseRelearning(org, resetsAt7d) {
-  const hit = org && _store && _store[org.uuid] ? _store[org.uuid].hit : null;
-  if (hit == null || !resetsAt7d) return false;
-  const r = Date.parse(resetsAt7d);
-  return Number.isFinite(r) && Math.abs(r - hit) < RP_SAME_CYCLE_TOL_MS;
 }
 
 // ── 4. 「지금 쓰세요 / 아껴두세요」 advice line under the chip ───────────────────────────────────

@@ -590,6 +590,10 @@ export const DEBATE_SLOW_BY_PROVIDER = Object.freeze({
   claude: Object.freeze({ skipMs: 120 * 1000, firstSkipMs: 120 * 1000, pct: 1, firstPct: 1 }),
 });
 export const DEBATE_SLOW_DEFAULT = DEBATE_SLOW_BY_PROVIDER.gemini;
+// The note's 「더 기다리기」 (#1943, 2026-10-07): each press moves this turn's auto-skip this much later. Not a longer
+// default — on prod 2026-09-28..10-07 a Gemini turn silent at 60 s had its first text by 120 s only ~1/3 of the
+// time (Kaplan-Meier, n=129), so a longer skip for everyone would cost ~50 s per slow turn to save a third of them.
+export const DEBATE_SLOW_WAIT_MORE_MS = 60 * 1000;
 /** The skip time and the note's share for a turn of `provider` (`first` = the column's first turn). */
 export function debateSlowFor(provider, first) {
   const row = Object.hasOwn(DEBATE_SLOW_BY_PROVIDER, provider) ? DEBATE_SLOW_BY_PROVIDER[provider] : DEBATE_SLOW_DEFAULT;

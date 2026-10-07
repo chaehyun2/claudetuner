@@ -6,7 +6,6 @@ import {
   buildPlanLimitLines, chartMaxY, formatWindowShort,
 } from './util.js';
 import { windowForecast, viewerTzOffsetMin, selectedForecastProvider } from './prediction.js';
-import { passUseRelearning, currentResetPassOrg } from './reset-pass-ui.js';
 
 // === Chart tab state ===
 let _activeChartTab = '5h';
@@ -271,12 +270,7 @@ export function drawCharts(history, plan, snapshot) {
   // snapshot and the UNSCALED history, exactly as the gauges use them: `sorted` below is
   // normalized to the current plan scale for DRAWING, and forecasting from that copy is what the
   // previous round had to undo.
-  // `relearning`: a reset pass the popup saw being used pauses the 7d forecast here as on the gauge
-  // (#2092) — no dotted point. windowForecast applies it to the 7d window only.
-  const fcOpts = {
-    tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider(),
-    relearning: passUseRelearning(currentResetPassOrg(), snapshot?.seven_day?.resets_at),
-  };
+  const fcOpts = { tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider() };
   const fc5h = windowForecast(snapshot?.five_hour?.utilization ?? null, 'h5', snapshot?.five_hour?.resets_at, sortedRaw, snapshot?.five_hour?.window_seconds, fcOpts);
   const fc7d = windowForecast(snapshot?.seven_day?.utilization ?? null, 'd7', snapshot?.seven_day?.resets_at, sortedRaw, snapshot?.seven_day?.window_seconds, fcOpts);
 
@@ -373,8 +367,7 @@ function drawSingleChart(opts) {
   const paceTier = forecast ? forecast.tier : null;
   const paceColors = { green: '#22c55e', yellow: '#f59e0b', orange: '#f97316', red: '#ef4444', darkred: '#dc2626' };
   const paceCss = paceTier ? paceColors[paceTier.css] : '#9ca3af';
-  const paceLabel = paceTier ? t('chart_pace_' + paceTier.id)
-    : forecast && forecast.paused ? t('chart_pred_paused') : t('chart_stable');
+  const paceLabel = paceTier ? t('chart_pace_' + paceTier.id) : t('chart_stable');
 
   // Rate portion: rising/falling/stagnant. Null on the degraded path (no measured rate exists),
   // where showing a number would dress up an assumption as a measurement.

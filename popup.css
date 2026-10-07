@@ -363,20 +363,11 @@
     .sb-red { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
     .sb-orange { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; }
     .sb-darkred { background: #fef2f2; border: 1px solid #f87171; color: #7f1d1d; }
-    .sb-gray { background: #f9fafb; border: 1px solid #e5e7eb; color: #4b5563; }
-    /* Closable banner (the 7d 「relearning」 note, #2092): text + a quiet × on the right. */
-    /* :not(.hidden) — `.status-banner.sb-closable` outranks `.hidden`, so a plain display:flex kept a
-       closed banner on screen (Codex 1R). */
-    .status-banner.sb-closable:not(.hidden) { display: flex; align-items: flex-start; gap: 6px; }
-    .status-banner.sb-closable > span { flex: 1; min-width: 0; word-break: keep-all; }
-    .sb-close { flex: none; border: none; background: none; padding: 0 2px; margin: -1px -4px 0 0; font-size: 14px; line-height: 1; color: inherit; opacity: .55; cursor: pointer; }
-    .sb-close:hover, .sb-close:focus-visible { opacity: 1; }
     [data-theme="dark"] .sb-green { background: #052e16; border-color: #166534; color: #86efac; }
     [data-theme="dark"] .sb-yellow { background: #1a1500; border-color: #854d0e; color: #fde68a; }
     [data-theme="dark"] .sb-orange { background: #1c0f00; border-color: #9a3412; color: #fdba74; }
     [data-theme="dark"] .sb-red { background: #2a0a0a; border-color: #991b1b; color: #fca5a5; }
     [data-theme="dark"] .sb-darkred { background: #350a0a; border-color: #b91c1c; color: #f87171; }
-    [data-theme="dark"] .sb-gray { background: #1f2937; border-color: #374151; color: #d1d5db; }
 
     /* 차트 탭 */
     .chart-tabs { display: flex; gap: 0; }

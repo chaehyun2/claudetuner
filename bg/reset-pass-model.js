@@ -247,11 +247,22 @@ const BLOCK_HIT_GAP_MS = 6 * HOUR_MS;
 // wall and length do not describe a normal week, so it is skipped altogether.
 const MIN_CYCLE_SPAN_FRAC = 5 / 7;
 // A fall this large inside one cycle is a cleared window (a pass used — the same threshold the
-// popup's pass-use detection uses): its later 100% samples are a second, unrelated wall.
+// 7d forecast re-anchors on): its later 100% samples are a second, unrelated wall.
 // A copy of ui/diurnal.js P7_PASS_DROP_PTS (this file imports nothing); test/pred7d-pace-how-guard.mjs
 // asserts the two are equal.
 export const SAME_CYCLE_FALL_PTS = 20;
 const WEEKLY_PASS_KINDS = new Set(['full', 'weekly']);
+
+/**
+ * One org's usage-history rows — the rule the popup's _filteredHistory, the in-page sidebar and the
+ * reset-pass notifier share: rows tagged with this org, plus the legacy untagged rows when this is
+ * the Claude primary org (`includeLegacy`). No org id → every row. Here (not in bg/sidebar-usage.js)
+ * so the notifier can reuse it without importing the sidebar's runtime dependencies.
+ */
+export function orgHistory(history, orgUuid, includeLegacy) {
+  if (!Array.isArray(history)) return [];
+  return orgUuid ? history.filter((p) => p.org === orgUuid || (includeLegacy && !p.org)) : history;
+}
 
 /**
  * The completed weekly cycles in `points` (usage history rows `{ t, d7, r7 }`, one org): how many

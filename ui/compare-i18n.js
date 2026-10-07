@@ -596,6 +596,8 @@ export const COMPARE_I18N = {
     // its send (that provider's `skipMs` / `firstSkipMs`, or later for a turn whose round got under way late).
     debate_slow_note: '대부분 몇 초 안에 답하지만, {0}초보다 오래 걸리는 경우가 약 {1}% 있어요. 조금 더 기다리거나 이번 차례를 건너뛸 수 있어요. ({2}초가 지나면 자동으로 건너뛰어요)',
     debate_slow_skip: '이번 차례 건너뛰기',
+    debate_slow_wait: '{0}초 더 기다리기',
+    debate_slow_wait_all: '이 토론 내내 {0}초 더 기다리기',
     debate_slow_skipped: '{0}{1} {2}초 안에 답하지 않아 이번 차례를 건너뛰었어요', // {1} = 이/가 (debate-core subjectParticle)
     debate_followup_placeholder: '토론에 끼어들기 — @이름으로 지목할 수 있어요',
     debate_followup_placeholder_short: '끼어들기 · @이름으로 지목',
@@ -1396,6 +1398,8 @@ export const COMPARE_I18N = {
     debate_mod_fallback: 'The AI moderator failed twice in a row — switched to automatic order',
     debate_slow_note: 'Most turns start within a few seconds, but about {1}% take longer than {0} seconds. You can wait a little longer or skip this turn. (It\'s skipped automatically after {2} seconds.)',
     debate_slow_skip: 'Skip this turn',
+    debate_slow_wait: 'Wait {0}s more',
+    debate_slow_wait_all: 'Wait {0}s more on every turn',
     debate_slow_skipped: '{0} didn\'t answer within {2} seconds, so this turn was skipped',
     debate_followup_placeholder: 'Join the debate — use @name to address someone',
     debate_followup_placeholder_short: 'Join in · @name to address',

@@ -23,7 +23,7 @@ import { updateBadgeForSelectedOrg, resetIcon, updateBadgeError, refreshToolbarT
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { SEND_CODE_REASON, sendCodeReasonFromThrown } from './bg/send-code-error.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification, checkResetPassNotifications, resetPassNotifUrl } from './bg/notifications.js';
 import {
   detectPlan, refineTeamPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -185,6 +185,9 @@ async function collectAndSendUnlocked(opts) {
     if (collectGemini && await hasProviderPermission('gemini')) await mergeGeminiOrgs(opts?.force, opts?.userManual).catch(() => {});
     throw e;
   } finally {
+    // #2092 P2: reset-pass cards read every provider's org, so they run once all merges are done —
+    // whichever of them succeeded. Local data only; a failure here must not fail the cycle.
+    await checkResetPassNotifications().catch((err) => console.warn('[Claude Tuner] reset-pass notify:', err && err.message));
     _collecting = false;
   }
 }
@@ -2118,6 +2121,13 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
     const orderId = Number(notifId.slice(PLAN_AUTO_NOTIF_PREFIX.length));
     const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
     if (card && card.order_id === orderId && card.org_id != null) chrome.tabs.create({ url: planChangeUrl(card.org_id, orderId) });
+    chrome.notifications.clear(notifId);
+    return;
+  }
+  // #2092 P2: a reset-pass card opens that provider's usage settings, where the user spends a pass.
+  const rpUrl = resetPassNotifUrl(notifId);
+  if (rpUrl) {
+    chrome.tabs.create({ url: rpUrl });
     chrome.notifications.clear(notifId);
     return;
   }

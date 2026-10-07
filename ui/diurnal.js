@@ -711,7 +711,24 @@ export function p7Features({ samples, nowMs, resetMs, currentUtil, priorCycles }
   const current = cycles.find((c) => Math.abs(c.resetMs - resetMs) < P7_SAME_CYCLE_TOL_MS) || null;
   // Window span comes from the caller (seven_day_window_seconds etc.). Not inferred from reset
   // spacing: resets move (e.g. 09-04T21 -> 09-05T05), which made inferred spans wrong.
-  const cycleH = Math.max(Number.isFinite(opts.cycleHours) && opts.cycleHours > 0 ? opts.cycleHours : P7_DEFAULT_CYCLE_H, rem);
+  const windowH = Math.max(Number.isFinite(opts.cycleHours) && opts.cycleHours > 0 ? opts.cycleHours : P7_DEFAULT_CYCLE_H, rem);
+  // Re-anchor at a same-cycle pass fall (p7HasPassDrop rule, the LAST one): the cleared cycle
+  // restarts at 0 between the two samples, so pace, recent rate and elapsed time are measured from
+  // there; prior finals keep the original cycle and window. Backtest on the points after a pass
+  // (#2151, n=1293): MAE 32.16 pausing / 15.52 plain / 13.01 re-anchored; no-pass points unchanged.
+  let win = current;
+  let cycleH = windowH;
+  if (current) {
+    let li = -1;
+    for (let i = current.pts.length - 1; i >= 1; i--) {
+      if (current.pts[i].tMs < current.resetMs && current.pts[i].util <= current.pts[i - 1].util - P7_PASS_DROP_PTS) { li = i; break; }
+    }
+    if (li >= 1) {
+      const raStart = (current.pts[li - 1].tMs + current.pts[li].tMs) / 2;
+      win = { resetMs: current.resetMs, pts: current.pts.slice(li) };
+      cycleH = Math.max((resetMs - raStart) / P7_HOUR_MS, rem);
+    }
+  }
   const startMs = resetMs - cycleH * P7_HOUR_MS;
   const elapsedH = (nowMs - startMs) / P7_HOUR_MS;
   const massRem = p7Mass(nowMs, resetMs, flat);
@@ -723,11 +740,11 @@ export function p7Features({ samples, nowMs, resetMs, currentUtil, priorCycles }
   let rate = elapsedH >= 1 ? cur / elapsedH : 0;
   let rateSpanH = Math.max(0, elapsedH);
   let ratePerMass = elapsedH >= 1 ? cur / massEl : 0;
-  if (current) {
+  if (win) {
     const t0 = Math.max(nowMs - P7_RECENT_H * P7_HOUR_MS, startMs);
-    let u0 = p7UtilAt(current.pts, t0);
+    let u0 = p7UtilAt(win.pts, t0);
     if (u0 == null && t0 === startMs) u0 = 0;
-    const u1 = p7UtilAt(current.pts, nowMs);
+    const u1 = p7UtilAt(win.pts, nowMs);
     const spanH = (nowMs - t0) / P7_HOUR_MS;
     if (u0 != null && u1 != null && spanH > 0) {
       const m = Math.max(p7Mass(t0, nowMs, flat), P7_MASS_FLOOR_FRAC * spanH, P7_MIN_OBS_MASS);
@@ -738,7 +755,7 @@ export function p7Features({ samples, nowMs, resetMs, currentUtil, priorCycles }
     }
   }
   const k = Number.isFinite(opts.maxPrior) ? opts.maxPrior : P7_PRIOR_K;
-  const finals = k > 0 ? p7PriorFinals(cycles, current, priorCycles, resetMs, nowMs, cycleH).slice(-k) : [];
+  const finals = k > 0 ? p7PriorFinals(cycles, current, priorCycles, resetMs, nowMs, windowH).slice(-k) : [];
   const pf = finals.length ? p7Median(finals) : null;
   const gap = pf != null ? Math.min(cap, Math.max(0, pf - cur)) : 0;
   return {
@@ -860,9 +877,8 @@ function p7CycleHours(windowSeconds) {
 }
 
 // True when the cycle ending at resetMs was cleared mid-cycle (p7HasPassDrop): a reset pass zeroes
-// util but keeps resets_at, so the pace, the recent rate and the cap verdict would all read the
-// cleared window as missing usage until the next reset. Data-driven — independent of the popup's
-// local pass-use detection (ui/reset-pass-ui.js), which only sees passes used while it was watching.
+// util but keeps resets_at. The projection re-anchors such a cycle at the pass; callers use this
+// only to skip caches whose keys do not digest every sample.
 export function p7CycleHasPassDrop(samples, resetMs, nowMs) {
   if (![resetMs, nowMs].every(Number.isFinite)) return false;
   const current = p7Cycles(samples, nowMs).find((c) => Math.abs(c.resetMs - resetMs) < P7_SAME_CYCLE_TOL_MS);
@@ -887,21 +903,12 @@ export function p7CycleHasPassDrop(samples, resetMs, nowMs) {
 //                     `rate > 0` holds exactly when the projection rises (the verdict predicates
 //                     gate on it)
 //   hoursTo100      : when willHit, hours until the cap (<= hoursToReset); else null
-//   paused          : true when the current cycle was cleared mid-cycle (p7CycleHasPassDrop). The
-//                     forecast is withheld until the next cycle — predicted = current util, rate 0,
-//                     willHit false — and every surface renders it as "no forecast". It is a result,
-//                     not null, so callers do not fall back to the window-average projection.
+// A cycle cleared mid-cycle by a reset pass is re-anchored at the pass (p7Features), not paused.
 export function p7ProjectAtReset({ samples, currentUtil, resetMs, nowMs, windowSeconds, tzOffsetMin, priorCycles }) {
   if (![currentUtil, resetMs, nowMs].every(Number.isFinite)) return null;
   const hoursToReset = (resetMs - nowMs) / 3600000;
-  const sorted = Array.isArray(samples) ? samples.slice().sort((a, b) => a.tMs - b.tMs) : [];
-  // Before the near-reset cutoff: a null there sends callers to the window-average fallback, which
-  // would speak for a cleared cycle in its last minutes (Codex 1R).
-  if (hoursToReset > 0 && p7CycleHasPassDrop(sorted, resetMs, nowMs)) {
-    const cur = Math.max(0, Math.min(P7_UTIL_CAP, currentUtil));
-    return { predicted: cur, predictedMedian: cur, willHit: false, rate: 0, hoursDiff: 0, hoursToReset, hoursTo100: null, paused: true };
-  }
   if (hoursToReset < 0.05) return null;
+  const sorted = Array.isArray(samples) ? samples.slice().sort((a, b) => a.tMs - b.tMs) : [];
   const r = p7Predict(
     { samples: sorted, nowMs, resetMs, currentUtil, priorCycles },
     { tzOffsetMin, cycleHours: p7CycleHours(windowSeconds) },

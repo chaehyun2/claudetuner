@@ -133,25 +133,18 @@ export function estimateCapHitTime(history, key) {
 //                    provider — and a caller that does not say — keeps the adaptive projector
 // The pace-how 7d result additionally carries `willHit` ("likely to hit the limit") and
 // `predictedMedian`; its `predicted` already encodes willHit for the tier ladder (p7ProjectAtReset).
-// `paused: true` = the cycle was cleared by a reset pass: every surface shows no 7d forecast.
 export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts = {}) {
   // Caching is OPT-IN and needs both a store and a scope. Omit either and every call recomputes —
   // slower, never wrong. That default is deliberate: the failure mode of the other default is a
   // user seeing someone else's number, which nothing downstream could detect.
   const _cache = opts.cache || null;
   const _scope = opts.scope != null ? String(opts.scope) : null;
-  if (!resetsAt || currentUtil === null || !history) return null;
-  // Three samples to forecast — but a reset-pass cycle is decided from TWO (a fall needs a before
-  // and an after), so the 7d branch reaches its pass check with two and applies the floor after it.
-  // Returning null first sent a just-cleared cycle to the window-average fallback (1.55.3 batch review).
-  const minHistoryMet = history.length >= 3;
-  if (!minHistoryMet && !(key === 'd7' && history.length >= 2)) return null;
+  if (!resetsAt || currentUtil === null || !history || history.length < 3) return null;
 
   const now = Date.now();
   const resetTime = new Date(resetsAt).getTime();
   const hoursToReset = Math.max((resetTime - now) / 3600000, 0);
-  // The 7d branch applies this cutoff itself, after its reset-pass check.
-  if (key !== 'd7' && hoursToReset < 0.05) return null;
+  if (hoursToReset < 0.05) return null;
 
   let rate, hoursDiff;
 
@@ -174,12 +167,11 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
       .map(p => ({ tMs: p.t, util: p.d7, resetMs: new Date(p.r7).getTime() }));
     // Claude 7d -> pace-how (#1681). Anything else -> the adaptive projector, exactly as before it.
     const usesP7 = p7Applies(fcOpts.provider, fcOpts.windowSeconds);
-    // A reset-pass cycle (#2092) is decided from ALL its samples, before the near-reset cutoff (a
-    // null there fell through to the window average) and before the cache (its key digests only
-    // some samples, so a mid-history fall could be served a pre-pass forecast) — Codex 1R.
-    const passCycle = usesP7 && resetTime > now && p7CycleHasPassDrop(samples, resetTime, now);
-    if (!passCycle && (hoursToReset < 0.05 || !minHistoryMet)) return null;
-    const cacheKey = (!passCycle && _cache && _scope !== null && hoursToReset >= PRED_CACHE_MIN_HOURS_TO_RESET)
+    // A reset-pass cycle (#2092) is re-anchored at the pass from ALL its samples, so it is never
+    // cached: the key digests only some samples, and a mid-history fall could be served a
+    // pre-pass forecast (Codex 1R of #2143).
+    const cacheKey = (_cache && _scope !== null && hoursToReset >= PRED_CACHE_MIN_HOURS_TO_RESET
+      && !(usesP7 && p7CycleHasPassDrop(samples, resetTime, now)))
       ? _predCacheKey(_scope, history, key, currentUtil, resetsAt, fcOpts)
       : null;
     if (cacheKey) {
@@ -206,9 +198,6 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
       hoursToReset: dp.hoursToReset,
       hoursDiff: dp.hoursDiff,
       hoursTo100: dp.hoursTo100,
-      // pace-how only: the cycle was cleared mid-cycle (a reset pass) — no forecast until the next
-      // cycle. Never cached: hoursDiff is 0.
-      paused: dp.paused === true,
     };
     // Store a copy so a caller mutating the returned object can never poison the cache.
     // A sub-hour observation window (a brand-new user, or the thin-data fallback) is NOT cached:
@@ -249,8 +238,7 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
 // and, since #1681, the measured 7d forecast too (its cycle-to-date pace needs the cycle start).
 // Threading it is #978 — before, `remaining` came from the real resets_at while the denominator
 // was hard-coded to 7 days, which inflated the projection inside ~6.3 days of a 30-day reset.
-// `fcOpts` ({ provider, tzOffsetMin, priorCycles, relearning }) is forwarded to calcPredictedAtReset
-// (`relearning` = the popup's own pass-use detection, ui/reset-pass-ui.js passUseRelearning); the span is threaded
+// `fcOpts` ({ provider, tzOffsetMin, priorCycles }) is forwarded to calcPredictedAtReset; the span is threaded
 // in as its windowSeconds, so the measured 7d forecast uses the real window length too (#978).
 export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds, fcOpts = {}) {
   if (currentUtil == null || !resetsAt) return null;
@@ -258,17 +246,10 @@ export function windowForecast(currentUtil, key, resetsAt, history, spanSeconds,
   // who is blocked and waiting. AT_LIMIT is its own rung for exactly this — the old code took
   // the loudest PACE rung here and told a stopped user they were "한도를 크게 넘는 페이스".
   if (currentUtil >= 100) return { tier: AT_LIMIT_TIER, predicted: currentUtil, rate: null, hoursTo100: null, measured: false };
-  // A paused 7d forecast (a reset pass cleared this cycle — seen in the samples, or detected by the
-  // popup itself: fcOpts.relearning) has no tier, so pickWorstWindow skips it, and must not fall
-  // through to the window average below, which would speak exactly what the gauge withholds.
-  // `paused` lets a surface say why it is silent (the chart's label).
-  const paused = { tier: null, predicted: null, rate: null, hoursTo100: null, measured: false, paused: true };
-  if (key === 'd7' && fcOpts.relearning === true) return paused;
   const pred = calcPredictedAtReset(history, key, currentUtil, resetsAt, {
     windowSeconds: spanSeconds, tzOffsetMin: fcOpts.tzOffsetMin, priorCycles: fcOpts.priorCycles,
     provider: fcOpts.provider,
   });
-  if (pred && pred.paused) return paused;
   if (pred) {
     return {
       tier: projectionTier(pred.predicted), predicted: pred.predicted, rate: pred.rate,

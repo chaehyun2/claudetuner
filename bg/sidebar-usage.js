@@ -6,7 +6,7 @@ import { hasProviderPermission } from './providers.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
-import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastWeeklyBlocks } from './reset-pass-model.js';
+import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastWeeklyBlocks, orgHistory } from './reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Sidebar Usage: build data for content script ===
@@ -226,12 +226,7 @@ async function noDataReason(provider) {
 
 // Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)
 // `windowSeconds` is the provider-reported 7d-slot span (org `w7s`), used by the 7d forecast only.
-// This org's history rows — the same rule calcSidebarPrediction and the popup's _filteredHistory use.
-function orgHistory(history, orgUuid, includeLegacy) {
-  if (!Array.isArray(history)) return [];
-  return orgUuid ? history.filter((p) => p.org === orgUuid || (includeLegacy && !p.org)) : history;
-}
-
+// `orgHistory` (bg/reset-pass-model.js) is the per-org row rule the popup's _filteredHistory uses.
 function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, includeLegacy, provider, windowSeconds) {
   if (!resetsAt || currentUtil == null || !history || history.length < 3) return null;
 
@@ -254,8 +249,7 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
     const dp = calcPredictedAtReset(orgRows, 'd7', currentUtil, resetsAt, {
       windowSeconds, tzOffsetMin: -new Date().getTimezoneOffset(), provider: provider || 'claude',
     });
-    // `paused`: a reset pass cleared this cycle — no forecast until the next one (#2092).
-    if (!dp || dp.paused || !(dp.rate > 0)) return null;
+    if (!dp || !(dp.rate > 0)) return null;
     // A forecast that says "you will hit the limit" is shown however little it adds — 98% -> 100
     // grows by 2pt and would otherwise be hidden by the "< 3pt" rule below (Codex R1, #1681).
     const hitsCap = dp.willHit === true || (dp.predicted >= 100 && currentUtil < 100);

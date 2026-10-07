@@ -5,8 +5,8 @@ import { state, _filteredHistory } from './state.js';
 import { _isDark, formatResetAbsolute, windowUnitLabel } from './util.js';
 import { renderGaugeWait, renderGaugeCapped } from './gauge-facts.js';
 import {
-  blockedSlots, resetPassHeadlineLink, appendResetPassHeadlineLink, currentResetPassOrg,
-  passUseRelearning, noteResetPassForecast, renderResetPassAdvice,
+  blockedSlots, resetPassHeadlineLink, appendResetPassHeadlineLink,
+  noteResetPassForecast, renderResetPassAdvice,
 } from './reset-pass-ui.js';
 // The forecast maths moved to a pure module so the Worker can import it too (#1026). Re-exported
 // here so every existing call site keeps working unchanged.
@@ -206,35 +206,9 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
     return;
   }
 
-  // A reset pass was used in this 7d cycle (#2092 P1-3): the forecast maths would read the
-  // cleared window as a shortened cycle or as missing usage, so it does not speak until the next
-  // cycle. The base reset line rendered before this call stays; no wait block, no projection.
-  // Two triggers: the popup's own pass-use detection (here) and the samples themselves
-  // (calcPredictedAtReset -> `paused`, below) — the latter also covers a pass used while no popup
-  // was open to see the pass count drop.
-  const showRelearning = () => {
-    hide();
-    if (inlineEl) {
-      inlineEl.style.display = 'inline';
-      inlineEl.style.color = '#9ca3af';
-      inlineEl.style.background = ''; // a forecast drawn before the pass use left its tint (Codex)
-      inlineEl.textContent = '\u25b8\u23f3';
-      inlineEl.title = t('rp_ui_pred_relearning_tip');
-      inlineEl.style.cursor = 'help';
-    }
-    // No line under the gauge (user, 2026-10-05: two lines saying 「relearning」 were not worth the
-    // space) — the grey ▸⏳ badge above carries the reason in its tooltip.
-    if (lineEl) lineEl.style.display = 'none';
-  };
-  if (id === '7d' && passUseRelearning(currentResetPassOrg(), resetsAt)) {
-    showRelearning();
-    return;
-  }
-
   // Insufficient history → the core returns null and the `!pred` branch below shows the collecting
   // indicator + day-1 teaser (showFallback keeps the "history loaded" gate). The minimum-history
-  // rule lives ONLY in calcPredictedAtReset: a second copy here ran first and kept a reset-pass
-  // cycle with two samples from ever reaching the core's pause check (1.55.3 batch review 2R).
+  // rule lives ONLY in calcPredictedAtReset, so the two can never disagree.
 
   // Use common prediction function
   // Scope the cache to the org currently selected in the popup. One popup only ever shows one
@@ -245,10 +219,6 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
   });
   if (!pred) {
     showFallback();
-    return;
-  }
-  if (pred.paused) {
-    showRelearning();
     return;
   }
 
@@ -351,23 +321,6 @@ export function renderGaugePrediction(id, history, key, currentUtil, resetsAt, s
 // `span5h`/`span7d` are the provider-reported window lengths (#978) — the banner is the one
 // surface that speaks at EVERY tier, so a wrong denominator here is the loudest version of the
 // bug: a ChatGPT Free user 5 days from a 30-day reset read "105% — 한도 도달 예상" instead of 36%.
-// The 「relearning」 banner's close, remembered per ORG and per 7d cycle (its resets_at) in
-// localStorage — a per-device convenience; losing it only shows the note again. Keyed by org so
-// closing one account's note never hides another's (Codex 1R). Same jitter tolerance as the cycle
-// grouping elsewhere (resets_at can move by minutes between collections).
-const RELEARN_CLOSED_KEY = 'ct-rp-relearn-closed:';
-const RELEARN_SAME_CYCLE_MS = 6 * 3600000;
-const relearnOrgKey = (orgId) => RELEARN_CLOSED_KEY + (orgId || 'default');
-export function relearnBannerClosed(resets7d, orgId) {
-  try {
-    const r = Date.parse(resets7d || ''), c = Date.parse(globalThis.localStorage?.getItem(relearnOrgKey(orgId)) || '');
-    return Number.isFinite(r) && Number.isFinite(c) && Math.abs(r - c) < RELEARN_SAME_CYCLE_MS;
-  } catch { return false; }
-}
-export function closeRelearnBanner(resets7d, orgId) {
-  try { if (resets7d) globalThis.localStorage?.setItem(relearnOrgKey(orgId), String(resets7d)); } catch { /* storage blocked */ }
-}
-
 export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, span5h, span7d) {
   const banner = document.getElementById('status-banner');
   if (!banner) return;
@@ -377,14 +330,10 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
   // window that gets there sooner. This used to be hand-rolled here with a `>=` that always
   // preferred 5h on a tie — a different rule from the one the shared helper documents, which is
   // how 'both banners agree' quietly stops being true.
-  let paused7d = false;
   const candidate = (util, key, resetsAt, label, spanSeconds) => {
-    const fc = windowForecast(util, key, resetsAt, history, spanSeconds, {
-      tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider(),
-      relearning: key === 'd7' && passUseRelearning(currentResetPassOrg(), resetsAt),
-    });
-    if (fc && fc.paused) paused7d = true;
-    if (!fc || !fc.tier) return null;
+    const fc = windowForecast(util, key, resetsAt, history, spanSeconds,
+      { tzOffsetMin: viewerTzOffsetMin(), provider: selectedForecastProvider() });
+    if (!fc) return null;
     const hoursToReset = resetsAt ? (new Date(resetsAt).getTime() - Date.now()) / 3600000 : null;
     return { tier: fc.tier, eta: etaWithinWindow(fc.hoursTo100, hoursToReset), label };
   };
@@ -416,36 +365,6 @@ export function renderStatusBanner(util5h, util7d, history, resets5h, resets7d, 
       tier = { id: 'comfortable', css: 'green' };
       text = t('pace_comfortable');
     }
-  }
-
-  // 7d forecast paused (#2092, Codex 1R): the 7d window is unknown, so no all-clear. A 5h warning
-  // or the static near-limit rule still speaks; anything green becomes a neutral 「relearning」 —
-  // which the user can close for the rest of that 7d cycle (user, 2026-10-05). Closed → no banner
-  // at all (never the green all-clear); a later cycle that is paused again shows it again.
-  if (paused7d && tier.css === 'green') {
-    // The org id the pass code itself uses (currentResetPassOrg's choice) — taken directly so it is
-    // known before collectedOrgs arrives (Codex 2R: a primary render with no org list stored the
-    // close under 'default', and the same cycle's note came back once the list loaded).
-    const orgId = state.selectedOrgId || state.currentSnapshot?.claude_org_uuid || null;
-    if (relearnBannerClosed(resets7d, orgId)) { banner.className = 'status-banner hidden'; banner.textContent = ''; return; }
-    banner.className = 'status-banner sb-gray sb-closable';
-    banner.textContent = '';
-    const msg = document.createElement('span');
-    msg.textContent = t('pace_relearning_7d', windowUnitLabel(span7d) || t('win_7d'));
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'sb-close';
-    close.textContent = '\u00d7';
-    close.title = t('pace_relearning_close');
-    close.setAttribute('aria-label', t('pace_relearning_close'));
-    close.addEventListener('click', () => {
-      closeRelearnBanner(resets7d, orgId);
-      banner.className = 'status-banner hidden';
-      banner.textContent = '';
-    });
-    banner.append(msg, close);
-    banner.classList.remove('hidden');
-    return;
   }
 
   banner.className = 'status-banner sb-' + tier.css;

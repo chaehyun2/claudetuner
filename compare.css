@@ -1064,8 +1064,8 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 /* A turn with no words DEBATE_SLOW_NOTE_MS after its send (2026-09-30): the note and 「이번 차례 건너뛰기」 under the dots. */
 .cmp-debate-slow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; max-width: 520px; }
 .cmp-debate-slow-text { margin: 0; font-size: 12px; line-height: 1.45; color: var(--debate-room-fg); }
-.cmp-debate-slow-skip { height: 24px; padding: 0 10px; border: 1px solid var(--debate-room-fg); border-radius: var(--radius-pill); background: transparent; color: var(--debate-room-fg); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
-.cmp-debate-slow-skip:hover { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); }
+.cmp-debate-slow-skip, .cmp-debate-slow-wait, .cmp-debate-slow-wait-all { height: 24px; padding: 0 10px; border: 1px solid var(--debate-room-fg); border-radius: var(--radius-pill); background: transparent; color: var(--debate-room-fg); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.cmp-debate-slow-skip:hover, .cmp-debate-slow-wait:hover, .cmp-debate-slow-wait-all:hover { background: var(--debate-bubble-bg); color: var(--debate-bubble-fg); }
 @keyframes cmp-typing {
   0%, 100% { background: var(--text-secondary); box-shadow: 10px 0 var(--border-strong), 20px 0 var(--border-strong); }
   33% { background: var(--border-strong); box-shadow: 10px 0 var(--text-secondary), 20px 0 var(--border-strong); }

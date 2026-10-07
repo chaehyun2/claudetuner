@@ -105,6 +105,13 @@ export const NOTIF_ID_OPTIMIZE = 'claude-plan-optimize';
 // a value that crosses module boundaries, so it is not a literal repeated at each end.
 export const ERR_PLAN_CHANGED_EXTERNALLY = 'Plan already changed externally';
 export const NOTIF_ID_ALERT = 'usage-alert';
+// #2092 P2 — the three reset-pass notification toggles (storage.sync) and their defaults. ONE literal
+// read by both the service worker (bg/notifications.js) and the options page (options.js imports this
+// module), so the two can never disagree about what an unset toggle means (#2235 is that bug for
+// notifyUsageWarn). All on: each fires rarely (a pass's 3d/1d expiry, a new pass, a limit a pass can
+// clear — at most once per window cycle) and each is about something the user would otherwise lose
+// or not know they can do.
+export const RP_NOTIFY_DEFAULTS = Object.freeze({ notifyRpExpiry: true, notifyRpLimit: true, notifyRpNew: true });
 
 // === Adaptive Polling for secondary orgs ===
 export const ORG_POLL_TIERS = {
@@ -323,6 +330,17 @@ export const BG_I18N = {
     // 🔴 마지막 회차는 "다시 알리지 않겠다"를 반드시 명시한다 — 끝난다는 걸 아는 것 자체가 분노를 크게 낮춘다.
     authblock_r4_title: '마지막 안내입니다',
     authblock_r4_msg: '인증하지 않으면 사용량은 이 브라우저에서만 볼 수 있습니다. 다시 알리지 않겠습니다 — 필요하면 확장 아이콘을 눌러 언제든 Claude Tuner 인증을 할 수 있습니다.',
+    // #2092 P2 사용 한도 초기화 패스 알림(bg/notifications.js checkResetPassNotifications). {0} = 서비스
+    // 이름, 같은 서비스 카드가 2개 이상이면 「서비스 · 조직명」. 클릭 = 해당 사이트 사용량 설정(딥링크만).
+    rp_notif_expiry3_title: '{0} 초기화 패스가 3일 안에 만료돼요',
+    rp_notif_expiry1_title: '{0} 초기화 패스가 24시간 안에 만료돼요',
+    rp_notif_expiry_msg: '쓰지 않은 패스 {0}장 · 가장 빠른 만료 {1}. 쓰지 않으면 사라져요 — 눌러서 사용량 설정 열기',
+    rp_notif_limit_title: '{0} 한도 도달 — 초기화 패스로 지금 풀 수 있어요',
+    rp_notif_limit_msg: '보유한 초기화 패스 한 장으로 막힌 한도를 바로 풀 수 있어요. 눌러서 사용량 설정 열기',
+    rp_notif_new_title: '{0} 초기화 패스를 받았어요',
+    rp_notif_new_msg: '새 패스 {0}장 · 보유 {1}장. 한도에 닿았을 때 사용량 설정에서 쓸 수 있어요.',
+    // ChatGPT 패스는 Codex·Work 한도에만 적용된다 — 채팅 한도를 풀어 준다고 읽히면 안 된다.
+    rp_notif_chatgpt_scope: '(Codex·Work 한도에만 적용)',
   },
   en: {
     // #966 badge tooltip. 🔴 Twin of `pin_move_title` in the popup dictionary
@@ -408,5 +426,14 @@ export const BG_I18N = {
     authblock_r3_msg: 'Weekly trends, hourly heatmaps and 7-day forecasts are built from usage saved to Claude Tuner. One verification is all it takes.',
     authblock_r4_title: 'Last reminder',
     authblock_r4_msg: "Without verifying, your usage stays visible only on this browser. We won't remind you again — you can verify Claude Tuner any time from the extension icon.",
+    // #2092 P2 reset-pass notifications. {0} = service, or 「service · org」 with 2+ cards for it.
+    rp_notif_expiry3_title: '{0} reset pass expires within 3 days',
+    rp_notif_expiry1_title: '{0} reset pass expires within 24 hours',
+    rp_notif_expiry_msg: '{0} unused pass(es) · earliest expiry {1}. Unused passes are lost — click to open usage settings',
+    rp_notif_limit_title: '{0} limit reached — a reset pass can clear it now',
+    rp_notif_limit_msg: 'One of your reset passes lifts the blocked limit right away. Click to open usage settings',
+    rp_notif_new_title: '{0}: new reset pass received',
+    rp_notif_new_msg: 'New: {0} · held: {1}. Use it from usage settings when you hit a limit.',
+    rp_notif_chatgpt_scope: '(Codex/Work limits only)',
   },
 };

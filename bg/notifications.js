@@ -1,7 +1,9 @@
-import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL } from './constants.js';
+import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL, RP_NOTIFY_DEFAULTS } from './constants.js';
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
 import { readHistory } from './usage-history-db.js';
+import { blockedSlotsOf, clearNowCall, holdsAny, isPassCount, orgHistory, pastWeeklyBlocks, resetPassSiteUrl, RESET_PASS_TICKETS_MAX } from './reset-pass-model.js';
+import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 /**
  * The services this install actually collects, as "Claude/ChatGPT/Gemini", for the auth-blocked
@@ -63,8 +65,9 @@ const NOTIF_LOG_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // Storage cost is zero: `_notifLog` already records every notification with 30-day retention. This
 // only adds a reader, plus a lock so concurrent producers stop losing each other's writes.
 const NOTIF_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
-const NUDGE_QUIET_START_HOUR = 22; // local time; nudges only
-const NUDGE_QUIET_END_HOUR = 8;
+// Exported for the reset-pass overnight-expiry guarantee check (test/notif-budget-guard.mjs [9]).
+export const NUDGE_QUIET_START_HOUR = 22; // local time; nudges and reset-pass cards
+export const NUDGE_QUIET_END_HOUR = 8;
 
 // The nudge class — everything here is deferrable by definition. A category that represents
 // something BROKEN does not belong in this set, because being suppressed would hide a real fault.
@@ -169,6 +172,10 @@ export function notifCategoryFromId(notifId) {
   if (id.startsWith('reset-soon-')) return 'reset-soon';
   if (id.startsWith('reset-done-')) return 'reset-done';
   if (id.startsWith('weekly-report-')) return 'weekly-report';
+  // #2092 P2 reset-pass cards: `rp-<family>-<provider>-<org uuid>` (checkResetPassNotifications).
+  if (id.startsWith('rp-expiry-')) return 'rp-expiry';
+  if (id.startsWith('rp-limit-')) return 'rp-limit';
+  if (id.startsWith('rp-new-')) return 'rp-new';
   // #1971 debate cards (bg/debate-notify.js, `debate-<kind>-<tabId>-<run>`): one bucket per kind.
   if (id.startsWith('debate-done-')) return 'debate-done';
   if (id.startsWith('debate-asked-')) return 'debate-asked';
@@ -788,6 +795,360 @@ export async function checkUsageAlerts(snapshot) {
   }
 
   await chrome.storage.local.set({ usageAlertState });
+}
+
+// === Usage-limit reset pass notifications (#2092 P2) ===
+//
+// Three cards, each about ONE org's passes (docs/plans/usage-reset-passes.md §3 P2):
+//   rp-expiry  an unused pass expires within 3 days, then within 24 hours — once per pass per step
+//   rp-limit   a window is at its limit AND clearNowCall says a pass should clear it now — once per
+//              window cycle (the blocked windows' resets_at)
+//   rp-new     a pass we had not seen before for this org — never on the first observation (an
+//              install or upgrade that finds passes already held seeds silently)
+// Clicking any of them opens the provider's usage settings (resetPassSiteUrl) — a deep link where
+// the user spends a pass themselves. We never spend one.
+//
+// Every collected org is checked, not only the pinned one checkUsageAlerts reads: a ChatGPT pass or
+// a second Claude org's pass is just as lost when it expires unseen. The limit card is still the
+// 100% path — blockedSlotsOf is the same `>= 100` reading every reset-pass surface uses.
+//
+// 🔴 The 「clear it now」 call is clearNowCall, the one every surface uses (batch review 1.55.2:
+// surfaces that judged on their own contradicted each other). Same inputs as the overview badge:
+// the org's own fields and its own history rows (orgHistory, legacy rows for the Claude primary).
+//
+// The ids are FIXED per family and org (#1132): the 24-hour expiry card replaces the 3-day one, a
+// second limit cycle replaces the first. Dedup lives in storage.local (RP_NOTIFY_STATE_KEY), written
+// BEFORE the cards are created, so a service-worker restart can skip a card but never repeat one —
+// the ordering the auth ladder chose for the same reason.
+//
+// Quiet hours (the nudge window, 22:00–08:00 local) DEFER these cards rather than drop them: nothing
+// is marked while quiet, so a pass still expiring / a limit still blocked in the same cycle / a new
+// pass still held is announced on the first collection after the window. Not budgeted: they are
+// about the user's own passes, not re-engagement.
+const RP_NOTIFY_STATE_KEY = 'rpNotifyState';
+// Expiry steps, most urgent first. A pass first seen inside the 24h step skips the 3-day card.
+export const RP_EXPIRY_STEPS = [{ tag: '1d', ms: DAY_MS }, { tag: '3d', ms: 3 * DAY_MS }];
+// Overnight expiry (user decision 2026-10-07): a pass that would lapse before the coming quiet
+// window ends gets its 24h card in any non-quiet cycle that sees it — not only once it is 24h away
+// (the last cycle before 22:00 may be the morning one, and a DST night is 25h — Codex 4R). A
+// deferred card is never shown after its pass expired: lapsed tickets are dropped before any card
+// is decided (rpTicketCounts). 🪤 A pass FIRST observed during quiet hours that lapses before
+// NUDGE_QUIET_END_HOUR is never warned: no earlier cycle knew it.
+
+/** The end of the quiet window that follows `now` (local NUDGE_QUIET_END_HOUR, DST-safe). */
+function rpNextQuietEnd(now) {
+  const d = new Date(now);
+  if (d.getHours() >= NUDGE_QUIET_END_HOUR) d.setDate(d.getDate() + 1);
+  d.setHours(NUDGE_QUIET_END_HOUR, 0, 0, 0);
+  return d.getTime();
+}
+// Two resets_at readings this close are the same window cycle (providers jitter by seconds).
+const RP_LIMIT_SAME_CYCLE_TOL_MS = 30 * 60 * 1000;
+// An org not observed for this long is forgotten (a re-appearing org seeds silently again).
+const RP_STATE_TTL_MS = 30 * DAY_MS;
+const RP_NOTIF_FAMILIES = ['rp-expiry-', 'rp-limit-', 'rp-new-'];
+
+/** The provider's usage-settings URL for a reset-pass card id, or null for any other id. */
+export function resetPassNotifUrl(notifId) {
+  const id = String(notifId || '');
+  const fam = RP_NOTIF_FAMILIES.find((f) => id.startsWith(f));
+  if (!fam) return null;
+  return resetPassSiteUrl(id.slice(fam.length).split('-')[0], SITE_ORIGINS);
+}
+
+/**
+ * THE view every reset-pass card is decided from (Codex 5R: each path filtering expiry on its own
+ * left the count fallback and clearNowCall reading passes that had lapsed). A summary is observed at
+ * collection time; by the time a card is decided — a deferred one at 08:00, a stale one after
+ * failed collections — some passes it lists may have expired. Those are taken OUT here:
+ *   · tickets are earliest-first and capped at RESET_PASS_TICKETS_MAX, so the lapsed ones are always
+ *     inside the list and subtracting them from `available` / `by_kind` is exact even past the cap;
+ *   · which pass the provider called usable is not known per ticket, so a summary with any lapsed
+ *     pass is `stale` and usable counts drop to 0 — clearNowCall (still the one judgement) is fed
+ *     this view and says no until a fresh collection;
+ *   · a ticketless summary (ChatGPT before its detail read) whose next_expires_at has passed is
+ *     `stale` too; with no next_expires_at its expiry is simply unknown (`expiryKnown: false`).
+ */
+function rpLiveView(rp, now) {
+  const tickets = Array.isArray(rp.tickets) ? rp.tickets.filter((t) => t && typeof t.kind === 'string') : [];
+  const lapsed = tickets.filter((t) => !(Date.parse(t.expires_at) > now));
+  const nextExp = Date.parse(rp.next_expires_at || '');
+  const expiryKnown = rp.kinds_known === true && Array.isArray(rp.tickets);
+  const stale = lapsed.length > 0 || (Number.isFinite(nextExp) && nextExp <= now);
+  if (!stale) return { rp, stale, expiryKnown };
+  const byKind = { ...(rp.by_kind || {}) };
+  for (const t of lapsed) byKind[t.kind] = Math.max(0, (Number(byKind[t.kind]) || 0) - 1);
+  const live = tickets.filter((t) => !lapsed.includes(t));
+  const usable = {};
+  for (const k of Object.keys(rp.usable_by_kind || {})) usable[k] = 0;
+  return {
+    stale, expiryKnown,
+    rp: {
+      ...rp, available: Math.max(0, rp.available - lapsed.length), by_kind: byKind, tickets: live,
+      next_expires_at: live.length ? live[0].expires_at : null, usable_by_kind: usable, usable_now: 0,
+    },
+  };
+}
+
+/**
+ * `{ "kind|expires_at": count }` of the passes held and still valid at `now`, or null when the kinds
+ * are not known. Lapsed tickets go here, so no card — new or expiry — is decided from a pass a stale
+ * summary still lists (Codex 4R: a deferred 「new pass」 card after the pass lapsed overnight).
+ */
+function rpTicketCounts(rp, now) {
+  if (rp.kinds_known !== true || !Array.isArray(rp.tickets)) return null;
+  const out = {};
+  for (const t of rp.tickets) {
+    if (!t || typeof t.kind !== 'string' || typeof t.expires_at !== 'string') continue;
+    if (!(Date.parse(t.expires_at) > now)) continue;
+    const k = `${t.kind}|${t.expires_at}`;
+    out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+}
+
+/**
+ * Passes in this observation that the previous one did not hold. Per pass (kind + expiry) when both
+ * sides list every pass — so a pass used and another received between two cycles still counts —
+ * else by the total. Tickets are capped at RESET_PASS_TICKETS_MAX: past the cap an expiring pass
+ * lets the next one into the list, which would read as new, so a capped list uses the total too.
+ */
+function rpNewPassCount(prev, n, tickets) {
+  const listed = (count) => isPassCount(count) && count <= RESET_PASS_TICKETS_MAX;
+  if (prev.t && typeof prev.t === 'object' && tickets && listed(prev.n) && listed(n)) {
+    let fresh = 0;
+    for (const [k, c] of Object.entries(tickets)) fresh += Math.max(0, c - (Number(prev.t[k]) || 0));
+    return fresh;
+  }
+  return Math.max(0, n - prev.n);
+}
+
+function rpMinCounts(a, b) {
+  const out = {};
+  for (const k of Object.keys(a)) if (b[k]) out[k] = Math.min(a[k], b[k]);
+  return out;
+}
+
+const rpPad = (x) => String(x).padStart(2, '0');
+function rpDate(ms) {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()} ${rpPad(d.getHours())}:${rpPad(d.getMinutes())}`;
+}
+
+/**
+ * Same cycle when every blocked slot's refill time matches the one we last notified for. A refill
+ * time we did not know was stored as `now + nominal window` (rpLimEnd) and flagged in `guessed`:
+ * an unknown refill is the same cycle while that guess is still ahead, and a refill that becomes
+ * known is the same cycle when it falls inside the guessed window (Codex 2R) — never re-fire per
+ * collection, never re-fire on the unknown → known transition.
+ */
+function rpSameCycle(prevLim, guessed, lim, now) {
+  if (!prevLim || typeof prevLim !== 'object') return false;
+  return Object.entries(lim).every(([slot, end]) => {
+    const was = prevLim[slot];
+    if (!Number.isFinite(was)) return false;
+    if (end === null) return was > now;
+    if (guessed && guessed[slot]) return end <= was + RP_LIMIT_SAME_CYCLE_TOL_MS;
+    return Math.abs(was - end) <= RP_LIMIT_SAME_CYCLE_TOL_MS;
+  });
+}
+
+const RP_SLOT_SPAN_MS = { five_hour: 5 * 60 * 60 * 1000, seven_day: 7 * DAY_MS };
+/** The refill time to remember for a slot: the reported one, else now + its nominal window. */
+const rpLimEnd = (slot, end, now) => (end === null ? now + (RP_SLOT_SPAN_MS[slot] || RP_SLOT_SPAN_MS.seven_day) : end);
+
+/** How many passes an expiry mark announced — a count, or 1.55.8's `1` / `true`; anything else is none. */
+function rpExpMarked(v) {
+  if (v === true) return 1;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * A card the browser did not show (revoked permission, OS block) must not stay marked as shown —
+ * its dedup was written before create(), so take back exactly what that card marked and let the
+ * next cycle try again (Codex 1R). Never throws.
+ */
+async function rpUndoCard(c) {
+  try {
+    const { [RP_NOTIFY_STATE_KEY]: st = {} } = await chrome.storage.local.get({ [RP_NOTIFY_STATE_KEY]: {} });
+    const e = st && st[c.key];
+    // Only the cycle that marked it is undone: a later cycle has rewritten the entry from its own
+    // observation, and reverting that would replay a card it showed (Codex 2R).
+    if (!e || typeof e !== 'object' || e.at !== c.at) return;
+    if (c.fam === 'expiry') {
+      for (const [m, was] of c.undo.marks) {
+        if (!e.exp) continue;
+        if (was === null) delete e.exp[m]; else e.exp[m] = was;
+      }
+    }
+    else if (c.fam === 'limit') { e.lim = c.undo.lim; e.limU = c.undo.limU; }
+    else { e.n = c.undo.n; e.t = c.undo.t; }
+    await chrome.storage.local.set({ [RP_NOTIFY_STATE_KEY]: st });
+  } catch { /* best effort: the worst case is the pre-fix behaviour, one card missed */ }
+}
+
+/**
+ * Decide and show the reset-pass cards for every collected org. Called once per collection cycle
+ * (background.js, after every provider merged). Local data only.
+ */
+export async function checkResetPassNotifications(now = Date.now()) {
+  const prefs = await chrome.storage.sync.get(RP_NOTIFY_DEFAULTS);
+  const local = await chrome.storage.local.get({ collectedOrgs: [], [RP_NOTIFY_STATE_KEY]: {} });
+  const orgs = Array.isArray(local.collectedOrgs) ? local.collectedOrgs : [];
+  const raw = local[RP_NOTIFY_STATE_KEY];
+  const state = {};
+  // Storage is not a type system: keep only entries of the right shape that are still fresh.
+  for (const [k, v] of Object.entries(raw && typeof raw === 'object' ? raw : {})) {
+    if (v && typeof v === 'object' && Number.isFinite(v.at) && now - v.at < RP_STATE_TTL_MS) state[k] = v;
+  }
+  const quiet = inNudgeQuietHours(now);
+  const cards = [];
+  let history = null;
+  for (const org of orgs) {
+    const provider = (org && org.provider) || 'claude';
+    const rp = org && org.resetPasses;
+    // 「모름」 (known:false) leaves the state untouched: seeding it as zero passes would announce
+    // every held pass as new the moment the summary is readable again.
+    if (!org || !org.uuid || rp?.known !== true || !isPassCount(rp.available)) continue;
+    if (!resetPassSiteUrl(provider, SITE_ORIGINS)) continue;
+    const key = `${provider}:${org.uuid}`;
+    const prev = state[key] && isPassCount(state[key].n) ? state[key] : null;
+    // Every card below reads `live`, never `rp` (rpLiveView).
+    const view = rpLiveView(rp, now);
+    const live = view.rp;
+    const tickets = rpTicketCounts(live, now);
+    const cur = { at: now, n: live.available, t: tickets, exp: {}, lim: prev?.lim ?? null };
+    // Name the org only when this service has more than one card — the label the overview's
+    // account-switch note uses the same count for.
+    const sameProvider = orgs.filter((o) => ((o && o.provider) || 'claude') === provider).length;
+    const service = PROVIDER_LABELS[provider] || provider;
+    const label = sameProvider >= 2 && org.name ? `${service} · ${org.name}` : service;
+    const tail = `${provider}-${org.uuid}`;
+
+    // ── new pass ── (no `prev` = first sight of this org: seed silently)
+    if (prev && prefs.notifyRpNew === true && (view.stale || !view.expiryKnown)) {
+      // Only a summary whose every pass has a known, unexpired expiry may say what is new. A stale
+      // one, or one without ticket detail (ChatGPT before its detail read — fetched when the count
+      // changes), could be announcing a pass that already lapsed (Codex 5R·6R): keep the last good
+      // observation, and the next summary with detail decides — late, never about a lapsed pass.
+      cur.n = prev.n;
+      cur.t = prev.t ?? null;
+    } else if (prev) {
+      const fresh = rpNewPassCount(prev, live.available, tickets);
+      if (fresh > 0 && prefs.notifyRpNew === true && quiet) {
+        // Deferred: remember only what went AWAY, so the new pass still reads as new after quiet hours.
+        cur.n = Math.min(prev.n, live.available);
+        cur.t = prev.t && tickets ? rpMinCounts(prev.t, tickets) : (prev.t ?? null);
+      } else if (fresh > 0 && prefs.notifyRpNew === true) {
+        cards.push({ fam: 'new', key, at: now, provider, tail, label, fresh, held: live.available, undo: { n: prev.n, t: prev.t ?? null } });
+      }
+      // Toggle off: the state follows silently, so turning it on later does not replay old passes.
+    }
+
+    // ── expiry ──
+    const prevExp = prev && prev.exp && typeof prev.exp === 'object' ? prev.exp : {};
+    for (const [k, v] of Object.entries(prevExp)) {
+      const exp = Date.parse(k.split('|')[1] || '');
+      if (Number.isFinite(exp) && exp > now) cur.exp[k] = v;
+    }
+    if (prefs.notifyRpExpiry === true && tickets && !quiet) {
+      let step = null, count = 0, earliest = Infinity;
+      const quietEnd = rpNextQuietEnd(now);
+      const marks = [];
+      for (const [k, c] of Object.entries(tickets)) {
+        const exp = Date.parse(k.split('|')[1] || '');
+        if (!Number.isFinite(exp) || exp <= now) continue;
+        const hit = exp <= quietEnd ? RP_EXPIRY_STEPS[0] : RP_EXPIRY_STEPS.find((st) => exp - now <= st.ms);
+        // A mark holds how many passes of that kind and expiry were announced (1.55.8 stored `1`, the
+        // same reading): one more pass with the very same expiry is announced too (1.55.9 batch review).
+        if (!hit || rpExpMarked(cur.exp[`${k}|${hit.tag}`]) >= c) continue;
+        // The 24h card stands for the 3-day one too: never show the 3-day card after it.
+        for (const st of RP_EXPIRY_STEPS.slice(RP_EXPIRY_STEPS.indexOf(hit))) {
+          const m = `${k}|${st.tag}`;
+          const was = rpExpMarked(cur.exp[m]);
+          if (was < c) { marks.push([m, cur.exp[m] ?? null]); cur.exp[m] = c; }
+        }
+        if (!step || hit.ms < step.ms) step = hit;
+        count += c;
+        earliest = Math.min(earliest, exp);
+      }
+      if (step) cards.push({ fam: 'expiry', key, at: now, provider, tail, label, step: step.tag, count, earliest, undo: { marks } });
+    }
+
+    // ── limit reached + a pass clears it now ──
+    // `lim` = per slot, the refill time of the cycle we last announced. Kept while the block lifts
+    // and returns (100 → 99 → 100 is one cycle — Codex 1R); only refill times already past go.
+    const prevLim = prev && prev.lim && typeof prev.lim === 'object' ? prev.lim : null;
+    const prevGuessed = prev && prev.limU && typeof prev.limU === 'object' ? prev.limU : {};
+    cur.lim = {};
+    cur.limU = {};
+    for (const [sl, end] of Object.entries(prevLim || {})) {
+      if (!Number.isFinite(end) || end + RP_LIMIT_SAME_CYCLE_TOL_MS <= now) continue;
+      cur.lim[sl] = end;
+      if (prevGuessed[sl]) cur.limU[sl] = 1;
+    }
+    const blocked = blockedSlotsOf(org);
+    if (blocked.length && prefs.notifyRpLimit === true && !quiet && holdsAny(live)) {
+      const r5 = Date.parse(org.resetsAt5h || ''), r7 = Date.parse(org.resetsAt7d || '');
+      if (history === null) {
+        try { history = await readHistory(); } catch { history = []; }
+      }
+      const past = pastWeeklyBlocks(orgHistory(history, org.uuid, provider === 'claude' && !!org.isPrimary), now);
+      if (clearNowCall(live, blocked, r5, r7, past, now)) {
+        const lim = {};
+        for (const sl of blocked) {
+          const end = sl === 'five_hour' ? r5 : r7;
+          lim[sl] = Number.isFinite(end) ? end : null;
+        }
+        if (rpSameCycle(cur.lim, cur.limU, lim, now)) {
+          // A guessed refill that is now reported is replaced by the real one (same cycle, no card).
+          for (const [sl, end] of Object.entries(lim)) {
+            if (end !== null && cur.limU[sl]) { cur.lim[sl] = end; delete cur.limU[sl]; }
+          }
+        } else {
+          const undo = { lim: { ...cur.lim }, limU: { ...cur.limU } };
+          for (const [sl, end] of Object.entries(lim)) {
+            cur.lim[sl] = rpLimEnd(sl, end, now);
+            if (end === null) cur.limU[sl] = 1; else delete cur.limU[sl];
+          }
+          cards.push({ fam: 'limit', key, at: now, provider, tail, label, undo });
+        }
+      }
+    }
+    state[key] = cur;
+  }
+  // Dedup first, cards second: a worker torn down in between skips a card, never repeats one.
+  await chrome.storage.local.set({ [RP_NOTIFY_STATE_KEY]: state });
+  for (const c of cards) {
+    // ChatGPT passes clear only the Codex / Work limits — never let a card read as a chat-limit fix.
+    const scope = c.provider === 'chatgpt' ? ' ' + await bt('rp_notif_chatgpt_scope') : '';
+    const base = { type: 'basic', iconUrl: 'icons/icon128.png' };
+    if (c.fam === 'expiry') {
+      createCountedNotification(`rp-expiry-${c.tail}`, {
+        ...base,
+        title: await bt(c.step === '1d' ? 'rp_notif_expiry1_title' : 'rp_notif_expiry3_title', c.label),
+        message: await bt('rp_notif_expiry_msg', c.count, rpDate(c.earliest)) + scope,
+        priority: c.step === '1d' ? 2 : 1,
+      }, 'rp-expiry').then((id) => { if (!id) rpUndoCard(c); });
+      logNotification('rp-expiry');
+    } else if (c.fam === 'limit') {
+      createCountedNotification(`rp-limit-${c.tail}`, {
+        ...base,
+        title: await bt('rp_notif_limit_title', c.label),
+        message: await bt('rp_notif_limit_msg') + scope,
+        priority: 2,
+      }, 'rp-limit').then((id) => { if (!id) rpUndoCard(c); });
+      logNotification('rp-limit');
+    } else {
+      createCountedNotification(`rp-new-${c.tail}`, {
+        ...base,
+        title: await bt('rp_notif_new_title', c.label),
+        message: await bt('rp_notif_new_msg', c.fresh, c.held) + scope,
+        priority: 0,
+      }, 'rp-new').then((id) => { if (!id) rpUndoCard(c); });
+      logNotification('rp-new');
+    }
+  }
 }
 
 // === Server-signaled push (e.g. Product Hunt launch) ===
