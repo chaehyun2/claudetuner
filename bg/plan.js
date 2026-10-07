@@ -165,12 +165,17 @@ export async function refineTeamPlan(plan, orgUuid) {
 }
 
 // === Report plan change order result ===
-export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason) {
+export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason, changedOrgUuid = null) {
   try {
     await authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-response`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order_id: orderId, user_email: userEmail, action, result, failure_reason: failureReason }),
+      // #2181 U4: `changed_org_uuid` = the org this browser actually changed — the server links the
+      // order to it, so the revert sweep judges the right org (closes U0 R5 for manual orders).
+      body: JSON.stringify({
+        order_id: orderId, user_email: userEmail, action, result, failure_reason: failureReason,
+        ...(changedOrgUuid ? { changed_org_uuid: changedOrgUuid } : {}),
+      }),
     });
   } catch (e) {
     console.error('[Claude Tuner] Failed to report plan order result:', e.message);
@@ -179,13 +184,18 @@ export async function reportPlanOrderResult(config, orderId, userEmail, action, 
 
 /** Accept a plan order: execute change + report result + update storage */
 export async function acceptPlanOrder(config, po, userEmail, { auto = false } = {}) {
+  // 🔴 Never an auto order: those run only through bg/plan-auto.js (execute approval, no fallback).
+  if (po?.source === 'auto') return { success: false, error: 'auto order on the manual path' };
+  // #2181 U4: an order whose target org was proven at creation changes ONLY that org
+  // (ERR_PLAN_ORG_UNVERIFIED when this popup shows another one).
   const changeResult = await executePlanChange({
     type: PLAN_HIERARCHY.indexOf(po.to_plan) > PLAN_HIERARCHY.indexOf(po.from_plan) ? 'upgrade' : 'downgrade',
     to_plan: po.to_plan, from_plan: po.from_plan,
-  });
+  }, { orgUuid: po.target_org_uuid || null });
   await reportPlanOrderResult(config, po.order_id, userEmail, 'accepted',
     changeResult?.success ? 'completed' : 'failed',
-    changeResult?.success ? undefined : (changeResult?.error || 'Plan change failed'));
+    changeResult?.success ? undefined : (changeResult?.error || 'Plan change failed'),
+    changeResult?.success ? changeResult.orgUuid : null);
   // 🔴 COMPARE-AND-CLEAR: only retire the order this call was about (#994, Codex 3rd pass).
   // `pendingPlanOrder` is a ONE-SLOT key and this used to null it unconditionally. Server POST
   // results are handled in an unawaited `.then` (bg/collect.js), so a second order can land in
@@ -334,7 +344,7 @@ export async function executePlanChange(recommendation, { orgUuid = null } = {})
     // Record state change immediately (skip dedup; server auto-updates last_plan_change_at)
     forceCollect('plan change');
 
-    return { success: true };
+    return { success: true, orgUuid: orgId };
 
   } catch (error) {
     console.error(`[Claude Tuner] Plan change failed:`, error.message);

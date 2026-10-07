@@ -783,8 +783,21 @@ export function mergeChatGPTResetDetail(summary, detail, now = Date.now()) {
 // Personal paid tiers. Team/Business seats are billed to the company.
 const CHATGPT_VAT_PLANS = ['go', 'plus', 'prolite', 'pro'];
 
-/** The member's own paid personal account in an accounts/check response, or null. */
-export function pickChatGPTVatAccount(data) {
+// `/wham/usage` — the active account's usage, and the id the team-sharing policy keys that account by.
+export const CHATGPT_USAGE_PATH = '/backend-api/wham/usage';
+/** The org key a `/wham/usage` response files the ACTIVE account under (sometimes a `user-…` id, which
+ * accounts/check never carries — so the two cannot be compared directly). */
+export function chatgptUsageAccountId(usage) {
+  return usage?.account_id || usage?.user_id || 'unknown';
+}
+
+/**
+ * The member's own personal account in an accounts/check response, or null. `paidOnly` keeps only a
+ * paid personal subscription (VAT); without it any personal account counts (the training-data setting,
+ * #1889 — Free accounts are the ones most likely to have it ON).
+ * @returns {{ accountId: string, planType: string, isDefault: boolean } | null}
+ */
+export function pickChatGPTPersonalAccount(data, { paidOnly = false } = {}) {
   const accounts = data?.accounts;
   if (!accounts || typeof accounts !== 'object') return null;
   const defaultId = accounts.default?.account?.account_id || null;
@@ -792,31 +805,41 @@ export function pickChatGPTVatAccount(data) {
     if (key === 'default') continue;               // an alias of a real entry
     const acc = a?.account;
     if (!acc || acc.structure !== 'personal' || acc.is_deactivated) continue;
-    if (!CHATGPT_VAT_PLANS.includes(acc.plan_type)) continue;
-    const ent = a.entitlement || {};
-    if (!ent.has_active_subscription || ent.is_active_subscription_gratis) continue;
+    if (paidOnly) {
+      if (!CHATGPT_VAT_PLANS.includes(acc.plan_type)) continue;
+      const ent = a.entitlement || {};
+      if (!ent.has_active_subscription || ent.is_active_subscription_gratis) continue;
+    }
     if (typeof acc.account_id !== 'string' || !acc.account_id) continue;
     return { accountId: acc.account_id, planType: acc.plan_type, isDefault: acc.account_id === defaultId };
   }
   return null;
 }
 
+/** The member's own paid personal account in an accounts/check response, or null. */
+export function pickChatGPTVatAccount(data) {
+  return pickChatGPTPersonalAccount(data, { paidOnly: true });
+}
+
 /**
- * Verdict from billing_info. Tax ID present → 'none'. No tax ID → 'charged' only when the billing
- * country is Korea (where a consumer is always charged 10% VAT); elsewhere "no tax ID" does not tell
- * whether VAT applies → null (undecidable). Unreadable body → undefined (a failed read, not a verdict).
- * Only the verdict leaves this function — never the number.
- * @returns {{ status: 'charged'|'none' } | null | undefined}
+ * Verdict from billing_info, with the billing country. Tax ID present → 'none'; no tax ID → 'charged'
+ * ("no business tax ID on file" — in Korea that always means 10% VAT). Abroad, no tax ID does not prove
+ * VAT applies, so the country rides along and the server decides where a verdict is shown (Korea only,
+ * #2157 10-07) — collecting abroad keeps the option to widen that later. No tax ID and no readable country
+ * → null (undecidable: the verdict could not be placed). Unreadable body → undefined (a failed read).
+ * Only the verdict and the country code leave this function — never the number or the address.
+ * @returns {{ status: 'charged'|'none', country: string|null } | null | undefined}
  */
 export function parseChatGPTBillingInfo(info) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined;
+  const raw = info.address && typeof info.address === 'object' ? info.address.country : null;
+  const country = typeof raw === 'string' && /^[A-Za-z]{2}$/.test(raw) ? raw.toUpperCase() : null;
   const tax = info.tax_id;
   if (tax != null) {
     // A tax ID entry whose value we cannot read is an unreadable answer, not "no tax ID" (Codex — a
     // malformed `value` must not turn into a confident 'charged').
     if (typeof tax !== 'object' || typeof tax.value !== 'string' || !tax.value.trim()) return undefined;
-    return { status: 'none' };
+    return { status: 'none', country };
   }
-  const country = info.address && typeof info.address === 'object' ? info.address.country : null;
-  return country === 'KR' ? { status: 'charged' } : null;
+  return country ? { status: 'charged', country } : null;
 }

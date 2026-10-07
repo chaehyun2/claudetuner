@@ -6,6 +6,7 @@ import {
   chatgptPlanName, unixToResetTime, parseAccountsRoster, windowSpan, classifyWindows,
   parseAdditionalLimits, parseModelAvailability, parseReachedType, summarizeLimitBuckets,
   pickScopedModel, parseChatGPTResetSummary, parseChatGPTResetDetail, mergeChatGPTResetDetail,
+  CHATGPT_USAGE_PATH, chatgptUsageAccountId,
 } from './parse-chatgpt.js';
 import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
@@ -14,6 +15,7 @@ import { chatgptUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { syncChatGPTVatStatus } from './vat.js';
+import { syncChatGPTTraining } from './training.js';
 import { trackPendingSend } from './collect-lock.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
@@ -139,7 +141,6 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
 const CHATGPT_RESET_DETAIL_PATH = '/backend-api/wham/rate-limit-reset-credits';
 const RESET_DETAIL_STATE_KEY = 'chatgptResetDetail';
 // The usage endpoint — read once per cycle, and once more right after a reset-credit detail fetch.
-const CHATGPT_USAGE_PATH = '/backend-api/wham/usage';
 // At most once a day per account, or when the held count changes (plan §4: low frequency only).
 const RESET_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
 // Failure backoff doubles from 1h up to the daily TTL; a failure never clears the last good detail.
@@ -199,7 +200,7 @@ async function withResetPassDetail(summary, accountId) {
     // right after; a different one discards the detail. Costs one GET only when a detail was fetched.
     if (detail) {
       const again = await fetchChatGPTApi(CHATGPT_USAGE_PATH);
-      if ((again?.account_id || again?.user_id || 'unknown') !== accountId) detail = null;
+      if (chatgptUsageAccountId(again) !== accountId) detail = null;
     }
     // A detail that cannot explain this summary (count mismatch) is not stored as fresh either —
     // it would pin 「kinds unknown」 for the whole TTL; it takes the failure path (short backoff).
@@ -267,7 +268,7 @@ export async function collectChatGPT(force = false, userManual = false) {
 
     const { w5h, w7d } = classifyWindows(usage.rate_limit);
     const plan = chatgptPlanName(usage.plan_type);
-    const accountId = usage.account_id || usage.user_id || 'unknown';
+    const accountId = chatgptUsageAccountId(usage);
     const email = usage.email || null;
 
     // One accounts/check fetch (cached ~daily, but busted when the active account
@@ -378,6 +379,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     // blocks as this snapshot. NOT awaited: an optional read must never delay or hang the cycle.
     // Tracked so an account switch waits for it (see the Claude call in bg/collect.js).
     void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTVatStatus(accountId, usage.plan_type, ingest)).catch(() => {}));
+    // #1889 — the account's training-data setting, filed under its personal account (bg/training.js): read
+    // at most every 30 min, sent on its own route only when it changes. Same identity, blocks and tracking.
+    void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTTraining(accountId, usage.plan_type, ingest)).catch(() => {}));
 
     // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
     // user belongs to beyond the active account. Per-workspace usage needs a

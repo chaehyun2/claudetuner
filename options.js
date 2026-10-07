@@ -133,6 +133,103 @@ async function _authedFetch(cfg, url, options = {}) {
   return authedFetch({ ...cfg, apiKey: cfg.apiKey || CT_CONFIG.DEFAULT_API_KEY }, url, options);
 }
 
+// === Auto plan optimization consent (#2181) ===
+// A sub-checkbox of the `auto` radio. Its truth is on the server (plan_auto_consent — possibly
+// seeded for a dogfood org), so the box stays disabled until GET /admin-order-setting answers.
+let _autoOptConsentLoaded = false;
+// The member touched the optimization radio on this page — an explicit choice, worth sending even
+// before the server values have loaded.
+let _optRadioTouched = false;
+// admin-order-setting PATCHes run one at a time, newest wins: two overlapping requests could
+// otherwise commit out of order and re-enable a consent the member just turned off (Codex R1).
+let _adminOrderSync = Promise.resolve();
+let _adminOrderSyncSeq = 0;
+
+function _autoOptConsentChecked() {
+  const cb = document.getElementById('auto-opt-consent');
+  return !!cb && cb.checked;
+}
+
+/** Render the box: checked only while `auto` is selected; usable only once the server value is in. */
+function _applyAutoOptConsent(checked, autoSelected) {
+  const cb = document.getElementById('auto-opt-consent');
+  const row = document.getElementById('auto-opt-consent-row');
+  if (!cb || !row) return;
+  cb.checked = !!checked && !!autoSelected;
+  cb.disabled = !autoSelected || !_autoOptConsentLoaded;
+  row.classList.toggle('is-disabled', cb.disabled);
+}
+
+function _loadAutoOptConsent(config) {
+  const cb = document.getElementById('auto-opt-consent');
+  if (!cb) return;
+  cb.addEventListener('change', autoSave);
+  chrome.storage.local.get({ lastStatus: null }, async (status) => {
+    const email = status.lastStatus?.snapshot?.user_email;
+    if (!email) return;
+    try {
+      const res = await _authedFetch(config, `${config.serverUrl.replace(/\/+$/, '')}/api/snapshots/admin-order-setting?user_email=${encodeURIComponent(email)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (typeof data.allow_auto_rec !== 'boolean' || typeof data.admin_order_auto_approve !== 'boolean') return;
+      // The server is the source of truth for both flags: a stale local `auto` flag would otherwise
+      // let the next autosave overwrite (and revoke) what the server holds.
+      // …unless the member already chose on this page: their choice is in flight and wins.
+      if (!_optRadioTouched && (getRadioValue('optimization-group') === 'auto') !== data.admin_order_auto_approve) {
+        const want = data.admin_order_auto_approve ? 'auto'
+          : (getRadioValue('optimization-group') === 'auto' ? 'notify_only' : getRadioValue('optimization-group'));
+        _selectRadio('optimization-group', want);
+        chrome.storage.local.set({ ct_admin_order_auto_approve: data.admin_order_auto_approve });
+      }
+      _autoOptConsentLoaded = true;
+      _applyAutoOptConsent(data.allow_auto_rec, getRadioValue('optimization-group') === 'auto');
+    } catch { /* offline/old server: the box stays disabled and the PATCH omits allow_auto_rec */ }
+  });
+}
+
+/** Push `auto_approve` (+ the consent once loaded) to the server. Called from every autosave. */
+function _syncAdminOrderSetting(cfg) {
+  // Until the server's values are on screen, the radio may show a stale local flag; an autosave of
+  // some unrelated setting would then send `auto_approve:false` and revoke a seeded consent the
+  // member never saw. So before the load, only an explicit radio choice is sent (Codex R1).
+  if (!_autoOptConsentLoaded && !_optRadioTouched) return;
+  const seq = ++_adminOrderSyncSeq;
+  _adminOrderSync = _adminOrderSync.then(async () => {
+    if (seq !== _adminOrderSyncSeq) return; // a newer save is queued — it carries the latest state
+    // Read the controls when the request is SENT, not when it was queued.
+    const autoApproveVal = getRadioValue('optimization-group') === 'auto';
+    const body = { auto_approve: autoApproveVal, ext_version: chrome.runtime.getManifest().version };
+    // Omitted until loaded: an unloaded box shows nothing real, and omitting leaves the server row as is.
+    if (_autoOptConsentLoaded) body.allow_auto_rec = autoApproveVal && _autoOptConsentChecked();
+    const { lastStatus } = await chrome.storage.local.get({ lastStatus: null });
+    const email = lastStatus?.snapshot?.user_email;
+    if (!email) return;
+    try {
+      const res = await _authedFetch(cfg, `${cfg.serverUrl}/api/snapshots/admin-order-setting`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_email: email, ...body }),
+      });
+      if (!res.ok) return;
+      // The checkbox is NOT re-rendered from the response: a pending (debounced) change of the box
+      // would be overwritten by this older answer and then re-sent wrong (Codex R2).
+      chrome.storage.local.set({ ct_admin_order_auto_approve: autoApproveVal });
+    } catch { /* offline: the next autosave retries with the then-current state */ }
+  });
+}
+
+/** Select a radio without firing its onChange (initRadioGroup's click handler would autosave). */
+function _selectRadio(groupId, value) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  group.querySelectorAll('.radio-item').forEach(item => {
+    const radio = item.querySelector('input[type="radio"]');
+    const on = radio.value === value;
+    radio.checked = on;
+    item.classList.toggle('active', on);
+  });
+}
+
 // === Radio group helper ===
 function initRadioGroup(groupId, value, onChange) {
   const group = document.getElementById(groupId);
@@ -229,19 +326,7 @@ function doSave() {
   const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
 
   // Sync plan change request settings to server
-  const autoApproveVal = optimizationMode === 'auto';
-  chrome.storage.local.get({ lastStatus: null }, (status) => {
-    const email = status.lastStatus?.snapshot?.user_email;
-    if (email) {
-      _authedFetch(config, `${serverUrl}/api/snapshots/admin-order-setting`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_email: email, auto_approve: autoApproveVal }),
-      }).then(res => {
-        if (res.ok) chrome.storage.local.set({ ct_admin_order_auto_approve: autoApproveVal });
-      }).catch(() => {});
-    }
-  });
+  _syncAdminOrderSetting(config);
 
   chrome.storage.sync.set(config, () => {
     // Poll alarm is owned by background.js (activity-adaptive + server cadence) — the
@@ -352,7 +437,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (local.ct_admin_order_auto_approve) optMode = 'auto';
         else if (config.optimizationMode === 'approval') optMode = 'approval';
         else optMode = 'notify_only';
-        initRadioGroup('optimization-group', optMode, () => autoSave());
+        initRadioGroup('optimization-group', optMode, (v) => { _optRadioTouched = true; _applyAutoOptConsent(v === 'auto' && _autoOptConsentChecked(), v === 'auto'); autoSave(); });
+        _applyAutoOptConsent(false, optMode === 'auto');
+        _loadAutoOptConsent(config);
       });
 
       // Badge display mode

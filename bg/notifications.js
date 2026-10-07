@@ -163,6 +163,7 @@ export function notifCategoryFromId(notifId) {
   if (id.startsWith('auth-blocked-r')) return 'auth-blocked-followup';
   if (id === 'auth-blocked') return 'auth-blocked';
   if (id.startsWith('plan-order-')) return 'plan-order';
+  if (id.startsWith('plan-auto-')) return 'plan-auto';
   if (id.startsWith('promo-push-')) return 'promo-push';
   if (id.startsWith('collect-fail')) return 'collect-fail';
   if (id.startsWith('reset-soon-')) return 'reset-soon';

@@ -351,8 +351,8 @@ export function _updateUICore(status) {
     // skip this whole block and blank the popup for exactly the people who need it.
     const withheld = status.serverWithheld || null;
     const paused = status.syncPaused === true;
-    const modeLabel = status.fetchMode === 'cookie' ? ` (${t('cookie_mode')})` : '';
-    paintHealthy(indicator, statusText, withheld, `${formatTimeAgo(status.timestamp)}${withheld || paused ? '' : modeLabel}`, paused);
+    // No transport label ("cookie mode"): it's jargon to users and ellipsised the ⏳ countdown.
+    paintHealthy(indicator, statusText, withheld, formatTimeAgo(status.timestamp), paused);
     // Show next collection schedule + boost status — but NOT while withheld: the countdown is a
     // promise that something will be sent, and nothing will be. "⏳ 59분 후" on a gated install
     // reads as "it will fix itself shortly", which is the opposite of what we need the user to

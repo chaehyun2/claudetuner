@@ -20,6 +20,7 @@ import {
   detectPlan, refineTeamPlan, planFromSeatTier, hasConsumerOrg, fetchSubscriptionInfo,
   acceptPlanOrder, reportPlanOrderResult,
 } from './plan.js';
+import { handleAutoPlanOrder, flushAutoReports, noteSubscriptionObservation, AUTO_PATH_CAPABILITY } from './plan-auto.js';
 import { claudeOrgPlan, pickClaudeOrg } from '../vendor-ai/models.js';
 import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, SITE_ORIGINS, isUsableTab } from '../vendor-ai/sites.js';
 import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
@@ -883,6 +884,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         return orgId;
       })();
       subscriptionInfo = await fetchSubscriptionInfo(subOrgId);
+      // #2181 U4: a downgrade an auto order scheduled stops being ours once it is seen gone.
+      await noteSubscriptionObservation(subOrgId, subscriptionInfo).catch(() => {});
       _timings['5_subscription'] = Math.round(performance.now() - _ts);
     }
 
@@ -944,6 +947,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       is_primary_org: !!config.selectedOrgId && config.selectedOrgId === bestOrg?.uuid,
       last_active_org_uuid: cookieOrgId || null,
       install_id: await getOrCreateInstallId(),
+      // #2181 U4: this extension implements the auto plan-order path (bg/plan-auto.js). Only on the
+      // primary Claude POST — the one whose response handles plan_order below. Without it the server
+      // never delivers a source='auto' order to this browser.
+      plan_auto_exec: AUTO_PATH_CAPABILITY,
       // #1445 step B. 🔴 A CLAIM from the request BODY — the server stores it under `claimed_`
       // and never lets it overwrite what it derived from the request's own headers.
       // Spread, not assigned: an unreadable platform must be ABSENT, never `null`.
@@ -1329,8 +1336,15 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         await chrome.storage.local.set({ ct_admin_order_auto_approve: result.admin_order_auto_approve });
       }
 
+      // #2181 U4: an auto order has its own path, its own storage keys and no manual accept. It must
+      // never reach `pendingPlanOrder` or the legacy auto_approve branch below.
+      if (result.plan_order && result.plan_order.source === 'auto') {
+        await handleAutoPlanOrder(config, result.plan_order, userEmail);
+      } else {
+        await flushAutoReports(config).catch(() => {});
+      }
       // Handle plan change order (skip if already completed)
-      if (result.plan_order) {
+      if (result.plan_order && result.plan_order.source !== 'auto') {
         const po = result.plan_order;
         const { completedPlanOrder: cpo } = await chrome.storage.local.get('completedPlanOrder');
         if (cpo && cpo.order_id === po.order_id) {
@@ -1712,6 +1726,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
           );
 
           const isPersonalExtra = !NON_PERSONAL_PLANS.some(t => extraPlan.startsWith(t));
+          const extraSubInfo = isPersonalExtra ? await fetchSubscriptionInfo(extraOrg.uuid) : {};
+          // #2181 U4: same as the primary read — an auto-scheduled downgrade seen gone stops being ours.
+          if (isPersonalExtra) await noteSubscriptionObservation(extraOrg.uuid, extraSubInfo).catch(() => {});
           const extraSnapshot = {
             user_email: userEmail,
             plan: extraPlan,
@@ -1719,7 +1736,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             seat_tier: extraSeatTier,
             ext_version: extVersion,
             collected_at: new Date().toISOString(),
-            subscription: isPersonalExtra ? await fetchSubscriptionInfo(extraOrg.uuid) : {},
+            subscription: extraSubInfo,
             ...await buildUsageFields(extraUsage, config),
             grove_enabled: null,
             grove_detected: false,

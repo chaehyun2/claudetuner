@@ -29,6 +29,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
+import { PLAN_AUTO_NOTIF_PREFIX, PLAN_AUTO_CARD_KEY, planChangeUrl, cancelAutoDowngrade, reportAutoRevert } from './bg/plan-auto.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { withCollectLock } from './bg/collect-lock.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
@@ -1698,6 +1699,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+  // #2181 U4: [예약 취소] on the popup's auto-order card — cancel the downgrade WE scheduled, on the
+  // org the order changed, and tell the server (plan-order-revert → 'reverted'; the decision cron then
+  // locks auto downgrades for this member for 90 days, C7).
+  if (message.type === 'CANCEL_AUTO_DOWNGRADE') {
+    (async () => {
+      const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
+      if (!card || card.order_id !== message.orderId || card.is_up || card.kind === 'cancel_downgrade' || card.result !== 'completed') {
+        sendResponse({ success: false, error: 'No auto downgrade to cancel' });
+        return;
+      }
+      const result = await cancelAutoDowngrade(card.target_org_uuid, card.to_plan);
+      if (result?.success) {
+        const config = await getConfig();
+        // The card carries the account the order belongs to; lastStatus is only a fallback.
+        const email = card.user_email || (await getLastStatus())?.snapshot?.user_email;
+        // Queued + retried until the server accepts it; the card says "reverted" only then.
+        if (email) await reportAutoRevert(config, card.order_id, email);
+        setTimeout(() => collectAndSend(), 3000);
+      }
+      sendResponse(result);
+    })();
+    return true;
+  }
   if (message.type === 'DOWNGRADE_TO') {
     downgradeTo(message.targetPlan, { orgUuid: message.orgUuid || null }).then((result) => sendResponse(result));
     return true;
@@ -2089,6 +2113,14 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
   // category — the wrong number is worse than none, because it reads as "nobody engages".
   bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
   if (debateNotifier.handleClick(notifId)) return; // a debate card: its tab comes forward (#1971)
+  // #2181 U4: an auto plan-order toast opens the page that explains the change (plan §6.1).
+  if (notifId.startsWith(PLAN_AUTO_NOTIF_PREFIX)) {
+    const orderId = Number(notifId.slice(PLAN_AUTO_NOTIF_PREFIX.length));
+    const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
+    if (card && card.order_id === orderId && card.org_id != null) chrome.tabs.create({ url: planChangeUrl(card.org_id, orderId) });
+    chrome.notifications.clear(notifId);
+    return;
+  }
   if (!notifId.startsWith('promo-push-')) return;
   const promoId = notifId.replace('promo-push-', '');
   const { promoPushState = {} } = await chrome.storage.local.get({ promoPushState: {} });

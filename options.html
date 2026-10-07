@@ -79,6 +79,10 @@
     .radio-item.active { border-color: var(--accent); background: var(--bg-hover); }
     .radio-item input[type="radio"] { width: auto; margin: 0; accent-color: var(--accent); flex-shrink: 0; }
     .radio-item .radio-label { font-size: 12px; font-weight: 600; color: var(--text-primary); flex: 1; }
+    .radio-sub { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0 0 24px; padding: 7px 10px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; }
+    .radio-sub input[type="checkbox"] { width: auto; margin: 2px 0 0; accent-color: var(--accent); flex-shrink: 0; }
+    .radio-sub .radio-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .radio-sub.is-disabled { opacity: .5; cursor: default; }
     .radio-item .radio-desc { font-size: 11px; color: var(--text-secondary); }
     /* Segmented control — one look for every 2~3-way choice (theme buttons and the language /
        display-mode / badge radios alike). Radio options keep `.radio-item` for initRadioGroup. */
@@ -579,6 +583,11 @@
             <div style="flex:1"><span class="radio-label" data-i18n="opt_auto"></span><div class="radio-desc" data-i18n="opt_desc_auto"></div></div>
           </label>
         </div>
+        <!-- Auto plan optimization consent (#2181) — a sub-option of `auto`; the value lives on the server -->
+        <label class="radio-sub" id="auto-opt-consent-row">
+          <input type="checkbox" id="auto-opt-consent" disabled>
+          <div style="flex:1"><span class="radio-label" data-i18n="opt_auto_rec_label"></span><div class="radio-desc" data-i18n="opt_auto_rec_desc"></div></div>
+        </label>
         <div class="form-hint" style="margin-top:4px;color:var(--accent)" data-i18n="opt_sync_note"></div>
       </div>
     </div>

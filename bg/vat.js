@@ -54,7 +54,7 @@ function vatErrCode(e) {
   return /^(err_|vat_)[a-z0-9_]+$/.test(m) ? m : 'error';
 }
 
-function withTimeout(promise) {
+export function withTimeout(promise) {
   let timer;
   return Promise.race([
     promise,
@@ -180,9 +180,10 @@ export async function readChatGPTVatFields(activeUsageAccountId, activeUsagePlan
       const info = await withTimeout(fetchChatGPTApi(`${CHATGPT_BILLING_INFO_PATH}?account_id=${encodeURIComponent(acct.accountId)}`));
       const verdict = parseChatGPTBillingInfo(info);
       if (verdict === undefined) throw new Error('vat_unreadable');   // failed read → keep
-      // No tax ID outside Korea: whether VAT applies is unknown → judge nothing.
+      // No tax ID and no billing country: the verdict cannot be placed → judge nothing.
       if (verdict === null) return { result: 'undecidable' };
-      return { result: { status: verdict.status, invoiceAt: new Date().toISOString(), orgUuid } };
+      // The country goes with it: the server shows Korea only (abroad, no tax ID ≠ paying VAT).
+      return { result: { status: verdict.status, invoiceAt: new Date().toISOString(), orgUuid, country: verdict.country } };
     });
   } catch (e) {
     console.warn('[Claude Tuner] VAT ChatGPT read skipped:', vatErrCode(e));
@@ -195,7 +196,7 @@ export async function readChatGPTVatFields(activeUsageAccountId, activeUsagePlan
  * only when its identity is `ingestEmail` — the identity this cycle's snapshot is filed under
  * (resolveIngestIdentity) — and only past the same blocks the snapshot POST obeys. Never throws.
  */
-async function sendableIdentity(ingestEmail) {
+export async function sendableIdentity(ingestEmail) {
   const token = await getExtToken();
   // RAW, as resolveIngestIdentity reads it — the lowercased form would never equal a mixed-case
   // ingest identity, and those accounts would send nothing (Codex 5R).

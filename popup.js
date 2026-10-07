@@ -16,6 +16,7 @@ import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGE
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
+import { renderPlanAutoCard } from './ui/plan-auto-card.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges, renderAdditionalLimits } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
@@ -1398,6 +1399,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // attached for THIS user (bg/collect.js), and orders are Claude-only, so its presence already
   // proves the user has a Claude org. The order itself is the signal — which provider happens to
   // be pinned primary in the popup is unrelated.
+  renderPlanAutoCard(t);
   chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null }, (store) => {
     const po = store.pendingPlanOrder;
     const completed = store.completedPlanOrder;
