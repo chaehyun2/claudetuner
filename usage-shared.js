@@ -921,7 +921,7 @@
       rp_ui_kind_weekly: 'Weekly {n}',
       rp_ui_chip_total: '{n} held',
       rp_ui_chip_expires: 'expires {d}',
-      rp_ui_line_now: 'clear it now',
+      rp_ui_line_now: 'can clear it now',
       rp_ui_chip_cg_scope: 'Codex & Work limits only',
       rp_ui_tip_held: 'Usage limit reset passes held: {n}',
       rp_ui_tip_kinds: 'Kinds: {k}',

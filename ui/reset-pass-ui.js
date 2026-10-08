@@ -153,6 +153,10 @@ export function resetPassAdviceText(adv, past) {
       tone = 'use';
       text = adv.reason === 'last' ? t('rp_adv_use_last')
         : adv.reason === 'five_hour' ? t('rp_adv_use_5h')
+        // Spending later lasts until the reset too (useAfter): 「지금 쓰세요」 + 「이후에 써도 버텨요」 read
+        // as two opposite instructions, so this case gets one line that offers both and says the cost.
+        : adv.reason === 'longer' && Number.isFinite(adv.useAfter)
+          ? t('rp_adv_use_longer_after', dur(adv.hours), usual, formatResetAbsolute(adv.useAfter))
         : adv.reason === 'longer' ? t('rp_adv_use_longer', dur(adv.hours), usual)
         : t('rp_adv_use_no_weekly');
       break;
@@ -166,9 +170,9 @@ export function resetPassAdviceText(adv, past) {
     case 'hold_reset_soon': tone = 'hold'; text = t('rp_adv_hold_reset_soon', dur(adv.hours)); break;
     default: return null;
   }
-  // The usual burn ends before this reset: spent now, the block returns. Said on the use/similar
-  // lines only — a hold line already says to wait.
-  if (Number.isFinite(adv.useAfter) && (adv.verdict === 'use_now' || adv.verdict === 'similar')) {
+  // The usual burn ends before this reset: spent now, the block returns. Appended to the similar line
+  // only — a hold line already says to wait, and use_now folds it into its own text above.
+  if (Number.isFinite(adv.useAfter) && adv.verdict === 'similar') {
     text += ' ' + t('rp_adv_use_after', formatResetAbsolute(adv.useAfter));
   }
   const tip = [];
