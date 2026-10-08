@@ -449,6 +449,59 @@ export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hour
 }
 
 /**
+ * THE view every reset-pass surface decides from — notification cards, popup chip/headline/advice,
+ * overview badge, in-page sidebar (#2092 P2 Codex 5R; surfaces since the 1.55.9 batch review: each path filtering expiry on its own
+ * left the count fallback and clearNowCall reading passes that had lapsed). A summary is observed at
+ * collection time; by the time a card is decided — a deferred one at 08:00, a stale one after
+ * failed collections — some passes it lists may have expired. Those are taken OUT here:
+ *   · tickets are earliest-first and capped at RESET_PASS_TICKETS_MAX, so the lapsed ones are always
+ *     inside the list and subtracting them from `available` / `by_kind` is exact even past the cap;
+ *   · which pass the provider called usable is not known per ticket, so a summary with any lapsed
+ *     pass is `stale` and each kind's usable count loses its lapsed passes (assumed usable) —
+ *     clearNowCall (still the one judgement) is fed this view;
+ *   · a ticketless summary (ChatGPT before its detail read) whose next_expires_at has passed is
+ *     `stale` too; with no next_expires_at its expiry is simply unknown (`expiryKnown: false`).
+ */
+export function resetPassLiveView(rp, now) {
+  const tickets = Array.isArray(rp.tickets) ? rp.tickets.filter((t) => t && typeof t.kind === 'string') : [];
+  const lapsed = tickets.filter((t) => !(Date.parse(t.expires_at) > now));
+  const nextExp = Date.parse(rp.next_expires_at || '');
+  const expiryKnown = rp.kinds_known === true && Array.isArray(rp.tickets);
+  const stale = lapsed.length > 0 || (Number.isFinite(nextExp) && nextExp <= now);
+  if (!stale) return { rp, stale, expiryKnown };
+  const byKind = { ...(rp.by_kind || {}) };
+  for (const t of lapsed) byKind[t.kind] = Math.max(0, (Number(byKind[t.kind]) || 0) - 1);
+  const live = tickets.filter((t) => !lapsed.includes(t));
+  // Usable counts lose the lapsed passes of their kind — assuming each lapsed one was usable, the
+  // side that never over-promises — so a still-valid pass keeps its 「지금 풀 수 있어요」 (Codex: zeroing
+  // every kind on one lapse hid a valid weekly pass). A ticketless summary whose next expiry passed
+  // cannot say which kind lapsed: nothing is usable until a fresh collection.
+  const lapsedBy = {};
+  for (const t of lapsed) lapsedBy[t.kind] = (lapsedBy[t.kind] || 0) + 1;
+  const usable = {};
+  for (const k of Object.keys(rp.usable_by_kind || {})) {
+    usable[k] = lapsed.length ? Math.max(0, (Number(rp.usable_by_kind[k]) || 0) - (lapsedBy[k] || 0)) : 0;
+  }
+  const usableNow = lapsed.length && Number.isFinite(rp.usable_now) ? Math.max(0, rp.usable_now - lapsed.length) : 0;
+  return {
+    stale, expiryKnown,
+    rp: {
+      ...rp, available: Math.max(0, rp.available - lapsed.length), by_kind: byKind, tickets: live,
+      next_expires_at: live.length ? live[0].expires_at : null, usable_by_kind: usable, usable_now: usableNow,
+    },
+  };
+}
+
+/**
+ * The summary with passes that have expired since it was observed taken out — what every surface
+ * renders and judges (resetPassLiveView). A missing or 「모름」 summary comes back as it is.
+ */
+export function liveResetPasses(rp, nowMs = Date.now()) {
+  if (!rp || rp.known !== true || !isPassCount(rp.available)) return rp ?? null;
+  return resetPassLiveView(rp, nowMs).rp;
+}
+
+/**
  * THE 「지금 풀 수 있어요」 call — the only function any surface (popup headline, overview badge,
  * in-page sidebar line) may use to emphasise spending a pass now (batch review 1.55.2, 2 rounds:
  * each surface deciding on its own put 「clear it now」 beside 「아껴두세요」). True only when

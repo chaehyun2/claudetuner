@@ -18,7 +18,7 @@ import {
 } from './prediction.js';
 import { buildWaitFactsHtml, buildResetFactsHtml, buildCappedFactsHtml } from './gauge-facts.js';
 import { selectOrg } from './org-selector.js';
-import { blockedSlotsOf, clearNowCall, holdsAny, pastWeeklyBlocks, resetPassSiteUrl } from '../bg/reset-pass-model.js';
+import { blockedSlotsOf, clearNowCall, holdsAny, liveResetPasses, pastWeeklyBlocks, resetPassSiteUrl } from '../bg/reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // Drag-reorder state (module-level so the cross-device onChanged handler can tell a
@@ -265,7 +265,8 @@ function _rpDate(iso) {
 }
 
 function _resetPassIcon(org, sameProviderCount, hist) {
-  const rp = org.resetPasses;
+  // Expired passes taken out (liveResetPasses) — the same view the popup and the sidebar use.
+  const rp = liveResetPasses(org.resetPasses, Date.now());
   const provider = org.provider || 'claude';
   if (!holdsAny(rp) || !resetPassSiteUrl(provider, SITE_ORIGINS)) return '';
   // Same 「clear it now」 rule as the headline and the sidebar (batch review 1.55.2).

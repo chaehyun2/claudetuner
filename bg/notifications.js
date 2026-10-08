@@ -2,7 +2,7 @@ import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPO
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
 import { readHistory } from './usage-history-db.js';
-import { blockedSlotsOf, clearNowCall, holdsAny, isPassCount, orgHistory, pastWeeklyBlocks, resetPassSiteUrl, RESET_PASS_TICKETS_MAX } from './reset-pass-model.js';
+import { blockedSlotsOf, clearNowCall, holdsAny, isPassCount, orgHistory, pastWeeklyBlocks, resetPassLiveView, resetPassSiteUrl, RESET_PASS_TICKETS_MAX } from './reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 /**
@@ -857,40 +857,6 @@ export function resetPassNotifUrl(notifId) {
 }
 
 /**
- * THE view every reset-pass card is decided from (Codex 5R: each path filtering expiry on its own
- * left the count fallback and clearNowCall reading passes that had lapsed). A summary is observed at
- * collection time; by the time a card is decided — a deferred one at 08:00, a stale one after
- * failed collections — some passes it lists may have expired. Those are taken OUT here:
- *   · tickets are earliest-first and capped at RESET_PASS_TICKETS_MAX, so the lapsed ones are always
- *     inside the list and subtracting them from `available` / `by_kind` is exact even past the cap;
- *   · which pass the provider called usable is not known per ticket, so a summary with any lapsed
- *     pass is `stale` and usable counts drop to 0 — clearNowCall (still the one judgement) is fed
- *     this view and says no until a fresh collection;
- *   · a ticketless summary (ChatGPT before its detail read) whose next_expires_at has passed is
- *     `stale` too; with no next_expires_at its expiry is simply unknown (`expiryKnown: false`).
- */
-function rpLiveView(rp, now) {
-  const tickets = Array.isArray(rp.tickets) ? rp.tickets.filter((t) => t && typeof t.kind === 'string') : [];
-  const lapsed = tickets.filter((t) => !(Date.parse(t.expires_at) > now));
-  const nextExp = Date.parse(rp.next_expires_at || '');
-  const expiryKnown = rp.kinds_known === true && Array.isArray(rp.tickets);
-  const stale = lapsed.length > 0 || (Number.isFinite(nextExp) && nextExp <= now);
-  if (!stale) return { rp, stale, expiryKnown };
-  const byKind = { ...(rp.by_kind || {}) };
-  for (const t of lapsed) byKind[t.kind] = Math.max(0, (Number(byKind[t.kind]) || 0) - 1);
-  const live = tickets.filter((t) => !lapsed.includes(t));
-  const usable = {};
-  for (const k of Object.keys(rp.usable_by_kind || {})) usable[k] = 0;
-  return {
-    stale, expiryKnown,
-    rp: {
-      ...rp, available: Math.max(0, rp.available - lapsed.length), by_kind: byKind, tickets: live,
-      next_expires_at: live.length ? live[0].expires_at : null, usable_by_kind: usable, usable_now: 0,
-    },
-  };
-}
-
-/**
  * `{ "kind|expires_at": count }` of the passes held and still valid at `now`, or null when the kinds
  * are not known. Lapsed tickets go here, so no card — new or expiry — is decided from a pass a stale
  * summary still lists (Codex 4R: a deferred 「new pass」 card after the pass lapsed overnight).
@@ -1013,8 +979,8 @@ export async function checkResetPassNotifications(now = Date.now()) {
     if (!resetPassSiteUrl(provider, SITE_ORIGINS)) continue;
     const key = `${provider}:${org.uuid}`;
     const prev = state[key] && isPassCount(state[key].n) ? state[key] : null;
-    // Every card below reads `live`, never `rp` (rpLiveView).
-    const view = rpLiveView(rp, now);
+    // Every card below reads `live`, never `rp` (resetPassLiveView).
+    const view = resetPassLiveView(rp, now);
     const live = view.rp;
     const tickets = rpTicketCounts(live, now);
     const cur = { at: now, n: live.available, t: tickets, exp: {}, lim: prev?.lim ?? null };

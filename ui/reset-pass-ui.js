@@ -13,7 +13,13 @@ import { _filteredHistory } from './state.js';
 import { formatResetAbsolute, formatDuration } from './util.js';
 import {
   canClearNow, clearNowCall, holdsAny, blockedSlotsOf, resetPassSiteUrl, resetPassHelpUrl, resetPassAdvice, pastWeeklyBlocks,
+  liveResetPasses,
 } from '../bg/reset-pass-model.js';
+
+// The org's passes as of NOW — expired ones taken out (liveResetPasses). Every read below goes
+// through this: a summary from a collection that has since failed can list a pass that lapsed
+// (1.55.9 batch review).
+const orgPasses = (org) => (org ? liveResetPasses(org.resetPasses, Date.now()) : null);
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 const core = () => globalThis.__ctUsageCore || {};
@@ -45,7 +51,7 @@ export function renderResetPassChip(org) {
   if (!el) return;
   const c = core();
   const html = org && typeof c.buildResetPassChipHtml === 'function'
-    ? c.buildResetPassChipHtml(org.resetPasses, getLang(), Date.now(), providerOf(org), resetPassLink(providerOf(org)),
+    ? c.buildResetPassChipHtml(orgPasses(org), getLang(), Date.now(), providerOf(org), resetPassLink(providerOf(org)),
       '', resetPassHelpUrl(providerOf(org)))
     : '';
   // Compare against what WE wrote, not el.innerHTML (the parser re-serializes): an unchanged chip
@@ -73,7 +79,7 @@ export function renderResetPassChip(org) {
  *   · anything else (a 5h pass while 7d is blocked too, unknown summary, 0 passes) → nothing
  */
 export function resetPassHeadlineLink(org, blocked, resets5h = null, resets7d = null, nowMs = Date.now(), history = null) {
-  const s = org && org.resetPasses;
+  const s = orgPasses(org);
   if (!holdsAny(s)) return null;
   const url = resetPassLink(providerOf(org));
   if (!url) return null;
@@ -106,7 +112,7 @@ export function appendResetPassHeadlineLink(headlineEl, link) {
 export function resetPassTip(org) {
   const c = core();
   return org && typeof c.resetPassDetailTip === 'function'
-    ? c.resetPassDetailTip(org.resetPasses, getLang(), providerOf(org)) : '';
+    ? c.resetPassDetailTip(orgPasses(org), getLang(), providerOf(org)) : '';
 }
 
 // ── 4. 「지금 쓰세요 / 아껴두세요」 advice line under the chip ───────────────────────────────────
@@ -126,10 +132,10 @@ const toMs = (v) => { const x = v ? Date.parse(v) : NaN; return Number.isFinite(
 
 /** The advice for the viewed org with the values on screen, or null. Exported for the guard. */
 export function resetPassAdviceFor(org, util5h, resets5h, util7d, resets7d, span5h, span7d, nowMs = Date.now()) {
-  if (!org || !org.resetPasses) return null;
+  if (!org || !orgPasses(org)) return null;
   const fc = _fc7d && resets7d && _fc7d.resetsAt === resets7d ? _fc7d.hoursTo100 : null;
   return resetPassAdvice({
-    summary: org.resetPasses,
+    summary: orgPasses(org),
     blocked: blockedSlots(util5h, util7d, span5h, span7d),
     resets5hMs: toMs(resets5h),
     resets7dMs: toMs(resets7d),
@@ -187,7 +193,7 @@ const RP_SHOW_EXPIRY_MS = 3 * 24 * 3600000;
 
 /** Whether the pass block is worth its space now: blocked, or a held pass expires within 3 days. */
 export function resetPassBlockShown(org, blocked, nowMs = Date.now()) {
-  const s = org && org.resetPasses;
+  const s = orgPasses(org);
   if (!holdsAny(s)) return false;
   if (Array.isArray(blocked) && blocked.length) return true;
   const exps = (Array.isArray(s.tickets) && s.tickets.length ? s.tickets.map((x) => x && x.expires_at) : [s.next_expires_at])

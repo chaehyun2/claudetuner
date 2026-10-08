@@ -6,7 +6,7 @@ import { hasProviderPermission } from './providers.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
 import { getLastStatus, getUsageHistory } from './storage.js';
 import { getProviderState, liveProviderErrors } from './provider-state.js';
-import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastWeeklyBlocks, orgHistory } from './reset-pass-model.js';
+import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastWeeklyBlocks, orgHistory, liveResetPasses } from './reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Sidebar Usage: build data for content script ===
@@ -171,7 +171,8 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     gates: gates && gates.length ? gates : null,
     // Reset-pass summary of THIS org (#2092 P1-1), drawn by usage-shared.js buildResetPassChipHtml.
     // Never from the snapshot fallback: the summary lives on the org entry only.
-    rp: orgData?.resetPasses ?? null,
+    // Expired passes taken out (liveResetPasses) — the same view the popup and the notifier use.
+    rp: liveResetPasses(orgData?.resetPasses, Date.now()),
     // Its link, built here because the panels are classic scripts that cannot import the one
     // builder (bg/reset-pass-model.js resetPassSiteUrl). null for Gemini → no chip.
     rpUrl: resetPassSiteUrl(wantProvider, SITE_ORIGINS),
@@ -179,7 +180,7 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     rpHelpUrl: resetPassHelpUrl(wantProvider),
     // One pass clears every window at its limit right now — the panel line's 「지금 풀 수 있어요」.
     // Decided here, over the SAME values the panel draws, by the popup's own predicate.
-    rpNow: clearNowCall(orgData?.resetPasses, blockedSlotsOf({ h5, d7, w5s, w7s }), Date.parse(r5 || ''), Date.parse(r7 || ''),
+    rpNow: clearNowCall(liveResetPasses(orgData?.resetPasses, Date.now()), blockedSlotsOf({ h5, d7, w5s, w7s }), Date.parse(r5 || ''), Date.parse(r7 || ''),
       pastWeeklyBlocks(orgHistory(history, reqOrgId || orgData?.uuid, legacyIsThisOrg), Date.now())),
     // 🔴 `reachedType` is deliberately NOT returned. It is the most interesting field we now
     // collect — the provider's own answer to "is anything actually exhausted", which is the
