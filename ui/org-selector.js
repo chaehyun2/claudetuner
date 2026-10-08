@@ -11,6 +11,7 @@ import { renderResetPassChip } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS } from '../bg/constants.js';
+import { planOrderRank } from './plan-order.js';
 import { TRAINING_CACHE_KEY_CHATGPT, chatgptTrainingStateFor } from '../bg/training-view.js';
 
 // Human-readable label for a provider org, provider-qualified across all providers
@@ -630,13 +631,7 @@ export function showMultiOrgBadges(collectedOrgs) {
   wrapper.appendChild(hintRow);
 
   // Sort: Claude (Personal > Team > Enterprise) > ChatGPT > Gemini
-  const planOrder = (org) => {
-    const p = org.provider || 'claude';
-    const base = p === 'gemini' ? 200 : p === 'chatgpt' ? 100 : 0;
-    if (/Enterprise/i.test(org.plan)) return base + 3;
-    if (/Team/i.test(org.plan)) return base + 2;
-    return base + 1;
-  };
+  const planOrder = (org) => planOrderRank(org.provider || 'claude', org.plan);
   const sorted = [...collectedOrgs].sort((a, b) => planOrder(a) - planOrder(b));
 
   // Pin SVGs

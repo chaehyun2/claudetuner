@@ -243,7 +243,9 @@ const CLAUDE_LABEL_KEYS = [[/^max 20x$/, 'max_20x'], [/^max 5x$/, 'max_5x'], [/^
 // paid labels, lower-cased, matched WHOLE (Codex 1R: a prefix let 「Team Mystery」 / 「AI Pro 999x」 read as paid).
 // An unrecognised code reaches the label capitalised — 'unknown' here.
 const PAID_LABELS = {
-  chatgpt: /^(go|plus|pro (5x|20x|25x|100|200|500)|team|business|enterprise|education( \(k-12\))?)$/,
+  // 'business standard' / 'business premium' = the display names of the Business seats (plan_type 'team' /
+  // 'self_serve_business_prolite', #1925) — the compare state carries the DISPLAYED label.
+  chatgpt: /^(go|plus|pro (5x|20x|25x|100|200|500)|team|business( (standard|premium))?|enterprise|education( \(k-12\))?)$/,
   gemini: /^(ai (plus|pro|ultra( (5|20)x)?)|advanced|work)$/,
 };
 /** The Claude plan key (vendor-ai claudeOrgPlan's vocabulary) of a display label, or 'unknown'. */

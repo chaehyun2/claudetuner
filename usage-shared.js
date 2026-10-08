@@ -342,6 +342,7 @@
       if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
       if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
       if (p === 'self_serve_business_prolite') return 'Business Premium';
+      if (p === 'team') return 'Business Standard';
     }
     return plan || '';
   }

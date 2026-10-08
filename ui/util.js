@@ -326,6 +326,7 @@ export function planDisplayName(plan, provider) {
     if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
     if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
     if (p === 'self_serve_business_prolite') return 'Business Premium';
+    if (p === 'team') return 'Business Standard';
   }
   return plan || '';
 }
@@ -380,7 +381,7 @@ export function planToMultiplier(plan, provider, win) {
 export function planLimitTiers(provider, currentMult, win) {
   if (currentMult === 1.25 || currentMult === 6.25) {
     return [
-      { mult: 1.25, label: provider === 'chatgpt' ? 'Team' : 'Team Standard', color: '#06b6d4' },
+      { mult: 1.25, label: provider === 'chatgpt' ? 'Business Standard' : 'Team Standard', color: '#06b6d4' },
       { mult: 6.25, label: provider === 'chatgpt' ? 'Business Premium' : 'Team Premium', color: '#14b8a6' },
     ];
   }

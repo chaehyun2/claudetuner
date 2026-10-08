@@ -13,6 +13,9 @@ const PROVIDER_BASE = { claude: 0, chatgpt: 100, gemini: 200 };
 export function planOrderRank(provider, plan) {
   const base = PROVIDER_BASE[provider] ?? PROVIDER_BASE.claude;
   if (plan && /Enterprise/i.test(plan)) return base + 3;
-  if (plan && /Team/i.test(plan)) return base + 2;
+  // 'Business' covers the ChatGPT Business seats stored as plan_type codes ('Self_serve_business_prolite' =
+  // Business Premium, #1925) — a seat, not a personal plan, even though no 'Team' appears in it.
+  // Gemini's Workspace plan is stored as the bare word 'Work'.
+  if (plan && /Team|Business|^Work$/i.test(plan)) return base + 2;
   return base + 1;
 }
