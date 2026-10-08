@@ -54,6 +54,8 @@ const CHATGPT_SUBSCRIPTION_PLAN_NAMES = {
   chatgptplusplan: 'Plus', chatgptprolite: 'Pro 5x', chatgptpro: 'Pro 20x', chatgptpromax: 'Pro 25x',
   chatgptteamplan: 'Team', chatgptbusinessplan: 'Business', chatgptenterpriseplan: 'Enterprise',
 };
+// ChatGPT Business Premium seat (OpenAI 2026-08-25): stored raw, see chatgptWorkspacePlan.
+const BUSINESS_PREMIUM_PLAN_TYPE = 'self_serve_business_prolite';
 const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
   self_serve_business_usage_based: 'Business',
 };
@@ -95,6 +97,10 @@ const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
 // 🔴 The non-string throw contract is UNCHANGED: a numeric plan_type still reaches .toLowerCase()
 // on the line above and throws, which parseChatGPTScheduledChange relies on validating against.
 export function chatgptWorkspacePlan(entitlement, accountPlanType) {
+  // A Business Premium seat reports subscription_plan 'chatgptprolite' (the PERSONAL Pro 100 code)
+  // next to plan_type 'self_serve_business_prolite'. The seat code wins so an extra workspace is
+  // stored exactly like the active-account path stores it, not as personal 'Pro 5x' (#1925).
+  if (String(accountPlanType || '').toLowerCase() === BUSINESS_PREMIUM_PLAN_TYPE) return chatgptPlanName(accountPlanType);
   const sub = entitlement?.subscription_plan;
   if (sub && CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub]) return CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub];
   const pt = (accountPlanType || '').toLowerCase();

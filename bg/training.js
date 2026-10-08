@@ -20,6 +20,7 @@ import { pickChatGPTPersonalAccount, CHATGPT_USAGE_PATH, chatgptUsageAccountId }
 import { ChatGPTClient } from '../vendor-ai/chatgpt-client.js';
 import { authedFetch, getConfig } from './storage.js';
 import { sendableIdentity, withTimeout } from './vat.js';
+import { TRAINING_CACHE_KEY_CHATGPT } from './training-view.js';
 
 const TRAINING_TTL_MS = 30 * 60 * 1000;
 const TRAINING_FAIL_RETRY_MS = 30 * 60 * 1000;
@@ -28,7 +29,7 @@ const TRAINING_REJECTED_RETRY_MS = 6 * 60 * 60 * 1000;
 const CHATGPT_ACCOUNTS_PATH = '/backend-api/accounts/check/v4-2023-04-27';
 const CHATGPT_USER_SETTINGS_PATH = '/backend-api/settings/user';
 const CLEAR = Object.freeze({ training_allowed: null });
-const KEYS = { cache: 'trainingCacheChatgpt', sent: 'trainingSentChatgpt' };
+const KEYS = { cache: TRAINING_CACHE_KEY_CHATGPT, sent: 'trainingSentChatgpt' };
 
 // Log a code only — a provider error message can carry part of the response body.
 function errCode(e) {

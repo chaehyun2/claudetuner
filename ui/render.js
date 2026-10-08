@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatTimeAgo, setRenewalDisplay, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
+import { gaugeColor, formatTimeAgo, setRenewalDisplay, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
@@ -571,21 +571,13 @@ export function _updateUICore(status) {
     document.getElementById('plan').textContent = s.plan || 'unknown';
 
     // Display Privacy (grove_enabled)
-    const privacyRow = document.getElementById('privacy-row');
-    const privacyVal = document.getElementById('privacy-value');
     // A team-only account (no consumer workspace) has nothing this setting applies to (#1892).
     if (s.grove_enabled === true && s.has_consumer_org !== false) {
-      privacyVal.textContent = t('privacy_on');
-      privacyVal.href = '#';
-      privacyVal.onclick = (e) => { e.preventDefault(); chrome.tabs.create({ url: 'https://claude.ai/settings/data-privacy-controls' }); };
-      privacyVal.title = t('privacy_link_title');
-      chrome.storage.local.get({ hiddenPrivacyBanner: false }, (st) => {
-        privacyRow.classList.toggle('hidden', !!st.hiddenPrivacyBanner);
-      });
+      showPrivacyRow('claude');
     } else {
-      privacyRow.classList.add('hidden');
+      hidePrivacyRow();
       // grove turned off — clear dismiss so it re-appears if turned on again
-      chrome.storage.local.remove('hiddenPrivacyBanner');
+      chrome.storage.local.remove(PRIVACY_DISMISS_KEYS.claude);
     }
 
     // Pass null when absent so a previously-shown renewal (e.g. before the

@@ -341,6 +341,7 @@
       if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
       if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
       if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
+      if (p === 'self_serve_business_prolite') return 'Business Premium';
     }
     return plan || '';
   }

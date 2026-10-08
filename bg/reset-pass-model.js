@@ -204,8 +204,13 @@ export function clearNowWorthIt(summary, blockedSlots, resets5hMs, resets7dMs, n
 //           that clear the weekly limit
 //   R     = hours until the blocked windows refill on their own
 //   lo/med = the shortest / median past block (hours from the estimated wall to the reset)
-//   hold  when P × lo  ≥ RP_ADVICE_HOLD_MARGIN × R   — even a short usual block, discounted, beats now
-//   use   when P × med ≤ R                           — now is at least as long as a usual one
+//   G     = what spending now buys: min(R, the usual burn from 0 = 168h − a past block) — a weekly
+//           pass keeps resets_at (v3, 2026-10-08), so a fast burner is blocked again before the reset.
+//           G_hold uses the longest burn (168 − lo), G_use the median one (168 − med)
+//   hold  when P × lo  ≥ RP_ADVICE_HOLD_MARGIN × G_hold — even a short usual block, discounted, beats now
+//   use   when P × med ≤ G_use                         — now buys at least a usual block
+//   useAfter (fact, use/similar lines only): when R > 168 − med, spending at reset − (168 − med)
+//           buys the same unblocked time and keeps the pass until then
 //   else  「비슷해요」 (similar) — no confident call either way
 // The current cycle's own block is NOT a sample: the user's case is exactly 「this week is short,
 // usually long」. A pattern that really changed is caught by the last-chance rule (no cycle left
@@ -213,18 +218,18 @@ export function clearNowWorthIt(summary, blockedSlots, resets5hMs, resets7dMs, n
 //
 // Verdicts (`null` = say nothing — the chip and the headline link already state the facts):
 //   use_now          reason last (no wall can come before the first pass expires) | longer
-//                    (R ≥ P × med) | five_hour (5h-only block, a 5h pass held) | no_weekly_ahead
+//                    (G_use ≥ P × med) | five_hour (5h-only block, a 5h pass held) | no_weekly_ahead
 //                    (5h-only block, only a full pass, no weekly wall expected while it is valid)
 //   use_or_lose      not blocked, a 7d-clearing pass expires within RP_ADVICE_EXPIRY_DAYS, no wall
 //                    is forecast before it does, and the site lets it be spent now
 //   similar          blocked, neither rule is confident
-//   hold_for_wall    reason longer (P × lo ≥ margin × R) | save_full (5h-only block, only a full
+//   hold_for_wall    reason longer (P × lo ≥ margin × G_hold) | save_full (5h-only block, only a full
 //                    pass, a weekly wall expected while it is valid)
 //   hold_until_wall  not blocked yet, but the 7d forecast hits 100% before the reset (`at`)
 //   hold_reset_soon  blocked, and the window refills on its own within RP_ADVICE_RESET_SOON_H
 //
-// 🪤 Whether a pass restarts the 7d window or keeps its resets_at is not measured yet (plan §6-1),
-// so no 「you regain N hours」 figure is claimed — the line shows R and the usual block, both facts.
+// Measured 2026-10-05 (plan §6-1): a Claude weekly/full pass keeps seven_day.resets_at and zeroes
+// the usage; a 5-hour pass restarts its window. ChatGPT is not measured — the same G is applied.
 export const RP_ADVICE_RESET_SOON_H = 3;
 export const RP_ADVICE_EXPIRY_DAYS = 3;
 export const RP_ADVICE_HOLD_MARGIN = 1.5;
@@ -409,9 +414,24 @@ export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hour
     const k = weeklyUsable.filter((x) => cyclesBefore(x.exp, r7, leadMs) <= nFirst).length;
     const prob = atLeast(nFirst, rate, k);
     const hi = Math.max(...blocks), med = median(blocks);
+    // What spending now buys. A weekly pass zeroes usage but KEEPS resets_at (measured 2026-10-05,
+    // plan §6-1), so the fresh 100% lasts as long as this user takes to burn a week's budget from 0
+    // — a cycle minus its block — or until the reset, whichever comes first. A user who walls on day
+    // 3 and is blocked for 4 days gets ~3 days back, not 4. Each side takes its conservative end:
+    // holding is weighed against the LONGEST usual burn (the most a spend could buy), spending
+    // against the median one.
+    const weekH = WEEK_MS / HOUR_MS;
+    // A block can read ≥ a week only from a broken sample; a burn is never negative (Codex v3 1R).
+    const burnLong = Math.max(0, weekH - lo), burnMed = Math.max(0, weekH - med);
+    const gainHold = Math.min(hours, burnLong);
+    const gainUse = Math.min(hours, burnMed);
     const facts = { hours, lo, hi, prob };
-    if (prob * lo >= RP_ADVICE_HOLD_MARGIN * hours) return { verdict: 'hold_for_wall', reason: 'longer', ...facts };
-    if (prob * med <= hours) return { verdict: 'use_now', reason: 'longer', ...facts };
+    // Spent now, the usual burn ends before the reset: the block comes back. Spending it later —
+    // once at most that burn is left before the reset — buys the same unblocked time and keeps the
+    // pass until then. A fact for the line, not a separate verdict (clearNowCall is unchanged).
+    if (burnMed > 0 && hours > burnMed) facts.useAfter = r7 - burnMed * HOUR_MS;
+    if (prob * lo >= RP_ADVICE_HOLD_MARGIN * gainHold) return { verdict: 'hold_for_wall', reason: 'longer', ...facts };
+    if (prob * med <= gainUse) return { verdict: 'use_now', reason: 'longer', ...facts };
     return { verdict: 'similar', ...facts };
   }
 

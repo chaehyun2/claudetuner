@@ -13,7 +13,7 @@ import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from '.
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
 import { createCapDropBanner, CAP_DROP_KEY, CAP_DROP_ACK_KEY } from './ui/capdrop-banner.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
-import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels } from './ui/util.js';
+import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels, dismissPrivacyRow } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
 import { renderPlanAutoCard } from './ui/plan-auto-card.js';
@@ -1541,8 +1541,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Privacy banner dismiss
   document.getElementById('privacy-dismiss').addEventListener('click', (e) => {
     e.preventDefault();
-    chrome.storage.local.set({ hiddenPrivacyBanner: true });
-    document.getElementById('privacy-row').classList.add('hidden');
+    // Per-provider flag (#1889): hiding ChatGPT's row must not hide Claude's, and vice versa.
+    dismissPrivacyRow();
   });
 
   // Extra usage card hide (×) — restorable from Options

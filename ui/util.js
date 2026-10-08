@@ -108,6 +108,54 @@ export function setRenewalDisplay(renewalDate) {
   return true;
 }
 
+// The "training data sharing ON" row (#privacy-row) — shared by render.js (Claude grove) and
+// org-selector.js (Claude grove + ChatGPT training setting, #1889). Each provider has its OWN dismiss
+// flag so hiding one provider's row never hides the other's; popup.js reads `dataset.provider` to know
+// which flag the "hide" link sets.
+export const PRIVACY_DISMISS_KEYS = Object.freeze({
+  claude: 'hiddenPrivacyBanner',
+  chatgpt: 'hiddenPrivacyBannerChatgpt',
+});
+const PRIVACY_SETTINGS = Object.freeze({
+  claude: { url: 'https://claude.ai/settings/data-privacy-controls', titleKey: 'privacy_link_title' },
+  chatgpt: { url: 'https://chatgpt.com/#settings/DataControls', titleKey: 'privacy_link_title_chatgpt' },
+});
+// Bumped by every show/hide so a dismiss-flag read that resolves after a later call (org switch) is dropped.
+let _privacySeq = 0;
+
+export function hidePrivacyRow() {
+  _privacySeq++;
+  const row = document.getElementById('privacy-row');
+  if (row) row.classList.add('hidden');
+}
+
+/** User hid the row: remember it for the provider shown and drop any dismiss-flag read still in flight. */
+export function dismissPrivacyRow() {
+  const row = document.getElementById('privacy-row');
+  if (!row) return;
+  const key = PRIVACY_DISMISS_KEYS[row.dataset.provider] || PRIVACY_DISMISS_KEYS.claude;
+  chrome.storage.local.set({ [key]: true });
+  hidePrivacyRow();
+}
+
+export function showPrivacyRow(provider) {
+  const cfg = PRIVACY_SETTINGS[provider];
+  const row = document.getElementById('privacy-row');
+  const val = document.getElementById('privacy-value');
+  if (!cfg || !row || !val) { hidePrivacyRow(); return; }
+  const seq = ++_privacySeq;
+  row.dataset.provider = provider;
+  val.textContent = t('privacy_on');
+  val.href = '#';
+  val.onclick = (e) => { e.preventDefault(); chrome.tabs.create({ url: cfg.url }); };
+  val.title = t(cfg.titleKey);
+  const key = PRIVACY_DISMISS_KEYS[provider];
+  chrome.storage.local.get({ [key]: false }, (st) => {
+    if (seq !== _privacySeq) return;
+    row.classList.toggle('hidden', !!st[key]);
+  });
+}
+
 /**
  * TRUE when the provider answered and gave this org nothing to show.
  *
@@ -277,6 +325,7 @@ export function planDisplayName(plan, provider) {
     if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
     if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
     if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
+    if (p === 'self_serve_business_prolite') return 'Business Premium';
   }
   return plan || '';
 }
@@ -304,6 +353,7 @@ export function planToMultiplier(plan, provider, win) {
     if (p === 'pro 5x' || p === 'prolite') return 5;
     if (p === 'pro 25x' || p === 'promax') return 25; // $500 Pro tier (25x Plus quota; raw plan_type 'promax')
     if (p === 'team') return 1.25;
+    if (p === 'self_serve_business_prolite') return 6.25; // Business Premium seat ($100/seat annual): 5x a Standard (Team) seat, no 5h limit (#1925)
     return 1; // plus, education, business, unknown
   }
   if (provider === 'gemini') {
@@ -331,7 +381,7 @@ export function planLimitTiers(provider, currentMult, win) {
   if (currentMult === 1.25 || currentMult === 6.25) {
     return [
       { mult: 1.25, label: provider === 'chatgpt' ? 'Team' : 'Team Standard', color: '#06b6d4' },
-      { mult: 6.25, label: 'Team Premium', color: '#14b8a6' },
+      { mult: 6.25, label: provider === 'chatgpt' ? 'Business Premium' : 'Team Premium', color: '#14b8a6' },
     ];
   }
   if (provider === 'chatgpt') {

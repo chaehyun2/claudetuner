@@ -166,6 +166,11 @@ export function resetPassAdviceText(adv, past) {
     case 'hold_reset_soon': tone = 'hold'; text = t('rp_adv_hold_reset_soon', dur(adv.hours)); break;
     default: return null;
   }
+  // The usual burn ends before this reset: spent now, the block returns. Said on the use/similar
+  // lines only — a hold line already says to wait.
+  if (Number.isFinite(adv.useAfter) && (adv.verdict === 'use_now' || adv.verdict === 'similar')) {
+    text += ' ' + t('rp_adv_use_after', formatResetAbsolute(adv.useAfter));
+  }
   const tip = [];
   if (past && past.seen > 0) tip.push(t('rp_adv_tip_past', past.seen, past.walled));
   if (Number.isFinite(adv.prob)) tip.push(t('rp_adv_tip_prob', Math.round(adv.prob * 100)));

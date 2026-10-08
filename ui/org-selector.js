@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, planDisplayName, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
+import { escHtml, planDisplayName, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
@@ -11,6 +11,7 @@ import { renderResetPassChip } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS } from '../bg/constants.js';
+import { TRAINING_CACHE_KEY_CHATGPT, chatgptTrainingStateFor } from '../bg/training-view.js';
 
 // Human-readable label for a provider org, provider-qualified across all providers
 // (e.g. "Claude Max 20x", "ChatGPT Pro 100", "Gemini Advanced"). Provider defaults to
@@ -491,15 +492,22 @@ export function selectOrg(orgId, container) {
     }
     // === POPUP REC RENDER GATE: END ===
 
-    // === 6. Privacy — Claude only ===
-
-    const privacyRow = document.getElementById('privacy-row');
+    // === 6. Privacy — Claude grove / ChatGPT training setting (#1889) ===
     if (isClaudeOrg && state.currentSnapshot?.grove_enabled === true && state.currentSnapshot?.has_consumer_org !== false) {
-      chrome.storage.local.get({ hiddenPrivacyBanner: false }, (s) => {
-        if (privacyRow) privacyRow.classList.toggle('hidden', !!s.hiddenPrivacyBanner);
+      showPrivacyRow('claude');
+    } else if (isChatgptOrg) {
+      hidePrivacyRow();
+      // Shown only on the org the setting was read for (the personal account) — a Business workspace is
+      // not trained on, so the row there would be a false alarm.
+      chrome.storage.local.get({ [TRAINING_CACHE_KEY_CHATGPT]: null }, (st) => {
+        if (state.selectedOrgId !== orgId) return;
+        const training = chatgptTrainingStateFor(st[TRAINING_CACHE_KEY_CHATGPT], orgId);
+        if (training === 'on') showPrivacyRow('chatgpt');
+        // Turned off — clear the dismiss so it re-appears if turned on again (same as Claude's grove).
+        else if (training === 'off') chrome.storage.local.remove(PRIVACY_DISMISS_KEYS.chatgpt);
       });
     } else {
-      if (privacyRow) privacyRow.classList.add('hidden');
+      hidePrivacyRow();
     }
 
     // === 7. Fitness matrix (Claude only — no plan comparison for external providers) ===
