@@ -545,16 +545,17 @@
     return true;
   }
 
-  // Weighted random pick over a campaign's contents (weight <= 0 treated as 1).
-  function _weightedPickContent(contents) {
+  // Weighted random pick over items carrying an optional `weight` — a campaign's contents,
+  // or the servable campaigns themselves (#2330). Missing / weight <= 0 is treated as 1.
+  function _weightedPick(items) {
     let total = 0;
-    for (const c of contents) total += (Number(c.weight) > 0 ? Number(c.weight) : 1);
+    for (const c of items) total += (Number(c.weight) > 0 ? Number(c.weight) : 1);
     let r = Math.random() * total;
-    for (const c of contents) {
+    for (const c of items) {
       r -= (Number(c.weight) > 0 ? Number(c.weight) : 1);
       if (r <= 0) return c;
     }
-    return contents[contents.length - 1];
+    return items[items.length - 1];
   }
 
   // Pick ONE content for a campaign (design §3.2 step 2 / §6). rotation 'weighted'
@@ -567,12 +568,12 @@
     );
     if (!contents.length) return { content: null, assigned: null };
     if (campaign.rotation === 'weighted') {
-      return { content: _weightedPickContent(contents), assigned: null };
+      return { content: _weightedPick(contents), assigned: null };
     }
     const prev = stickyStore[campaign.campaign_id];
     const found = prev && contents.find((c) => c.content_id === prev);
     if (found) return { content: found, assigned: null };
-    const chosen = _weightedPickContent(contents);
+    const chosen = _weightedPick(contents);
     return { content: chosen, assigned: chosen.content_id };
   }
 
@@ -589,7 +590,7 @@
 
   // Fetch → target-filter → cap-check → pick ONE campaign at random → content-select.
   // Returns an array holding a single { campaign, content, placement } (or []) — one ad
-  // slot per fetch, chosen uniformly at random among servable campaigns so the banner
+  // slot per fetch, chosen at random (weighted, #2330) among servable campaigns so the banner
   // rotates across advertisers on each fetch cycle instead of stacking them. Persists any
   // new sticky assignment. Frequency cap is only CHECKED here (not incremented) — a serve
   // is counted later via noteAdServed() at render time so re-selecting doesn't inflate it.
@@ -620,12 +621,20 @@
       return !_adCapReached(capStore, c.campaign_id, placement, perDay, today);
     });
     if (!servable.length) return [];
-    // Uniform-random single slot (rotates across advertisers per fetch).
-    const c = servable[Math.floor(Math.random() * servable.length)];
-    const { content, assigned } = selectAdContent(c, stickyStore);
-    if (!content) return [];
-    if (assigned) { stickyStore[c.campaign_id] = assigned; await _adSet(AD_STICKY_KEY, stickyStore); }
-    return [{ campaign: c, content, placement }];
+    // Single slot, weighted by campaign weight (#2330; all 1 = uniform) so it rotates
+    // across advertisers per fetch. A campaign with no usable content is dropped and the
+    // pick redrawn (as the dashboard does) — otherwise a heavily weighted empty campaign
+    // would blank the slot most of the time.
+    const pool = servable.slice();
+    while (pool.length) {
+      const c = _weightedPick(pool);
+      pool.splice(pool.indexOf(c), 1);
+      const { content, assigned } = selectAdContent(c, stickyStore);
+      if (!content) continue;
+      if (assigned) { stickyStore[c.campaign_id] = assigned; await _adSet(AD_STICKY_KEY, stickyStore); }
+      return [{ campaign: c, content, placement }];
+    }
+    return [];
   }
 
   // Record that a campaign was actually served at this placement, toward its daily

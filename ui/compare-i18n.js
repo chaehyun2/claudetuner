@@ -591,6 +591,8 @@ export const COMPARE_I18N = {
     debate_role_moderator: '진행자',
     debate_auto_pick: '자동 선택',
     debate_mod_fallback: 'AI 진행자가 두 번 연속 답하지 못해 자동 순서로 바꿨어요',
+    debate_limited_out: '{0}{1} 사용 한도에 걸려 이번 토론에서 빠졌어요 — 나머지 AI로 이어가요', // {1} = 이/가
+    debate_limited_pause: '{0}{1} 사용 한도에 걸려 토론을 멈췄어요 — 한도가 풀리면 ▶ 계속을 눌러 주세요', // {1} = 이/가
     // A turn with no answer text yet (2026-09-30): {0} = DEBATE_SLOW_NOTE_MS in seconds, {1} = the speaker's provider's measured share
     // (DEBATE_SLOW_BY_PROVIDER `pct`, a column's first turn: `firstPct` — #2076), {2} = when THIS turn is auto-skipped, in seconds from
     // its send (that provider's `skipMs` / `firstSkipMs`, or later for a turn whose round got under way late).
@@ -1396,6 +1398,8 @@ export const COMPARE_I18N = {
     debate_role_moderator: 'Moderator',
     debate_auto_pick: 'auto-picked',
     debate_mod_fallback: 'The AI moderator failed twice in a row — switched to automatic order',
+    debate_limited_out: '{0} hit its usage limit and left this debate — the other AIs carry on',
+    debate_limited_pause: '{0} hit its usage limit, so the debate is paused — press ▶ Continue once the limit resets',
     debate_slow_note: 'Most turns start within a few seconds, but about {1}% take longer than {0} seconds. You can wait a little longer or skip this turn. (It\'s skipped automatically after {2} seconds.)',
     debate_slow_skip: 'Skip this turn',
     debate_slow_wait: 'Wait {0}s more',

@@ -1453,7 +1453,11 @@ export function readDebateRecord(raw, colIds, textMax) {
   const st = splitStance(raw.stance);
   const stance = raw.vf === true ? composeStance(st.base, [...st.roles, STANCE_VERIFY]) : raw.stance;
   const pace = raw.pb === true && raw.pace === PACE_DEEP ? PACE_BALANCED : raw.pace || PACE_QUICK; // recordPace
-  return { debaters, modCol, modKind: raw.modKind, stance, pace, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.asks ? { asks: Math.min(raw.asks, DEBATE_MAX_ASKS) } : {}), ...(raw.legacy === true ? { legacy: true } : {}) };
+  // `lim` = a kept debater on its usage limit (debate.js benchIfLimited): no conclusion goes to it after a reload
+  // either. Ignored (never a reason to drop the entry) unless it names a debater still in the rotation; older
+  // readers ignore the unknown key.
+  const lim = isDebater(raw.lim) && el.includes(raw.lim) ? raw.lim : null;
+  return { debaters, modCol, modKind: raw.modKind, stance, pace, length: raw.length || LENGTH_NORMAL, tone, aliases, log, dl, prev, fr, el, turns, modStarted: raw.modStarted === true, done: raw.done === true, ...(raw.asks ? { asks: Math.min(raw.asks, DEBATE_MAX_ASKS) } : {}), ...(lim ? { lim } : {}), ...(raw.legacy === true ? { legacy: true } : {}) };
 }
 /**
  * The log cut to `max` entries for the record, oldest first — but never a line some speaker has

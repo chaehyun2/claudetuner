@@ -618,6 +618,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   let _statusReady = false, _historyReady = false;
+  // True once the collectedOrgs onChanged arm has applied a list. The first-paint storage read was
+  // issued earlier and can deliver an OLDER list after that event; it must not overwrite it (#2304).
+  let _orgsLive = false;
 
   // Status banner refresh (reflects rate-based prediction). Extracted because every
   // detail redraw site below needs the exact same guard + argument unpacking.
@@ -722,13 +725,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       readHistory().then((history) => {
         state.usageHistory = history;
         state.historyLoaded = true;
-        if (isOverviewActive()) { if (!isDragging()) renderOverview(); return; }
-        if (isDetailHidden()) return;
-        if (state.selectedOrgId) selectOrg(state.selectedOrgId);
-        else redrawDetail();
+        redrawForHistory();
       });
     });
   });
+
+  // Redraw what the usage history feeds (overview cards, or the open detail view's charts and
+  // forecast) after state.usageHistory changed.
+  function redrawForHistory() {
+    if (isOverviewActive()) { if (!isDragging()) renderOverview(); return; }
+    if (isDetailHidden()) return;
+    if (state.selectedOrgId) selectOrg(state.selectedOrgId);
+    else redrawDetail();
+  }
 
   function tryDrawCharts() {
     if (!_statusReady || !_historyReady) return;
@@ -746,7 +755,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Restore pinned org from selectedOrgId (sync)
   chrome.storage.sync.get({ selectedOrgId: null, overviewOrder: [] }, (syncCfg) => {
     state.overviewOrder = syncCfg.overviewOrder || []; // user's saved overview card order
-    getLocalWithHistory({ lastStatus: null, collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
+    // 🔴 The status does NOT wait for the usage history. The history lives in IndexedDB (#1957),
+    // and opening it can take seconds on a slow disk; while this first paint waited for it, the
+    // open-time collect's collectedOrgs write re-rendered the panel with NO status — the
+    // first-run onboarding and "no data yet" showed for an existing user for 10-20s (#2304).
+    // Status and gauges paint from storage now; the history-backed parts redraw when it lands.
+    readHistory().then((history) => {
+      state.usageHistory = history;
+      state.historyLoaded = true;
+      _historyReady = true;
+      // Before the status paint, the status callback below draws with the history already in
+      // state — nothing to redraw yet. After it: the forecast inside updateUI (gated on
+      // historyLoaded), then the history-fed view the same way a HISTORY_UPDATED redraw does it.
+      // 🔴 Through selectOrg, not tryDrawCharts alone: a selectOrg that ran while the history was
+      // still empty (the open-time collect's collectedOrgs write) HID #chart-section, and
+      // drawCharts never un-hides it — the charts stayed gone until the next append.
+      if (!_statusReady) return;
+      if (state.lastUpdateUIStatus) updateUI(state.lastUpdateUIStatus);
+      if (state.selectedOrgId) redrawForHistory();
+      else tryDrawCharts();
+    });
+    chrome.storage.local.get({ lastStatus: null, collectedOrgs: [], claudeNoticeDismissed: false, onboardOrgName: null, lastView: 'overview', overviewHintDismissed: false, lastViewedOrgId: null, extToken: null, accountCache: null }, (result) => {
       state.providerEmail = result.accountCache?.email || null;
       // Which Tuner account this install actually syncs into (see bg/ext-token-claims.js).
       // Skipped once the onChanged listener has already reported a token: this read was issued
@@ -756,10 +785,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.claudeNoticeDismissed = result.claudeNoticeDismissed || false;
       state.lastView = result.lastView || 'overview';
       state.overviewHintDismissed = !!result.overviewHintDismissed;
-      _historyReady = true;
 
       // Multi-org: restore pinned org or fall back to primary
-      const cOrgs = result.collectedOrgs || [];
+      const cOrgs = _orgsLive ? state.collectedOrgs : (result.collectedOrgs || []);
       if (cOrgs.length >= 1) {
         state.collectedOrgs = cOrgs;
         // Restore the user's last-viewed org (persisted by selectOrg) so reopening the
@@ -952,6 +980,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {
       state.collectedOrgs = changes.collectedOrgs.newValue || [];
+      _orgsLive = true;
       const viewTabs = document.getElementById('view-tabs');
       if (state.collectedOrgs.length >= 2) {
         showMultiOrgBadges(state.collectedOrgs);
@@ -992,7 +1021,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       // collection failed" banner + onboarding + missing footer email until the
       // panel is reopened. The lastStatus handler below returns early when only
       // collectedOrgs changed, so this is the sole re-render trigger then.
-      updateUI(state.lastUpdateUIStatus);
+      // Not before the first status paint: lastUpdateUIStatus is still unset there, and rendering
+      // it paints "no data" (+ the first-run block) over an install that has a status (#2304).
+      // That paint reads collectedOrgs from state, which this handler has just updated.
+      if (_statusReady) updateUI(state.lastUpdateUIStatus);
     }
 
     // Live-apply the extra-usage card visibility toggled from the Options page,

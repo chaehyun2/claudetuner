@@ -18,7 +18,7 @@
 //   wins; Stop aborts the stream and pauses, the queue survives. ⏸ 멈춤 (#1816) never aborts: it
 //   lets the turn in flight finish and stops before the next one (`pauseAfter`).
 
-import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_WAIT_MORE_MS, debateSlowFor, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
+import { TURN_KIND_DEBATE, SEND_VIA_DEBATE, DEBATE_SEND_BUDGET, DEBATE_AWAY_PAUSE_MS, DEBATE_IDLE_DETECT_S, DEBATE_HARD_CAP, DEBATE_BUDGET_ASK, DEBATE_BUDGET_CONTINUE, DEBATE_BUDGET_MODES, DEBATE_NOTIFY_MSG, DEBATE_NOTIFY_CLEAR_MSG, DEBATE_FREEZE_NOTE_MS, DEBATE_MIN_TURNS_TO_END, DEBATE_MAX_ASKS, DEBATE_PREFS_KEY, DEBATE_ALIASES_KEY, DEBATE_FOLLOW_PX, GATE_CODES, CODE_ABORTED, CODE_RATE_LIMITED, STAGE_SEND_START, STAGE_STREAM_DONE, TTFT_MAX_MS, MODEL_SOURCE_REQUESTED, PROVIDER_META, SVG_NS, FEEDBACK_MSG_TYPE, DEBATE_FEEDBACK_REASONS, DEBATE_FEEDBACK_NOTE_MAX, DEBATE_FEEDBACK_TIMEOUT_MS, DEBATE_SLOW_NOTE_MS, DEBATE_SLOW_WAIT_MORE_MS, debateSlowFor, MS_PER_SECOND, MS_PER_MINUTE, WAIT_TICK_MS, DEBATE_PHASE_MARK_KEY } from './constants.js';
 import { BRAND_MARK_VIEWBOX, BRAND_MARK_PATHS, BRAND_WORDMARK } from './brand-marks.js';
 import { answeredTurn, exampleSentCode, sendMessage, storageGet } from './helpers.js';
 import { usageFloorHit, USAGE_FLOOR_PCT, USAGE_MAX_AGE_MS } from './usage-floor.js';
@@ -1922,8 +1922,8 @@ export function installDebate(ctx) {
         entry.text = ok ? turn.text : '';
         entry.pending = false;
         if (col) { const info = turnMeta(col, turn, ok, false); keepMeta(entry, info); if (turn) turn.debateInfo = info; if (ok) showMeta(turn, info); }
-        if (ok) { d.lastSpoke.set(id, seq); d.delivered.set(id, 0); } // it has read nobody yet
-        else dropIfDead(id, col);
+        if (ok) { d.lastSpoke.set(id, seq); d.delivered.set(id, 0); if (d.limited === id) d.limited = null; } // it has read nobody yet
+        else if (!benchIfLimited(id, col)) dropIfDead(id, col);
       }
       if (d.phase === PHASE_OPENING) d.phase = PHASE_SPEAKING;
     } else {
@@ -1987,6 +1987,7 @@ export function installDebate(ctx) {
           d.delivered.set(cur.col, cur.covered);
           d.lastSpoke.set(cur.col, cur.seq);
           d.prev = cur.col;
+          if (d.limited === cur.col) d.limited = null; // back under its limit: a concluder again
           d.firstReplied.add(cur.col);
           // A debater's conclusion (#1909 — no AI moderator) closes the run like a moderator's END; the next
           // leg (the user speaks again) gets its own automatic-order turn count.
@@ -2014,6 +2015,8 @@ export function installDebate(ctx) {
           }
         } else if (cur.conclude) {
           // A conclusion that failed is asked for again on ▶ 계속 — the debate does not slip back into turns.
+          // A concluder on its limit is not the one asked again (benchIfLimited: out, or d.limited → concluderOf).
+          benchIfLimited(cur.col, col);
           if (col && col.status !== 'error') dropIfDead(cur.col, col);
           d.wrapNow = true;
           d.phase = PHASE_PAUSED;
@@ -2021,6 +2024,7 @@ export function installDebate(ctx) {
           return false;
         } else {
           if (col && col.status === 'error' && col.errorCode === CODE_ABORTED && !cur.skipped) { d.phase = PHASE_PAUSED; renderBar(); return false; }
+          if (benchIfLimited(cur.col, col) && d.phase === PHASE_PAUSED) { renderBar(); return false; }
           dropIfDead(cur.col, col);
           d.prev = cur.col; // a failed speaker is not asked again straight away
         }
@@ -2083,6 +2087,36 @@ export function installDebate(ctx) {
   function dropIfDead(id, col) {
     if (!col || col.status !== 'error') return;
     if (GATE_CODES.has(col.errorCode) || ctx.columnDead(col) || ctx.threadless(col)) state.debate.eligible.delete(id);
+  }
+
+  /**
+   * A debater its service refused on the usage limit (rate_limited) is not asked again: the next turn
+   * would fail the same way — one debate ran 12 failed Claude turns in 4 minutes (2026-10-05). With
+   * three or more debaters it leaves this run's rotation; with two the run pauses instead, so ▶ 계속
+   * after the reset goes on with both. True = handled (left, or paused) — the caller skips dropIfDead.
+   */
+  function benchIfLimited(id, col) {
+    const d = state.debate;
+    if (!col || col.status !== 'error' || col.errorCode !== CODE_RATE_LIMITED || !d.eligible.has(id)) return false;
+    const name = nameOf(id);
+    const out = d.eligible.size > 2;
+    if (out) d.eligible.delete(id);
+    else {
+      // ▶ 계속 asks the OTHER one first (autoNext skips prev) and a conclusion goes to it too (concluderOf),
+      // until this one answers again — also after an opening, where nothing else sets prev.
+      d.phase = PHASE_PAUSED;
+      d.prev = id;
+      d.pendingNext = null;
+      d.limited = id;
+    }
+    const line = t(out ? 'debate_limited_out' : 'debate_limited_pause', name, subjectParticle(name));
+    // On the failed turn itself (kept by the history like a skip line): a page notice alone is wiped by
+    // the next turn's send in the same task when the run goes on.
+    const turn = ctx.lastAssistantTurn(col);
+    if (turn) { turn.errorText = line; ctx.paintAssistant(col); }
+    if (!out) ctx.showNotice('warn', [line]);
+    track('debate_limited', { provider: col.provider, out });
+    return true;
   }
 
   /** Take the next step, if the debate is running and nothing is in flight. */
@@ -2325,7 +2359,9 @@ export function installDebate(ctx) {
       for (let i = d.transcript.length - 1; i >= 0; i--) { const e = d.transcript[i]; if (e.speaker === id && e.tierKey) return e.tierKey; }
       return colTier(id);
     };
-    return pickConcluder({ order: d.debaters, eligible: d.eligible, tierKeyOf });
+    // A kept debater on its usage limit (benchIfLimited, two left) writes no conclusion while another can.
+    const pool = d.limited && d.eligible.size > 1 ? new Set([...d.eligible].filter((x) => x !== d.limited)) : d.eligible;
+    return pickConcluder({ order: d.debaters, eligible: pool, tierKeyOf });
   }
   /** Is there anyone to write the conclusion — a live AI moderator, or an eligible debater? */
   const canConclude = (d) => (d.modKind === MOD_AI && !!d.modCol && !ctx.columnDead(colOf(d.modCol))) || !!concluderOf(d);
@@ -2470,6 +2506,7 @@ export function installDebate(ctx) {
       // 🔎 verifier: written as vf beside a stance an older reader knows, so it keeps the entry (recordStance).
       debaters: d.debaters.slice(), modCol: d.modCol, modKind: d.modKind, ...recordStance(d.stance), ...recordPace(d.pace), length: d.length, tone: { kind: d.tone.kind, custom: d.tone.custom || '' }, aliases,
       log: trimRecordLog(log, d.delivered, DEBATE_RECORD_LOG_MAX), dl: Object.fromEntries(d.delivered), prev: d.prev, fr: [...d.firstReplied], el: [...d.eligible],
+      ...(d.limited ? { lim: d.limited } : {}),
       turns: d.turnsUsed, modStarted: d.modStarted, ...(d.phase === PHASE_DONE ? { done: true } : {}), ...(d.asks ? { asks: d.asks } : {}),
     };
   }
@@ -2493,7 +2530,7 @@ export function installDebate(ctx) {
       run: ctx.clock.now(), userMsgs: 0, restored: true, reported: null, reportSeq: 0, turnsAtRun: record.turns, legStart: record.turns,
       modKind: record.modKind,
       transcript: [], seq: 0,
-      delivered: new Map(), lastSpoke: new Map(), prev: record.prev,
+      delivered: new Map(), lastSpoke: new Map(), prev: record.prev, limited: record.lim || null,
       eligible: new Set(record.el), firstReplied: new Set(record.fr), modStarted: record.modStarted, modFails: 0,
       phase: PHASE_PAUSED, turnsUsed: record.turns,
       // A reloaded debate is stopped; 「계속」 starts a fresh run of the budget (like a spent one).

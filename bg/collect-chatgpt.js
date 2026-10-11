@@ -16,6 +16,7 @@ import { noteDriftOutcome, noteDriftEvent, buildDriftRider } from './drift-store
 import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, resolveIngestIdentity } from './storage.js';
 import { syncChatGPTVatStatus } from './vat.js';
 import { syncChatGPTTraining } from './training.js';
+import { syncChatGPTProModelSignal } from './pro-model-signal.js';
 import { trackPendingSend } from './collect-lock.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
@@ -382,6 +383,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     // #1889 — the account's training-data setting, filed under its personal account (bg/training.js): read
     // at most every 30 min, sent on its own route only when it changes. Same identity, blocks and tracking.
     void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTTraining(accountId, usage.plan_type, ingest)).catch(() => {}));
+    // #2332 — whether Pro-only models are picked (two booleans from settings/user, bg/pro-model-signal.js): read
+    // and sent at most once a day on its own route. Same identity, blocks and tracking.
+    void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTProModelSignal(accountId, ingest)).catch(() => {}));
 
     // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
     // user belongs to beyond the active account. Per-workspace usage needs a

@@ -849,3 +849,42 @@ export function parseChatGPTBillingInfo(info) {
   }
   return country ? { status: 'charged', country } : null;
 }
+
+// ─── Pro-model use signal (#2332 U8, step 1) ───
+// Whether the member uses the models only a Pro plan offers — the evidence an automatic Pro → Plus
+// downgrade must respect. Read from `GET /backend-api/settings/user` → settings.last_used_model_config
+// (a settings API, no conversations). Measured 2026-10-12 (Plus account that used to be Pro):
+//   slugs:  { web: 'gpt-6-thinking', default: 'gpt-6-thinking', android_app: 'gpt-6' } — picked NOW
+//   juices: { default: { 'gpt-6-pro': 'standard', 'gpt-5-6-pro': 'standard', … } }  — EVER picked
+//           (no time, no count; old models stay)
+// Only two booleans leave this function — never a model name.
+
+/** A Pro-only model slug: a `pro` TOKEN between hyphens (`gpt-6-pro`, `o1-pro`, `gpt-6-pro-x`), never a
+ *  substring — `prolite` (a plan) or `prompt-…` must not count. */
+const PRO_MODEL_SLUG_RE = /(?:^|-)pro(?:-|$)/i;
+export function isProModelSlug(slug) {
+  return typeof slug === 'string' && PRO_MODEL_SLUG_RE.test(slug);
+}
+
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * settings/user → `{ pro_used, pro_selected }`, each true / false / null (null = that part of the
+ * answer was missing or unreadable — kept apart from false so the server can measure how often the
+ * shape is absent per plan). An unreadable body (no `settings` object) → undefined: a failed read,
+ * nothing to send.
+ * @returns {{ pro_used: boolean|null, pro_selected: boolean|null } | undefined}
+ */
+export function parseChatGPTProModelSignal(data) {
+  const settings = isPlainObject(data) ? data.settings : null;
+  if (!isPlainObject(settings)) return undefined;
+  const cfg = settings.last_used_model_config;
+  const juices = isPlainObject(cfg) && isPlainObject(cfg.juices) ? cfg.juices : null;
+  const slugs = isPlainObject(cfg) && isPlainObject(cfg.slugs) ? cfg.slugs : null;
+  return {
+    pro_used: juices
+      ? Object.values(juices).some((surface) => isPlainObject(surface) && Object.keys(surface).some(isProModelSlug))
+      : null,
+    pro_selected: slugs ? Object.values(slugs).some(isProModelSlug) : null,
+  };
+}
