@@ -53,6 +53,7 @@ export const PLAN_AUTO_RESERVATIONS_KEY = 'planAutoReservations';
 export const PLAN_AUTO_NOTIF_PREFIX = 'plan-auto-';
 const MONTHLY = 'monthly';
 const EXECUTE_TIMEOUT_MS = 15_000;
+const REPORT_TIMEOUT_MS = 15_000;
 const DONE_KEEP_MS = 60 * 24 * 60 * 60 * 1000;          // a done id outlives any order's expiry
 
 /** Explanation page for an order (plan §6.2). */
@@ -148,7 +149,7 @@ async function mutateOnce(call) {
   }
 }
 
-async function markDone(orderId) {
+export async function markDone(orderId) {
   const { [PLAN_AUTO_DONE_KEY]: done = {} } = await chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {} });
   const now = Date.now();
   for (const [k, ts] of Object.entries(done)) if (now - ts > DONE_KEEP_MS) delete done[k];
@@ -156,19 +157,19 @@ async function markDone(orderId) {
   await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done });
 }
 
-async function unmarkDone(orderId) {
+export async function unmarkDone(orderId) {
   const { [PLAN_AUTO_DONE_KEY]: done = {} } = await chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {} });
   delete done[orderId];
   await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done });
 }
 
-async function isDone(orderId) {
+export async function isDone(orderId) {
   const { [PLAN_AUTO_DONE_KEY]: done = {} } = await chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {} });
   return !!done[orderId];
 }
 
 /** POST /plan-order-execute. true only on an explicit { ok: true }. */
-async function requestExecute(config, po, userEmail, installId) {
+export async function requestExecute(config, po, userEmail, installId) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), EXECUTE_TIMEOUT_MS);
   try {
@@ -225,14 +226,19 @@ export function flushAutoReports(config) {
       const oid = r.body?.order_id;
       if (blocked.has(oid)) { keep.push(r); continue; }
       let status = 0;
+      // Bounded (#2332 CWS batch review): a report the server never answers must not hold the queue —
+      // and with it every collector that awaits a flush — forever. A timeout is status 0 → retried.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), REPORT_TIMEOUT_MS);
       try {
         const res = await authedFetch(config, `${config.serverUrl}${r.path || RESPONSE_PATH}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(r.body),
+          signal: ctrl.signal,
         });
-        status = res.status;
-      } catch { /* network: status 0 → retry */ }
+        status = res?.status || 0;
+      } catch { /* network / timeout: status 0 → retry */ } finally { clearTimeout(timer); }
       if (status >= 200 && status < 300) {
         if (r.path === REVERT_PATH) await markCardReverted(r.body.order_id);
         continue;
@@ -254,7 +260,7 @@ async function markCardReverted(orderId) {
   if (card && card.order_id === orderId) await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: { ...card, result: 'reverted', at: Date.now() } });
 }
 
-async function report(config, po, userEmail, installId, r, changedOrgUuid) {
+export async function reportAutoResult(config, po, userEmail, installId, r, changedOrgUuid) {
   const body = {
     order_id: po.order_id, user_email: userEmail, action: 'accepted',
     result: r.result, outcome: r.outcome, install_id: installId,
@@ -275,9 +281,11 @@ export async function reportAutoRevert(config, orderId, userEmail) {
   await flushAutoReports(config);
 }
 
-async function tellMember(po, r, changeDate, userEmail) {
-  const isUp = po.kind !== 'cancel_downgrade' && rank(po.to_plan) > rank(po.from_plan);
+export async function tellMember(po, r, changeDate, userEmail) {
+  // ChatGPT orders are downgrades only (#2332); PLAN_HIERARCHY is Claude's and cannot rank their plans.
+  const isUp = po.provider !== 'chatgpt' && po.kind !== 'cancel_downgrade' && rank(po.to_plan) > rank(po.from_plan);
   const card = {
+    provider: po.provider || 'claude',
     order_id: po.order_id, org_id: po.org_id, kind: po.kind, from_plan: po.from_plan, to_plan: po.to_plan,
     target_org_uuid: po.target_org_uuid, result: r.result, outcome: r.outcome, is_up: isUp,
     change_date: changeDate || null, at: Date.now(), user_email: userEmail || null,
@@ -311,15 +319,17 @@ async function readReservations() {
   const { [PLAN_AUTO_RESERVATIONS_KEY]: m = {} } = await chrome.storage.local.get({ [PLAN_AUTO_RESERVATIONS_KEY]: {} });
   return m;
 }
-async function ourReservation(orgUuid) {
+export async function ourReservation(orgUuid) {
   return (await readReservations())[orgUuid] || null;
 }
-async function rememberReservation(orgUuid, orderId, planType) {
+export async function rememberReservation(orgUuid, orderId, planType, extra = null) {
   const m = await readReservations();
-  m[orgUuid] = { order_id: orderId, plan_type: planType, at: Date.now() };
+  // `extra` (#2332): a re-check stamp on an existing entry — its original `at` is kept.
+  const prev = m[orgUuid];
+  m[orgUuid] = { order_id: orderId, plan_type: planType, at: extra && prev?.order_id === orderId ? prev.at : Date.now(), ...(extra || {}) };
   await chrome.storage.local.set({ [PLAN_AUTO_RESERVATIONS_KEY]: m });
 }
-async function forgetReservation(orgUuid) {
+export async function forgetReservation(orgUuid) {
   const m = await readReservations();
   if (!(orgUuid in m)) return;
   delete m[orgUuid];
@@ -347,7 +357,10 @@ const _inFlight = new Set();
 
 /** Entry point from the Claude snapshot POST response (bg/collect.js) for a source='auto' order. */
 export async function handleAutoPlanOrder(config, po, userEmail) {
-  if (!po || po.source !== 'auto' || !po.order_id || !po.target_org_uuid || !userEmail) {
+  // 🔴 Claude orders only. Another service's order (#2332, `provider` on the payload) is never run against
+  // claude.ai, whatever response it arrived on — the server already delivers per provider; this is the
+  // second lock.
+  if (!po || po.source !== 'auto' || !po.order_id || !po.target_org_uuid || !userEmail || (po.provider && po.provider !== 'claude')) {
     await flushAutoReports(config).catch(() => {});
     return;
   }
@@ -373,7 +386,7 @@ export async function handleAutoPlanOrder(config, po, userEmail) {
     const changeDate = sub?.next_charge_date || null;
     if (pre.final) {
       await markDone(po.order_id);
-      await report(config, po, userEmail, installId, pre.final, null);
+      await reportAutoResult(config, po, userEmail, installId, pre.final, null);
       await tellMember(po, pre.final, changeDate, userEmail);
       return;
     }
@@ -392,7 +405,7 @@ export async function handleAutoPlanOrder(config, po, userEmail) {
       if (po.kind === 'cancel_downgrade') await forgetReservation(org.uuid);
       else if (rank(po.to_plan) < rank(po.from_plan)) await rememberReservation(org.uuid, po.order_id, PLAN_API_MAP[po.to_plan]);
     }
-    await report(config, po, userEmail, installId, r, r.result === 'completed' ? org.uuid : null);
+    await reportAutoResult(config, po, userEmail, installId, r, r.result === 'completed' ? org.uuid : null);
     await tellMember(po, r, changeDate, userEmail);
   } finally {
     _inFlight.delete(po.order_id);

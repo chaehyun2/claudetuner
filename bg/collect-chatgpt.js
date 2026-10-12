@@ -17,6 +17,8 @@ import { getConfig, appendUsageHistory, postSnapshot, getOrCreateInstallId, reso
 import { syncChatGPTVatStatus } from './vat.js';
 import { syncChatGPTTraining } from './training.js';
 import { syncChatGPTProModelSignal } from './pro-model-signal.js';
+import { AUTO_PATH_CAPABILITY, flushAutoReports } from './plan-auto.js';
+import { handleAutoChatgptOrder, checkChatgptReservation } from './plan-auto-chatgpt.js';
 import { trackPendingSend } from './collect-lock.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
@@ -279,6 +281,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     // Only userManual busts the cache — NOT an automatic `force`, which for this provider comes
     // from an unrelated Claude trigger (e.g. a Claude 429) and shouldn't hit accounts/check.
     const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type, userManual);
+    // #2332: is a downgrade an automatic order scheduled on this account still in place? Read on THAT
+    // account (not the roster's `default`), only while one is ours, at most hourly.
+    void checkChatgptReservation(accountId).catch(() => {});
     const renewalDate = roster.defaultRenewal;
 
     const org = {
@@ -358,7 +363,7 @@ export async function collectChatGPT(force = false, userManual = false) {
       // gate unadvanced and the next cycle retries (no silent drop of a change).
       // Rides an existing POST; does not decide whether one happens. Committed only on success.
       const { rider: driftRider, commit: driftCommit } = await buildDriftRider('chatgpt', shape, { label: plan, raw: usage.plan_type });
-      const res = await sendChatGPTSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider }).catch(e => {
+      const res = await sendChatGPTSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider, sendMeta: gate.meta }).catch(e => {
         console.warn('[Claude Tuner] ChatGPT snapshot send failed:', e.message);
         sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
@@ -443,7 +448,7 @@ export async function collectChatGPT(force = false, userManual = false) {
       // even for ChatGPT-only users (must not overwrite the users row's plan). A
       // plan/pending change (or a user-manual collect) marks the POST force so the server
       // stores it rather than deduping this usage-null workspace heartbeat.
-      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true, force: shouldForceProviderPost(exGate.reason, userManual), sendOutcome }).catch((e) => {
+      const res = await sendChatGPTSnapshot(ex, email, ex.plan, { forceExtraOrg: true, force: shouldForceProviderPost(exGate.reason, userManual), sendOutcome, sendMeta: exGate.meta }).catch((e) => {
         console.warn('[Claude Tuner] ChatGPT workspace snapshot send failed:', e.message);
         sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
@@ -513,7 +518,7 @@ export async function collectChatGPT(force = false, userManual = false) {
 // Send ChatGPT snapshot to server (same /api/snapshots endpoint)
 // Uses ext_token email (Claude email) as user_email for server identity,
 // preserves ChatGPT email in provider_email for reference.
-async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false, force = false, sendOutcome = null, driftRider = null } = {}) {
+async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = false, force = false, sendOutcome = null, driftRider = null, sendMeta = null } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -573,6 +578,8 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
     // h5/d7/r7, so a plan/pending change with flat usage would otherwise be dropped. Set only on
     // plan/pending-change or user-manual sends (shouldForceProviderPost) — flat heartbeats stay dedupable.
     ...(force ? { force: true } : {}),
+    // #2333: is_heartbeat + send_reason (send-gate.js sendMeta) — observation, not a dedup input.
+    ...(sendMeta || {}),
   };
 
   // Model-scoped limit (e.g. Codex 'GPT-5.3-Codex-Spark') rides the shared `seven_day_omelette`
@@ -662,6 +669,9 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // 2xx erase the primary's failure, so the user was told everything was fine while their main
   // account never reached the server (Codex DEPLOY-BLOCKER).
   // Per-pass detail (#2092 P3) — only on a snapshot that is actually being sent.
+  // #2332: this build executes automatic ChatGPT downgrade orders (bg/plan-auto-chatgpt.js). The server
+  // delivers one only on a ChatGPT POST that declares it (and ≥ its ChatGPT version floor).
+  payload.plan_auto_exec = AUTO_PATH_CAPABILITY;
   const commitResetPassDetail = await attachResetPassDetail(payload, org.resetPasses);
   const posted = await postSnapshot(config, payload, (code) => {
     if (!sendOutcome) return;
@@ -671,5 +681,15 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // postSnapshot returns null when it withheld or failed the POST, else the server's reply — the
   // detail counts as sent only when that reply says it was stored (reset_pass_stored).
   await commitResetPassDetail(posted);
+  // #2332: an automatic ChatGPT order rides the reply. Its own module, its own checks (the session must
+  // be the order's account — so it needs no account-switch tracking); any other reply flushes queued
+  // reports. NOT awaited (CWS batch review): the collection cycle — and the Gemini collection and account
+  // switch after it — must never wait on an order or a report.
+  if (posted?.plan_order?.source === 'auto' && posted.plan_order.provider === 'chatgpt') {
+    void handleAutoChatgptOrder(config, posted.plan_order, payload.user_email)
+      .catch((e) => console.warn('[Claude Tuner] auto ChatGPT order handling failed:', e?.message));
+  } else if (posted) {
+    void flushAutoReports(config).catch(() => {});
+  }
   return posted;
 }

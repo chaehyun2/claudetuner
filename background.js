@@ -30,6 +30,7 @@ import {
   setCollectAndSendRef,
 } from './bg/plan.js';
 import { PLAN_AUTO_NOTIF_PREFIX, PLAN_AUTO_CARD_KEY, planChangeUrl, cancelAutoDowngrade, reportAutoRevert } from './bg/plan-auto.js';
+import { cancelAutoDowngradeChatgpt } from './bg/plan-auto-chatgpt.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { withCollectLock } from './bg/collect-lock.js';
 import { getCadence, isCollectionPaused, setCadenceChangeHandler } from './bg/cadence-config.js';
@@ -1712,7 +1713,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ success: false, error: 'No auto downgrade to cancel' });
         return;
       }
-      const result = await cancelAutoDowngrade(card.target_org_uuid, card.to_plan);
+      // The card names its service (#2332): a ChatGPT reservation is cancelled on chatgpt.com, never claude.ai.
+      const result = card.provider === 'chatgpt'
+        ? await cancelAutoDowngradeChatgpt(card.target_org_uuid, card.to_plan)
+        : await cancelAutoDowngrade(card.target_org_uuid, card.to_plan);
       if (result?.success) {
         const config = await getConfig();
         // The card carries the account the order belongs to; lastStatus is only a fallback.

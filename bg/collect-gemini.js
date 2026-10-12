@@ -186,7 +186,7 @@ export async function collectGemini(force = false, userManual = false) {
         raw: policies.length ? (tierWord || 'policy')
           : (planId === null || planId === undefined ? null : String(planId)),
       });
-      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider }).catch(e => {
+      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider, sendMeta: gate.meta }).catch(e => {
         console.warn('[Claude Tuner] Gemini snapshot send failed:', e.message);
         sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
@@ -254,7 +254,7 @@ export async function collectGemini(force = false, userManual = false) {
 }
 
 // Send Gemini snapshot to server (same /api/snapshots endpoint)
-async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendOutcome = null, driftRider = null } = {}) {
+async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendOutcome = null, driftRider = null, sendMeta = null } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -312,6 +312,8 @@ async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendO
     // ChatGPT rider follows. If a response shape changes while usage sits flat we would rather
     // lose that observation than start forcing a store on every heartbeat.
     ...(driftRider ? { drift_obs: driftRider } : {}),
+    // #2333: is_heartbeat + send_reason (send-gate.js sendMeta) — observation, not a dedup input.
+    ...(sendMeta || {}),
   };
 
   // Shared helper handles auth recovery (401/403), account deletion (410),

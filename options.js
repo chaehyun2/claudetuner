@@ -137,6 +137,9 @@ async function _authedFetch(cfg, url, options = {}) {
 // A sub-checkbox of the `auto` radio. Its truth is on the server (plan_auto_consent — possibly
 // seeded for a dogfood org), so the box stays disabled until GET /admin-order-setting answers.
 let _autoOptConsentLoaded = false;
+// #2332: the separate ChatGPT consent. Its own flag — a server without the field leaves this box disabled
+// and the PATCH omits it, so an older server never sees a value the member could not have set.
+let _autoOptCgLoaded = false;
 // The member touched the optimization radio on this page — an explicit choice, worth sending even
 // before the server values have loaded.
 let _optRadioTouched = false;
@@ -152,18 +155,29 @@ function _autoOptConsentChecked() {
 
 /** Render the box: checked only while `auto` is selected; usable only once the server value is in. */
 function _applyAutoOptConsent(checked, autoSelected) {
-  const cb = document.getElementById('auto-opt-consent');
-  const row = document.getElementById('auto-opt-consent-row');
+  _applyConsentBox('auto-opt-consent', 'auto-opt-consent-row', checked, autoSelected, _autoOptConsentLoaded);
+}
+function _applyAutoOptCgConsent(checked, autoSelected) {
+  _applyConsentBox('auto-opt-consent-cg', 'auto-opt-consent-cg-row', checked, autoSelected, _autoOptCgLoaded);
+}
+function _applyConsentBox(boxId, rowId, checked, autoSelected, loaded) {
+  const cb = document.getElementById(boxId);
+  const row = document.getElementById(rowId);
   if (!cb || !row) return;
   cb.checked = !!checked && !!autoSelected;
-  cb.disabled = !autoSelected || !_autoOptConsentLoaded;
+  cb.disabled = !autoSelected || !loaded;
   row.classList.toggle('is-disabled', cb.disabled);
+}
+function _autoOptCgChecked() {
+  const cb = document.getElementById('auto-opt-consent-cg');
+  return !!cb && cb.checked;
 }
 
 function _loadAutoOptConsent(config) {
   const cb = document.getElementById('auto-opt-consent');
   if (!cb) return;
   cb.addEventListener('change', autoSave);
+  document.getElementById('auto-opt-consent-cg')?.addEventListener('change', autoSave);
   chrome.storage.local.get({ lastStatus: null }, async (status) => {
     const email = status.lastStatus?.snapshot?.user_email;
     if (!email) return;
@@ -183,6 +197,10 @@ function _loadAutoOptConsent(config) {
       }
       _autoOptConsentLoaded = true;
       _applyAutoOptConsent(data.allow_auto_rec, getRadioValue('optimization-group') === 'auto');
+      if (typeof data.allow_auto_chatgpt === 'boolean') {
+        _autoOptCgLoaded = true;
+        _applyAutoOptCgConsent(data.allow_auto_chatgpt, getRadioValue('optimization-group') === 'auto');
+      }
     } catch { /* offline/old server: the box stays disabled and the PATCH omits allow_auto_rec */ }
   });
 }
@@ -201,6 +219,7 @@ function _syncAdminOrderSetting(cfg) {
     const body = { auto_approve: autoApproveVal, ext_version: chrome.runtime.getManifest().version };
     // Omitted until loaded: an unloaded box shows nothing real, and omitting leaves the server row as is.
     if (_autoOptConsentLoaded) body.allow_auto_rec = autoApproveVal && _autoOptConsentChecked();
+    if (_autoOptCgLoaded) body.allow_auto_chatgpt = autoApproveVal && _autoOptCgChecked();
     const { lastStatus } = await chrome.storage.local.get({ lastStatus: null });
     const email = lastStatus?.snapshot?.user_email;
     if (!email) return;
@@ -447,8 +466,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (local.ct_admin_order_auto_approve) optMode = 'auto';
         else if (config.optimizationMode === 'approval') optMode = 'approval';
         else optMode = 'notify_only';
-        initRadioGroup('optimization-group', optMode, (v) => { _optRadioTouched = true; _applyAutoOptConsent(v === 'auto' && _autoOptConsentChecked(), v === 'auto'); autoSave(); });
+        initRadioGroup('optimization-group', optMode, (v) => {
+          _optRadioTouched = true;
+          _applyAutoOptConsent(v === 'auto' && _autoOptConsentChecked(), v === 'auto');
+          _applyAutoOptCgConsent(v === 'auto' && _autoOptCgChecked(), v === 'auto');
+          autoSave();
+        });
         _applyAutoOptConsent(false, optMode === 'auto');
+        _applyAutoOptCgConsent(false, optMode === 'auto');
         _loadAutoOptConsent(config);
       });
 

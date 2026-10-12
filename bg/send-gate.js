@@ -57,18 +57,48 @@ export async function noteServerSuccess() {
   });
 }
 
+/** True if a utilization (or extra-usage spend) moved beyond threshold — the values themselves. */
+export function hasUsageValueChanged(prev, current) {
+  prev = prev || {};
+  const diff = (a, b) => a != null && b != null && Math.abs(a - b) >= ORG_POLL_CHANGE_THRESHOLD;
+  return diff(prev.h5, current.h5) || diff(prev.d7, current.d7) || diff(prev.extraUsed, current.extraUsed);
+}
+
 /** Compare usage values; true if changed beyond threshold (or a 5h/7d reset window rolled over). */
 export function hasOrgUsageChanged(prev, current) {
   prev = prev || {};
-  const diff = (a, b) => a != null && b != null && Math.abs(a - b) >= ORG_POLL_CHANGE_THRESHOLD;
   // A reset_at change (new window) is meaningful even when utilization is flat.
   // First comparison (prev absent) counts as a change so a real reset isn't missed.
   const resetChanged = (a, b) => b != null && a !== b;
   // NOTE: a plan change is handled by shouldSendSnapshot (it bypasses the send floor), not here —
   // this predicate stays about USAGE so the adaptive tier / heartbeat classification isn't
   // perturbed by a pure relabel.
-  return diff(prev.h5, current.h5) || diff(prev.d7, current.d7) || diff(prev.extraUsed, current.extraUsed)
+  return hasUsageValueChanged(prev, current)
     || resetChanged(prev.resetsAt5h, current.resetsAt5h) || resetChanged(prev.resetsAt7d, current.resetsAt7d);
+}
+
+/**
+ * #2333 — why this POST is being sent, as body fields the server can read later. Pure.
+ *   send_reason: 'heartbeat' (nothing changed, the liveness floor elapsed) · 'usage' (a value
+ *                moved) · 'reset' (ONLY a reset time moved — at 0% ChatGPT/Gemini report a rolling
+ *                "now + window", so these are the suspected bulk of server-dropped sends) ·
+ *                'plan-change' · 'force' · 'manual' (the user pressed collect) · 'first' (no gate state yet)
+ *   is_heartbeat: send_reason === 'heartbeat' — the same field Claude extra orgs already send.
+ * Observation only: it changes nothing about WHETHER to send.
+ */
+export function sendMeta(prevValues, currentValues, reason, { userManual = false } = {}) {
+  let send_reason;
+  // A user-pressed collect is a request for fresh data, never a liveness tick — and the server
+  // skips the recommendation refresh for heartbeats, which a manual collect must not lose.
+  if (userManual) send_reason = 'manual';
+  else if (reason === 'plan-change' || reason === 'force') send_reason = reason;
+  // No gate state yet (fresh install, new stream, cleared storage): hasOrgUsageChanged counts a
+  // missing previous reset as a change, which would mislabel every first send as 'reset'.
+  else if (!prevValues || Object.keys(prevValues).length === 0) send_reason = 'first';
+  else if (hasUsageValueChanged(prevValues, currentValues)) send_reason = 'usage';
+  else if (hasOrgUsageChanged(prevValues, currentValues)) send_reason = 'reset';
+  else send_reason = 'heartbeat';
+  return { is_heartbeat: send_reason === 'heartbeat', send_reason };
 }
 
 /**
@@ -207,5 +237,5 @@ export async function gateProviderSnapshot(uuid, currentValues, { force = false,
   const commit = async () => {
     await chrome.storage.local.set({ [key]: { lastValues: currentValues, lastSentAt: Date.now() } });
   };
-  return { send, reason, commit };
+  return { send, reason, commit, meta: sendMeta(prev.lastValues, currentValues, reason, { userManual }) };
 }
