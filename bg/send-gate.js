@@ -65,28 +65,37 @@ export function hasUsageValueChanged(prev, current) {
 }
 
 /** Compare usage values; true if changed beyond threshold (or a 5h/7d reset window rolled over). */
-export function hasOrgUsageChanged(prev, current) {
+export function hasOrgUsageChanged(prev, current, { ignoreIdleReset = false } = {}) {
   prev = prev || {};
   // A reset_at change (new window) is meaningful even when utilization is flat.
   // First comparison (prev absent) counts as a change so a real reset isn't missed.
-  const resetChanged = (a, b) => b != null && a !== b;
+  // 🔑 ignoreIdleReset (ChatGPT/Gemini SEND gate only, #2333): a window at exactly 0% on both sides
+  // has not started, and those providers report a rolling "now + window" reset time that moves on
+  // every poll. Counting it sent every send floor (15 min) instead of the 60-min heartbeat and the
+  // server dropped it — ~68% of all server-dropped messages (measured 2026-10-12, plan §1c). The
+  // first real use moves the utilization, which is a change on its own.
+  // 🔴 NOT for Claude: a Claude extra org's adaptive poll tier wakes on a REAL 0% reset (Claude
+  // reports a fixed reset time); suppressing it left a dormant org unpolled ~108 min (Codex 1R).
+  const idle = (u0, u1) => ignoreIdleReset && u0 === 0 && u1 === 0;
+  const resetChanged = (a, b, u0, u1) => b != null && a !== b && !idle(u0, u1);
   // NOTE: a plan change is handled by shouldSendSnapshot (it bypasses the send floor), not here —
   // this predicate stays about USAGE so the adaptive tier / heartbeat classification isn't
   // perturbed by a pure relabel.
   return hasUsageValueChanged(prev, current)
-    || resetChanged(prev.resetsAt5h, current.resetsAt5h) || resetChanged(prev.resetsAt7d, current.resetsAt7d);
+    || resetChanged(prev.resetsAt5h, current.resetsAt5h, prev.h5, current.h5)
+    || resetChanged(prev.resetsAt7d, current.resetsAt7d, prev.d7, current.d7);
 }
 
 /**
  * #2333 — why this POST is being sent, as body fields the server can read later. Pure.
  *   send_reason: 'heartbeat' (nothing changed, the liveness floor elapsed) · 'usage' (a value
- *                moved) · 'reset' (ONLY a reset time moved — at 0% ChatGPT/Gemini report a rolling
- *                "now + window", so these are the suspected bulk of server-dropped sends) ·
+ *                moved) · 'reset' (ONLY a reset time moved — with ignoreIdleReset, which the ChatGPT/
+ *                Gemini gate passes, not in a window idle at 0%; Claude callers keep counting it) ·
  *                'plan-change' · 'force' · 'manual' (the user pressed collect) · 'first' (no gate state yet)
  *   is_heartbeat: send_reason === 'heartbeat' — the same field Claude extra orgs already send.
  * Observation only: it changes nothing about WHETHER to send.
  */
-export function sendMeta(prevValues, currentValues, reason, { userManual = false } = {}) {
+export function sendMeta(prevValues, currentValues, reason, { userManual = false, ignoreIdleReset = false } = {}) {
   let send_reason;
   // A user-pressed collect is a request for fresh data, never a liveness tick — and the server
   // skips the recommendation refresh for heartbeats, which a manual collect must not lose.
@@ -96,7 +105,7 @@ export function sendMeta(prevValues, currentValues, reason, { userManual = false
   // missing previous reset as a change, which would mislabel every first send as 'reset'.
   else if (!prevValues || Object.keys(prevValues).length === 0) send_reason = 'first';
   else if (hasUsageValueChanged(prevValues, currentValues)) send_reason = 'usage';
-  else if (hasOrgUsageChanged(prevValues, currentValues)) send_reason = 'reset';
+  else if (hasOrgUsageChanged(prevValues, currentValues, { ignoreIdleReset })) send_reason = 'reset';
   else send_reason = 'heartbeat';
   return { is_heartbeat: send_reason === 'heartbeat', send_reason };
 }
@@ -111,14 +120,14 @@ export function sendMeta(prevValues, currentValues, reason, { userManual = false
  * polled one — comparing against last-sent catches slow cumulative drift and
  * matches what the server last stored.
  */
-export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { force = false, now = Date.now(), sendFloorMs = SEND_MIN_INTERVAL_MS, heartbeatFloorMs = SEND_HEARTBEAT_FLOOR_MS } = {}) {
+export function shouldSendSnapshot(prevValues, lastSentAt, currentValues, { force = false, now = Date.now(), sendFloorMs = SEND_MIN_INTERVAL_MS, heartbeatFloorMs = SEND_HEARTBEAT_FLOOR_MS, ignoreIdleReset = false } = {}) {
   prevValues = prevValues || {};
   // Always compute the real change (vs last sent) — callers use it to set the
   // is_heartbeat flag and to drive the adaptive tier, which must NOT be told
   // "changed" just because a forced send bypassed the gate.
   // sendFloorMs / heartbeatFloorMs default to the hardcoded constants; callers that
   // resolved a server override (via getCadence) pass the steered values in.
-  const changed = hasOrgUsageChanged(prevValues, currentValues);
+  const changed = hasOrgUsageChanged(prevValues, currentValues, { ignoreIdleReset });
   // force = "always post" (manual/backfill/429/plan-change). It bypasses the
   // stale-reset guard below to mirror the SERVER, whose stale-reset guard also
   // lives inside `if (!force)` — so we never drop a force send.
@@ -233,9 +242,9 @@ export async function gateProviderSnapshot(uuid, currentValues, { force = false,
   // throttling this provider can no longer slow the others down.
   const cadence = await getCadence(Date.now(), { uuid, provider });
   const { send, reason } = shouldSendSnapshot(prev.lastValues, prev.lastSentAt, currentValues,
-    { force, sendFloorMs: cadence.sendFloorMs, heartbeatFloorMs: cadence.heartbeatFloorMs });
+    { force, sendFloorMs: cadence.sendFloorMs, heartbeatFloorMs: cadence.heartbeatFloorMs, ignoreIdleReset: true });
   const commit = async () => {
     await chrome.storage.local.set({ [key]: { lastValues: currentValues, lastSentAt: Date.now() } });
   };
-  return { send, reason, commit, meta: sendMeta(prev.lastValues, currentValues, reason, { userManual }) };
+  return { send, reason, commit, meta: sendMeta(prev.lastValues, currentValues, reason, { userManual, ignoreIdleReset: true }) };
 }
