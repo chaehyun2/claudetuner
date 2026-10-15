@@ -34,8 +34,8 @@ import { SITE_TAB_PATTERNS, CHATGPT_API_BASE } from './constants.js';
 import { isUsableTab } from '../vendor-ai/sites.js';
 import { getOrCreateInstallId } from './storage.js';
 import {
-  AUTO_OUTCOME, flushAutoReports, isDone, markDone, unmarkDone, requestExecute, reportAutoResult, tellMember,
-  ourReservation, rememberReservation, forgetReservation, PLAN_AUTO_CARD_KEY,
+  AUTO_OUTCOME, flushAutoReports, isDone, beginOrder, approveOrSettle, boundedRead, reportAutoResult, tellMember,
+  ourReservation, rememberReservation, forgetReservation, patchPlanAutoCard, claimOrder, releaseOrder, withWorkerKeepalive,
 } from './plan-auto.js';
 
 export const CHATGPT_ACCOUNTS_CHECK_PATH = '/backend-api/accounts/check/v4-2023-04-27';
@@ -191,7 +191,7 @@ async function proveWrite(orderKey, expect) {
   for (let i = 0; i < PROOF_READS; i++) {
     if (i) await new Promise((r) => setTimeout(r, PROOF_GAP_MS));
     try {
-      const acct = await readActiveAccount(orderKey);
+      const acct = await boundedRead(readActiveAccount(orderKey));
       if (chatgptWriteProven(acct, expect)) return acct;
     } catch { /* next read */ }
   }
@@ -205,84 +205,90 @@ async function readActiveAccount(orderKey) {
   return resolveActiveChatgptAccount(await fetchChatGPTApi(CHATGPT_ACCOUNTS_CHECK_PATH), key);
 }
 
-const _inFlight = new Set();
-
-/** Entry point from a ChatGPT snapshot POST response (bg/collect-chatgpt.js) for a source='auto' order. */
+/**
+ * Entry point from a ChatGPT snapshot POST response (bg/collect-chatgpt.js) for a source='auto' order.
+ * The collector does not await it; the service worker is kept alive while it runs, and if the worker dies
+ * anyway the order's journal entry (written with its done mark) is reported 'unknown' by the next flush.
+ */
 export async function handleAutoChatgptOrder(config, po, userEmail) {
   if (!po || po.source !== 'auto' || po.provider !== 'chatgpt' || !po.order_id || !po.target_org_uuid || !userEmail) {
-    await flushAutoReports(config).catch(() => {});
+    void flushAutoReports(config).catch(() => {});
     return;
   }
-  if (_inFlight.has(po.order_id)) return;
-  _inFlight.add(po.order_id);
+  // One claim set for both services (bg/plan-auto.js) — the journal recovery reads it. Synchronous.
+  if (!claimOrder(po.order_id)) return;
   try {
-    await flushAutoReports(config).catch(() => {});
-    if (await isDone(po.order_id)) return;
-    const installId = await getOrCreateInstallId();
-    let acct;
-    try {
-      // The session must be the order's account right now. Another login (the member's second ChatGPT
-      // account) is not a failure of the order — nothing happens, and a later POST from the right
-      // session tries again before the order expires.
-      if ((await activeUsageKey()) !== po.target_org_uuid) return;
-      const data = await fetchChatGPTApi(CHATGPT_ACCOUNTS_CHECK_PATH);
-      // An unreadable roster is a failed READ (retry later), not "the account is gone".
-      if (!isObj(data?.accounts)) return;
-      acct = resolveActiveChatgptAccount(data, po.target_org_uuid);
-    } catch (e) {
-      console.warn(`[Claude Tuner] auto ChatGPT order #${po.order_id}: pre-check read failed, retrying later:`, e?.message);
-      return;
-    }
-    const pre = planAutoPrecheckChatgpt(po, acct, acct ? await ourReservation(po.target_org_uuid) : null);
-    let changeDate = acct?.entitlement?.renews_at || null;
-    if (pre.final) {
-      await markDone(po.order_id);
-      await reportAutoResult(config, po, userEmail, installId, pre.final, null);
-      await tellMember(po, pre.final, changeDate, userEmail);
-      return;
-    }
-    // The write goes through the page only. No usable tab = nothing done this time (no approval asked,
-    // nothing marked): a later POST with a tab open tries again before the order expires.
-    const tab = await usableChatgptTab();
-    if (!tab) {
-      console.log(`[Claude Tuner] auto ChatGPT order #${po.order_id}: no chatgpt.com tab — waiting`);
-      return;
-    }
-    // The session again, as late as possible BEFORE approval: a login switch since the pre-check ends
-    // nothing — this run simply stops. (After approval an 'unknown' would count toward the global API
-    // kill, and a switch is no API failure.) The remaining gap is the approval round trip; the body names
-    // the pre-checked account's UUID, which another session cannot change.
-    let sameSession = false;
-    try { sameSession = (await activeUsageKey()) === po.target_org_uuid; } catch { /* unread = not proven */ }
-    if (!sameSession) return;
-    // 🔴 Done BEFORE approval (same reason as the Claude path): no storage write between the approval and
-    // the call, and a worker that dies after this line never attempts the order again.
-    await markDone(po.order_id);
-    if (!(await requestExecute(config, po, userEmail, installId))) {
-      await unmarkDone(po.order_id);
-      return;
-    }
-    let r = classifyChatgptWrite(await postOnceViaTab(tab.id, pre.call.path, pre.call.body));
-    let changed = null;
-    if (r.result === 'completed') {
-      // The 200 body is empty either way: only the re-read proves it. Unproven = 'unknown' (the call
-      // went out and answered 200), which the server settles from the account's own observations.
-      const proof = await proveWrite(po.target_org_uuid, pre.call.expect);
-      if (proof) {
-        // The real switch date (it has differed from renews_at — SPEC 08-07).
-        changeDate = proof.entitlement?.scheduled_plan_change?.changes_at || changeDate;
-        changed = po.target_org_uuid;
-        if (po.kind === 'cancel_downgrade') await forgetReservation(po.target_org_uuid);
-        else await rememberReservation(po.target_org_uuid, po.order_id, po.to_plan);
-      } else {
-        r = { result: 'unknown', outcome: AUTO_OUTCOME.unknown };
-      }
-    }
-    await reportAutoResult(config, po, userEmail, installId, r, changed);
-    await tellMember(po, r, changeDate, userEmail);
+    await withWorkerKeepalive(() => runAutoChatgptOrder(config, po, userEmail));
   } finally {
-    _inFlight.delete(po.order_id);
+    releaseOrder(po.order_id);
   }
+}
+
+async function runAutoChatgptOrder(config, po, userEmail) {
+  void flushAutoReports(config).catch(() => {});
+  if (await isDone(po.order_id)) return;
+  const installId = await getOrCreateInstallId();
+  let acct;
+  try {
+    // The session must be the order's account right now. Another login (the member's second ChatGPT
+    // account) is not a failure of the order — nothing happens, and a later POST from the right
+    // session tries again before the order expires.
+    if ((await boundedRead(activeUsageKey())) !== po.target_org_uuid) return;
+    const data = await boundedRead(fetchChatGPTApi(CHATGPT_ACCOUNTS_CHECK_PATH));
+    // An unreadable roster is a failed READ (retry later), not "the account is gone".
+    if (!isObj(data?.accounts)) return;
+    acct = resolveActiveChatgptAccount(data, po.target_org_uuid);
+  } catch (e) {
+    console.warn(`[Claude Tuner] auto ChatGPT order #${po.order_id}: pre-check read failed, retrying later:`, e?.message);
+    return;
+  }
+  const pre = planAutoPrecheckChatgpt(po, acct, acct ? await ourReservation(po.target_org_uuid) : null);
+  let changeDate = acct?.entitlement?.renews_at || null;
+  if (pre.final) {
+    await beginOrder(po, userEmail, installId, pre.final, changeDate);
+    void flushAutoReports(config).catch(() => {});
+    await tellMember(po, pre.final, changeDate, userEmail);
+    return;
+  }
+  // The write goes through the page only. No usable tab = nothing done this time (no approval asked,
+  // nothing marked): a later POST with a tab open tries again before the order expires.
+  const tab = await usableChatgptTab();
+  if (!tab) {
+    console.log(`[Claude Tuner] auto ChatGPT order #${po.order_id}: no chatgpt.com tab — waiting`);
+    return;
+  }
+  // The session again, as late as possible BEFORE approval: a login switch since the pre-check ends
+  // nothing — this run simply stops. (After approval an 'unknown' would count toward the global API
+  // kill, and a switch is no API failure.) The remaining gap is the approval round trip; the body names
+  // the pre-checked account's UUID, which another session cannot change.
+  let sameSession = false;
+  try { sameSession = (await boundedRead(activeUsageKey())) === po.target_org_uuid; } catch { /* unread = not proven */ }
+  if (!sameSession) return;
+  // 🔴 Done (and journaled) BEFORE approval (same reason as the Claude path): no storage write between
+  // the approval and the call, and a worker that dies after this line never attempts the order again.
+  await beginOrder(po, userEmail, installId, null, changeDate);
+  if (!(await approveOrSettle(config, po, userEmail, installId))) return;
+  let r = classifyChatgptWrite(await postOnceViaTab(tab.id, pre.call.path, pre.call.body));
+  let changed = null;
+  if (r.result === 'completed') {
+    // The 200 body is empty either way: only the re-read proves it. Unproven = 'unknown' (the call
+    // went out and answered 200), which the server settles from the account's own observations.
+    const proof = await proveWrite(po.target_org_uuid, pre.call.expect);
+    if (proof) {
+      // The real switch date (it has differed from renews_at — SPEC 08-07).
+      changeDate = proof.entitlement?.scheduled_plan_change?.changes_at || changeDate;
+      changed = po.target_org_uuid;
+    } else {
+      r = { result: 'unknown', outcome: AUTO_OUTCOME.unknown };
+    }
+  }
+  // Journaled first — a failure in the bookkeeping below must not turn the result into 'unknown'.
+  await reportAutoResult(config, po, r, changed);
+  if (changed) {
+    if (po.kind === 'cancel_downgrade') await forgetReservation(po.target_org_uuid);
+    else await rememberReservation(po.target_org_uuid, po.order_id, po.to_plan);
+  }
+  await tellMember(po, r, changeDate, userEmail);
 }
 
 /** How often the collector re-checks a reservation this browser made (a read of accounts/check). */
@@ -325,10 +331,7 @@ export async function checkChatgptReservation(accountKey) {
     // Applied as scheduled: nothing left to cancel, and the card (which retires itself after the change
     // date) must not claim the member changed anything.
     if (verdict === 'applied') return;
-    const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
-    if (card && card.order_id === ours.order_id && card.result === 'completed') {
-      await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: { ...card, result: 'member_changed', at: Date.now() } });
-    }
+    await patchPlanAutoCard(ours.order_id, { result: 'member_changed' }, (card) => card.result === 'completed');
   } catch { /* never fails the cycle */ }
 }
 

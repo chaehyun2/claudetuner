@@ -411,6 +411,8 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   'share_open', 'share_create', 'share_update', 'share_delete', 'share_copy',
   // One-click share's popover: a password set / removed on an existing link (action + 0-1 flag, never the password).
   'share_password',
+  // …and the link put in / taken out of search engines (#2409: 0-1 flag).
+  'share_search',
   // Round footer (#1976): shown once per settled round (`answers_n`), a chip pressed (`chip` id + `targets_n`) — never the chip's words.
   'round_footer_shown', 'chip_click',
   // 「🗣 토론 붙이기」 (#1976 stage 3): the bridge pressed / the new debate tab took its handoff (`cols_n`, `incognito`) — never the topic.
@@ -2719,12 +2721,13 @@ export function createCompareController({
 
   // ── Share links (#1784 U3, docs/plans/compare-share.md §0.5) ─────────────────────────────
   // runtime message COMPARE_SHARE{op, …} → the ext_token routes `/api/compare/shares*`:
-  //   create {snapshot, author, authorName?}      → {ok, id, url, author{mode, name?}, createdAt}
+  //   create {snapshot, author, authorName?, search?} → {ok, id, url, author{mode, name?}, search, createdAt}
+  //          `search` (#2409): the sharer opted this PUBLIC link into search engines — off unless true
   //   create {snapshot, visibility:'private', password} → the same — a PRIVATE share (U5): anonymous,
   //          behind the password on the server (its content updates stay private and anonymous; the
   //          password itself changes only through op password). 🔴 The password is passed through to
   //          the server once and kept nowhere (not logged, not stored, not in the reply)
-  //   update {id, snapshot, author, authorName?}  → {ok, id, url, author{mode, name?}, updatedAt, visibility?}
+  //   update {id, snapshot, author, authorName?, search?} → {ok, id, url, author{mode, name?}, search, updatedAt, visibility?}
   //   delete {id}                                 → {ok}
   //   list                                        → {ok, shares[{id, url, kind, author, title, createdAt, updatedAt, views}]}
   //   password {id, password: string | null}     → {ok, id, url, visibility, rev?} — set / change (string) or
@@ -2755,7 +2758,7 @@ export function createCompareController({
     author: SHARE_AUTHOR_MODES.includes(r.author) ? r.author : 'anon',
     title: typeof r.title === 'string' ? r.title.slice(0, SHARE_TITLE_MAX) : '',
     createdAt: typeof r.createdAt === 'string' ? r.createdAt : '', updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
-    views: Number.isFinite(r.views) ? r.views : 0,
+    views: Number.isFinite(r.views) ? r.views : 0, search: r.search === true,
   } : null);
   async function shareRequest(message, sender) {
     const op = message.op;
@@ -2784,7 +2787,7 @@ export function createCompareController({
       const name = !priv && typeof message.authorName === 'string' ? message.authorName.slice(0, SHARE_AUTHOR_NAME_MAX) : '';
       const body = JSON.stringify(priv
         ? { snapshot: message.snapshot, visibility: 'private', password: message.password }
-        : { snapshot: message.snapshot, author: mode, ...(name ? { authorName: name } : {}) });
+        : { snapshot: message.snapshot, author: mode, ...(name ? { authorName: name } : {}), search: message.search === true });
       // Measured here too: the server refuses a larger request anyway, but only after it is uploaded.
       if (new TextEncoder().encode(body).byteLength > SHARE_REQUEST_MAX_BYTES) return { ok: false, status: 413, code: SHARE_CODES.TOO_LARGE };
       init = { method: op === 'create' ? 'POST' : 'PUT', headers: { ...JSON_HEADERS }, body };
@@ -2829,6 +2832,8 @@ export function createCompareController({
       ...(typeof body.updatedAt === 'string' ? { updatedAt: body.updatedAt } : {}),
       ...(rev ? { rev } : {}),
       ...(visibility ? { visibility } : {}),
+      // What the server SETTLED (a private share is never searchable; an older worker answers none = off).
+      search: body.search === true,
     };
   }
 

@@ -104,7 +104,7 @@ export function installShare(ctx) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
     for (const [sid, v] of Object.entries(raw)) {
       if (v && typeof v === 'object' && typeof v.id === 'string' && SHARE_ID_RE.test(v.id)) {
-        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '', ...(typeof v.label === 'string' && v.label ? { label: v.label.slice(0, SHARE_TITLE_INPUT_MAX) } : {}), ...(v.vis === 'private' ? { vis: 'private' } : {}), ...(SHARE_AUTHOR_MODES.includes(v.author) ? { author: v.author } : {}) };
+        out[sid] = { id: v.id, title: typeof v.title === 'string' ? v.title.slice(0, SHARE_TITLE_INPUT_MAX) : '', updatedAt: Number.isFinite(v.updatedAt) ? v.updatedAt : 0, kind: v.kind === 'debate' ? 'debate' : 'compare', sig: typeof v.sig === 'string' ? v.sig : '', ...(typeof v.label === 'string' && v.label ? { label: v.label.slice(0, SHARE_TITLE_INPUT_MAX) } : {}), ...(v.vis === 'private' ? { vis: 'private' } : {}), ...(SHARE_AUTHOR_MODES.includes(v.author) ? { author: v.author } : {}), ...(v.search === true && v.vis !== 'private' ? { search: true } : {}) };
       }
     }
     return out;
@@ -643,7 +643,7 @@ export function installShare(ctx) {
    * request goes out, and its link is recorded before the lock is let go — so no other tab can
    * decide from a map that does not have it yet.
    */
-  async function writeShare(sessionId, asked, snapshot, mode, authorName, password) {
+  async function writeShare(sessionId, asked, snapshot, mode, authorName, password, search) {
     await loadShares();
     const current = shareFor(sessionId);
     // One-click: the link the map holds NOW (under the lock) is the one to update — another tab's included.
@@ -655,10 +655,13 @@ export function installShare(ctx) {
       const [pref, legacyPref] = await Promise.all([readKey(SHARE_AUTHOR_PREF_KEY), readKey(SHARE_AUTHOR_PREF_KEY_V1)]);
       mode = authorFor(asked, pref, legacyPref);
     }
+    // Search engines (#2409): an explicit choice (the popover's switch), else an EXISTING link keeps what it
+    // has — re-sharing never changes it — and a new link is off. Never for a password link.
+    const wantSearch = !password && (typeof search === 'boolean' ? search : !!(asked && asked.search === true));
     // `password` (#1784 U5): a NEW private share — handed to the SW once, kept nowhere here.
     const res = await sendMessage(chrome, {
       type: SHARE_MSG_TYPE, op: asked ? SHARE_OP_UPDATE : SHARE_OP_CREATE, ...(asked ? { id: asked.id } : {}),
-      snapshot, ...(password ? { visibility: SHARE_VIS_PRIVATE, password } : { author: mode, ...(authorName ? { authorName } : {}) }),
+      snapshot, ...(password ? { visibility: SHARE_VIS_PRIVATE, password } : { author: mode, ...(authorName ? { authorName } : {}), search: wantSearch }),
     });
     if (!res || res.ok !== true) {
       const code = res && typeof res.code === 'string' ? res.code : 'network_error';
@@ -667,6 +670,7 @@ export function installShare(ctx) {
       if (gone) await forgetShareId(asked.id);
       // One click on a link deleted elsewhere makes a fresh one: the user asked for 「a link」, not that one.
       // A fresh link is a NEW link: an automatic author is decided again (the pick or the default), not the dead link's.
+      // …and it is not in search engines unless asked again (the dead link's choice does not carry over).
       if (gone && latest) return writeShare(sessionId, null, snapshot, autoAuthor ? SHARE_AUTHOR_AUTO : mode, authorName, password);
       return { error: code, gone };
     }
@@ -676,7 +680,8 @@ export function installShare(ctx) {
     const priv = res.visibility ? res.visibility === SHARE_VIS_PRIVATE : !!password || (!!asked && asked.vis === SHARE_VIS_PRIVATE);
     const settledAuthor = !priv && res.author && SHARE_AUTHOR_MODES.includes(res.author.mode) ? res.author.mode : SHARE_AUTHOR_ANON;
     // The record keeps who the link shows as: re-sharing an existing link keeps it (linkAuthor), never the new default.
-    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot), author: settledAuthor, ...(priv ? { vis: SHARE_VIS_PRIVATE } : {}) };
+    // Searchable as the SERVER settled it (an older worker answers nothing = off).
+    const record = { id: res.id, title: snapshot.title, updatedAt: clock.now(), kind: snapshot.kind, sig: snapshotSig(snapshot), author: settledAuthor, ...(priv ? { vis: SHARE_VIS_PRIVATE } : {}), ...(!priv && res.search === true ? { search: true } : {}) };
     // A display name for 「내 공유 링크」 (a private share has no title on the server): the first question.
     const label = (snapshot.title || firstQuestion(snapshot)).split('\n')[0].slice(0, SHARE_TITLE_INPUT_MAX);
     await updateShares((map) => { map[sessionId] = label ? { ...record, label } : record; });
@@ -954,6 +959,17 @@ export function installShare(ctx) {
     author.appendChild(who);
     node.appendChild(author);
 
+    // Search engines (#2409) — a public link only, off unless switched on here; the hint says what it means.
+    const search = el('div', 'cmp-sharepop-sec cmp-sharepop-search');
+    const searchLab = el('label', 'cmp-sharepop-search-row');
+    const searchBox = el('input', 'cmp-sharepop-search-box');
+    searchBox.type = 'checkbox';
+    searchLab.appendChild(searchBox);
+    searchLab.appendChild(el('span', 'cmp-sharepop-search-text', t('share_search_label')));
+    search.appendChild(searchLab);
+    search.appendChild(el('p', 'cmp-sharepop-search-hint', t('share_search_hint')));
+    node.appendChild(search);
+
     const error = el('p', 'cmp-sharepop-error');
     error.setAttribute('role', 'alert');
     node.appendChild(error);
@@ -1001,6 +1017,7 @@ export function installShare(ctx) {
     pwForm.addEventListener('submit', (e) => { e.preventDefault(); savePassword(pwInput.value); });
     pwRemove.addEventListener('click', () => savePassword(null));
     for (const r of Object.values(radios)) r.addEventListener('change', () => { if (r.checked) changeAuthor(r.value); });
+    searchBox.addEventListener('change', () => changeSearch(searchBox.checked));
     deleteBtn.addEventListener('click', () => { pop.confirming = true; paintPop(); confirmNo.focus(); });
     confirmNo.addEventListener('click', () => { pop.confirming = false; paintPop(); deleteBtn.focus(); });
     confirmYes.addEventListener('click', deletePop);
@@ -1025,8 +1042,8 @@ export function installShare(ctx) {
     ctx.root.appendChild(node);
     return {
       node, mark, status, close, sub, linkRow, url, copyBtn, openSlot, pw, pwAdd, pwOn, pwChange, pwRemove, pwForm, pwInput, pwSave,
-      author, radios, who, error, foot, scope, incog, attNote, actions, deleteBtn, mineBtn, confirm, confirmYes,
-      phase: 'working', statusKey: '', subKey: '', askedAuthor: null, share: null, sessionId: null, snapshot: null, settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false, pwEditing: false, confirming: false,
+      author, radios, who, search, searchBox, error, foot, scope, incog, attNote, actions, deleteBtn, mineBtn, confirm, confirmYes,
+      phase: 'working', statusKey: '', subKey: '', askedAuthor: null, askedSearch: null, share: null, sessionId: null, snapshot: null, settled: SHARE_AUTHOR_ANON, authorName: '', fallback: false, pwEditing: false, confirming: false,
     };
   }
   /** The element the popover hangs from: 「⋯」 while the bar is folded (shareOpener.anchor), else the button. */
@@ -1067,6 +1084,9 @@ export function installShare(ctx) {
     const whoText = pop.fallback ? t('share_author_fallback_pop') : pop.settled !== SHARE_AUTHOR_ANON && pop.authorName ? t('share_author_shown_as', pop.authorName) : '';
     pop.who.textContent = whoText;
     pop.who.hidden = !whoText;
+    pop.search.hidden = !href || priv;
+    // While a change is on the wire the box shows what was asked; then what the server settled.
+    pop.searchBox.checked = busy && pop.askedSearch !== null ? pop.askedSearch : !!(s && s.search === true);
     pop.foot.hidden = !href;
     pop.scope.textContent = t(priv ? 'share_scope_private' : 'share_scope_public');
     pop.incog.hidden = !incognitoShared();
@@ -1074,7 +1094,7 @@ export function installShare(ctx) {
     pop.actions.hidden = pop.confirming;
     pop.confirm.hidden = !pop.confirming;
     // Nothing is pressed twice while a write runs; the inputs of that write are already taken.
-    for (const b of [pop.copyBtn, pop.pwAdd, pop.pwChange, pop.pwRemove, pop.pwSave, pop.pwInput, pop.deleteBtn, pop.confirmYes, ...Object.values(pop.radios)]) b.disabled = busy;
+    for (const b of [pop.copyBtn, pop.pwAdd, pop.pwChange, pop.pwRemove, pop.pwSave, pop.pwInput, pop.deleteBtn, pop.confirmYes, pop.searchBox, ...Object.values(pop.radios)]) b.disabled = busy;
     placePop();
   }
   /** Fixed, under (or, without room, above) its button; clamped inside the window with a gutter. */
@@ -1238,7 +1258,8 @@ export function installShare(ctx) {
   async function linkMovedOn(sessionId, base) {
     await loadShares();
     const cur = shareFor(sessionId);
-    return !cur || !base || cur.id !== base.id || cur.updatedAt !== base.updatedAt;
+    // A password set / removed in another tab keeps updatedAt — its visibility says it moved on (#2409 Codex 2R).
+    return !cur || !base || cur.id !== base.id || cur.updatedAt !== base.updatedAt || (cur.vis || '') !== (base.vis || '');
   }
   /** Under the lock: the request, then the map. `base` = the popover's record at the click. */
   async function writePassword(sessionId, base, password, snapshot) {
@@ -1255,7 +1276,9 @@ export function installShare(ctx) {
     const vis = r.visibility === SHARE_VIS_PRIVATE ? SHARE_VIS_PRIVATE : SHARE_VIS_PUBLIC;
     const withVis = (rec) => {
       // Setting or removing a password leaves the link anonymous on the server (a reopened link stays so until picked).
+      // …and out of search engines (#2409: the server turns it off on either switch).
       const next = { ...rec, author: SHARE_AUTHOR_ANON };
+      delete next.search;
       if (vis === SHARE_VIS_PRIVATE) next.vis = vis;
       else delete next.vis;
       return next;
@@ -1310,6 +1333,36 @@ export function installShare(ctx) {
     if (out.error) { paintPop(); setPopError(out.error); return; }
     Object.assign(pop, { share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: mode !== SHARE_AUTHOR_ANON && out.settled !== mode, subKey: '' });
     await rememberAuthor(mode); // the popover's choice is the user's
+    paintPop();
+  }
+  /**
+   * In search engines or not (#2409): the same link, updated with the snapshot of the click and the author
+   * it shows now (changeAuthor's path) — the server settles it. Never remembered as a preference: every link
+   * starts out of search engines.
+   */
+  async function changeSearch(on) {
+    if (!pop || !pop.share || !pop.snapshot || pop.share.vis === SHARE_VIS_PRIVATE) return;
+    if (busy || on === (pop.share.search === true)) { paintPop(); return; }
+    const my = gen;
+    const { sessionId, snapshot, share: base, settled: mode } = pop;
+    busy = true;
+    pop.askedSearch = on;
+    setPopError(null);
+    paintPop();
+    let out;
+    try {
+      out = await writeUnderLock(async () => (await linkMovedOn(sessionId, base)) ? { error: 'stale' } : writeShare(sessionId, SHARE_ASK_LATEST, snapshot, mode, '', '', on));
+    } catch {
+      out = { error: 'generic' };
+    } finally {
+      busy = false;
+      pop.askedSearch = null;
+    }
+    syncShareButton();
+    if (gen !== my) return;
+    if (out.error) { paintPop(); setPopError(out.error); return; }
+    track('share_search', { on: out.record.search === true ? 1 : 0 });
+    Object.assign(pop, { share: out.record, settled: out.settled, authorName: out.author.name || '', fallback: false, subKey: '' });
     paintPop();
   }
   async function deletePop() {

@@ -1341,7 +1341,8 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       if (result.plan_order && result.plan_order.source === 'auto') {
         await handleAutoPlanOrder(config, result.plan_order, userEmail);
       } else {
-        await flushAutoReports(config).catch(() => {});
+        // Not awaited (#2358): a backlog of unsent reports must not hold the Claude cycle.
+        void flushAutoReports(config).catch(() => {});
       }
       // Handle plan change order (skip if already completed)
       if (result.plan_order && result.plan_order.source !== 'auto') {

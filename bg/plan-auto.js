@@ -8,11 +8,14 @@
 //      (ERR_PLAN_ORG_UNVERIFIED otherwise), the subscription is monthly (C1), no reservation sits on
 //      it, the plan is still from_plan — each failure ends the order charge-free, with no Claude call;
 //   2. ask the server for execute approval (POST /plan-order-execute). No approval — refusal, error,
-//      timeout — means Claude is NOT called (fail-closed). The server grants it once per order;
+//      timeout — means Claude is NOT called (fail-closed). The server grants it once per order. A lost
+//      answer (timeout, network, 5xx) is reported, not forgotten: the server may have approved (#2390);
 //   3. call Claude ONCE over ONE transport (never the tab→cookie fallback of fetchClaudeApi, which
 //      re-sends a request whose first attempt may already have gone through);
 //   4. report the result with the org it changed. A report that cannot be sent is queued and retried;
-//      the call itself is never retried (an order id is marked done before the call is made).
+//      the call itself is never retried (an order id is marked done before the call is made). The done
+//      mark is written together with a journal entry (#2358): if the worker dies mid-order, the next
+//      flush reports that order 'unknown' — it is never run again, and its report is never lost.
 //
 // 🔴 Auto orders live under their OWN storage keys (planAuto*). They are never written to
 // `pendingPlanOrder`, which pre-auto-path code (≤ 1.55.7) reads and executes with no approval (Codex U4 R1).
@@ -40,11 +43,23 @@ export const AUTO_OUTCOME = Object.freeze({
   reservationPresent: 'reservation_present',
   apiError: 'api_error',
   unknown: 'unknown',
+  executeUnconfirmed: 'execute_unconfirmed',  // #2390: the approval's answer was lost; Claude NOT called
+  callTimeout: 'call_timeout',                // #2390: approved, the Claude call never answered
 });
 
 export const PLAN_AUTO_DONE_KEY = 'planAutoDone';       // { [orderId]: ts } — never act twice
 export const PLAN_AUTO_REPORTS_KEY = 'planAutoReports'; // queued result reports (retried)
-export const PLAN_AUTO_CARD_KEY = 'planAutoCard';       // what the popup card shows
+/** { [orderId]: { at, body, card, report? } } — the order journal (#2358). Written in the SAME storage
+ *  write as the done mark, before approval is asked. `report` is set when the handler knows the result;
+ *  an entry that never got one and whose handler is no longer running (the service worker died, or the
+ *  handler threw) is reported as 'unknown' by the next flush — never re-executed (the done mark stays). */
+export const PLAN_AUTO_JOURNAL_KEY = 'planAutoJournal';
+/** What the popup card shows — ONE card per service (#2358): a Claude and a ChatGPT order around the same
+ *  time must not overwrite each other's card (the earlier one's [예약 취소] would vanish). */
+export const PLAN_AUTO_CARD_KEYS = Object.freeze({ claude: 'planAutoCardClaude', chatgpt: 'planAutoCardChatgpt' });
+/** ≤ 1.55.18 kept a single card for both services here. Still read (for its own service, until that
+ *  service writes a new card, which clears it) so a scheduled downgrade's [예약 취소] survives the update. */
+export const PLAN_AUTO_LEGACY_CARD_KEY = 'planAutoCard';
 /** { [orgUuid]: { order_id, plan_type, at } } — downgrades THIS browser scheduled for an auto order and
  *  has watched stay in place since. The only reservations the extension will ever cancel on its own
  *  (D7) or from the card: plan type alone cannot tell ours from one the member re-made after
@@ -53,7 +68,17 @@ export const PLAN_AUTO_RESERVATIONS_KEY = 'planAutoReservations';
 export const PLAN_AUTO_NOTIF_PREFIX = 'plan-auto-';
 const MONTHLY = 'monthly';
 const EXECUTE_TIMEOUT_MS = 15_000;
+/** #2390: an in-page request has no deadline of its own (a frozen tab, a request claude.ai never
+ *  answers) and its handler would hold the order in _inFlight — and its report back — for good. */
+const MUTATE_TIMEOUT_MS = 120_000;
+const READ_TIMEOUT_MS = 30_000;
+const ERR_PLAN_AUTO_TIMEOUT = 'err_plan_auto_timeout';
 const REPORT_TIMEOUT_MS = 15_000;
+/** One flush sends for at most this long in total (#2358): with several reports the server never answers,
+ *  N × REPORT_TIMEOUT_MS would hold the queue — and anything waiting on it. The rest wait, untouched. */
+const FLUSH_BUDGET_MS = 30_000;
+/** MV3 ends an idle service worker after ~30 s; any extension API call resets that clock. */
+const KEEPALIVE_MS = 20_000;
 const DONE_KEEP_MS = 60 * 24 * 60 * 60 * 1000;          // a done id outlives any order's expiry
 
 /** Explanation page for an order (plan §6.2). */
@@ -62,6 +87,85 @@ export function planChangeUrl(orgId, orderId) {
 }
 
 const rank = (p) => PLAN_HIERARCHY.indexOf(p);
+
+/** `promise`, or a rejection (ERR_PLAN_AUTO_TIMEOUT) after `ms`. The work itself is not cancelled — a
+ *  request that times out may still land, so a timed-out WRITE is 'unknown', never 'failed'. */
+export function withDeadline(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(ERR_PLAN_AUTO_TIMEOUT)), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+/** A read (pre-check or proof; Claude or ChatGPT), bounded. A timeout throws like any failed read. */
+export const boundedRead = (promise) => withDeadline(promise, READ_TIMEOUT_MS);
+
+const PROVIDERS = Object.keys(PLAN_AUTO_CARD_KEYS);
+const providerOf = (card) => (card?.provider === 'chatgpt' ? 'chatgpt' : 'claude');
+/** The storage keys a card read needs (both services + the legacy single card). */
+export const PLAN_AUTO_CARD_READ_KEYS = Object.freeze([...Object.values(PLAN_AUTO_CARD_KEYS), PLAN_AUTO_LEGACY_CARD_KEY]);
+
+/**
+ * Pure: { claude, chatgpt } cards from a storage read of PLAN_AUTO_CARD_READ_KEYS. A service's own key
+ * wins; the legacy single card (≤ 1.55.18) fills in only for the service it names (no provider = Claude).
+ */
+export function pickPlanAutoCards(store) {
+  const out = {};
+  const legacy = store?.[PLAN_AUTO_LEGACY_CARD_KEY];
+  for (const p of PROVIDERS) {
+    const own = store?.[PLAN_AUTO_CARD_KEYS[p]];
+    out[p] = own && own.order_id ? own : (legacy && legacy.order_id && providerOf(legacy) === p ? legacy : null);
+  }
+  return out;
+}
+
+export async function readPlanAutoCards() {
+  return pickPlanAutoCards(await chrome.storage.local.get(PLAN_AUTO_CARD_READ_KEYS));
+}
+
+/** The card (of either service) for `orderId`, or null. Order ids are server-wide unique. */
+export async function findPlanAutoCard(orderId) {
+  const cards = await readPlanAutoCards();
+  return PROVIDERS.map((p) => cards[p]).find((c) => c && c.order_id === orderId) || null;
+}
+
+/** Write `card` under its service's key; the legacy card is cleared in the same write once it is that
+ *  service's (it would otherwise come back if the new card were ever removed). Callers hold withState:
+ *  every card read-modify-write is serialised there, so a late write for an older order can never land
+ *  between another order's read and write (Codex #2358 R1). */
+async function writeCardLocked(card) {
+  const p = providerOf(card);
+  const { [PLAN_AUTO_CARD_KEYS[p]]: cur = null, [PLAN_AUTO_LEGACY_CARD_KEY]: legacy = null } =
+    await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEYS[p]]: null, [PLAN_AUTO_LEGACY_CARD_KEY]: null });
+  // Server order ids only grow: a card for an OLDER order of this service that finishes late must not
+  // replace a newer order's card (it would hide that reservation's [예약 취소]). Batch review 1.55.19.
+  if (cur?.order_id != null && card.order_id != null && Number(cur.order_id) > Number(card.order_id)) return false;
+  await chrome.storage.local.set({
+    [PLAN_AUTO_CARD_KEYS[p]]: card,
+    ...(legacy && providerOf(legacy) === p ? { [PLAN_AUTO_LEGACY_CARD_KEY]: null } : {}),
+  });
+  return true;
+}
+
+/** Patch the card of `orderId` (whichever service) when `cond(card)` holds. */
+export function patchPlanAutoCard(orderId, patch, cond = () => true) {
+  return withState(async () => {
+    const card = await findPlanAutoCard(orderId);
+    if (card && cond(card)) await writeCardLocked({ ...card, ...patch, at: Date.now() });
+  });
+}
+
+/** Keep the service worker alive while `fn` runs (an order spans approval + write + proof reads, each
+ *  network-bound with no extension API call in between). Never changes what `fn` does. */
+export async function withWorkerKeepalive(fn) {
+  const ping = () => { try { chrome.runtime?.getPlatformInfo?.()?.catch?.(() => {}); } catch { /* best effort */ } };
+  const timer = setInterval(ping, KEEPALIVE_MS);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+  }
+}
 
 /**
  * Pure: what to do given the order and what claude.ai says right now. Returns either a final
@@ -139,28 +243,97 @@ async function mutateOnce(call) {
     ...(call.body ? { body: JSON.stringify(call.body) } : {}),
   };
   try {
-    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).filter(isUsableTab);
-    if (tabs.length > 0) await fetchViaTab(tabs[0].id, url, options);
-    else await fetchWithCookies(url, options);
+    await withDeadline((async () => {
+      const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).filter(isUsableTab);
+      if (tabs.length > 0) await fetchViaTab(tabs[0].id, url, options);
+      else await fetchWithCookies(url, options);
+    })(), MUTATE_TIMEOUT_MS);
     return { result: 'completed', outcome: null };
   } catch (e) {
+    // Never retried: the request may still land after the deadline.
+    if (e?.message === ERR_PLAN_AUTO_TIMEOUT) return { result: 'unknown', outcome: AUTO_OUTCOME.callTimeout };
     const outcome = classifyMutationError(e?.message);
     return { result: outcome === AUTO_OUTCOME.apiError ? 'failed' : 'unknown', outcome };
   }
 }
 
-export async function markDone(orderId) {
-  const { [PLAN_AUTO_DONE_KEY]: done = {} } = await chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {} });
-  const now = Date.now();
-  for (const [k, ts] of Object.entries(done)) if (now - ts > DONE_KEEP_MS) delete done[k];
-  done[orderId] = now;
-  await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done });
+// The done set, the order journal and the popup cards are read-modify-written by both services'
+// handlers, which run concurrently (#2332 ChatGPT orders are not awaited by their collector), and by the
+// flush. One promise chain serialises them: an interleaved write would drop the other service's done
+// mark, or put an older order's card back over a newer one (#2358). withState callbacks never call
+// withQueue (the queue chain may call this one) — no deadlock.
+let _stateChain = Promise.resolve();
+function withState(fn) {
+  const p = _stateChain.then(fn, fn);
+  _stateChain = p.catch(() => {});
+  return p;
+}
+async function readState() {
+  return chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {}, [PLAN_AUTO_JOURNAL_KEY]: {} });
 }
 
-export async function unmarkDone(orderId) {
-  const { [PLAN_AUTO_DONE_KEY]: done = {} } = await chrome.storage.local.get({ [PLAN_AUTO_DONE_KEY]: {} });
-  delete done[orderId];
-  await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done });
+/** Orders whose handler is running in THIS service worker, both services. Claimed synchronously (no
+ *  await before the claim) so two handlers for one order can never both pass; a journal entry of an
+ *  order that is not in here belongs to a handler that is gone. */
+const _inFlight = new Set();
+export function claimOrder(orderId) {
+  if (_inFlight.has(orderId)) return false;
+  _inFlight.add(orderId);
+  return true;
+}
+export function releaseOrder(orderId) { _inFlight.delete(orderId); }
+
+/** The fields of an order's report that do not depend on its result — fixed when the order starts, so the
+ *  account a report names is the one the order ran for, whatever the browser has switched to since. */
+function reportBase(po, userEmail, installId) {
+  return { order_id: po.order_id, user_email: userEmail, action: 'accepted', install_id: installId };
+}
+function reportFields(r, changedOrgUuid) {
+  return {
+    result: r.result, outcome: r.outcome,
+    ...(changedOrgUuid ? { changed_org_uuid: changedOrgUuid } : {}),
+    ...(Array.isArray(r.diag_keys) ? { diag_keys: r.diag_keys } : {}),
+  };
+}
+
+/**
+ * 🔴 Mark `po` done and open its journal entry in ONE storage write — before execute approval is asked.
+ * From here on the order is never attempted again by this browser (no retry of the write call), and its
+ * report cannot be lost: either the handler settles the entry, or the next flush finds it orphaned and
+ * reports 'unknown'. With `r`, the entry is born settled (a charge-free pre-check result).
+ */
+export function beginOrder(po, userEmail, installId, r = null, changeDate = null) {
+  return withState(async () => {
+    const { [PLAN_AUTO_DONE_KEY]: done, [PLAN_AUTO_JOURNAL_KEY]: journal } = await readState();
+    const now = Date.now();
+    for (const [k, ts] of Object.entries(done)) if (now - ts > DONE_KEEP_MS) delete done[k];
+    done[po.order_id] = now;
+    journal[po.order_id] = {
+      at: now, body: reportBase(po, userEmail, installId), card: cardFor(po, null, changeDate, userEmail),
+      ...(r ? { report: reportFields(r, null) } : {}),
+    };
+    await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done, [PLAN_AUTO_JOURNAL_KEY]: journal });
+  });
+}
+
+/** No execute approval: nothing ran. Un-mark it and drop its entry (one write) — a later delivery may try. */
+export function abortOrder(orderId) {
+  return withState(async () => {
+    const { [PLAN_AUTO_DONE_KEY]: done, [PLAN_AUTO_JOURNAL_KEY]: journal } = await readState();
+    delete done[orderId];
+    delete journal[orderId];
+    await chrome.storage.local.set({ [PLAN_AUTO_DONE_KEY]: done, [PLAN_AUTO_JOURNAL_KEY]: journal });
+  });
+}
+
+/** The handler knows the result: settle the journal entry. The next flush turns it into a report. */
+function settleOrder(orderId, r, changedOrgUuid) {
+  return withState(async () => {
+    const { [PLAN_AUTO_JOURNAL_KEY]: journal } = await readState();
+    if (!journal[orderId]) return;
+    journal[orderId] = { ...journal[orderId], report: reportFields(r, changedOrgUuid) };
+    await chrome.storage.local.set({ [PLAN_AUTO_JOURNAL_KEY]: journal });
+  });
 }
 
 export async function isDone(orderId) {
@@ -168,30 +341,64 @@ export async function isDone(orderId) {
   return !!done[orderId];
 }
 
-/** POST /plan-order-execute. true only on an explicit { ok: true }. */
+/** requestExecute verdicts (#2390). Only `approved` lets Claude be called. `refused` = the server
+ *  answered and did not approve (any 4xx, or a 2xx without { ok: true }). `ambiguous` = no answer we can
+ *  read (timeout, network, 5xx, unparsable body): the approval may have been granted and committed. */
+export const EXECUTE_VERDICT = Object.freeze({ approved: 'approved', refused: 'refused', ambiguous: 'ambiguous' });
+
+/** Pure: an execute response → verdict. `status` 0 = no response; `body` undefined = unreadable. */
+export function classifyExecuteResponse(status, body) {
+  if (status >= 200 && status < 300) {
+    if (body === undefined) return EXECUTE_VERDICT.ambiguous;
+    return body?.ok === true ? EXECUTE_VERDICT.approved : EXECUTE_VERDICT.refused;
+  }
+  if (status >= 400 && status < 500) return EXECUTE_VERDICT.refused;
+  return EXECUTE_VERDICT.ambiguous;
+}
+
+/** POST /plan-order-execute → EXECUTE_VERDICT. */
 export async function requestExecute(config, po, userEmail, installId) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), EXECUTE_TIMEOUT_MS);
   try {
-    const res = await authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-execute`, {
+    // The signal only bounds the fetch; withDeadline also bounds the auth-header step before it (Codex #2390 R1).
+    const res = await withDeadline(authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ order_id: po.order_id, user_email: userEmail, install_id: installId }),
       signal: ctrl.signal,
-    });
-    if (!res.ok) return false;
-    const body = await res.json().catch(() => null);
-    return body?.ok === true;
+    }), EXECUTE_TIMEOUT_MS);
+    const status = res?.status || 0;
+    const body = status >= 200 && status < 300 ? await res.json().catch(() => undefined) : null;
+    return classifyExecuteResponse(status, body);
   } catch {
-    return false;
+    return EXECUTE_VERDICT.ambiguous;
   } finally {
     clearTimeout(timer);
   }
 }
 
+/**
+ * Ask for execute approval for an order begun with beginOrder (no result yet). true = approved: call
+ * the service now, once. Otherwise the order is settled here and the caller stops:
+ *   refused   → nothing ran; un-marked, so a later delivery may try (abortOrder).
+ *   ambiguous → 🔴 kept done and reported failed/execute_unconfirmed (#2390 H1). The server may have
+ *               moved it to 'executing', which it never delivers again — un-marking it would leave it
+ *               with no report at all. Claude is still NOT called (fail-closed). A still-'delivered'
+ *               order ends charge-free on that report; an 'executing' one becomes 'unknown'.
+ */
+export async function approveOrSettle(config, po, userEmail, installId) {
+  const verdict = await requestExecute(config, po, userEmail, installId);
+  if (verdict === EXECUTE_VERDICT.approved) return true;
+  console.log(`[Claude Tuner] auto order #${po.order_id}: execute ${verdict} — not calling the service`);
+  if (verdict === EXECUTE_VERDICT.refused) await abortOrder(po.order_id);
+  else await reportAutoResult(config, po, { result: 'failed', outcome: AUTO_OUTCOME.executeUnconfirmed }, null);
+  return false;
+}
+
 // The report queue is read-modify-written from several async paths (a collect cycle, the popup's
 // cancel). One promise chain serialises every access so a slow flush cannot overwrite an entry that
-// was added while it was sending.
+// was added while it was sending. Order handlers never wait on it: they write the journal (withState).
 let _queueChain = Promise.resolve();
 function withQueue(fn) {
   const p = _queueChain.then(fn, fn);
@@ -201,35 +408,77 @@ function withQueue(fn) {
 const RESPONSE_PATH = '/api/snapshots/plan-order-response';
 export const REVERT_PATH = '/api/snapshots/plan-order-revert';
 /** Statuses worth resending: the server did not process it (5xx) or could not tell who we are yet
- *  (401/403, e.g. a token being refreshed). Any other 4xx is the server's final word on that report. */
-const retryable = (status) => status >= 500 || status === 401 || status === 403;
+ *  (401/403, e.g. a token being refreshed), or turned it away for now (429/408). Any other 4xx is the
+ *  server's final word on that report. */
+const retryable = (status) => status >= 500 || status === 401 || status === 403 || status === 429 || status === 408;
+
+/**
+ * Inside withQueue: move journal entries into `queue` — settled ones as their report, orphaned ones (no
+ * report, handler not running here) as 'unknown'. Decided inside the state chain, so a handler cannot
+ * settle an entry between the read and the decision; the queue and the journal are written in ONE
+ * storage write, so a report is never in both or in neither.
+ */
+async function drainJournalInto(queue) {
+  await withState(async () => {
+    const { [PLAN_AUTO_JOURNAL_KEY]: journal } = await readState();
+    let moved = false;
+    for (const [id, e] of Object.entries(journal)) {
+      if (!e?.body) {
+        delete journal[id];
+      } else if (e.report) {
+        queue.push({ tries: 0, path: RESPONSE_PATH, body: { ...e.body, ...e.report } });
+        delete journal[id];
+      } else if (!_inFlight.has(e.body.order_id)) {
+        // 🔴 Its handler is gone after the done mark — maybe after approval, maybe mid-call. Whether the
+        // write went out is unknowable, so the report says so ('unknown': the server holds the cap and
+        // settles it from observations; an order it never approved answers 409 and the report ends
+        // there). The done mark stays: the order is never attempted again.
+        queue.push({
+          tries: 0, path: RESPONSE_PATH, body: { ...e.body, result: 'unknown', outcome: AUTO_OUTCOME.unknown },
+          recovered: { card: e.card || null, at: e.at || 0 },
+        });
+        delete journal[id];
+      } else continue;
+      moved = true;
+    }
+    if (moved) await chrome.storage.local.set({ [PLAN_AUTO_REPORTS_KEY]: queue, [PLAN_AUTO_JOURNAL_KEY]: journal });
+  });
+}
 
 async function enqueue(item) {
   await withQueue(async () => {
     const { [PLAN_AUTO_REPORTS_KEY]: queue = [] } = await chrome.storage.local.get({ [PLAN_AUTO_REPORTS_KEY]: [] });
+    // Settled results first: a revert queued ahead of its order's completion report would be refused.
+    await drainJournalInto(queue);
     queue.push({ tries: 0, ...item });
     await chrome.storage.local.set({ [PLAN_AUTO_REPORTS_KEY]: queue });
   });
 }
 
-/** Send queued reports (results and reverts). Never re-runs anything on claude.ai. */
-export function flushAutoReports(config) {
+/** Send queued reports (results and reverts), the journal's first. Never re-runs anything on claude.ai /
+ *  chatgpt.com. Sends for at most `budgetMs` in total; what is left waits, untouched, for the next flush. */
+export function flushAutoReports(config, { budgetMs = FLUSH_BUDGET_MS } = {}) {
   return withQueue(async () => {
     const { [PLAN_AUTO_REPORTS_KEY]: queue = [] } = await chrome.storage.local.get({ [PLAN_AUTO_REPORTS_KEY]: [] });
+    await drainJournalInto(queue);
     if (!queue.length || !config?.serverUrl) return;
     const keep = [];
     // Reports for one order go in order: once one is kept (failed), later ones for the SAME order
     // wait behind it unsent — a revert sent before its completion report would be refused (400) and
     // then dropped (Codex U4 ext R3).
     const blocked = new Set();
+    const deadline = Date.now() + budgetMs;
     for (const r of queue) {
       const oid = r.body?.order_id;
       if (blocked.has(oid)) { keep.push(r); continue; }
+      const left = deadline - Date.now();
+      // Out of budget (#2358): kept as is — not a failed try — and its order's later reports stay behind it.
+      if (left <= 0) { keep.push(r); blocked.add(oid); continue; }
       let status = 0;
-      // Bounded (#2332 CWS batch review): a report the server never answers must not hold the queue —
-      // and with it every collector that awaits a flush — forever. A timeout is status 0 → retried.
+      // Bounded (#2332 CWS batch review): a report the server never answers must not hold the queue.
+      // A timeout is status 0 → retried.
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), REPORT_TIMEOUT_MS);
+      const timer = setTimeout(() => ctrl.abort(), Math.min(REPORT_TIMEOUT_MS, left));
       try {
         const res = await authedFetch(config, `${config.serverUrl}${r.path || RESPONSE_PATH}`, {
           method: 'POST',
@@ -240,7 +489,8 @@ export function flushAutoReports(config) {
         status = res?.status || 0;
       } catch { /* network / timeout: status 0 → retry */ } finally { clearTimeout(timer); }
       if (status >= 200 && status < 300) {
-        if (r.path === REVERT_PATH) await markCardReverted(r.body.order_id);
+        if (r.path === REVERT_PATH) await patchPlanAutoCard(r.body.order_id, { result: 'reverted' });
+        else if (r.recovered) await showRecoveredCard(r.recovered);
         continue;
       }
       // Never dropped while the server could still take it: a lost completion report would also strand
@@ -255,42 +505,49 @@ export function flushAutoReports(config) {
   });
 }
 
-async function markCardReverted(orderId) {
-  const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
-  if (card && card.order_id === orderId) await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: { ...card, result: 'reverted', at: Date.now() } });
+/** An interrupted order the server accepted as 'unknown' (it had approved it): the member sees "checking"
+ *  — unless their card already shows a newer order of that service. */
+function showRecoveredCard({ card, at }) {
+  if (!card?.order_id) return undefined;
+  return withState(async () => {
+    const cur = (await readPlanAutoCards())[providerOf(card)];
+    if (cur && cur.order_id !== card.order_id && (cur.at || 0) > at) return;
+    await writeCardLocked({ ...card, result: 'unknown', outcome: AUTO_OUTCOME.unknown, at: Date.now() });
+  });
 }
 
-export async function reportAutoResult(config, po, userEmail, installId, r, changedOrgUuid) {
-  const body = {
-    order_id: po.order_id, user_email: userEmail, action: 'accepted',
-    result: r.result, outcome: r.outcome, install_id: installId,
-    ...(changedOrgUuid ? { changed_org_uuid: changedOrgUuid } : {}),
-    ...(Array.isArray(r.diag_keys) ? { diag_keys: r.diag_keys } : {}),
-  };
-  await enqueue({ path: RESPONSE_PATH, body });
-  await flushAutoReports(config);
+/** Record the result of an order begun with beginOrder, and send it — not awaited by the order (#2358:
+ *  a backlog of unsent reports must not hold the collector; the journal keeps the report until sent). */
+export async function reportAutoResult(config, po, r, changedOrgUuid) {
+  await settleOrder(po.order_id, r, changedOrgUuid);
+  void flushAutoReports(config).catch(() => {});
 }
 
 /** The member cancelled the downgrade an auto order scheduled: tell the server (→ 'reverted', and the
  *  decision cron locks auto downgrades for 90 days). The card says "reverted" only once the server
  *  accepted it; until then it says the report is pending, and the queue keeps retrying. */
 export async function reportAutoRevert(config, orderId, userEmail) {
-  const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
-  if (card && card.order_id === orderId) await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: { ...card, result: 'revert_pending', at: Date.now() } });
+  await patchPlanAutoCard(orderId, { result: 'revert_pending' });
   await enqueue({ path: REVERT_PATH, body: { order_id: orderId, user_email: userEmail } });
   await flushAutoReports(config);
 }
 
-export async function tellMember(po, r, changeDate, userEmail) {
+/** The popup card for `po` with result `r` (null = not known yet: the journal's copy). */
+function cardFor(po, r, changeDate, userEmail) {
   // ChatGPT orders are downgrades only (#2332); PLAN_HIERARCHY is Claude's and cannot rank their plans.
   const isUp = po.provider !== 'chatgpt' && po.kind !== 'cancel_downgrade' && rank(po.to_plan) > rank(po.from_plan);
-  const card = {
+  return {
     provider: po.provider || 'claude',
     order_id: po.order_id, org_id: po.org_id, kind: po.kind, from_plan: po.from_plan, to_plan: po.to_plan,
-    target_org_uuid: po.target_org_uuid, result: r.result, outcome: r.outcome, is_up: isUp,
+    target_org_uuid: po.target_org_uuid, result: r ? r.result : null, outcome: r ? r.outcome : null, is_up: isUp,
     change_date: changeDate || null, at: Date.now(), user_email: userEmail || null,
   };
-  await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: card });
+}
+
+export async function tellMember(po, r, changeDate, userEmail) {
+  const card = cardFor(po, r, changeDate, userEmail);
+  const isUp = card.is_up;
+  await withState(() => writeCardLocked(card));
   // Only real changes and real failures interrupt the member; a charge-free premise skip does not.
   let title = null, message = null;
   if (r.result === 'completed' && !r.outcome) {
@@ -347,13 +604,8 @@ export async function noteSubscriptionObservation(orgUuid, info) {
   const ours = await ourReservation(orgUuid);
   if (!ours || info.pending_plan === ours.plan_type) return;
   await forgetReservation(orgUuid);
-  const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
-  if (card && card.order_id === ours.order_id && card.result === 'completed') {
-    await chrome.storage.local.set({ [PLAN_AUTO_CARD_KEY]: { ...card, result: 'member_changed', at: Date.now() } });
-  }
+  await patchPlanAutoCard(ours.order_id, { result: 'member_changed' }, (card) => card.result === 'completed');
 }
-
-const _inFlight = new Set();
 
 /** Entry point from the Claude snapshot POST response (bg/collect.js) for a source='auto' order. */
 export async function handleAutoPlanOrder(config, po, userEmail) {
@@ -361,55 +613,57 @@ export async function handleAutoPlanOrder(config, po, userEmail) {
   // claude.ai, whatever response it arrived on — the server already delivers per provider; this is the
   // second lock.
   if (!po || po.source !== 'auto' || !po.order_id || !po.target_org_uuid || !userEmail || (po.provider && po.provider !== 'claude')) {
-    await flushAutoReports(config).catch(() => {});
+    void flushAutoReports(config).catch(() => {});
     return;
   }
   // Claimed synchronously, before any await, so two handlers for one order can never both pass.
-  if (_inFlight.has(po.order_id)) return;
-  _inFlight.add(po.order_id);
+  if (!claimOrder(po.order_id)) return;
   try {
-    await flushAutoReports(config).catch(() => {});
-    if (await isDone(po.order_id)) return;
-    const installId = await getOrCreateInstallId();
-    // Read-only checks. Any failure to READ (network, logged out) just tries again on a later POST.
-    let org, sub;
-    try {
-      const orgList = await fetchClaudeApi(CLAUDE_ORGS_PATH);
-      org = Array.isArray(orgList) ? (orgList.find((o) => o.uuid === po.target_org_uuid) || null) : undefined;
-      if (org === undefined) return;
-      sub = org ? await fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${org.uuid}/subscription_details`) : null;
-    } catch (e) {
-      console.warn(`[Claude Tuner] auto order #${po.order_id}: pre-check read failed, retrying later:`, e?.message);
-      return;
-    }
-    const pre = planAutoPrecheck(po, org, sub, org ? await ourReservation(org.uuid) : null);
-    const changeDate = sub?.next_charge_date || null;
-    if (pre.final) {
-      await markDone(po.order_id);
-      await reportAutoResult(config, po, userEmail, installId, pre.final, null);
-      await tellMember(po, pre.final, changeDate, userEmail);
-      return;
-    }
-    // 🔴 Done BEFORE asking for approval, so no storage write sits between the approval and the
-    // request (Codex U4 ext R1: the server's revoke cannot reach an order it has already approved, so
-    // that gap is kept to the request itself). A worker that dies after this line never attempts the
-    // order again; the server settles it from observations.
-    await markDone(po.order_id);
-    if (!(await requestExecute(config, po, userEmail, installId))) {
-      console.log(`[Claude Tuner] auto order #${po.order_id}: no execute approval — not calling Claude`);
-      await unmarkDone(po.order_id);  // nothing ran: a later delivery may try again
-      return;
-    }
-    const r = await mutateOnce(pre.call);
-    if (r.result === 'completed') {
-      if (po.kind === 'cancel_downgrade') await forgetReservation(org.uuid);
-      else if (rank(po.to_plan) < rank(po.from_plan)) await rememberReservation(org.uuid, po.order_id, PLAN_API_MAP[po.to_plan]);
-    }
-    await reportAutoResult(config, po, userEmail, installId, r, r.result === 'completed' ? org.uuid : null);
-    await tellMember(po, r, changeDate, userEmail);
+    await withWorkerKeepalive(() => runAutoPlanOrder(config, po, userEmail));
   } finally {
-    _inFlight.delete(po.order_id);
+    releaseOrder(po.order_id);
   }
+}
+
+async function runAutoPlanOrder(config, po, userEmail) {
+  // Queued reports go out on their own (#2358): this order — and the collector awaiting it — never waits on them.
+  void flushAutoReports(config).catch(() => {});
+  if (await isDone(po.order_id)) return;
+  const installId = await getOrCreateInstallId();
+  // Read-only checks. Any failure to READ (network, logged out) just tries again on a later POST.
+  let org, sub;
+  try {
+    const orgList = await boundedRead(fetchClaudeApi(CLAUDE_ORGS_PATH));
+    org = Array.isArray(orgList) ? (orgList.find((o) => o.uuid === po.target_org_uuid) || null) : undefined;
+    if (org === undefined) return;
+    sub = org ? await boundedRead(fetchClaudeApi(`${CLAUDE_ORGS_PATH}/${org.uuid}/subscription_details`)) : null;
+  } catch (e) {
+    console.warn(`[Claude Tuner] auto order #${po.order_id}: pre-check read failed, retrying later:`, e?.message);
+    return;
+  }
+  const pre = planAutoPrecheck(po, org, sub, org ? await ourReservation(org.uuid) : null);
+  const changeDate = sub?.next_charge_date || null;
+  if (pre.final) {
+    // Done and its (charge-free) report recorded in one write.
+    await beginOrder(po, userEmail, installId, pre.final, changeDate);
+    void flushAutoReports(config).catch(() => {});
+    await tellMember(po, pre.final, changeDate, userEmail);
+    return;
+  }
+  // 🔴 Done (and journaled) BEFORE asking for approval, so no storage write sits between the approval
+  // and the request (Codex U4 ext R1: the server's revoke cannot reach an order it has already approved,
+  // so that gap is kept to the request itself). A worker that dies after this line never attempts the
+  // order again; the next flush reports it 'unknown' from the journal (#2358).
+  await beginOrder(po, userEmail, installId, null, changeDate);
+  if (!(await approveOrSettle(config, po, userEmail, installId))) return;
+  const r = await mutateOnce(pre.call);
+  // The result is journaled first — a failure in the bookkeeping below must not turn it into 'unknown'.
+  await reportAutoResult(config, po, r, r.result === 'completed' ? org.uuid : null);
+  if (r.result === 'completed') {
+    if (po.kind === 'cancel_downgrade') await forgetReservation(org.uuid);
+    else if (rank(po.to_plan) < rank(po.from_plan)) await rememberReservation(org.uuid, po.order_id, PLAN_API_MAP[po.to_plan]);
+  }
+  await tellMember(po, r, changeDate, userEmail);
 }
 
 /** [예약 취소] for a downgrade an auto order scheduled: on the order's org (not whatever the popup

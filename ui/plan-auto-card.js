@@ -2,7 +2,7 @@
 // A scheduled auto downgrade stays visible until it applies, with [예약 취소] (bg CANCEL_AUTO_DOWNGRADE);
 // everything else shows for a day. There is no [accept] — an auto order runs only through
 // bg/plan-auto.js. Text goes in via textContent (plan names come from the server).
-import { PLAN_AUTO_CARD_KEY, AUTO_OUTCOME, planChangeUrl } from '../bg/plan-auto.js';
+import { PLAN_AUTO_CARD_READ_KEYS, pickPlanAutoCards, AUTO_OUTCOME, planChangeUrl } from '../bg/plan-auto.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** A scheduled downgrade without a known change date is shown for one monthly cycle at most. */
@@ -34,29 +34,41 @@ export function planAutoCardView(card, now, t) {
   return null;  // a charge-free premise skip is not worth a card
 }
 
+/** Service names on the card — product names, not translated. */
+const SERVICE_LABEL = Object.freeze({ claude: 'Claude', chatgpt: 'ChatGPT' });
+
+/** One card per service (#2358), Claude first. Reads the legacy single card too (pickPlanAutoCards). */
 export function renderPlanAutoCard(t) {
-  chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null }, (store) => {
-    const card = store[PLAN_AUTO_CARD_KEY];
-    const el = document.getElementById('plan-auto-card');
-    if (!el) return;
-    const view = planAutoCardView(card, Date.now(), t);
-    if (!view) { el.classList.add('hidden'); return; }
-    el.classList.remove('hidden');
-    el.dataset.tone = view.tone;
-    document.getElementById('plan-auto-card-text').textContent = view.text;
-    const why = document.getElementById('plan-auto-card-why');
-    why.textContent = t('pa_card_why');
-    why.href = planChangeUrl(card.org_id, card.order_id);
-    why.classList.toggle('hidden', !view.why || card.org_id == null);
-    const btn = document.getElementById('plan-auto-card-cancel');
-    btn.textContent = t('pa_card_cancel_btn');
-    btn.classList.toggle('hidden', !view.cancel);
-    btn.onclick = () => {
-      btn.disabled = true;
-      chrome.runtime.sendMessage({ type: 'CANCEL_AUTO_DOWNGRADE', orderId: card.order_id }, (res) => {
-        btn.disabled = false;
-        if (res?.success) renderPlanAutoCard(t);
-      });
-    };
+  chrome.storage.local.get(PLAN_AUTO_CARD_READ_KEYS, (store) => {
+    const box = document.getElementById('plan-auto-cards');
+    const tpl = document.getElementById('plan-auto-card-tpl');
+    if (!box || !tpl) return;
+    box.replaceChildren();
+    const cards = pickPlanAutoCards(store);
+    for (const provider of Object.keys(SERVICE_LABEL)) {
+      const card = cards[provider];
+      const view = planAutoCardView(card, Date.now(), t);
+      if (!view) continue;
+      const el = tpl.content.firstElementChild.cloneNode(true);
+      el.dataset.tone = view.tone;
+      el.dataset.provider = provider;
+      el.querySelector('.pa-card-svc').textContent = SERVICE_LABEL[provider];
+      el.querySelector('.pa-card-text').textContent = view.text;
+      const why = el.querySelector('.pa-card-why');
+      why.textContent = t('pa_card_why');
+      why.href = planChangeUrl(card.org_id, card.order_id);
+      why.classList.toggle('hidden', !view.why || card.org_id == null);
+      const btn = el.querySelector('.pa-card-cancel');
+      btn.textContent = t('pa_card_cancel_btn');
+      btn.classList.toggle('hidden', !view.cancel);
+      btn.onclick = () => {
+        btn.disabled = true;
+        chrome.runtime.sendMessage({ type: 'CANCEL_AUTO_DOWNGRADE', orderId: card.order_id }, (res) => {
+          btn.disabled = false;
+          if (res?.success) renderPlanAutoCard(t);
+        });
+      };
+      box.appendChild(el);
+    }
   });
 }

@@ -29,7 +29,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
-import { PLAN_AUTO_NOTIF_PREFIX, PLAN_AUTO_CARD_KEY, planChangeUrl, cancelAutoDowngrade, reportAutoRevert } from './bg/plan-auto.js';
+import { PLAN_AUTO_NOTIF_PREFIX, findPlanAutoCard, planChangeUrl, cancelAutoDowngrade, reportAutoRevert } from './bg/plan-auto.js';
 import { cancelAutoDowngradeChatgpt } from './bg/plan-auto-chatgpt.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { withCollectLock } from './bg/collect-lock.js';
@@ -1708,7 +1708,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // locks auto downgrades for this member for 90 days, C7).
   if (message.type === 'CANCEL_AUTO_DOWNGRADE') {
     (async () => {
-      const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
+      // One card per service (#2358): the one for THIS order, whichever service it is.
+      const card = await findPlanAutoCard(message.orderId);
       if (!card || card.order_id !== message.orderId || card.is_up || card.kind === 'cancel_downgrade' || card.result !== 'completed') {
         sendResponse({ success: false, error: 'No auto downgrade to cancel' });
         return;
@@ -2123,8 +2124,8 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
   // #2181 U4: an auto plan-order toast opens the page that explains the change (plan §6.1).
   if (notifId.startsWith(PLAN_AUTO_NOTIF_PREFIX)) {
     const orderId = Number(notifId.slice(PLAN_AUTO_NOTIF_PREFIX.length));
-    const { [PLAN_AUTO_CARD_KEY]: card = null } = await chrome.storage.local.get({ [PLAN_AUTO_CARD_KEY]: null });
-    if (card && card.order_id === orderId && card.org_id != null) chrome.tabs.create({ url: planChangeUrl(card.org_id, orderId) });
+    const card = await findPlanAutoCard(orderId);
+    if (card && card.org_id != null) chrome.tabs.create({ url: planChangeUrl(card.org_id, orderId) });
     chrome.notifications.clear(notifId);
     return;
   }
