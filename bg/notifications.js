@@ -1,4 +1,4 @@
-import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL, RP_NOTIFY_DEFAULTS } from './constants.js';
+import { ACTIONABLE_ERRORS, NOTIF_ID_ALERT, NOTIF_ID_OPTIMIZE, ALARM_WEEKLY_REPORT, PROVIDER_LABELS, PROVIDER_ORDER, DEFAULT_SERVER_URL, RP_NOTIFY_DEFAULTS, USAGE_NOTIFY_DEFAULTS } from './constants.js';
 import { bt, bgLang } from './i18n.js';
 import { getLastStatus } from './storage.js';
 import { readHistory } from './usage-history-db.js';
@@ -734,7 +734,7 @@ export async function checkCollectFailNotification(errorMsg) {
 
 // === Usage threshold alerts ===
 export async function checkUsageAlerts(snapshot) {
-  const { thresholdWarn = 80, thresholdDanger = 95, notifyUsageWarn = false, notifyUsageDanger = true } = await chrome.storage.sync.get({ thresholdWarn: 80, thresholdDanger: 95, notifyUsageWarn: true, notifyUsageDanger: true });
+  const { thresholdWarn = 80, thresholdDanger = 95, notifyUsageWarn, notifyUsageDanger } = await chrome.storage.sync.get({ thresholdWarn: 80, thresholdDanger: 95, ...USAGE_NOTIFY_DEFAULTS });
   if (!notifyUsageWarn && !notifyUsageDanger) return;
 
   const alertThresholds = [];

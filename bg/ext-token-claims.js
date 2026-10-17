@@ -59,10 +59,17 @@ export function extTokenScope(token) {
  * This says nothing about IDENTITY — whether the incoming token belongs to the same person is a
  * separate check at the call site, and narrowing this one does not relax that one.
  */
-export function mayReplaceStoredToken(existing) {
+export function mayReplaceStoredToken(existing, nowMs = Date.now()) {
   if (!existing) return true;
-  return extTokenScope(existing) === 'ingest';
+  const claims = decodeJwtPayload(existing);
+  if (claims?.scope === 'ingest') return true;
+  // From the sunset the server refuses src-less tokens (isUnprovenToken), so replacing one loses nothing (#760).
+  if (claims && !claims.src && nowMs >= UNPROVEN_TOKEN_SUNSET_MS) return true;
+  return false;
 }
+
+// Mirror of worker INGEST_SCOPE_SUNSET_MS; test/token-upgrade-guard.mjs asserts they are equal.
+export const UNPROVEN_TOKEN_SUNSET_MS = Date.UTC(2026, 10, 16, 15, 0, 0);
 
 /**
  * The Tuner account this install actually syncs INTO — the `email` claim the server bound

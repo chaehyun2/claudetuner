@@ -6,7 +6,7 @@ import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_TIMEOUT_MS, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
-  CLAUDE_API_BASE, SITE_TAB_PATTERNS,
+  CLAUDE_API_BASE, SITE_TAB_PATTERNS, USAGE_NOTIFY_DEFAULTS,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
 import { scopedLimitsForDisplay } from './scoped-limits.js';
@@ -269,7 +269,7 @@ function syncNotificationPermission(config, userEmail) {
 /** Sync notification toggle preferences to server (fire-and-forget, on change only) */
 function syncNotificationPrefs(config, userEmail) {
   const defaults = {
-    notifyUsageWarn: false, notifyUsageDanger: true,
+    ...USAGE_NOTIFY_DEFAULTS,
     notifyResetSoon: true, notifyResetDone: true,
     notifyWeeklyReport: true, notifyCollectFail: true, notifyPlanChange: true,
   };

@@ -116,6 +116,10 @@ export const NOTIF_ID_ALERT = 'usage-alert';
 // clear — at most once per window cycle) and each is about something the user would otherwise lose
 // or not know they can do.
 export const RP_NOTIFY_DEFAULTS = Object.freeze({ notifyRpExpiry: true, notifyRpLimit: true, notifyRpNew: true });
+// #2235 — the usage-threshold toggles' defaults: danger (95%) on, warn (80%) off since 2026-05-03.
+// The service worker spells them nowhere else; options.js (a classic script that loads its config
+// synchronously) keeps a copy in its defaults object, pinned to this one by test/notif-budget-guard.mjs.
+export const USAGE_NOTIFY_DEFAULTS = Object.freeze({ notifyUsageWarn: false, notifyUsageDanger: true });
 
 // === Adaptive Polling for secondary orgs ===
 export const ORG_POLL_TIERS = {
