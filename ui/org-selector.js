@@ -13,6 +13,7 @@ import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS } from '../bg/constants.js';
 import { planOrderRank } from './plan-order.js';
 import { TRAINING_CACHE_KEY_CHATGPT, chatgptTrainingStateFor } from '../bg/training-view.js';
+import { renderLoginNudgeSpark } from './login-nudge.js';
 
 // Human-readable label for a provider org, provider-qualified across all providers
 // (e.g. "Claude Max 20x", "ChatGPT Pro 100", "Gemini Advanced"). Provider defaults to
@@ -183,6 +184,7 @@ export function selectOrg(orgId, container) {
   // stays in sync; popup.js init reads it back and prefers it when seeding the selection.
   if (orgId) chrome.storage.local.set({ lastViewedOrgId: orgId });
   refreshDashboardLinks(orgId); // keep static dashboard anchors pointed at the viewed org
+  renderLoginNudgeSpark(); // the login nudge's 7-day line follows the viewed org (#2420)
 
   // Look up selected org data from collectedOrgs (+ lastStatus for recommendation restore)
   chrome.storage.local.get({ collectedOrgs: [], lastStatus: null }, (local) => {

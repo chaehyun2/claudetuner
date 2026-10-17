@@ -5,6 +5,10 @@ import { CLAUDE_CLIENT_HEADERS, SITE_ORIGINS } from '../vendor-ai/sites.js';
 export const DEFAULT_SERVER_URL = 'https://api.claudetuner.com';
 export const DEFAULT_API_KEY = 'claude-manager-dev-key-2024';
 export const SITE_URL = 'https://claudetuner.com';
+// Static announcements feed on the CDN (ACAO:*). Read by the popup (ui/notices.js) and the
+// update-time what's-new check (bg/whats-new.js). usage-shared.js is a classic content script and
+// keeps its own copy.
+export const ANNOUNCEMENTS_URL = 'https://cdn.claudetuner.com/announcements.json';
 
 export const ALARM_NAME = 'claude-usage-poll';
 export const ALARM_EXPIRE_PREFIX = 'claude-expire-';
@@ -269,9 +273,10 @@ export const BG_I18N = {
     pa_done_up_title: '플랜 자동 업그레이드',
     pa_done_up_msg: '관리자의 자동 최적화로 {0} → {1}(으)로 바뀌었습니다. 결제 수단에 바로 청구됩니다.',
     pa_done_down_title: '플랜 자동 다운그레이드 예약',
-    pa_done_down_msg: '{0} → {1} — {2}부터 적용됩니다. 원하지 않으면 팝업에서 예약을 취소하세요.',
+    pa_done_down_msg: '{0} → {1} — {2}부터 적용됩니다. 그 전에 지금 플랜이 맞는 사용량이 되면 자동으로 취소됩니다. 원하지 않으면 팝업의 [원치 않아요]로 이유를 알려 주세요 — 예약이 취소되고 7일 또는 14일 동안 자동 판정이 멈춥니다.',
+    pa_done_down_msg_cg: '{0} → {1} — {2}부터 적용됩니다. 원하지 않으면 팝업의 [원치 않아요]로 이유를 알려 주세요 — 예약이 취소되고 7일 또는 14일 동안 자동 판정이 멈춥니다.',
     pa_cancel_down_title: '예약된 다운그레이드 자동 취소',
-    pa_cancel_down_msg: '사용량이 늘어 {0} 플랜을 유지합니다.',
+    pa_cancel_down_msg: '지금 사용량에는 {0} 플랜이 맞아 그대로 유지합니다.',
     pa_fail_title: '자동 플랜 변경 실패',
     pa_fail_msg: '{0} → {1} 변경이 실패했습니다. 다시 시도하지 않습니다.',
     pa_unknown_title: '자동 플랜 변경 확인 중',
@@ -383,9 +388,10 @@ export const BG_I18N = {
     pa_done_up_title: 'Plan upgraded automatically',
     pa_done_up_msg: "Your admin's auto-optimization changed {0} → {1}. Your payment method is charged now.",
     pa_done_down_title: 'Plan downgrade scheduled automatically',
-    pa_done_down_msg: '{0} → {1} — takes effect {2}. Cancel the schedule in the popup if you do not want it.',
+    pa_done_down_msg: '{0} → {1} — takes effect {2}. If your usage comes to fit your current plan before then, it is cancelled automatically. If you do not want it, tell us why with [I don\'t want this] in the popup — the schedule is cancelled and automatic decisions pause for 7 or 14 days.',
+    pa_done_down_msg_cg: '{0} → {1} — takes effect {2}. If you do not want it, tell us why with [I don\'t want this] in the popup — the schedule is cancelled and automatic decisions pause for 7 or 14 days.',
     pa_cancel_down_title: 'Scheduled downgrade cancelled automatically',
-    pa_cancel_down_msg: 'Usage went up, so you stay on {0}.',
+    pa_cancel_down_msg: 'Your current usage fits {0}, so you stay on it.',
     pa_fail_title: 'Automatic plan change failed',
     pa_fail_msg: 'Changing {0} → {1} failed. It will not be retried.',
     pa_unknown_title: 'Checking automatic plan change',

@@ -165,7 +165,7 @@ export async function refineTeamPlan(plan, orgUuid) {
 }
 
 // === Report plan change order result ===
-export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason, changedOrgUuid = null) {
+export async function reportPlanOrderResult(config, orderId, userEmail, action, result, failureReason, changedOrgUuid = null, rejectReason = null) {
   try {
     await authedFetch(config, `${config.serverUrl}/api/snapshots/plan-order-response`, {
       method: 'POST',
@@ -175,6 +175,8 @@ export async function reportPlanOrderResult(config, orderId, userEmail, action, 
       body: JSON.stringify({
         order_id: orderId, user_email: userEmail, action, result, failure_reason: failureReason,
         ...(changedOrgUuid ? { changed_org_uuid: changedOrgUuid } : {}),
+        // #2435: the member's preset reason (+ note) for a rejection — optional, never blocks it.
+        ...(rejectReason?.reason ? { reason_code: rejectReason.reason, note: rejectReason.note || null } : {}),
       }),
     });
   } catch (e) {

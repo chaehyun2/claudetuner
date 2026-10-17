@@ -202,6 +202,18 @@ button:disabled { cursor: not-allowed; }
 .cmp-examples[hidden] { display: none; }
 .cmp-examples-intro { margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 .cmp-examples-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+/* #2418 readiness strip (ui/compare/readiness-strip.js): above the intro until two AIs are ready. */
+.cmp-ready { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 0 0 8px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; text-align: center; flex-shrink: 0; }
+.cmp-ready[hidden] { display: none; }
+.cmp-ready-title { margin: 0; font-size: 13.5px; font-weight: 600; color: var(--text-primary); line-height: 1.5; }
+.cmp-ready-rows { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; margin: 0; padding: 0; list-style: none; }
+.cmp-ready-row { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
+.cmp-ready-name { color: var(--text-primary); font-weight: 500; }
+.cmp-ready-row[data-ready="ready"] .cmp-ready-state::before { content: '✓ '; }
+.cmp-ready-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; }
+.cmp-ready-hint, .cmp-ready-checking { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.cmp-ready-hint:empty, .cmp-ready-checking:empty { display: none; }
+.cmp-ready[data-nudge] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); } /* U4: a single-provider send is held here */
 /* A chip is a whole question (server pool, 2026-09-20): up to two lines with an ellipsis, at most 300px wide
    so three sit in one row from ~1000px and wrap below; the full text is the title. */
 .cmp-example-chip { display: inline-flex; align-items: center; min-height: 28px; max-width: 300px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12.5px; line-height: 1.4; text-align: left; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }

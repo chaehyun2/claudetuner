@@ -494,8 +494,8 @@ export function flushAutoReports(config, { budgetMs = FLUSH_BUDGET_MS } = {}) {
         continue;
       }
       // Never dropped while the server could still take it: a lost completion report would also strand
-      // the revert queued behind it, and a revert has no other way to reach the server (its 90-day lock
-      // depends on it). The queue only holds reports of orders this browser handled, so it stays small.
+      // the revert queued behind it, and a revert has no other way to reach the server (the admin's
+      // bell and the order's 'reverted' state depend on it). The queue only holds reports of orders this browser handled, so it stays small.
       if (status === 0 || retryable(status)) {
         keep.push({ ...r, tries: (r.tries || 0) + 1 });
         blocked.add(oid);
@@ -523,8 +523,48 @@ export async function reportAutoResult(config, po, r, changedOrgUuid) {
   void flushAutoReports(config).catch(() => {});
 }
 
-/** The member cancelled the downgrade an auto order scheduled: tell the server (→ 'reverted', and the
- *  decision cron locks auto downgrades for 90 days). The card says "reverted" only once the server
+// ── #2435 member refusal: a preset reason, an optional note and a 7/14-day pause of automatic decisions ──
+// The codes are the server's (worker/src/services/plan-auto/feedback.ts) — pinned equal by test/plan-auto-guard.mjs.
+export const PA_REFUSE_REASONS = Object.freeze({
+  down: Object.freeze(['temp_low', 'upcoming_heavy', 'limit_worry', 'need_feature', 'bad_timing', 'self_manage', 'other']),
+  up: Object.freeze(['no_more_cost', 'can_wait', 'usage_dropping', 'other']),
+});
+/** A manual (admin-requested) order adds this reason, before 'other'. */
+export const PA_MANUAL_EXTRA_REASONS = Object.freeze(['talked_admin']);
+/** Reasons whose honest answer is "never", not "not now" — the form points to consent withdrawal. */
+export const PA_LONG_TERM_REASONS = Object.freeze(['need_feature', 'self_manage']);
+export const PA_PAUSE_DAYS = Object.freeze([7, 14]);
+export const PA_NOTE_MAX = 200;
+const FEEDBACK_PATH = '/api/snapshots/plan-auto-feedback';
+
+/** Reasons for a manual order's [거절]: the direction's set with talked_admin before 'other'. */
+export function manualRejectReasons(isUp) {
+  const base = isUp ? PA_REFUSE_REASONS.up : PA_REFUSE_REASONS.down;
+  return [...base.filter((r) => r !== 'other'), ...PA_MANUAL_EXTRA_REASONS, 'other'];
+}
+
+/**
+ * Send the member's refusal of an AUTO order. Direct (not queued): the member is waiting for the answer,
+ * and a scheduled downgrade is cancelled only after the server has the reason and the pause.
+ * → { ok: true, pause_until, cancelled } | { ok: false, error }
+ */
+export async function sendAutoRefusal(config, orderId, userEmail, { reason, note, pauseDays }) {
+  try {
+    const res = await authedFetch(config, `${config.serverUrl}${FEEDBACK_PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId, user_email: userEmail, reason_code: reason, note: note || null, pause_days: pauseDays }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: body?.error || `http_${res.status}` };
+    return { ok: true, pause_until: body?.pause_until || null, cancelled: !!body?.cancelled };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+/** The member cancelled the downgrade an auto order scheduled: tell the server (→ 'reverted'; no lock since
+ *  2026-10-17 — the refusal's 7/14-day pause is the hold). The card says "reverted" only once the server
  *  accepted it; until then it says the report is pending, and the queue keeps retrying. */
 export async function reportAutoRevert(config, orderId, userEmail) {
   await patchPlanAutoCard(orderId, { result: 'revert_pending' });
@@ -557,7 +597,8 @@ export async function tellMember(po, r, changeDate, userEmail) {
       title = await bt('pa_done_up_title'); message = await bt('pa_done_up_msg', po.from_plan, po.to_plan);
     } else {
       title = await bt('pa_done_down_title');
-      message = await bt('pa_done_down_msg', po.from_plan, po.to_plan, changeDate ? new Date(changeDate).toLocaleDateString() : '—');
+      // ChatGPT keeps its popup [예약 취소] (#2412 is Claude only) — its own copy.
+      message = await bt(po.provider === 'chatgpt' ? 'pa_done_down_msg_cg' : 'pa_done_down_msg', po.from_plan, po.to_plan, changeDate ? new Date(changeDate).toLocaleDateString() : '—');
     }
   } else if (r.result === 'failed' && r.outcome === AUTO_OUTCOME.apiError) {
     title = await bt('pa_fail_title'); message = await bt('pa_fail_msg', po.from_plan, po.to_plan);

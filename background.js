@@ -29,7 +29,7 @@ import {
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
   setCollectAndSendRef,
 } from './bg/plan.js';
-import { PLAN_AUTO_NOTIF_PREFIX, findPlanAutoCard, planChangeUrl, cancelAutoDowngrade, reportAutoRevert } from './bg/plan-auto.js';
+import { PLAN_AUTO_NOTIF_PREFIX, findPlanAutoCard, planChangeUrl, cancelAutoDowngrade, reportAutoRevert, sendAutoRefusal, patchPlanAutoCard } from './bg/plan-auto.js';
 import { cancelAutoDowngradeChatgpt } from './bg/plan-auto-chatgpt.js';
 import { collectAndSend as _collectAndSend, getLastActiveOrgId, reportSyncPauseState } from './bg/collect.js';
 import { withCollectLock } from './bg/collect-lock.js';
@@ -57,6 +57,8 @@ import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, isUsableTab, providerForUrl
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
 import { readLast } from './bg/usage-history-db.js';
+import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
+import { REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './bg/review-nudge.js';
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -294,24 +296,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       serverSyncGrandfathered: false,
       installFirstSeenAt: new Date().toISOString(),
     });
-    // Only force the welcome page's language when the user has *explicitly* set
-    // the extension language. On 'auto' (the default), pass no param and let the
-    // welcome page self-detect via navigator.language — the same signal the popup
-    // uses. (Do NOT use chrome.i18n.getUILanguage()/bgLang here: it reflects
-    // Chrome's app UI language, which can differ from navigator.language and would
-    // mismatch what the user sees in the popup.)
-    let explicitLang = null;
-    try {
-      const { lang } = await chrome.storage.sync.get({ lang: 'auto' });
-      if (lang === 'ko' || lang === 'en') explicitLang = lang;
-    } catch (e) { /* fall through with no param */ }
-    const welcomeUrl = new URL('/welcome/', SITE_URL);
-    if (explicitLang) welcomeUrl.searchParams.set('lang', explicitLang);
-    // An unpacked (dev) build has its own id. Without this the welcome page (it reads ?ext=,
-    // site/welcome/index.html) hands the sign-in token to the store id — a disabled or absent
-    // extension — and login "fails" right after a correct code.
-    if (chrome.runtime.id !== CWS_EXT_ID) welcomeUrl.searchParams.set('ext', chrome.runtime.id);
-    chrome.tabs.create({ url: welcomeUrl.toString() });
+    // lang (explicit setting only) and ext (non-store build only) rules: bg/whats-new.js, shared
+    // with the update-time what's-new tab so the two URLs cannot drift.
+    chrome.tabs.create({ url: await buildWelcomeUrl() });
     // Allow auto-open side panel on first Claude.ai visit (fresh install only)
     await chrome.storage.local.set({ sidePanelAutoOpened: false });
   } else if (details.reason === 'update') {
@@ -332,6 +319,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         console.log('[Claude Tuner] Migration: optional provider permissions not retained, popup will prompt');
       }
     }
+    // What's-new page for no-account installs (#2427). Last in this branch and NOT awaited: it
+    // waits on a network fetch, and the migrations above (serverSyncGrandfathered first of all)
+    // must never queue behind it. Any failure means "no tab", nothing else.
+    runWhatsNewOnUpdate({ previousVersion: details.previousVersion }).catch((e) => console.warn('[Claude Tuner] whats-new check failed:', e?.message || e));
   }
   await setupAlarm();
   sendGAEvent('extension_installed', { reason: details.reason });
@@ -410,6 +401,19 @@ function openGrantTab(provider, opener) {
     ...(opener && Number.isInteger(opener.index) ? { index: opener.index + 1 } : {}),
   });
 }
+
+// Production site only — PR previews are externally_connectable too. An unpacked build accepts
+// previews: that is how a preview gets tested, and only its developer runs it.
+function isProdSiteSenderOrDevBuild(sender) {
+  return (sender && sender.origin === SITE_URL) || chrome.runtime.id !== CWS_EXT_ID;
+}
+
+// What's-new login attribution (#2427): the moment an account appears on this install.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && accountAppeared(changes.independentAccount)) {
+    reportWhatsNewLogin().catch(() => {});
+  }
+});
 
 // Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
@@ -691,8 +695,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   // of them could otherwise open tabs in a loop. An unpacked build accepts previews — that is how
   // a preview gets tested, and only its developer runs it.
   if (message && message.type === 'OPEN_PERMISSION_PAGE') {
-    const fromProd = sender && sender.origin === SITE_URL;
-    if (!fromProd && chrome.runtime.id === CWS_EXT_ID) {
+    if (!isProdSiteSenderOrDevBuild(sender)) {
       sendResponse({ ok: false, error: 'origin_not_allowed' });
       return false;
     }
@@ -702,6 +705,31 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     }
     openGrantTab(message.provider, sender && sender.tab)
       .then(() => sendResponse({ ok: true }), (e) => sendResponse({ ok: false, error: e && e.message }));
+    return true;
+  }
+
+  // What's-new page's "don't open this on updates" (#2427). Same origin rule as
+  // OPEN_PERMISSION_PAGE: a PR preview must not be able to switch the page off for store users.
+  if (message && message.type === 'whats_new_optout') {
+    if (!isProdSiteSenderOrDevBuild(sender)) {
+      sendResponse({ ok: false, error: 'origin_not_allowed' });
+      return false;
+    }
+    chrome.storage.local.set({ [WN_OPTOUT_KEY]: true })
+      .then(() => sendResponse({ ok: true }), (e) => sendResponse({ ok: false, error: e && e.message }));
+    return true;
+  }
+
+  // What's-new page's store-review card (#2427): record the click / dismissal the same way the
+  // compare page does (bg/compare.js), so the popup / options nudges respect it. Same
+  // production-only origin rule; recordReviewNudgeAction rejects any action but clicked/dismissed.
+  if (message && message.type === REVIEW_NUDGE_MSG_TYPE) {
+    if (!isProdSiteSenderOrDevBuild(sender)) {
+      sendResponse({ ok: false, error: 'origin_not_allowed' });
+      return false;
+    }
+    recordReviewNudgeAction(message.action, { storage: chrome.storage.local, getConfig, authedFetch })
+      .then((ok) => sendResponse({ ok: !!ok }), () => sendResponse({ ok: false }));
     return true;
   }
 
@@ -1520,6 +1548,28 @@ const debateNotifier = createDebateNotifier({ chrome, createCountedNotification,
 chrome.tabs.onRemoved.addListener((tabId) => { debateNotifier.clearTab(tabId); });
 
 // === Message Handler (manual collection request from popup) ===
+/** The card is OUR scheduled downgrade (completed, not an upgrade, not a cancel order) for `orderId`. */
+function isScheduledAutoDown(card, orderId) {
+  return !!card && card.order_id === orderId && !card.is_up && card.kind !== 'cancel_downgrade' && card.result === 'completed';
+}
+
+/** Cancel the downgrade an auto order scheduled, on the service's own site, and report it ('reverted'). */
+async function cancelScheduledAutoDown(card) {
+  // The card names its service (#2332): a ChatGPT reservation is cancelled on chatgpt.com, never claude.ai.
+  const result = card.provider === 'chatgpt'
+    ? await cancelAutoDowngradeChatgpt(card.target_org_uuid, card.to_plan)
+    : await cancelAutoDowngrade(card.target_org_uuid, card.to_plan);
+  if (result?.success) {
+    const config = await getConfig();
+    // The card carries the account the order belongs to; lastStatus is only a fallback.
+    const email = card.user_email || (await getLastStatus())?.snapshot?.user_email;
+    // Queued + retried until the server accepts it; the card says "reverted" only then.
+    if (email) await reportAutoRevert(config, card.order_id, email);
+    setTimeout(() => collectAndSend(), 3000);
+  }
+  return result;
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // COMPARE_FLAG / COMPARE_STATUS / OPEN_COMPARE — answered asynchronously by the controller.
   if (compareController.handleMessage(message, _sender, sendResponse)) return true;
@@ -1665,7 +1715,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ success: false, error: e.message });
         }
       } else {
-        await reportPlanOrderResult(config, po.order_id, userEmail, 'rejected');
+        try {
+          await reportPlanOrderResult(config, po.order_id, userEmail, 'rejected', undefined, undefined, null,
+            message.reason ? { reason: message.reason, note: message.note } : null);
+        } catch (e) { sendResponse({ success: false, error: e?.message || String(e) }); return; }
         await chrome.storage.local.set({ pendingPlanOrder: null });
         // Restore badge to show utilization
         const lastStatus = await getLastStatus();
@@ -1703,30 +1756,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
-  // #2181 U4: [예약 취소] on the popup's auto-order card — cancel the downgrade WE scheduled, on the
-  // org the order changed, and tell the server (plan-order-revert → 'reverted'; the decision cron then
-  // locks auto downgrades for this member for 90 days, C7).
+  // #2181 U4: cancel the downgrade WE scheduled, on the org the order changed, and tell the server
+  // (plan-order-revert → 'reverted'; no lock for either service since 2026-10-17 — the card's
+  // [원치 않아요] (REFUSE_AUTO_ORDER) is what pauses decisions).
   if (message.type === 'CANCEL_AUTO_DOWNGRADE') {
     (async () => {
       // One card per service (#2358): the one for THIS order, whichever service it is.
       const card = await findPlanAutoCard(message.orderId);
-      if (!card || card.order_id !== message.orderId || card.is_up || card.kind === 'cancel_downgrade' || card.result !== 'completed') {
+      if (!isScheduledAutoDown(card, message.orderId)) {
         sendResponse({ success: false, error: 'No auto downgrade to cancel' });
         return;
       }
-      // The card names its service (#2332): a ChatGPT reservation is cancelled on chatgpt.com, never claude.ai.
-      const result = card.provider === 'chatgpt'
-        ? await cancelAutoDowngradeChatgpt(card.target_org_uuid, card.to_plan)
-        : await cancelAutoDowngrade(card.target_org_uuid, card.to_plan);
-      if (result?.success) {
-        const config = await getConfig();
-        // The card carries the account the order belongs to; lastStatus is only a fallback.
-        const email = card.user_email || (await getLastStatus())?.snapshot?.user_email;
-        // Queued + retried until the server accepts it; the card says "reverted" only then.
-        if (email) await reportAutoRevert(config, card.order_id, email);
-        setTimeout(() => collectAndSend(), 3000);
+      sendResponse(await cancelScheduledAutoDown(card));
+    })();
+    return true;
+  }
+  // #2435: [원치 않아요] on the auto-order card — the reason (+ note) and a 7/14-day pause go to the server
+  // FIRST; then a scheduled downgrade is cancelled on its own site. An applied upgrade is not undone (the
+  // charge happened) — the refusal pauses the next ones.
+  if (message.type === 'REFUSE_AUTO_ORDER') {
+    (async () => {
+      const card = await findPlanAutoCard(message.orderId);
+      if (!card || card.order_id !== message.orderId) { sendResponse({ success: false, error: 'No auto order' }); return; }
+      const config = await getConfig();
+      const email = card.user_email || (await getLastStatus())?.snapshot?.user_email;
+      if (!email) { sendResponse({ success: false, error: 'No account' }); return; }
+      const sent = await sendAutoRefusal(config, card.order_id, email, { reason: message.reason, note: message.note, pauseDays: message.pauseDays });
+      if (!sent.ok) { sendResponse({ success: false, error: sent.error }); return; }
+      // From here the server HAS the reason and the pause: whatever fails below, answer that it was recorded
+      // and whether the schedule may still be in place (never leave the popup without a reply).
+      const down = isScheduledAutoDown(card, card.order_id);
+      try {
+        await patchPlanAutoCard(card.order_id, { refused: { reason: message.reason, pause_until: sent.pause_until } });
+        if (down) {
+          const cancelled = await cancelScheduledAutoDown(card);
+          // A failed cancel is the member's to finish on the site.
+          sendResponse({ success: true, pause_until: sent.pause_until, cancel_failed: !cancelled?.success });
+          return;
+        }
+        sendResponse({ success: true, pause_until: sent.pause_until });
+      } catch (e) {
+        console.error('[Claude Tuner] refusal follow-up failed:', e?.message || e);
+        sendResponse({ success: true, pause_until: sent.pause_until, cancel_failed: down });
       }
-      sendResponse(result);
     })();
     return true;
   }

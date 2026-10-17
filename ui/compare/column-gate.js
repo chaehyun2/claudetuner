@@ -52,17 +52,56 @@ export function columnFacts(status, col) {
   return facts && typeof facts === 'object' ? facts : null;
 }
 
+/** Which gate a provider's status calls for; null = sendable (no gate). */
+export function gateKindFor(pstate) {
+  if (!pstate || !pstate.permitted) return GATE_PERMISSION;
+  if (pstate.loggedIn === true) return null;
+  // The SW answers null only when not permitted, but a null under `permitted` must not read as
+  // "signed out" — it is "unknown", with a re-check and no login prompt.
+  return pstate.loggedIn === false ? GATE_LOGIN : GATE_UNKNOWN;
+}
+/**
+ * A column the user wants on this page right now: a known provider, not closed for this
+ * conversation, not the source hidden by 「원본 제외」. Read from STATE (never `col.node.hidden`).
+ * ONE rule for the send-time permission set and the readiness strip (#2418).
+ */
+export function columnInPlay(col, excludeSrc, src) {
+  return !!(col && PROVIDER_META[col.provider] && !col.closed && !(excludeSrc && col.provider === src));
+}
+/** Minimum distinct ready providers for a cross-check worth showing (#2418 — 96 % of sends use 2+). */
+export const READY_MIN = 2;
+/**
+ * #2418: what the page can compare with right now, by DISTINCT provider (two Claude models are one
+ * provider; a closed / excluded column counts for nothing), in column order. Each provider lands in
+ * exactly one bucket by gateKindFor — the same predicate the column gates and the send-time prompt
+ * use. null while there is no status (no facts yet: neither ready nor gated).
+ */
+export function computeReadiness(status, columns, excludeSrc, src) {
+  if (!status || !status.providers) return null;
+  const out = { ready: [], permissionGated: [], loginGated: [], unknown: [] };
+  const seen = new Set();
+  for (const col of columns) {
+    if (!columnInPlay(col, excludeSrc, src) || seen.has(col.provider)) continue;
+    seen.add(col.provider);
+    const kind = gateKindFor(status.providers[col.provider]);
+    const bucket = kind === null ? out.ready : kind === GATE_PERMISSION ? out.permissionGated : kind === GATE_LOGIN ? out.loginGated : out.unknown;
+    bucket.push(col.provider);
+  }
+  return out;
+}
+/**
+ * #2418: whether the readiness strip shows — a pure function of the current state, no first-run
+ * flag and no latch (a revoked permission brings it back on the next recompute). Cross-check tab,
+ * before the session, the extension signed in (signed out / unknown has its own notice), fewer than
+ * READY_MIN distinct providers ready — and only in the A/B arm that gets it (`armOn`, #2418 U5).
+ */
+export function readinessVisible({ readiness, status, crosscheckTab, sessionStarted, disabled, armOn }) {
+  return !!(armOn && readiness && crosscheckTab && !sessionStarted && !disabled && status && status.loggedIn === true && readiness.ready.length < READY_MIN);
+}
+
 /** Installs the column-gate slice onto `ctx` (ctx contract: ui/compare/history.js header). */
 export function installColumnGate(ctx) {
   const { chrome, t, state, clock, embedHost, track, el, clear, link, dot, src } = ctx;
-  /** Which gate a provider's status calls for; null = sendable (no gate). */
-  function gateKindFor(pstate) {
-    if (!pstate || !pstate.permitted) return GATE_PERMISSION;
-    if (pstate.loggedIn === true) return null;
-    // The SW answers null only when not permitted, but a null under `permitted` must not read as
-    // "signed out" — it is "unknown", with a re-check and no login prompt.
-    return pstate.loggedIn === false ? GATE_LOGIN : GATE_UNKNOWN;
-  }
   /** A quiet 「다시 확인」: a status re-read on demand (the manual path when auto-reconnect missed). */
   function checkAgainButton() {
     const btn = el('button', 'cmp-btn cmp-btn-sm cmp-gate-check', t('gate_check_again'));
@@ -109,7 +148,7 @@ export function installColumnGate(ctx) {
     if (!first && !(state.status && state.status.providers)) return [];
     const out = first ? [first] : [];
     for (const col of state.columns.values()) {
-      if (out.includes(col.provider) || !PROVIDER_META[col.provider] || (state.excludeSrc && col.provider === src) || col.closed) continue; // closed = ✕ in the session / not in a loaded entry (1.36.0 batch review)
+      if (out.includes(col.provider) || !columnInPlay(col, state.excludeSrc, src)) continue; // closed = ✕ in the session / not in a loaded entry (1.36.0 batch review)
       const pstate = state.status && state.status.providers ? state.status.providers[col.provider] : null;
       if (gateKindFor(pstate) === GATE_PERMISSION) out.push(col.provider);
     }
@@ -159,13 +198,18 @@ export function installColumnGate(ctx) {
     }
   }
   async function requestProviderPermission(provider, btn, hint) {
-    if (state.disabled) return;
+    // One prompt at a time across the page (#2418 U2 Codex 1R): the readiness strip's 「모두 연결」, a
+    // column gate's 「권한 허용」 and 「보내기」 (sendInitial) all share `permissionAsking`.
+    if (state.disabled || state.permissionAsking) return;
     const providers = providersNeedingPermission(provider);
     btn.disabled = true;
+    state.permissionAsking = true;
     try {
       // The extension's own tab is where the prompt is guaranteed when the iframe refused to show it:
       // open this page there with the same query and say so. The button stays; a retry is possible.
-      const { unavailable: promptUnavailable } = await askSitePermission(providers);
+      const asked = askSitePermission(providers); // synchronous start: the gesture holds
+      ctx.updateControls(); // 「보내기」 waits while the prompt is open
+      const { unavailable: promptUnavailable } = await asked;
       if (promptUnavailable) ctx.openInExtensionTab();
       hint.textContent = '';
       await ctx.refreshStatus();
@@ -177,6 +221,8 @@ export function installColumnGate(ctx) {
       // 🔴 The gate is updated in place across refreshes, so this is the SAME button the user
       // will press again after a "no": it must come back (Codex b2 2R #1).
       btn.disabled = false;
+      state.permissionAsking = false;
+      ctx.updateControls();
     }
   }
   /**

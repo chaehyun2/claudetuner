@@ -605,3 +605,21 @@
       .gauge-fill, .ov-card, .ct-chevron, .notice-chevron, .extra-usage-chevron,
       .org-option, .org-chip, .org-chip-pin { transition: none; }
     }
+
+    /* #2435 refusal reason picker (ui/refuse-form.js) — auto-order card and the manual order banner */
+    .refuse-form { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 11.5px; color: var(--text-primary); }
+    .refuse-form .rf-title { font-weight: 600; margin-bottom: 4px; }
+    .refuse-form .rf-hint { font-size: 10.5px; color: var(--text-secondary); margin: 2px 0 4px; line-height: 1.45; }
+    .refuse-form .rf-reasons { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+    .refuse-form .rf-reason, .refuse-form .rf-pause-opt { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; line-height: 1.4; }
+    .refuse-form .rf-reason input, .refuse-form .rf-pause-opt input { margin: 2px 0 0; accent-color: var(--accent); }
+    .refuse-form .rf-long { font-size: 10.5px; color: #b45309; background: #fffbeb; border-radius: 6px; padding: 4px 6px; margin: 2px 0 4px; line-height: 1.45; }
+    .refuse-form .rf-long a { color: inherit; font-weight: 600; }
+    .refuse-form .rf-note { width: 100%; box-sizing: border-box; font: inherit; font-size: 11.5px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text-primary); resize: vertical; }
+    .refuse-form .rf-pause { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+    .refuse-form .rf-pause-label { font-weight: 600; }
+    .refuse-form .rf-error { color: #dc2626; font-size: 11px; margin-top: 4px; }
+    .refuse-form .rf-actions { display: flex; gap: 6px; margin-top: 6px; }
+    .refuse-form .rf-send { font-size: 11px; padding: 4px 12px; border-radius: 6px; border: none; background: var(--accent); color: #fff; cursor: pointer; }
+    .refuse-form .rf-close { font-size: 11px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
+    .refuse-form button:disabled { opacity: .5; cursor: default; }

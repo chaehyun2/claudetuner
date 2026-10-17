@@ -436,6 +436,10 @@ export const COMPARE_EVENT_NAMES = Object.freeze([
   // #1985: the cross-service consent card — `surface` (summary_pop | summary_auto | chip | debate | retry),
   // `choice` (shown | agree | exclude | cancel), `pairs_n`. Never a service's words.
   'cross_consent',
+  // #2418 「연결하기」 onboarding (ui/compare/readiness-strip.js): the A/B arm per visit (`arm`, `forced`), the strip
+  // shown (counts + `cta`), 「모두 연결」 (`providers_n`), 「다른 AI 추가하기」 (`provider`, `action`), the single-provider
+  // hold (`provider`) and 「그래도 보내기」. Every one carries `visit_id` (a per-mount random id, also on `open`/`send`).
+  'onboard_arm', 'onboard_shown', 'onboard_connect_click', 'onboard_add_click', 'onboard_nudge', 'onboard_nudge_send',
   // The CWS review banner (#1966): `source` (compare | debate) only. Sent WITHOUT the prefix — see below.
   ...REVIEW_EVENTS,
 ]);

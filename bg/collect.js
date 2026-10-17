@@ -1,11 +1,11 @@
 import { sendGAEvent } from './analytics.js';
+import { setUninstallUrl } from './uninstall-url.js';
 import { trackPendingSend } from './collect-lock.js';
 import { platformField } from './platform.js';
 import {
   ALARM_NAME, DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
   HEARTBEAT_TIMEOUT_MS, NON_PERSONAL_PLANS,
   ORG_POLL_TIERS, ORG_POLL_TIER_ORDER,
-  DEFAULT_SERVER_URL,
   CLAUDE_API_BASE, SITE_TAB_PATTERNS,
 } from './constants.js';
 import { hasOrgUsageChanged, shouldSendSnapshot, noteServerFailure, noteServerSuccess, isServerBackedOff } from './send-gate.js';
@@ -150,6 +150,11 @@ function parseGroveFromText(text) {
 /** Save grove detection result to local cache */
 function saveGroveCache(value, detected) {
   chrome.storage.local.set({ groveCache: { value, detected, ts: Date.now() } });
+}
+
+// The uninstall survey's language — the same rule both uninstall-URL writers use.
+function uninstallLang(snapshot) {
+  return snapshot.user_language || (chrome.i18n?.getUILanguage?.()?.startsWith('ko') ? 'ko' : 'en');
 }
 
 /** Build a history point from a snapshot for appendUsageHistory */
@@ -1091,6 +1096,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       await updateBadgeForSelectedOrg(snapshot);
       // 🔴 The local-only path matters MORE than the synced one here: this is the withheld/gated
       // install, i.e. exactly the population that gets shown the login CTA the disclosure sits in.
+      // #2427: a withheld install never reached the synced path's uninstall URL, so its uninstalls
+      // were never recorded. Set one WITHOUT email/plan (identity stays gated until login).
+      // 🔴 ONLY when identity is actually withheld: this branch also carries skipServer alarm ticks,
+      // Boost and a user pause of a SYNCED install — writing here then would overwrite that install's
+      // email-bearing URL and its uninstall would lose users.uninstalled_at (Codex 1R).
+      // (Before noteClaudeCollected: claim-disclosure-guard anchors that call to this return.)
+      if (blockServerNewUser) await setUninstallUrl({ lang: uninstallLang(snapshot) });
       await noteClaudeCollected(claudeProviderEmail);
       return { success: true, snapshot, localOnly: true };
     }
@@ -1510,16 +1522,13 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       if (!r.ct_install_date) u.ct_install_date = Date.now();
       chrome.storage.local.set(u);
 
-      // Update uninstall tracking URL
-      const daysUsed = r.ct_install_date ? Math.floor((Date.now() - r.ct_install_date) / 86400000) : 0;
-      const params = new URLSearchParams({
-        email: snapshot.user_email || '',
-        plan: snapshot.plan || '',
-        v: chrome.runtime.getManifest().version,
-        days: String(daysUsed),
-        lang: snapshot.user_language || (chrome.i18n?.getUILanguage?.()?.startsWith('ko') ? 'ko' : 'en'),
+      // Update uninstall tracking URL (one builder — bg/uninstall-url.js; synced path carries email/plan)
+      setUninstallUrl({
+        email: snapshot.user_email || null,
+        plan: snapshot.plan || null,
+        lang: uninstallLang(snapshot),
+        installDate: r.ct_install_date || null,
       });
-      chrome.runtime.setUninstallURL(`${DEFAULT_SERVER_URL}/api/uninstall?${params}`);
     });
 
     // 4-0.5 Sync notification permission & preferences to server (fire-and-forget, on change only)

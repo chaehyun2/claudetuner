@@ -71,6 +71,13 @@ export async function renderLoginCta() {
   noteSurface('login_cta');
   // WHY the CTA is up, so exposure can be split by cause rather than reported as one number.
   const _ctaReason = scopeBlocked ? 'scope_blocked' : authIsBlocked ? 'auth_blocked' : 'login_first';
+  // 🔴 The card can now be revealed for an install whose server sync is NOT withheld: the felt-need
+  // nudge (ui/login-nudge.js, #2420) flips showLoginPrompt for a grandfathered no-account install,
+  // and those ARE already sending via the shared key (serverSyncWithheldReason() === null). Telling
+  // them to "turn on server sync" is false (Codex deploy-blocker), so when sync is not withheld the
+  // title/msg speak of ATTRIBUTING the existing stream to their account instead. withheldMini is
+  // exactly that gate read; `blocked` keeps the auth/scope overrides on their own copy.
+  const notWithheld = !blocked && !withheldMini;
 
   const full = document.getElementById('login-cta-full');
   const mini = document.getElementById('login-cta-mini');
@@ -130,12 +137,16 @@ export async function renderLoginCta() {
     ? (t('login_cta_authblocked_title') || 'Log in to resume server sync')
     : scopeBlocked
       ? (t('login_cta_scope_title') || 'Log in to unlock this feature')
-      : (t('login_cta_title') || 'Turn on server sync');
+      : notWithheld
+        ? (t('login_cta_account_title') || 'Claim your usage to your account')
+        : (t('login_cta_title') || 'Turn on server sync');
   document.getElementById('login-cta-msg').textContent = authIsBlocked
     ? (t('login_cta_authblocked_msg') || 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires a login. One email verification restores it:')
     : scopeBlocked
       ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
-      : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
+      : notWithheld
+        ? (t('login_cta_account_msg') || 'Your usage is already being saved. One email verification attributes it to your own account and enables the features below.')
+        : (t('login_cta_msg') || 'Your usage is saved on this browser. Verify your email once to enable:');
   // 🔴 Name the account that is about to be attributed. Logging in here does NOT ask which
   // provider account to take — the server mints for whoever authenticates and, per THE RULE in
   // bg/storage.js, everything this install collects then belongs to them. That is right for the

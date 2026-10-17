@@ -204,6 +204,33 @@ export function unixToResetTime(ts) {
   }
 }
 
+// /wham/usage reports a PERSONAL account as `user-…` (its user id), an id accounts/check never
+// carries — it keys the same account by a UUID. So whenever `default` did not name that account
+// (absent, or pointing at a workspace), the account just collected WITH usage was enumerated again
+// under its UUID: a second org row for one account (seen live: `user-…` Plus selected next to the
+// same account's UUID offered as "Pro 5x"). parseAccountsRoster resolves the active entry with the
+// rule below, the same one the auto-downgrade uses to pick the account it changes.
+const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+/**
+ * The accounts/check entry an order keyed `usageKey` (the /wham/usage key) targets, or null:
+ *   - `user-…` key → the ONE personal account whose account_user_id starts with it (two or none → null);
+ *   - UUID key     → the account with that account_id.
+ * Canonical (UUID-keyed) entries only — `default` is an alias. Pure.
+ */
+export function resolveActiveChatgptAccount(data, usageKey) {
+  const accounts = isPlainObj(data?.accounts) ? data.accounts : null;
+  if (!accounts || typeof usageKey !== 'string' || !usageKey || usageKey === 'unknown') return null;
+  const entries = Object.entries(accounts).filter(([k, a]) => k !== 'default' && isPlainObj(a) && isPlainObj(a.account)).map(([, a]) => a);
+  if (usageKey.startsWith('user-')) {
+    // account_user_id = `${user_id}__${account_id}` (measured 2026-10-12, every account) — matched whole.
+    const mine = entries.filter((a) => a.account.structure === 'personal'
+      && a.account.account_user_id === `${usageKey}__${a.account.account_id}`);
+    return mine.length === 1 ? mine[0] : null;
+  }
+  const hit = entries.filter((a) => a.account.account_id === usageKey);
+  return hit.length === 1 ? hit[0] : null;
+}
+
 /**
  * Parse an accounts/check response into a roster the collector can act on.
  *
@@ -241,18 +268,17 @@ export function unixToResetTime(ts) {
 export function parseAccountsRoster(data, activeAccountId = null) {
   const accounts = data?.accounts || {};
   const def = accounts.default || null;
-  // The entry describing the account /wham/usage reported on, when accounts/check names it. It
-  // may be absent: `usage.account_id` is sometimes a `user-…` id while accounts/check keys by
-  // account UUID, and those never match — in which case `default` remains the only anchor we have.
+  // The entry describing the account /wham/usage reported on, when accounts/check names it: by
+  // account_id for a UUID key, by account_user_id for a `user-…` key (see resolveActiveChatgptAccount).
+  // It may be absent — then `default` remains the only anchor we have.
   //
   // 🪤 `default` is an ALIAS: it repeats one real entry under a second key, so two values can carry
-  // the same account_id and a bare `Object.values(...).find` would pick whichever came first (Codex
-  // FOLLOW-UP). Search the canonical UUID-keyed entries only — if the alias is the sole match, the
-  // `|| def` fallback below reaches the same object anyway, so nothing is lost by skipping it.
-  const activeEntry = activeAccountId
-    ? (Object.entries(accounts).find(([k, a]) => k !== 'default' && a?.account?.account_id === activeAccountId) || [])[1] || null
-    : null;
+  // the same account_id. The resolver searches the canonical UUID-keyed entries only — if the alias
+  // is the sole match, the `|| def` fallback below reaches the same object anyway.
+  const activeEntry = activeAccountId ? resolveActiveChatgptAccount(data, activeAccountId) : null;
   const anchor = activeEntry || def;
+  // The id the primary snapshot's account carries in THIS response, whichever way it was found.
+  const activeRosterId = activeEntry?.account?.account_id || null;
   // The `default` alias carries the real account UUID of the active account, which
   // lets us exclude it from the extra-workspace list (its usage comes from /wham/usage).
   const defaultAccountId = def?.account?.account_id || null;
@@ -273,6 +299,7 @@ export function parseAccountsRoster(data, activeAccountId = null) {
     // usage-null snapshot under the very same org key (#1144).
     if (acc.account_id === defaultAccountId) continue; // active account → /wham/usage handles it
     if (activeAccountId && acc.account_id === activeAccountId) continue; // ditto, per /wham/usage
+    if (activeRosterId && acc.account_id === activeRosterId) continue;   // ditto, matched as the personal account
     if (acc.is_deactivated) continue;                  // expired/left workspace → skip (unused)
     if (a.can_access_with_session === false) continue; // session can't read this account
     workspaces.push({

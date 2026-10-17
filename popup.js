@@ -16,7 +16,9 @@ import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGE
 import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels, dismissPrivacyRow } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
-import { renderPlanAutoCard } from './ui/plan-auto-card.js';
+import { renderPlanAutoCard, watchPlanAutoCards } from './ui/plan-auto-card.js';
+import { buildRefuseForm } from './ui/refuse-form.js';
+import { manualRejectReasons } from './bg/plan-auto.js';
 import { loadOrgSelector, selectOrg, showMultiOrgBadges, renderAdditionalLimits } from './ui/org-selector.js';
 import { enterOverview, enterDetail, renderOverview, isOverviewActive, exitOverview, syncViewTabs, isDragging } from './ui/overview.js';
 import { _updateUICore, renderSyncAccountNote, renderUpgradeWarning } from './ui/render.js';
@@ -26,6 +28,7 @@ import { renderSyncPause } from './ui/sync-pause.js';
 import { renderReauth } from './ui/reauth.js';
 import { renderClaimSwitch } from './ui/claim-switch.js';
 import { renderLoginCta } from './ui/login-cta.js';
+import { initLoginNudge, renderLoginNudge, renderLoginNudgeSpark, relabelLoginNudge } from './ui/login-nudge.js';
 import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
 import { readCompareEntryVariant, ENTRY_CROSSCHECK, ENTRY_DEBATE, ENTRY_PLACEMENT } from './ui/compare-entry.js';
 
@@ -524,6 +527,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   renderReauth();
   renderLoginCta();
+  // Felt-need login nudge (#2420) — counts this open and renders for a no-account repeat visitor.
+  // After renderLoginCta so it can read the same storage and defer to the CTA when that is live.
+  initLoginNudge();
   renderClaimSwitch();
   renderSyncPause();
   // showLoginPrompt is written by the first gated collect cycle, which can land AFTER this
@@ -537,6 +543,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
       // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
       if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      // The felt-need nudge (#2420) defers to every one of those flags, so re-render it on the same
+      // edges — a login landing mid-session must hide it, and showLoginPrompt flipping (its own CTA
+      // hand-off, or a gated collect) must stop it doubling up with #login-cta. No open is counted
+      // here: this is a re-render, not a new panel open.
+      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked || changes.independentAccount)) renderLoginNudge();
       // #852 — the provider failure reason is written by the SERVICE WORKER while the popup is
       // open (a manual collect that fails right after granting permission is the common case).
       // Piggy-backing on THIS listener rather than adding a second one: test/login-first-guard.mjs
@@ -764,6 +775,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.usageHistory = history;
       state.historyLoaded = true;
       _historyReady = true;
+      renderLoginNudgeSpark(); // the nudge's 7-day line, once the history and the selected org are both in
       // Before the status paint, the status callback below draws with the history already in
       // state — nothing to redraw yet. After it: the forecast inside updateUI (gated on
       // historyLoaded), then the history-fed view the same way a HISTORY_UPDATED redraw does it.
@@ -807,6 +819,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (primary) state.selectedOrgId = primary.uuid;
         }
       }
+      renderLoginNudgeSpark();
 
       const status = result.lastStatus;
       updateUI(status);
@@ -882,6 +895,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderReauth();
       renderLoginCta();
       renderClaimSwitch();   // same reason — every string in it is imperative t() text
+      relabelLoginNudge(); // same reason — the nudge card and its 7-day line label/note (the line itself is kept)
       checkProviderPermissions().then(checkProviderErrors);
       checkCapDrops();   // same reason — imperative t() text, repainted by the module
       // Same reason: the sync-account note is imperative t() text with no data-i18n attribute.
@@ -901,6 +915,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const primary = state.collectedOrgs.find(o => o.isPrimary) || state.collectedOrgs[0];
           state.selectedOrgId = stillValid ? state.selectedOrgId : (primary ? primary.uuid : null);
           refreshDashboardLinks(state.selectedOrgId);
+          renderLoginNudgeSpark(); // the selection may have fallen back to the primary just above
           updateUI(r.lastStatus);
           state.currentPlan = r.lastStatus?.snapshot?.plan || null;
           state.currentSnapshot = r.lastStatus?.snapshot || null;
@@ -1426,6 +1441,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // proves the user has a Claude org. The order itself is the signal — which provider happens to
   // be pinned primary in the popup is unrelated.
   renderPlanAutoCard(t);
+  watchPlanAutoCards(t);
   chrome.storage.local.get({ pendingPlanOrder: null, completedPlanOrder: null }, (store) => {
     const po = store.pendingPlanOrder;
     const completed = store.completedPlanOrder;
@@ -1528,9 +1544,33 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
-  document.getElementById('plan-order-reject').addEventListener('click', () => {
-    document.getElementById('plan-order-banner').classList.add('hidden');
-    chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'reject' });
+  // #2435: [거절] asks why (preset reason + optional note, no pause — the order is the admin's request).
+  document.getElementById('plan-order-reject').addEventListener('click', async () => {
+    const { pendingPlanOrder: po } = await chrome.storage.local.get('pendingPlanOrder');
+    const buttons = document.getElementById('plan-order-buttons');
+    const box = document.getElementById('plan-order-reject-form');
+    if (!buttons || !box) {
+      // An older cached popup.html without the form slots: reject without a reason, as before.
+      document.getElementById('plan-order-banner').classList.add('hidden');
+      chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'reject' });
+      return;
+    }
+    const isUp = !!po && PLAN_HIERARCHY.indexOf(po.to_plan) > PLAN_HIERARCHY.indexOf(po.from_plan);
+    buttons.style.display = 'none';
+    box.replaceChildren(buildRefuseForm(t, {
+      reasons: manualRejectReasons(isUp),
+      withPause: false,
+      submitText: t('plan_order_reject'),
+      onCancel: () => { box.replaceChildren(); buttons.style.display = 'flex'; },
+      onSubmit: (v) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RESPOND_PLAN_ORDER', action: 'reject', reason: v.reason, note: v.note }, (res) => {
+          if (chrome.runtime.lastError || !res?.success) { resolve(t('pa_refuse_failed')); return; }
+          box.replaceChildren(); buttons.style.display = 'flex';
+          document.getElementById('plan-order-banner').classList.add('hidden');
+          resolve(null);
+        });
+      }),
+    }));
   });
 
   // Cancel downgrade button

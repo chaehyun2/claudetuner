@@ -77,7 +77,7 @@ import { NARROW_MEDIA, REDUCED_MOTION_MEDIA } from './ui/compare/constants.js';
 import { installHistory } from './ui/compare/history.js';
 import { installHistorySync } from './ui/compare/history-sync.js';
 import { installSummary } from './ui/compare/summary.js';
-import { installColumnGate } from './ui/compare/column-gate.js';
+import { installColumnGate, computeReadiness, readinessVisible } from './ui/compare/column-gate.js';
 import { installModelPicker } from './ui/compare/model-picker.js';
 import { installExport } from './ui/compare/export.js';
 import { installColumnThread } from './ui/compare/column-thread.js';
@@ -88,6 +88,7 @@ import { installDebate } from './ui/compare/debate.js';
 import { installShare } from './ui/compare/share.js';
 import { installOpenInProvider, OPEN_FROM_HEAD } from './ui/compare/open-in-provider.js';
 import { installReviewNudge, REVIEW_SOURCE_COMPARE, REVIEW_SOURCE_DEBATE } from './ui/compare/review-nudge.js';
+import { installReadinessStrip, ONBOARD_ARM_ON } from './ui/compare/readiness-strip.js';
 import { installRoundFooter, threadless, resendable } from './ui/compare/round-footer.js';
 import { installSummaryCard } from './ui/compare/summary-card.js';
 import { installSuggest } from './ui/compare/suggest.js';
@@ -197,6 +198,10 @@ export function mountComparePage(deps) {
     linkPrevSave: null,   // `{saveBy, touched, provider}` as they were before that — the link provider's value is restored when the link goes
     sending: false,       // a SEND/FOLLOWUP is in flight (until ALL_DONE or CONSUME_FAIL)
     sessionStarted: false, // SEND has been accepted at least once (follow-ups allowed)
+    readiness: null,      // #2418 recomputeReadiness(): {ready, permissionGated, loginGated, unknown} by distinct provider, null without a status
+    readinessShown: false, // #2418 the readiness strip's visibility — a pure function of the state above, never latched
+    onboardArm: null,     // #2418 U5 the A/B arm (readiness-strip.js readOnboardArm): 'on' | 'off' | 'none', null until read
+    nudging: false,       // #2418 U4 a single-provider first send is held in the strip: {provider, key} | false
     sessionEnded: false,  // the port that carried this session is gone — the SW disposed its clients (a kept session may still resume, canResume())
     resuming: false,      // a SEND{resume} is on a fresh port and awaits its CONSUME_OK (D3)
     resumed: false,       // the session rode a SEND{resume} at least once: a column without a continuation is dead for good (batch-3 Codex #1)
@@ -468,6 +473,7 @@ export function mountComparePage(deps) {
   installShare(ctx);
   installOpenInProvider(ctx);
   installReviewNudge(ctx);
+  installReadinessStrip(ctx); // #2418: the 「연결하기」 strip above the composer
   const { historyStorage, historyUpdate, newSessionId, snapshotSession, fitEntry, persistSession, syncHistoryButton, paintHistoryList, openHistoryPanel, closeHistoryPanel, clearHistory, loadSession } = ctx;
   const { focusQuietly, clearCopyFeedback, attachCopy, copyButton, allColumns, firstColumnOf, firstAccountColumnOf, colLabel, modelLabelOf, compareMarkdown, columnMarkdown, syncCopyAll } = ctx;
   const { closePicker, togglePicker, toggleServicePicker, syncServiceButton, applyModelPick, renderPickerLabel, setColumnModel, renderModelSelect, syncModelHint, applyModels, hasAutoOption, modelsFor, columnsFor, modelsCsv, gaCol, servedModelId } = ctx;
@@ -1662,6 +1668,7 @@ export function mountComparePage(deps) {
   const followup = makeFollowupComposer(FOLLOWUP_ID_BOTTOM, 'cmp-card cmp-composer cmp-composer-compact');
   const dock = el('div', 'cmp-dock');
   dock.id = 'cmp-dock';
+  dock.appendChild(ctx.readinessBox); // #2418: what is ready / needs access — first, above the intro (readiness-strip.js)
   dock.appendChild(examples); // the empty-state intro + chips ride the dock, right above the composer
   dock.appendChild(attachBox); // between the chips and BOTH composer faces — only one shows, so it is always directly above the active one
   dock.appendChild(qCard);
@@ -1788,6 +1795,7 @@ export function mountComparePage(deps) {
   function renderComingSoon() {
     state.disabled = true;
     state.sending = false;
+    recomputeReadiness(); // #2418: `disabled` changed without an updateControls() pass (Codex U1 1R)
     closePort(); // stops the keepalive too
     clearCopyFeedback();
     removeAutoRefreshListeners(true); // terminal: nothing on this page will ever read the status again
@@ -3152,6 +3160,18 @@ export function mountComparePage(deps) {
     // Last: the tray reads the targets this pass just settled, so unticking the only column that
     // takes files repaints the note in the same frame that disables the button.
     renderAttachment();
+    recomputeReadiness();
+  }
+  /**
+   * #2418: the ONE place the readiness strip's facts are recomputed — from the state as it is, never
+   * a status re-read. Called at the end of updateControls(), which every change it depends on already
+   * runs through: a status read (readStatus), 원본 제외, a column added / removed / replaced, a tab
+   * switch (modeChanged), the session starting or being reset. One caller, so no path can go stale.
+   */
+  function recomputeReadiness() {
+    state.readiness = computeReadiness(state.status, allColumns(), state.excludeSrc, src);
+    state.readinessShown = readinessVisible({ readiness: state.readiness, status: state.status, crosscheckTab: !ctx.debateChosen(), sessionStarted: state.sessionStarted, disabled: state.disabled, armOn: state.onboardArm === ONBOARD_ARM_ON });
+    ctx.renderReadiness();
   }
 
   /**
@@ -3502,6 +3522,7 @@ export function mountComparePage(deps) {
   function setChecking(on) {
     state.checking = on;
     for (const col of state.columns.values()) syncGateStatus(col);
+    ctx.renderReadiness(); // its 「확인 중…」 line (same shape → only the line changes)
   }
   // Every status read gets a sequence number at its START (before the await): a column records the
   // count at its gate-code error, and only reads numbered above it may clear or revoke the gate.
@@ -3789,10 +3810,13 @@ export function mountComparePage(deps) {
       return;
     }
     if (!attachableTargets(targets).length || attachBusy()) return;
+    // #2418 U4: one distinct provider is not a comparison — held once, with 「그래도 보내기」 (readiness-strip.js).
+    if (ctx.holdSingleProviderSend(text, targets)) return;
     state.question = text;
     state.sessionSaveBy = state.saveBy; // fixed for the session (FOLLOWUP carries no field); a frozen SaveBy
     beginSend(text, targets, 'SEND');
   }
+  ctx.sendNow = sendNow; // 「그래도 보내기」 (#2418 U4) sends past the single-provider hold, at the same boundary
   ctx.sendInitial = sendInitial; // the consent card's 「동의하고 시작」 starts again (consent.js / debate.js)
   sendBtn.addEventListener('click', sendInitial);
   bindComposer(qInput, sendInitial, updateControls, win);
@@ -3865,11 +3889,12 @@ export function mountComparePage(deps) {
   qInput.focus();
   if (q && typeof qInput.setSelectionRange === 'function') qInput.setSelectionRange(q.length, q.length);
 
-  track('open', { src: src || '', framed: !!embedHost, lang, has_q: !!q });
+  track('open', { src: src || '', framed: !!embedHost, lang, has_q: !!q, visit_id: ctx.visitId });
   readFeedbackAccount();
   // The stored layout must be known before the first status builds the columns.
   // A debate tab opened by 「🗣 토론 붙이기」 (#1976 stage 3) takes its one-shot handoff before the columns are built.
-  Promise.all([readLayout(), ctx.readDebatePrefs()]).then(() => ctx.takeDebateHandoff()).then(() => refreshStatus(), () => refreshStatus());
+  // #2418 U5: the A/B arm too — known before the first status, so the strip never flashes in the `off` arm.
+  Promise.all([readLayout(), ctx.readDebatePrefs(), ctx.readOnboardArm()]).then(() => ctx.takeDebateHandoff()).then(() => refreshStatus(), () => refreshStatus());
 
   // Exposed for the flow guard only.
   return { state, refreshStatus, sendableTargets: currentTargets, loadSession, snapshotSession, fitEntry, setColumnFocus };

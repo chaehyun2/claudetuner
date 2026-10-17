@@ -29,7 +29,10 @@
 //   4. ONE write call, never retried; then one re-read to prove it; report with the account it changed.
 // A downgrade never charges (₩0 preview, measured) and only takes effect at renewal.
 import { fetchChatGPTApi } from './api-chatgpt.js';
-import { chatgptPlanName, chatgptUsageAccountId, CHATGPT_USAGE_PATH } from './parse-chatgpt.js';
+import { chatgptPlanName, chatgptUsageAccountId, CHATGPT_USAGE_PATH, resolveActiveChatgptAccount } from './parse-chatgpt.js';
+// Re-exported: the guard and callers reach it through this module (it lives with the parsers so the
+// roster and the auto-downgrade resolve "the active account" by one rule).
+export { resolveActiveChatgptAccount };
 import { SITE_TAB_PATTERNS, CHATGPT_API_BASE } from './constants.js';
 import { isUsableTab } from '../vendor-ai/sites.js';
 import { getOrCreateInstallId } from './storage.js';
@@ -54,26 +57,6 @@ const NOT_SENT = -1;
 
 const rank = (p) => CG_LADDER.indexOf(p);
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-
-/**
- * The accounts/check entry an order keyed `usageKey` (the /wham/usage key) targets, or null:
- *   - `user-…` key → the ONE personal account whose account_user_id starts with it (two or none → null);
- *   - UUID key     → the account with that account_id.
- * Canonical (UUID-keyed) entries only — `default` is an alias. Pure.
- */
-export function resolveActiveChatgptAccount(data, usageKey) {
-  const accounts = isObj(data?.accounts) ? data.accounts : null;
-  if (!accounts || typeof usageKey !== 'string' || !usageKey || usageKey === 'unknown') return null;
-  const entries = Object.entries(accounts).filter(([k, a]) => k !== 'default' && isObj(a) && isObj(a.account)).map(([, a]) => a);
-  if (usageKey.startsWith('user-')) {
-    // account_user_id = `${user_id}__${account_id}` (measured 2026-10-12, every account) — matched whole.
-    const mine = entries.filter((a) => a.account.structure === 'personal'
-      && a.account.account_user_id === `${usageKey}__${a.account.account_id}`);
-    return mine.length === 1 ? mine[0] : null;
-  }
-  const hit = entries.filter((a) => a.account.account_id === usageKey);
-  return hit.length === 1 ? hit[0] : null;
-}
 
 /** entitlement top-level KEY names (never values) — diagnostic for an unreadable billing period. Pure. */
 function entitlementKeyNames(ent) {

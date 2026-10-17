@@ -2,6 +2,7 @@
 // Leaf domain: imports shared state + escHtml; CT_CONFIG and i18n `t` are globals (classic scripts).
 import { escHtml } from './util.js';
 import { state } from './state.js';
+import { ANNOUNCEMENTS_URL } from '../bg/constants.js';
 
 // The popup loads usage-shared.js (see popup.html), so the ad-serving core is
 // available as a global here — the SAME canonical logic the sidebars use (no copy).
@@ -14,8 +15,8 @@ try { window.addEventListener('pagehide', () => { if (CORE && CORE.sendAdFlushHi
 // Announcements FEED is served as a static object from the CDN (cdn.claudetuner.com,
 // ACAO:*), NOT a Worker route — polling it never wakes the Worker (mirrors the
 // dashboard shared/announcement.js + promo push.json CDN migrations). Shape is a
-// drop-in array identical to the old /api/announcements response.
-const ANNOUNCEMENT_URL = 'https://cdn.claudetuner.com/announcements.json';
+// drop-in array identical to the old /api/announcements response. URL: ANNOUNCEMENTS_URL
+// (bg/constants.js — shared with the update-time what's-new check).
 // Impression/click events still POST to the Worker (the CDN is read-only static).
 const ANNOUNCEMENT_EVENT_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/announcements/event';
 const PROMOS_URL = CT_CONFIG.DEFAULT_SERVER_URL + '/api/promos';
@@ -158,7 +159,7 @@ export async function loadPopupAnnouncements(attempt = 0) {
     // and merge. (Keeping promos out of the announcements feed avoids leaking them into the
     // Claude sidebar / landing page, which consume /api/announcements as a notices list.)
     const [aRes, pRes] = await Promise.all([
-      fetch(ANNOUNCEMENT_URL + '?t=' + cacheBuster),
+      fetch(ANNOUNCEMENTS_URL + '?t=' + cacheBuster),
       fetch(PROMOS_URL + '?t=' + cacheBuster).catch(() => null)
     ]);
     if (!aRes.ok) throw new Error('HTTP ' + aRes.status);

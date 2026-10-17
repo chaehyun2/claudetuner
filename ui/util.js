@@ -350,7 +350,7 @@ export function planToMultiplier(plan, provider, win) {
   if (provider === 'chatgpt') {
     if (p === 'free') return 0.2;
     if (p === 'go') return 0.4;
-    if (p === 'pro' || p === 'pro 20x') return 20;
+    if (p === 'pro' || p === 'pro 20x') return win === '7d' ? 10 : 20; // weekly quota measures ~10x Plus (#2446)
     if (p === 'pro 5x' || p === 'prolite') return 5;
     if (p === 'pro 25x' || p === 'promax') return 25; // $500 Pro tier (25x Plus quota; raw plan_type 'promax')
     if (p === 'team') return 1.25;
@@ -376,8 +376,8 @@ export function planToMultiplier(plan, provider, win) {
 }
 
 // Provider-specific quota tiers used by the popup's dashed guide lines.
-// `win` picks the Claude 20x tier's quota for THIS chart's window (#955). ChatGPT/Gemini 20x
-// tiers are unmeasured and stay at 20 in both windows, so only the Claude arm below moves.
+// `win` picks the 20x tier's quota for THIS chart's window: Claude Max 20x (#955) and ChatGPT Pro 200
+// (#2446) both measure ~10x weekly. Gemini's 20x tier is unmeasured and stays at 20 in both windows.
 export function planLimitTiers(provider, currentMult, win) {
   if (currentMult === 1.25 || currentMult === 6.25) {
     return [
@@ -389,7 +389,7 @@ export function planLimitTiers(provider, currentMult, win) {
     return [
       { mult: 1, label: 'Plus', color: '#22c55e' },
       { mult: 5, label: 'Pro 100', color: '#f97316' },
-      { mult: 20, label: 'Pro 200', color: '#ef4444' },
+      { mult: win === '7d' ? 10 : 20, label: 'Pro 200', color: '#ef4444' },
       { mult: 25, label: 'Pro 500', color: '#a21caf' },
     ];
   }

@@ -11,6 +11,8 @@ import { _shouldSuppressRec, _renderRecommendation, maybeShowDashNudge } from '.
 import { _providerOrgLabel, renderAdditionalLimits } from './org-selector.js';
 import { _authedFetch } from './auth.js';
 import { getUpgradeBlock } from '../bg/upgrade-gate.js';
+import { PLAN_AUTO_CARD_READ_KEYS, PLAN_AUTO_RESERVATIONS_KEY, pickPlanAutoCards } from '../bg/plan-auto.js';
+import { planAutoCardView } from './plan-auto-card.js';
 import { sendCodeReasonFromStatus, sendCodeReasonFromThrown, sendCodeErrorCopy } from '../bg/send-code-error.js';
 
 function _applyTeamOnboarding(onboarding) {
@@ -591,10 +593,20 @@ export function _updateUICore(status) {
       const planLabels = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x', cancel: t('pending_cancel') };
       pendingEl.textContent = planLabels[s.subscription.pending_plan] || s.subscription.pending_plan;
       if (s.subscription.pending_plan !== 'cancel') {
-        chrome.storage.local.get({ hiddenDowngradePlan: null }, (st) => {
+        chrome.storage.local.get([...PLAN_AUTO_CARD_READ_KEYS, PLAN_AUTO_RESERVATIONS_KEY, 'hiddenDowngradePlan'], (st) => {
           const wrap = document.getElementById('cancel-downgrade-wrap');
           if (wrap) {
-            if (st.hiddenDowngradePlan === s.subscription.pending_plan) {
+            // #2435: OUR scheduled auto downgrade is refused through the card's [원치 않아요] (reason + short pause,
+            // then the cancel) — a bare cancel here would be scheduled again the next day. Hidden ONLY when the
+            // pending plan IS the reservation this browser made for this org (the same record the cancel itself
+            // requires) AND that order's card still offers [원치 않아요]; a member's own later schedule keeps the button.
+            const res = (st[PLAN_AUTO_RESERVATIONS_KEY] || {})[s.claude_org_uuid];
+            const auto = pickPlanAutoCards(st).claude;
+            // "Offers [원치 않아요]" is decided by the card's own view function, so the two can never disagree
+            // (a missing change date, an expired card, a refused one — all the card's rules).
+            const autoView = auto && auto.order_id === res?.order_id ? planAutoCardView(auto, Date.now(), (k) => k) : null;
+            const ourAutoDown = !!res && res.plan_type === s.subscription.pending_plan && !!autoView?.refuse && autoView.refuseUp === false;
+            if (ourAutoDown || st.hiddenDowngradePlan === s.subscription.pending_plan) {
               wrap.style.display = 'none';
             } else {
               wrap.style.display = 'flex';
