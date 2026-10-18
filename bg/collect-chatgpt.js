@@ -18,7 +18,7 @@ import { syncChatGPTVatStatus } from './vat.js';
 import { syncChatGPTTraining } from './training.js';
 import { syncChatGPTProModelSignal } from './pro-model-signal.js';
 import { AUTO_PATH_CAPABILITY, flushAutoReports } from './plan-auto.js';
-import { handleAutoChatgptOrder, checkChatgptReservation } from './plan-auto-chatgpt.js';
+import { handleAutoChatgptOrder, checkChatgptReservation, readPlanAutoWait, clearPlanAutoWait, sweepOrphanChatgptTab } from './plan-auto-chatgpt.js';
 import { trackPendingSend } from './collect-lock.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
@@ -672,6 +672,10 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // #2332: this build executes automatic ChatGPT downgrade orders (bg/plan-auto-chatgpt.js). The server
   // delivers one only on a ChatGPT POST that declares it (and ≥ its ChatGPT version floor).
   payload.plan_auto_exec = AUTO_PATH_CAPABILITY;
+  void sweepOrphanChatgptTab();
+  // #2503: why the last automatic order run waited (no tab, session, read) — the server records it in AE only.
+  const planAutoWait = await readPlanAutoWait();
+  if (planAutoWait) payload.plan_auto_wait = { order_id: planAutoWait.order_id, reason: planAutoWait.reason };
   const commitResetPassDetail = await attachResetPassDetail(payload, org.resetPasses);
   const posted = await postSnapshot(config, payload, (code) => {
     if (!sendOutcome) return;
@@ -681,6 +685,8 @@ async function sendChatGPTSnapshot(org, chatgptEmail, plan, { forceExtraOrg = fa
   // postSnapshot returns null when it withheld or failed the POST, else the server's reply — the
   // detail counts as sent only when that reply says it was stored (reset_pass_stored).
   await commitResetPassDetail(posted);
+  // A skip_org reply returns before the server records it (Codex R1 후속) — keep it for the next POST.
+  if (posted && !posted.skip_org && planAutoWait) await clearPlanAutoWait(planAutoWait);
   // #2332: an automatic ChatGPT order rides the reply. Its own module, its own checks (the session must
   // be the order's account — so it needs no account-switch tracking); any other reply flushes queued
   // reports. NOT awaited (CWS batch review): the collection cycle — and the Gemini collection and account

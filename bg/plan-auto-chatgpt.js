@@ -23,8 +23,9 @@
 //      accounts/check, it is the member's PERSONAL account, billed monthly, not on trial / delinquent /
 //      gratis, nothing is scheduled or cancelling on it, and it is still on from_plan. Each failure ends
 //      the order charge-free with no write call;
-//   2. a usable chatgpt.com tab must exist — the write goes through the page only (no cookie fallback,
-//      which would re-send a request whose first attempt may already have landed);
+//   2. the write goes through a chatgpt.com page only (no cookie fallback, which would re-send a request
+//      whose first attempt may already have landed). An open tab is used; with none open, one is opened
+//      in the background for this order and closed after it (#2503 — measured: hidden tab, 3-5 s);
 //   3. execute approval from the server (POST /plan-order-execute) — none means no call (fail-closed);
 //   4. ONE write call, never retried; then one re-read to prove it; report with the account it changed.
 // A downgrade never charges (₩0 preview, measured) and only takes effect at renewal.
@@ -54,6 +55,46 @@ const PROOF_READS = 3;           // re-reads after a 200 (reads are safe to repe
 const PROOF_GAP_MS = 2_000;
 /** postOnceViaTab: the script could not be injected, so nothing was sent. */
 const NOT_SENT = -1;
+const TAB_LOAD_TIMEOUT_MS = 30_000; // a background chatgpt.com tab loaded in 1.6-3.2 s (#2503)
+/**
+ * Why a run ended with nothing marked, nothing asked and nothing reported — the order simply waits for a
+ * later POST. Without this the server could not tell any of them apart (order 63 sat `delivered` for days,
+ * #2503). Closed vocabulary — the worker drops anything else (services/ae/plan-auto-wait.ts).
+ */
+export const CG_WAIT = Object.freeze({
+  session: 'session_mismatch', roster: 'roster_unreadable', read: 'precheck_read_failed',
+  noWindow: 'no_window', tab: 'tab_open_failed', switched: 'session_switched',
+});
+const WAIT_KEY = 'planAutoChatgptWait';
+/** A noted wait rides ChatGPT POSTs for at most this long (an order lives ~a week). */
+const WAIT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** One background tab per order per hour: a tab that never loads must not reopen on every POST. */
+const TAB_OPEN_KEY = 'planAutoChatgptTabOpen';
+const TAB_REOPEN_MS = 60 * 60 * 1000;
+/**
+ * The background tab we opened, in storage.SESSION (Codex R1-B1): a worker that dies while using it
+ * never reaches its finally, and the next run would take the leftover tab for the member's own. The
+ * session area is cleared on browser restart, so a recorded id can never name a different tab after a
+ * restart (tab ids are reused across browser sessions, never within one).
+ */
+// One key PER TAB (Codex R2): two runs opening tabs at once must not overwrite each other's record.
+const OUR_TAB_PREFIX = 'planAutoChatgptOurTab:';
+/**
+ * Tabs this worker opened and has not finished closing. NEVER handed to another run (Codex R1-B2 → no
+ * sharing at all): each run opens its own background tab and closes only that one, so no run can close
+ * a tab another is using. Lives and dies with the worker; a dead worker's tabs are swept (above).
+ */
+const ourTabs = new Set();
+/**
+ * Choosing / opening / sweeping tabs runs one at a time (not the write itself): between "a tab exists"
+ * and "it is in ourTabs" another run must not look and take our new tab for the member's own.
+ */
+let tabLock = Promise.resolve();
+function withTabLock(fn) {
+  const run = tabLock.then(fn, fn);
+  tabLock = run.catch(() => {});
+  return run;
+}
 
 const rank = (p) => CG_LADDER.indexOf(p);
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -123,9 +164,127 @@ export function classifyChatgptWrite(status) {
 
 async function usableChatgptTab() {
   try {
-    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt })).filter(isUsableTab);
+    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt })).filter((t) => isUsableTab(t) && !ourTabs.has(t.id));
     return tabs[0] || null;
   } catch { return null; }
+}
+
+/** Resolves true once the tab finished loading on chatgpt.com, false on timeout / close / a redirect away. */
+function chatgptTabLoaded(tabId) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve(v);
+    };
+    // A logged-out session lands on auth.openai.com — not a page the write may run in.
+    const onChatgpt = (url) => { try { return new URL(url).origin === CHATGPT_API_BASE; } catch { return false; } };
+    const onUpdated = (id, info, tab) => { if (id === tabId && info.status === 'complete') finish(onChatgpt(tab?.url)); };
+    const onRemoved = (id) => { if (id === tabId) finish(false); };
+    const timer = setTimeout(() => finish(false), TAB_LOAD_TIMEOUT_MS);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    // Already complete before the listener was attached.
+    chrome.tabs.get(tabId).then((t) => { if (t?.status === 'complete') finish(onChatgpt(t.url)); }, () => finish(false));
+  });
+}
+
+/**
+ * A chatgpt.com tab for the write: an open one, else one opened in the BACKGROUND for this order only
+ * (#2503 — the member downgraded is the one who rarely opens ChatGPT, so "wait for a tab" never ended).
+ * Never opens a window: with no normal window a new tab would pop up a visible one, so that run waits.
+ * Incognito windows are skipped (other cookies — another session). → { tab, opened } | { wait: CG_WAIT.* }
+ */
+function acquireChatgptTab(orderId) {
+  return withTabLock(async () => {
+    await sweepLocked();
+    const open = await usableChatgptTab();
+    if (open) return { tab: open, opened: false };
+    let tab = null;
+    try {
+      const wins = (await chrome.windows.getAll({ windowTypes: ['normal'] })).filter((w) => !w.incognito);
+      if (!wins.length) return { wait: CG_WAIT.noWindow };
+      // orderId null = the member's own [예약 취소] — never rate-limited (they are there, clicking).
+      if (orderId != null) {
+        const last = (await chrome.storage.local.get(TAB_OPEN_KEY))[TAB_OPEN_KEY];
+        if (last?.order_id === orderId && Date.now() - last.at < TAB_REOPEN_MS) return { wait: CG_WAIT.tab };
+        await chrome.storage.local.set({ [TAB_OPEN_KEY]: { order_id: orderId, at: Date.now() } });
+      }
+      const win = wins.find((w) => w.focused) || wins[0];
+      tab = await chrome.tabs.create({ url: `${CHATGPT_API_BASE}/`, active: false, windowId: win.id });
+      ourTabs.add(tab.id);
+      // Best effort (Codex R2-B1): without the record only a worker death would leave this tab behind.
+      try { await chrome.storage.session.set({ [OUR_TAB_PREFIX + tab.id]: Date.now() }); } catch { /* not recorded */ }
+      if (await chatgptTabLoaded(tab.id)) return { tab, opened: true };
+    } catch { /* fall through: close what was opened */ }
+    if (tab) await closeOpenedTab(tab);
+    return { wait: CG_WAIT.tab };
+  });
+}
+
+/** Closes a tab this run opened. It leaves ourTabs only once closed, so no run can take it meanwhile. */
+async function closeOpenedTab(tab) {
+  try {
+    try { await chrome.storage.session.remove(OUR_TAB_PREFIX + tab.id); } catch { /* recorded nothing */ }
+    await removeUnlessViewed(tab.id);
+  } finally {
+    ourTabs.delete(tab.id);
+  }
+}
+
+/** A tab the member switched to (they clicked it while it ran) is theirs now — left open. */
+async function removeUnlessViewed(id) {
+  try {
+    if ((await chrome.tabs.get(id))?.active) return;
+    await chrome.tabs.remove(id);
+  } catch { /* already gone */ }
+}
+
+/**
+ * Closes background tabs a dead worker left behind: recorded in this browser session and not opened by
+ * THIS worker. Before every acquisition (inside the lock) and on every ChatGPT cycle. Never throws.
+ */
+export function sweepOrphanChatgptTab() {
+  return withTabLock(sweepLocked);
+}
+
+async function sweepLocked() {
+  try {
+    const all = await chrome.storage.session.get(null);
+    for (const key of Object.keys(all || {})) {
+      if (!key.startsWith(OUR_TAB_PREFIX)) continue;
+      const id = Number(key.slice(OUR_TAB_PREFIX.length));
+      if (!Number.isInteger(id) || ourTabs.has(id)) continue;
+      // Inside the tab lock: no run can look for a tab until this one is gone (Codex R3-B1).
+      await chrome.storage.session.remove(key);
+      await removeUnlessViewed(id);
+    }
+  } catch { /* no session storage */ }
+}
+
+async function noteWait(orderId, reason) {
+  try { await chrome.storage.local.set({ [WAIT_KEY]: { order_id: orderId, reason, at: Date.now() } }); } catch { /* observation only */ }
+}
+
+/** The last noted wait, for the next ChatGPT POST (`plan_auto_wait`), or null. Never throws. */
+export async function readPlanAutoWait() {
+  try {
+    const w = (await chrome.storage.local.get(WAIT_KEY))[WAIT_KEY];
+    if (!w || !Number.isInteger(w.order_id) || typeof w.reason !== 'string' || !(Date.now() - w.at < WAIT_MAX_AGE_MS)) return null;
+    return w;
+  } catch { return null; }
+}
+
+/** Clears the wait a POST carried — only that one (a newer wait noted meanwhile stays for the next POST). */
+export async function clearPlanAutoWait(sent) {
+  try {
+    const w = (await chrome.storage.local.get(WAIT_KEY))[WAIT_KEY];
+    if (w && sent && w.at === sent.at) await chrome.storage.local.remove(WAIT_KEY);
+  } catch { /* observation only */ }
 }
 
 /** ONE POST through ONE open chatgpt.com tab — no retry, no cookie fallback. → HTTP status (0 = no answer). */
@@ -216,14 +375,14 @@ async function runAutoChatgptOrder(config, po, userEmail) {
     // The session must be the order's account right now. Another login (the member's second ChatGPT
     // account) is not a failure of the order — nothing happens, and a later POST from the right
     // session tries again before the order expires.
-    if ((await boundedRead(activeUsageKey())) !== po.target_org_uuid) return;
+    if ((await boundedRead(activeUsageKey())) !== po.target_org_uuid) return noteWait(po.order_id, CG_WAIT.session);
     const data = await boundedRead(fetchChatGPTApi(CHATGPT_ACCOUNTS_CHECK_PATH));
     // An unreadable roster is a failed READ (retry later), not "the account is gone".
-    if (!isObj(data?.accounts)) return;
+    if (!isObj(data?.accounts)) return noteWait(po.order_id, CG_WAIT.roster);
     acct = resolveActiveChatgptAccount(data, po.target_org_uuid);
   } catch (e) {
     console.warn(`[Claude Tuner] auto ChatGPT order #${po.order_id}: pre-check read failed, retrying later:`, e?.message);
-    return;
+    return noteWait(po.order_id, CG_WAIT.read);
   }
   const pre = planAutoPrecheckChatgpt(po, acct, acct ? await ourReservation(po.target_org_uuid) : null);
   let changeDate = acct?.entitlement?.renews_at || null;
@@ -233,20 +392,29 @@ async function runAutoChatgptOrder(config, po, userEmail) {
     await tellMember(po, pre.final, changeDate, userEmail);
     return;
   }
-  // The write goes through the page only. No usable tab = nothing done this time (no approval asked,
-  // nothing marked): a later POST with a tab open tries again before the order expires.
-  const tab = await usableChatgptTab();
-  if (!tab) {
-    console.log(`[Claude Tuner] auto ChatGPT order #${po.order_id}: no chatgpt.com tab — waiting`);
-    return;
+  // The write goes through the page only. No tab to be had (no window, or the background tab did not
+  // load) = nothing done this time (no approval asked, nothing marked): a later POST tries again.
+  const got = await acquireChatgptTab(po.order_id);
+  if (!got.tab) {
+    console.log(`[Claude Tuner] auto ChatGPT order #${po.order_id}: no chatgpt.com tab (${got.wait}) — waiting`);
+    return noteWait(po.order_id, got.wait);
   }
+  try {
+    await runInTab(config, po, userEmail, installId, pre, got.tab, changeDate);
+  } finally {
+    // Only the tab this order opened — never one the member had open.
+    if (got.opened) await closeOpenedTab(got.tab);
+  }
+}
+
+async function runInTab(config, po, userEmail, installId, pre, tab, changeDate) {
   // The session again, as late as possible BEFORE approval: a login switch since the pre-check ends
   // nothing — this run simply stops. (After approval an 'unknown' would count toward the global API
   // kill, and a switch is no API failure.) The remaining gap is the approval round trip; the body names
   // the pre-checked account's UUID, which another session cannot change.
   let sameSession = false;
   try { sameSession = (await boundedRead(activeUsageKey())) === po.target_org_uuid; } catch { /* unread = not proven */ }
-  if (!sameSession) return;
+  if (!sameSession) return noteWait(po.order_id, CG_WAIT.switched);
   // 🔴 Done (and journaled) BEFORE approval (same reason as the Claude path): no storage write between
   // the approval and the call, and a worker that dies after this line never attempts the order again.
   await beginOrder(po, userEmail, installId, null, changeDate);
@@ -329,13 +497,17 @@ export async function cancelAutoDowngradeChatgpt(accountId, scheduledPlan) {
     if (!sched || chatgptPlanName(sched.plan_type) !== scheduledPlan || !ours || ours.plan_type !== scheduledPlan) {
       return { success: false, error: 'No scheduled downgrade found' };
     }
-    const tab = await usableChatgptTab();
-    if (!tab) return { success: false, error: 'err_chatgpt_no_tab' };
-    const r = classifyChatgptWrite(await postOnceViaTab(tab.id, CHATGPT_RENEW_PATH, { account_id: acct.account.account_id }));
-    if (r.result !== 'completed') return { success: false, error: r.outcome };
-    if (!(await proveWrite(accountId, null))) return { success: false, error: AUTO_OUTCOME.unknown };
-    await forgetReservation(accountId);
-    return { success: true };
+    const got = await acquireChatgptTab(null);
+    if (!got.tab) return { success: false, error: 'err_chatgpt_no_tab' };
+    try {
+      const r = classifyChatgptWrite(await postOnceViaTab(got.tab.id, CHATGPT_RENEW_PATH, { account_id: acct.account.account_id }));
+      if (r.result !== 'completed') return { success: false, error: r.outcome };
+      if (!(await proveWrite(accountId, null))) return { success: false, error: AUTO_OUTCOME.unknown };
+      await forgetReservation(accountId);
+      return { success: true };
+    } finally {
+      if (got.opened) await closeOpenedTab(got.tab);
+    }
   } catch (e) {
     return { success: false, error: e?.message || 'cancel failed' };
   }
