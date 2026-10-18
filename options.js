@@ -143,6 +143,17 @@ let _autoOptCgLoaded = false;
 // The member touched the optimization radio on this page — an explicit choice, worth sending even
 // before the server values have loaded.
 let _optRadioTouched = false;
+// The optimization mode on screen. initRadioGroup re-fires onChange on a click of the selected item,
+// so "entering auto" is decided against this, not the click.
+let _optModeShown = null;
+// The member entered `auto` on this page (both boxes start checked). The server answer may land later
+// and must not erase that, nor leave it unsent: until the load, the PATCH omits the consents (Codex R1).
+let _optEnteredAutoHere = false;
+// The radio or a consent box changed on this page since the last admin-order PATCH. Only then is the
+// setting sent: an autosave of an unrelated option would otherwise push this page's possibly stale
+// boxes and re-grant a consent revoked elsewhere (dashboard, another device) — deploy-1.55.26 R1-B2.
+let _adminOrderDirty = false;
+function _markAdminOrderDirtyAndSave() { _adminOrderDirty = true; autoSave(); }
 // admin-order-setting PATCHes run one at a time, newest wins: two overlapping requests could
 // otherwise commit out of order and re-enable a consent the member just turned off (Codex R1).
 let _adminOrderSync = Promise.resolve();
@@ -164,7 +175,9 @@ function _applyConsentBox(boxId, rowId, checked, autoSelected, loaded) {
   const cb = document.getElementById(boxId);
   const row = document.getElementById(rowId);
   if (!cb || !row) return;
-  cb.checked = !!checked && !!autoSelected;
+  // Checked only once the server values are in: an unloaded box is never sent, so showing it ticked
+  // would claim a consent the server does not hold (deploy-1.55.26 R1-B1).
+  cb.checked = !!checked && !!autoSelected && !!loaded;
   cb.disabled = !autoSelected || !loaded;
   row.classList.toggle('is-disabled', cb.disabled);
 }
@@ -176,8 +189,8 @@ function _autoOptCgChecked() {
 function _loadAutoOptConsent(config) {
   const cb = document.getElementById('auto-opt-consent');
   if (!cb) return;
-  cb.addEventListener('change', autoSave);
-  document.getElementById('auto-opt-consent-cg')?.addEventListener('change', autoSave);
+  cb.addEventListener('change', _markAdminOrderDirtyAndSave);
+  document.getElementById('auto-opt-consent-cg')?.addEventListener('change', _markAdminOrderDirtyAndSave);
   chrome.storage.local.get({ lastStatus: null }, async (status) => {
     const email = status.lastStatus?.snapshot?.user_email;
     if (!email) return;
@@ -193,14 +206,19 @@ function _loadAutoOptConsent(config) {
         const want = data.admin_order_auto_approve ? 'auto'
           : (getRadioValue('optimization-group') === 'auto' ? 'notify_only' : getRadioValue('optimization-group'));
         _selectRadio('optimization-group', want);
+        _optModeShown = want;
         chrome.storage.local.set({ ct_admin_order_auto_approve: data.admin_order_auto_approve });
       }
+      const autoNow = getRadioValue('optimization-group') === 'auto';
+      const keepEntered = _optEnteredAutoHere && autoNow;
       _autoOptConsentLoaded = true;
-      _applyAutoOptConsent(data.allow_auto_rec, getRadioValue('optimization-group') === 'auto');
+      _applyAutoOptConsent(keepEntered || data.allow_auto_rec, autoNow);
       if (typeof data.allow_auto_chatgpt === 'boolean') {
         _autoOptCgLoaded = true;
-        _applyAutoOptCgConsent(data.allow_auto_chatgpt, getRadioValue('optimization-group') === 'auto');
+        _applyAutoOptCgConsent(keepEntered || data.allow_auto_chatgpt, autoNow);
       }
+      // The earlier PATCH went out without the consents; send them now that the boxes are real.
+      if (keepEntered && (!data.allow_auto_rec || data.allow_auto_chatgpt === false)) _markAdminOrderDirtyAndSave();
     } catch { /* offline/old server: the box stays disabled and the PATCH omits allow_auto_rec */ }
   });
 }
@@ -211,9 +229,11 @@ function _syncAdminOrderSetting(cfg) {
   // some unrelated setting would then send `auto_approve:false` and revoke a seeded consent the
   // member never saw. So before the load, only an explicit radio choice is sent (Codex R1).
   if (!_autoOptConsentLoaded && !_optRadioTouched) return;
+  if (!_adminOrderDirty) return; // nothing of this setting changed here — never push stale boxes
   const seq = ++_adminOrderSyncSeq;
   _adminOrderSync = _adminOrderSync.then(async () => {
     if (seq !== _adminOrderSyncSeq) return; // a newer save is queued — it carries the latest state
+    _adminOrderDirty = false; // a change made while this request is in flight marks it again
     // Read the controls when the request is SENT, not when it was queued.
     const autoApproveVal = getRadioValue('optimization-group') === 'auto';
     const body = { auto_approve: autoApproveVal, ext_version: chrome.runtime.getManifest().version };
@@ -222,18 +242,18 @@ function _syncAdminOrderSetting(cfg) {
     if (_autoOptCgLoaded) body.allow_auto_chatgpt = autoApproveVal && _autoOptCgChecked();
     const { lastStatus } = await chrome.storage.local.get({ lastStatus: null });
     const email = lastStatus?.snapshot?.user_email;
-    if (!email) return;
+    if (!email) { _adminOrderDirty = true; return; }
     try {
       const res = await _authedFetch(cfg, `${cfg.serverUrl}/api/snapshots/admin-order-setting`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_email: email, ...body }),
       });
-      if (!res.ok) return;
+      if (!res.ok) { _adminOrderDirty = true; return; }
       // The checkbox is NOT re-rendered from the response: a pending (debounced) change of the box
       // would be overwritten by this older answer and then re-sent wrong (Codex R2).
       chrome.storage.local.set({ ct_admin_order_auto_approve: autoApproveVal });
-    } catch { /* offline: the next autosave retries with the then-current state */ }
+    } catch { _adminOrderDirty = true; /* offline: the next autosave retries with the then-current state */ }
   });
 }
 
@@ -466,11 +486,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (local.ct_admin_order_auto_approve) optMode = 'auto';
         else if (config.optimizationMode === 'approval') optMode = 'approval';
         else optMode = 'notify_only';
+        _optModeShown = optMode;
         initRadioGroup('optimization-group', optMode, (v) => {
           _optRadioTouched = true;
-          _applyAutoOptConsent(v === 'auto' && _autoOptConsentChecked(), v === 'auto');
-          _applyAutoOptCgConsent(v === 'auto' && _autoOptCgChecked(), v === 'auto');
-          autoSave();
+          // Choosing `auto` is the member's own act, so both consents start checked (2026-10-18
+          // decision); they can uncheck either. Re-clicking `auto` keeps what they set.
+          const entering = v === 'auto' && _optModeShown !== 'auto';
+          _optModeShown = v;
+          if (v !== 'auto') _optEnteredAutoHere = false;
+          else if (entering) _optEnteredAutoHere = true;
+          _applyAutoOptConsent(v === 'auto' && (entering || _autoOptConsentChecked()), v === 'auto');
+          _applyAutoOptCgConsent(v === 'auto' && (entering || _autoOptCgChecked()), v === 'auto');
+          _markAdminOrderDirtyAndSave();
         });
         _applyAutoOptConsent(false, optMode === 'auto');
         _applyAutoOptCgConsent(false, optMode === 'auto');

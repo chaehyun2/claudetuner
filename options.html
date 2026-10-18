@@ -82,6 +82,7 @@
     .radio-sub { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0 0 24px; padding: 7px 10px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; }
     .radio-sub input[type="checkbox"] { width: auto; margin: 2px 0 0; accent-color: var(--accent); flex-shrink: 0; }
     .radio-sub .radio-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .radio-sub .radio-desc { white-space: pre-line; }
     .radio-sub.is-disabled { opacity: .5; cursor: default; }
     .radio-item .radio-desc { font-size: 11px; color: var(--text-secondary); }
     /* Segmented control — one look for every 2~3-way choice (theme buttons and the language /
@@ -619,6 +620,7 @@
           <input type="checkbox" id="auto-opt-consent-cg" disabled>
           <div style="flex:1"><span class="radio-label" data-i18n="opt_auto_cg_label"></span><div class="radio-desc" data-i18n="opt_auto_cg_desc"></div></div>
         </label>
+        <div class="form-hint" style="margin:6px 0 0 24px" data-i18n="opt_auto_consent_note"></div>
         <div class="form-hint" style="margin-top:4px;color:var(--accent)" data-i18n="opt_sync_note"></div>
       </div>
     </div>
