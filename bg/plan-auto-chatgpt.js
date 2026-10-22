@@ -30,7 +30,7 @@
 //   4. ONE write call, never retried; then one re-read to prove it; report with the account it changed.
 // A downgrade never charges (₩0 preview, measured) and only takes effect at renewal.
 import { fetchChatGPTApi } from './api-chatgpt.js';
-import { chatgptPlanName, chatgptUsageAccountId, CHATGPT_USAGE_PATH, resolveActiveChatgptAccount } from './parse-chatgpt.js';
+import { chatgptPlanName, chatgptUsageAccountId, chatgptPersonalOrgKey, CHATGPT_USAGE_PATH, resolveActiveChatgptAccount } from './parse-chatgpt.js';
 // Re-exported: the guard and callers reach it through this module (it lives with the parsers so the
 // roster and the auto-downgrade resolve "the active account" by one rule).
 export { resolveActiveChatgptAccount };
@@ -323,9 +323,16 @@ async function postOnceViaTab(tabId, path, body) {
   }
 }
 
-/** The session's usage key (the snapshot / order key of the active account). Throws on a failed read. */
+/**
+ * The session's org key (the snapshot / order key of the active account): the /wham/usage key, except a
+ * personal account reported under its UUID maps to its `user-…` key exactly as the collector files it
+ * (#2458) — otherwise an order keyed `user-…` would wait, or a cancel fail, whenever /wham/usage answers
+ * with the UUID. The extra accounts/check read happens only on such a UUID answer. Throws on a failed read.
+ */
 async function activeUsageKey() {
-  return chatgptUsageAccountId(await fetchChatGPTApi(CHATGPT_USAGE_PATH));
+  const key = chatgptUsageAccountId(await fetchChatGPTApi(CHATGPT_USAGE_PATH));
+  if (key === 'unknown' || key.startsWith('user-')) return key;
+  return chatgptPersonalOrgKey(await fetchChatGPTApi(CHATGPT_ACCOUNTS_CHECK_PATH), key) || key;
 }
 
 /** Re-read until the write shows (or PROOF_READS run out). The proving account entry, or null. Never throws. */

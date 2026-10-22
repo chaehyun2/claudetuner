@@ -232,6 +232,26 @@ export function resolveActiveChatgptAccount(data, usageKey) {
 }
 
 /**
+ * The `user-…` org key for a PERSONAL account that /wham/usage reported under its UUID, or null (#2458).
+ * /wham/usage keys a personal account by `user-…` almost always (2,105 of 2,106 personal-plan members,
+ * 7 days to 2026-10-22) but now and then answers with the account UUID instead — the same account then
+ * lands under a second org key (a stray UUID row, or, at the 3-org cap, a dropped send that leaves a
+ * duplicate availorg entry). accounts/check ties the two: account_user_id = `${user_id}__${account_id}`.
+ * Workspaces keep their UUID (they have no `user-…` key); a `user-…` key, an unknown account, or an
+ * account_user_id of another shape → null, i.e. keep the key /wham/usage gave. Pure.
+ */
+export function chatgptPersonalOrgKey(data, usageKey) {
+  if (typeof usageKey !== 'string' || usageKey.startsWith('user-')) return null;
+  const acc = resolveActiveChatgptAccount(data, usageKey)?.account;
+  if (!acc || acc.structure !== 'personal') return null;
+  const suffix = `__${acc.account_id}`;
+  const au = acc.account_user_id;
+  if (typeof au !== 'string' || !au.endsWith(suffix)) return null;
+  const userKey = au.slice(0, -suffix.length);
+  return /^user-[A-Za-z0-9]+$/.test(userKey) ? userKey : null;
+}
+
+/**
  * Parse an accounts/check response into a roster the collector can act on.
  *
  * ChatGPT's `/wham/usage` is scoped to a single account (the JWT's active

@@ -6,7 +6,7 @@ import {
   chatgptPlanName, unixToResetTime, parseAccountsRoster, windowSpan, classifyWindows,
   parseAdditionalLimits, parseModelAvailability, parseReachedType, summarizeLimitBuckets,
   pickScopedModel, parseChatGPTResetSummary, parseChatGPTResetDetail, mergeChatGPTResetDetail,
-  CHATGPT_USAGE_PATH, chatgptUsageAccountId,
+  CHATGPT_USAGE_PATH, chatgptUsageAccountId, chatgptPersonalOrgKey,
 } from './parse-chatgpt.js';
 import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
@@ -100,7 +100,9 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
     const data = await fetchChatGPTApi('/backend-api/accounts/check/v4-2023-04-27');
     // The active id is part of the cache fingerprint above, so a cached roster was always parsed
     // against the same active account it is served for — the exclusion cannot go stale here.
-    const roster = parseAccountsRoster(data, activeAccountId);
+    // `personalOrgKey` (#2458) rides the cached roster: it is a function of this same response and
+    // active id, so it is exactly as fresh as the exclusion — no second cache to keep in step.
+    const roster = { ...parseAccountsRoster(data, activeAccountId), personalOrgKey: chatgptPersonalOrgKey(data, activeAccountId) };
     // One line per (at most hourly) refresh: what the LIVE response carried. This is the
     // signal that was missing while diagnosing the null-pending incident — it separates
     // "the API didn't return a scheduled change" from "we parsed/sent it wrong" at a glance.
@@ -281,13 +283,18 @@ export async function collectChatGPT(force = false, userManual = false) {
     // Only userManual busts the cache — NOT an automatic `force`, which for this provider comes
     // from an unrelated Claude trigger (e.g. a Claude 429) and shouldn't hit accounts/check.
     const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type, userManual);
-    // #2332: is a downgrade an automatic order scheduled on this account still in place? Read on THAT
-    // account (not the roster's `default`), only while one is ours, at most hourly.
-    void checkChatgptReservation(accountId).catch(() => {});
     const renewalDate = roster.defaultRenewal;
+    // #2458: /wham/usage sometimes keys the PERSONAL account by its UUID instead of its usual `user-…`
+    // id. File it under `user-…` so it stays one org (history, send gate, 3-org cap, auto orders) — the
+    // reads that ask ChatGPT about "the active account" (reset detail, VAT, training) keep `accountId`.
+    const orgKey = roster.personalOrgKey || accountId;
+    // #2332: is a downgrade an automatic order scheduled on this account still in place? Read on THAT
+    // account (not the roster's `default`), only while one is ours, at most hourly. Orders are keyed by
+    // the org key, so this is too.
+    void checkChatgptReservation(orgKey).catch(() => {});
 
     const org = {
-      uuid: accountId,
+      uuid: orgKey,
       name: email || 'ChatGPT',
       email: email || null, // provider account email (shown in the popup footer)
       plan: plan,
@@ -402,9 +409,11 @@ export async function collectChatGPT(force = false, userManual = false) {
     // roster already excludes the active account, but that exclusion depends on accounts/check
     // agreeing with /wham/usage about which account is active — and it is exactly that agreement
     // that failed in #1144. This check needs no such agreement: it compares the id the primary
-    // snapshot was keyed by against the id each extra send would be keyed by. Keep both.
+    // snapshot was keyed by against the id each extra send would be keyed by. Keep both. The raw
+    // /wham/usage id is checked too: with #2458 the primary org key may be `user-…` while the
+    // account's UUID is what a roster entry would carry.
     const extraOrgs = roster.workspaces
-      .filter((ws) => ws.accountId !== org.uuid)
+      .filter((ws) => ws.accountId !== org.uuid && ws.accountId !== accountId)
       .slice(0, MAX_EXTRA_WORKSPACES).map((ws) => ({
       uuid: ws.accountId,
       name: ws.name || 'ChatGPT Workspace',
