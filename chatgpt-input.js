@@ -244,20 +244,30 @@
   // Chat-bubble icon (matches the popup's Feedback button).
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
 
-  // The button may not cost the strip a line (CORE.fitCompareButton): measured on every mount and
-  // again whenever the strip's width changes. Guarded for a tab whose usage-shared.js predates
-  // these helpers (dynamic re-injection, #1421) — then the button simply behaves as before.
+  // The optional parts — the compare button, then the prompt chip's 「프롬프트」 label (#2038) — may not
+  // cost the strip a line (CORE.fitStripParts): measured after every render and again whenever the
+  // strip's width changes. Guarded for a tab whose usage-shared.js predates these helpers (dynamic
+  // re-injection, #1421) — then the compare button alone is fitted, as before.
   let _fitStop = null;
   let _fitTarget = null;
-  function ensureCompareFit(strip) {
+  function ensureStripFit(strip) {
     if (!CORE || !CORE.fitCompareButton) return;
-    // A superseded instance's observer answers null → no-op on the newest instance's button.
-    const find = () => (isCurrent() ? strip.querySelector('.' + CMP_BTN_CLASS) : null);
-    CORE.fitCompareButton(strip, find());
+    // A superseded instance's observer answers no parts → no-op on the newest instance's strip.
+    const parts = () => (isCurrent() ? [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')] : []);
+    if (!CORE.fitStripParts) {
+      const find = () => parts()[0] || null;
+      CORE.fitCompareButton(strip, find());
+      if (_fitTarget === strip) return;
+      if (_fitStop) _fitStop();
+      _fitTarget = strip;
+      _fitStop = CORE.observeCompareFit(strip, find);
+      return;
+    }
+    CORE.fitStripParts(strip, parts());
     if (_fitTarget === strip) return;
     if (_fitStop) _fitStop();
     _fitTarget = strip;
-    _fitStop = CORE.observeCompareFit(strip, find);
+    _fitStop = CORE.observeStripParts(strip, parts);
   }
   function stopCompareFit() {
     if (_fitStop) _fitStop();
@@ -329,7 +339,6 @@
       try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-cg-strip-inner') || strip).appendChild(btn);
-    ensureCompareFit(strip);
   }
 
   // Per-question rows (2026-09-21, user request): the same label under every user message
@@ -428,8 +437,36 @@
     return owns(inner) ? inner : null;
   }
 
+  // Prompt picker (#2038 S2, docs/plans/prompt-inpage.md): the strip's bookmark chip + a bookmark-save on
+  // each sent message — the same ui/prompt-picker.js as claude.ai. SOFT dependency like the rows (#1421):
+  // a persisted registration from an older build runs this file without it → neither appears.
+  // The editor is the ProseMirror div INSIDE the composer form only: the new UI also keeps a hidden
+  // <textarea> in the form (text typed there never reaches the composer), and a document-wide search could
+  // land in a sent message's edit box (Codex S2 R1-B2). No such div → no editor → the picker does not open.
+  const PROMPT_BTN_CLASS = 'ct-prompt-btn';
+  const PROMPT_EDITOR_SELECTOR = 'div.ProseMirror[contenteditable="true"]';
+  const _picker = globalThis.__ctPromptPicker ? globalThis.__ctPromptPicker.create({
+    document, chrome, site: PROVIDER,
+    getEditor: () => { const form = findComposerForm(); return form ? form.querySelector(PROMPT_EDITOR_SELECTOR) : null; },
+    anchor: () => { const form = findComposerForm(); return (form && composerBox(form)) || document.getElementById(STRIP_ID); },
+    lang: () => _lang,
+    isDark: () => { const h = document.documentElement; return h.classList.contains('dark') || h.classList.contains('dark-oled') || h.getAttribute('data-theme') === 'dark'; },
+    // The options page's 「입력창 프롬프트 버튼」 changed: chip and message bookmarks follow (renderStrip re-syncs rows).
+    onEnabledChange: () => { if (isCurrent()) renderStrip(); },
+  }) : null;
+
+  /** The chip goes right after the gear/contact icons; the compare button (appended next) stays last. */
+  function mountPromptButton(strip) {
+    const chip = strip.querySelector('.' + PROMPT_BTN_CLASS);
+    if (_picker && !_picker.enabled()) { if (chip) chip.remove(); return; }   // renderStripInto re-fits after this
+    if (!_picker || chip) return;
+    (strip.querySelector('.ct-cg-strip-inner') || strip).appendChild(_picker.button(PROMPT_BTN_CLASS));
+  }
+
   const _msgRows = globalThis.__ctCmpMsgRows ? globalThis.__ctCmpMsgRows.create({
     document, chrome, provider: PROVIDER,
+    decorate: _picker ? (row, ownerOf) => { row.appendChild(_picker.starButton('ct-cmp-msg-star', ownerOf)); } : null,
+    decorateAllowed: () => !_picker || _picker.enabled(),
     bubbleSelector: CMP_MSG_SELECTOR,
     anchorOf: anchorOfBubble,
     rowOwnerOf: bubbleOfRow,
@@ -452,7 +489,9 @@
   // after the markup, rather than inside each branch.
   function renderStripInto(strip) {
     renderStripMarkup(strip);
+    mountPromptButton(strip);
     mountCompareButton(strip);
+    ensureStripFit(strip);
   }
 
   function renderStripMarkup(strip) {
@@ -589,6 +628,7 @@
   function teardown() {
     _enabled = false;
     unmount();
+    if (_picker) (_picker.destroy || _picker.close)();
     // Superseded: the newer instance rebuilds the rows itself (gen ownership). Revoked (still the
     // newest instance): nobody else will, so the rows with our handlers go too.
     if (_msgRows && _gen === globalThis.__ctCgInputGen) _msgRows.removeAll();

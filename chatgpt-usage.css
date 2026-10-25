@@ -391,6 +391,17 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 /* Text-only strip (collecting / reason): the sentence is a bare seg, not the padded `-main` pill,
    so the inner's 2px gap is all that separates it from the button. */
 .ct-cg-strip-inner > .ct-cg-strip-seg + .ct-cmp-btn { margin-left: 8px; }
+/* The prompt picker chip (#2038 S2, ui/prompt-picker.js): the compare pill's shape — line bookmark + 「프롬프트」.
+   The label is the first part a narrow strip drops (CORE.fitStripParts), the bookmark stays. */
+.ct-prompt-btn {
+  display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 8px; margin-left: 4px;
+  border: 1px solid var(--ct-cg-border); border-radius: 999px; background: none;
+  color: var(--ct-cg-text-muted); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.ct-prompt-btn:hover { background: var(--ct-cg-surface); color: var(--ct-cg-text); }
+.ct-prompt-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+.ct-cg-strip-inner > .ct-cg-strip-seg + .ct-prompt-btn { margin-left: 8px; }
 
 /* Per-question row (ui/cmp-msg-rows.js, 2026-09-21): appended INSIDE the user turn's action row
    (flex justify-end), so it sits right-aligned on the same 40px line as chatgpt.com's hover
@@ -428,6 +439,18 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
   color: var(--text-secondary, var(--ct-cg-text-muted)); cursor: pointer; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
 }
 .ct-cmp-msg .ct-cmp-msg-gear svg { width: 12px; height: 12px; }
+/* The prompt bookmark (#2038 S2): the gear's round square, its own class (the rows' relabel looks the gear up by class). */
+.ct-cmp-msg .ct-cmp-msg-star {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 30%, transparent);
+  border-radius: 999px; background: transparent;
+  color: var(--text-secondary, var(--ct-cg-text-muted)); cursor: pointer; opacity: 0.75; transition: opacity 0.15s, background 0.15s;
+}
+.ct-cmp-msg .ct-cmp-msg-star svg { width: 12px; height: 12px; }
+.ct-cmp-msg .ct-cmp-msg-star:hover {
+  opacity: 1; color: var(--text-primary, var(--ct-cg-text));
+  background: color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 10%, transparent);
+}
 .ct-cmp-msg .ct-cmp-msg-gear:hover {
   opacity: 1; color: var(--text-primary, var(--ct-cg-text));
   background: color-mix(in srgb, var(--text-secondary, var(--ct-cg-text-muted)) 10%, transparent);

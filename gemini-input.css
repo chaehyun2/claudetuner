@@ -145,3 +145,14 @@
 /* Text-only strip (collecting / reason): the sentence is a bare seg, not the padded `-main` pill,
    so the inner's 2px gap is all that separates it from the button. */
 .ct-gm-strip-inner > .ct-gm-strip-seg + .ct-cmp-btn { margin-left: 8px; }
+/* The prompt picker chip (#2038 S2, ui/prompt-picker.js): the compare pill's shape — line bookmark + 「프롬프트」.
+   The label is the first part a narrow strip drops (CORE.fitStripParts), the bookmark stays. */
+.ct-prompt-btn {
+  display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 8px; margin-left: 4px;
+  border: 1px solid var(--ct-gm-border); border-radius: 999px; background: none;
+  color: var(--ct-gm-text-muted); font: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.ct-prompt-btn:hover { background: var(--ct-gm-surface); color: var(--ct-gm-text); }
+.ct-prompt-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+.ct-gm-strip-inner > .ct-gm-strip-seg + .ct-prompt-btn { margin-left: 8px; }

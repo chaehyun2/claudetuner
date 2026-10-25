@@ -28,6 +28,13 @@
 //   opts.isCurrent()             — true while the calling instance is the newest one on the page
 //   opts.allowed()               — flag && compareEnabled && compareMsgButtonEnabled
 //   opts.gearIconPath            — optional override of GEAR_ICON_PATH (the strips reuse ours)
+//   opts.decorate(row, ownerOf)  — optional: add buttons to a NEW row (the prompt ☆, #2038); `ownerOf()`
+//                                  answers the row's bubble at click time, like the ask button does
+//   opts.askAllowed()            — optional: the ask button + gear are shown (default: always). With a
+//                                  `decorate`, rows still appear while this is false, holding only what
+//                                  decorate adds — so the ☆ survives the cross-check being switched off
+//   opts.decorateAllowed()       — optional: false hides what decorate adds (rows rebuilt without it; with the
+//                                  ask button off too, no row at all) — the prompt picker's on/off option
 (() => {
   'use strict';
 
@@ -50,7 +57,13 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   function create(opts) {
-    const { document, chrome, provider, bubbleSelector, anchorOf, rowOwnerOf, readText, t, gen, isCurrent, allowed } = opts;
+    const { document, chrome, provider, bubbleSelector, anchorOf, rowOwnerOf, readText, t, gen, isCurrent } = opts;
+    const askAllowed = () => !opts.askAllowed || opts.askAllowed();
+    // A row exists when the ask button may show, or when decorate has something to put in it.
+    // opts.decorateAllowed() (optional): the decorate buttons can be switched off at runtime (#2038 promptButtonEnabled).
+    const decorating = () => !!opts.decorate && (!opts.decorateAllowed || opts.decorateAllowed() !== false);
+    const allowed = () => opts.allowed() || decorating();
+    const VARIANT_ATTR = 'data-ct-cmp-variant';   // 'ask' (button + extras + gear) | 'ask-bare' (no extras) | 'extras' (decorate only)
     const gearPath = opts.gearIconPath || GEAR_ICON_PATH;
 
     /** The row's gear: a 12px SVG (no innerHTML — the row is light DOM) that opens the options page. */
@@ -80,10 +93,15 @@
       return gear;
     }
 
-    function buildRow(label, tip, settingsLabel) {
+    function buildRow(label, tip, settingsLabel, ask) {
       const row = document.createElement('div');
       row.className = ROW_CLASS;
       row.setAttribute(GEN_ATTR, String(gen()));
+      row.setAttribute(VARIANT_ATTR, ask ? (decorating() ? 'ask' : 'ask-bare') : 'extras');
+      if (!ask) {
+        if (decorating()) { try { opts.decorate(row, () => rowOwnerOf(row)); } catch { /* nothing to show */ } }
+        return row;
+      }
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = STRIP_BTN_CLASS + ' ' + BTN_CLASS;
@@ -100,6 +118,7 @@
         try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: provider, q, placement: 'message' }); } catch { /* context dead */ }
       });
       row.appendChild(btn);
+      if (decorating()) { try { opts.decorate(row, () => rowOwnerOf(row)); } catch { /* the row still works without it */ } }
       row.appendChild(buildGear(settingsLabel));
       return row;
     }
@@ -126,13 +145,17 @@
       if (!isCurrent()) return;
       if (!allowed()) { removeAll(); return; }
       const mine = String(gen());
+      const ask = askAllowed() && opts.allowed();
+      // The decorate buttons going on/off rebuilds the ask rows too ('ask' ↔ 'ask-bare').
+      const variant = ask ? (decorating() ? 'ask' : 'ask-bare') : 'extras';
       // A row whose bubble is gone (message deleted / re-rendered) goes, so does a row another
       // instance built (its handler may point at a dead runtime), and so does a second row on
       // the same bubble — the loop below rebuilds what is missing.
       const owned = new Map();
       document.querySelectorAll('.' + ROW_CLASS).forEach((row) => {
         const bubble = rowOwnerOf(row);
-        if (!bubble || row.getAttribute(GEN_ATTR) !== mine || owned.has(bubble)) { row.remove(); return; }
+        // A row of the other variant (the ask button was switched on/off) is rebuilt too.
+        if (!bubble || row.getAttribute(GEN_ATTR) !== mine || owned.has(bubble) || row.getAttribute(VARIANT_ATTR) !== variant) { row.remove(); return; }
         owned.set(bubble, row);
       });
       const label = t('cmp_ask_others');
@@ -140,10 +163,10 @@
       const settingsLabel = t('settings');
       document.querySelectorAll(bubbleSelector).forEach((bubble) => {
         const existing = owned.get(bubble);
-        if (existing) { relabel(existing, label, tip, settingsLabel); return; }
+        if (existing) { if (ask) relabel(existing, label, tip, settingsLabel); return; }
         const at = anchorOf(bubble);
         if (!at || !at.parent) return;
-        at.parent.insertBefore(buildRow(label, tip, settingsLabel), at.before || null);
+        at.parent.insertBefore(buildRow(label, tip, settingsLabel, ask), at.before || null);
       });
     }
 

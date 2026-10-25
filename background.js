@@ -57,6 +57,7 @@ import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, isUsableTab, providerForUrl
 // module has no top-level DOM access — safe to load in the service worker (compare plan labels).
 import { planDisplayName } from './ui/util.js';
 import { readLast } from './bg/usage-history-db.js';
+import { registerPromptsHandler, handlePromptExternal } from './bg/prompts.js';
 import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
 import { REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './bg/review-nudge.js';
 
@@ -336,7 +337,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     for (const tab of tabs) {
       chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'input-usage.js'],
+        files: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'input-usage.js'],
       }).catch(() => {});
       chrome.scripting.insertCSS({
         target: { tabId: tab.id },
@@ -419,6 +420,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   // A share page's 「이어서 질문하기」 (#1784 U4) — the compare controller checks the origin itself.
   if (compareController.handleExternalMessage(message, sender, sendResponse)) return true;
+  // Our prompt pages' 「Claude / ChatGPT / Gemini」: open that site with the prompt typed in (#2584, bg/prompts.js).
+  if (handlePromptExternal(message, sender, sendResponse)) return true;
   // Silent recovery from the dashboard: the page is signed in, mints an ext_token server-side
   // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
   // recovery path we shipped needs them to notice something first, and none did (2026-07-27).
@@ -1568,6 +1571,19 @@ async function cancelScheduledAutoDown(card) {
     setTimeout(() => collectAndSend(), 3000);
   }
   return result;
+}
+
+// Prompt picker (#2038 in-page): the content scripts' server proxy, and the keyboard shortcut
+// (manifest `commands` — the browser takes it before the page, and the user can rebind it).
+registerPromptsHandler();
+if (chrome.commands && chrome.commands.onCommand) {
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command !== 'open-prompt-picker') return;
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.id != null) chrome.tabs.sendMessage(tab.id, { type: 'ct_prompts_open' }).catch(() => {});
+    } catch { /* no active tab */ }
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

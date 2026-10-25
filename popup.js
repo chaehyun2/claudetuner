@@ -864,6 +864,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
+  // GA: which header menu items (and the overview/detail tabs) people actually press. One
+  // delegated listener keyed by data-ga covers links and buttons alike without touching each handler.
+  document.querySelectorAll('.header, #view-tabs').forEach(el => el.addEventListener('click', (e) => {
+    if (!e.isTrusted) return; // programmatic .click() (the onboarding collect button) is not a press
+    const item = e.target.closest('[data-ga]')?.dataset.ga;
+    if (item) sendGAEvent('header_click', { item });
+  }));
+
   // Top tab switcher: 모아 보기 ↔ 자세히. The detail tab re-opens the last-viewed
   // org (or the primary) so it always has something to show.
   const tabOverview = document.getElementById('tab-overview');

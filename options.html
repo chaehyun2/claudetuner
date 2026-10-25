@@ -432,6 +432,15 @@
           <div><b data-i18n="page_usage_chatgpt"></b> · <span data-i18n="chatgpt_usage_hint"></span></div>
           <div><b data-i18n="page_usage_gemini"></b> · <span data-i18n="gemini_usage_hint"></span></div>
         </div>
+        <!-- #2038: the in-page prompt picker (strip chip, per-message bookmark, first-visit spotlight, shortcut) on all
+             three sites — ui/prompt-picker.js reads promptButtonEnabled itself (default on). -->
+        <div class="form-group" style="margin-top:12px">
+          <label class="check-label">
+            <input type="checkbox" id="prompt-button-enabled" checked>
+            <span data-i18n="prompt_btn_desc"></span>
+          </label>
+          <div class="form-hint" data-i18n="prompt_btn_hint"></div>
+        </div>
       </div>
     </div>
 

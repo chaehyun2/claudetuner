@@ -32,7 +32,7 @@ export function hasProviderPermission(provider) {
 const CHATGPT_INJECT = {
   id: 'ct-chatgpt-usage',
   matches: [SITE_TAB_PATTERNS.chatgpt],
-  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'ui/cmp-msg-rows.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
+  js: ['usage-shared.js', 'chatgpt-sidebar.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'chatgpt-input.js', 'claude-folders.js', 'chatgpt-folders.js'],
   css: ['chatgpt-usage.css', 'claude-folders.css'],
   runAt: 'document_idle',
 };
@@ -83,7 +83,7 @@ export async function injectChatGPTOpenTabs() {
 const GEMINI_INJECT = {
   id: 'ct-gemini-usage',
   matches: [SITE_TAB_PATTERNS.gemini],
-  js: ['usage-shared.js', 'gemini-sidebar.js', 'gemini-input.js'],
+  js: ['usage-shared.js', 'gemini-sidebar.js', 'ui/prompt-picker.js', 'gemini-input.js'],
   css: ['gemini-usage.css', 'gemini-input.css'],
   runAt: 'document_idle',
 };

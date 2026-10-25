@@ -16,6 +16,8 @@ async function sendGAEvent(name, params = {}) {
     const clientId = await getOrCreateClientId();
     await fetch(GA_ENDPOINT, {
       method: 'POST',
+      // A header link opens a tab and closes the popup; keepalive lets the hit outlive the page.
+      keepalive: true,
       body: JSON.stringify({
         client_id: clientId,
         events: [{ name, params }],

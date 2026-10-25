@@ -80,6 +80,10 @@ export const PROVIDER_ERROR_CODES = {
     'err_chatgpt_no_cookies',
     'err_chatgpt_rate_limit',
     'err_chatgpt_session_expired',
+    // The session's accessToken was invalidated (plan upgrade) and one `refresh=true` re-read did
+    // not heal it (#2229). Distinct from session_expired: the user is still signed in, and the fix
+    // is to VISIT chatgpt.com once so the web app refreshes the session — not to sign in again.
+    'err_chatgpt_token_expired',
     // Promoted out of the catch-all (inquiry 2026-09-11), the same move #1162/#1176 made for
     // Claude. `collect_failed` was not merely vague — its copy prescribed "open a chatgpt.com tab",
     // and the two commonest ways to reach it BOTH require a tab to have been open and tried. These
@@ -140,6 +144,7 @@ export const PROVIDER_STATUS_BEARING = ['auth_failed', 'http', 'page_fetch'];
 
 export const PROVIDER_ERROR_ACTIONABLE = [
   'not_logged_in', 'session_expired', 'auth_failed',   // sign in again
+  'token_expired',   // visit the site once so it refreshes the session (#2229)
   'cloudflare', 'no_cookies', 'no_at_token', 'page_fetch', 'collect_failed',   // open a tab there
   // 🔴 `network` is deliberately absent, for `rate_limit`'s reason: the request never reached the
   // provider, so there is nothing at that site to click. The fix is on the user's machine or

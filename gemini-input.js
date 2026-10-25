@@ -188,7 +188,9 @@
   // after the markup, rather than inside each branch.
   function renderStripInto(strip) {
     renderStripMarkup(strip);
+    mountPromptButton(strip);
     mountCompareButton(strip);
+    ensureStripFit(strip);
   }
 
   function renderStripMarkup(strip) {
@@ -244,20 +246,30 @@
   }
 
 
-  // The button may not cost the strip a line (CORE.fitCompareButton): measured on every mount and
-  // again whenever the strip's width changes. Guarded for a tab whose usage-shared.js predates
-  // these helpers (dynamic re-injection, #1421) — then the button simply behaves as before.
+  // The optional parts — the compare button, then the prompt chip's 「프롬프트」 label (#2038) — may not
+  // cost the strip a line (CORE.fitStripParts): measured after every render and again whenever the
+  // strip's width changes. Guarded for a tab whose usage-shared.js predates these helpers (dynamic
+  // re-injection, #1421) — then the compare button alone is fitted, as before.
   let _fitStop = null;
   let _fitTarget = null;
-  function ensureCompareFit(strip) {
+  function ensureStripFit(strip) {
     if (!CORE || !CORE.fitCompareButton) return;
-    // A superseded instance's observer answers null → no-op on the newest instance's button.
-    const find = () => (isCurrent() ? strip.querySelector('.' + CMP_BTN_CLASS) : null);
-    CORE.fitCompareButton(strip, find());
+    // A superseded instance's observer answers no parts → no-op on the newest instance's strip.
+    const parts = () => (isCurrent() ? [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')] : []);
+    if (!CORE.fitStripParts) {
+      const find = () => parts()[0] || null;
+      CORE.fitCompareButton(strip, find());
+      if (_fitTarget === strip) return;
+      if (_fitStop) _fitStop();
+      _fitTarget = strip;
+      _fitStop = CORE.observeCompareFit(strip, find);
+      return;
+    }
+    CORE.fitStripParts(strip, parts());
     if (_fitTarget === strip) return;
     if (_fitStop) _fitStop();
     _fitTarget = strip;
-    _fitStop = CORE.observeCompareFit(strip, find);
+    _fitStop = CORE.observeStripParts(strip, parts);
   }
   function stopCompareFit() {
     if (_fitStop) _fitStop();
@@ -323,7 +335,27 @@
       try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-gm-strip-inner') || strip).appendChild(btn);
-    ensureCompareFit(strip);
+  }
+
+  // Prompt picker (#2038 S2, docs/plans/prompt-inpage.md): the strip's bookmark chip — the same
+  // ui/prompt-picker.js as claude.ai (insertion into Quill measured in S0 §7). No per-message save
+  // here yet (the cross-check rows are not on Gemini). SOFT dependency (#1421): absent → no chip.
+  const PROMPT_BTN_CLASS = 'ct-prompt-btn';
+  const _picker = globalThis.__ctPromptPicker ? globalThis.__ctPromptPicker.create({
+    document, chrome, site: PROVIDER,
+    getEditor: findEditor,
+    anchor: () => findAnchor() || document.getElementById(STRIP_ID),
+    lang: () => _lang,
+    isDark: isDarkTheme,
+    onEnabledChange: () => { if (isCurrent()) renderStrip(); },   // the options page's 「입력창 프롬프트 버튼」
+  }) : null;
+
+  /** The chip goes right after the gear/contact icons; the compare button (appended next) stays last. */
+  function mountPromptButton(strip) {
+    const chip = strip.querySelector('.' + PROMPT_BTN_CLASS);
+    if (_picker && !_picker.enabled()) { if (chip) chip.remove(); return; }   // renderStripInto re-fits after this
+    if (!_picker || chip) return;
+    (strip.querySelector('.ct-gm-strip-inner') || strip).appendChild(_picker.button(PROMPT_BTN_CLASS));
   }
 
   function renderStrip() {
@@ -379,6 +411,7 @@
   function teardown() {
     _enabled = false;
     unmount();
+    if (_picker) (_picker.destroy || _picker.close)();
     clearEmptyRetry();
     _intervals.forEach(clearInterval);
     _intervals = [];

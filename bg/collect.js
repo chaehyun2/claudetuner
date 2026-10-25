@@ -1363,7 +1363,12 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         if (cpo && cpo.order_id === po.order_id) {
           console.log(`[Claude Tuner] Plan order #${po.order_id} already completed, skipping`);
         } else {
-        console.log(`[Claude Tuner] Plan order received: #${po.order_id} ${po.from_plan} → ${po.to_plan} (auto_approve=${po.auto_approve})`);
+        // 🔴 #820: the member's auto-approve opt-in covers DOWNGRADES only — an upgrade bills the card
+        // the moment it runs. The server decides the direction (it alone ranks Team/Free plans) and
+        // already withholds auto_approve for anything but 'down'; requiring `direction === 'down'` here
+        // too keeps a worker without the field (rollback) on the confirm path. Unknown = confirm.
+        const autoApprove = po.auto_approve === true && po.direction === 'down';
+        console.log(`[Claude Tuner] Plan order received: #${po.order_id} ${po.from_plan} → ${po.to_plan} (auto_approve=${po.auto_approve}, direction=${po.direction}, auto=${autoApprove})`);
         await chrome.storage.local.set({ pendingPlanOrder: po });
         // 🔴 A pending order no longer takes the badge or the icon (#994) — see bg/badge.js for
         // why. The sticky notification below is what replaces it, so WHO GETS IT matters more
@@ -1373,9 +1378,9 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
         // banner — a surface the user has to think to open (Codex DEPLOY-BLOCKER). A failed auto
         // order is precisely the case that needs a person: the change did not happen and only
         // they can retry or reject it.
-        let needsUserDecision = !po.auto_approve;
+        let needsUserDecision = !autoApprove;
         let autoAttemptFailed = false;
-        if (po.auto_approve) {
+        if (autoApprove) {
           console.log('[Claude Tuner] Auto-approving plan order');
           try {
             await acceptPlanOrder(config, po, userEmail, { auto: true });

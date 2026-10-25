@@ -13,6 +13,64 @@ function chatgptHttpStatus(message) {
   return m ? m[1] : '';
 }
 
+// === Session token refresh on `token_expired` (#2229) ===
+//
+// A plan upgrade invalidates the session's accessToken: every backend-api call answers
+// `401 {"error":{"code":"token_expired"}}`, and the PLAIN `/api/auth/session` keeps handing back the
+// dead token (no-store or not). Only the `refresh=true` form mints a live one — that is what the web
+// app itself calls (docs/SPEC-chatgpt-plan-change.md, "Commit"). Without this, collection stops
+// after any upgrade until the user happens to visit chatgpt.com.
+//
+// 🔴 BOUNDED, ON PURPOSE. A refresh happens ONLY for a 401 whose body says `token_expired` — never
+// for another 401/403 — and any refresh that does not end in a successful API answer suppresses
+// further refreshes FOR THAT DEAD TOKEN for REFRESH_COOLDOWN_MS. That one rule is also what makes it
+// at most ONCE per fetchChatGPTApi call: a second refresh within a call (the cookie fallback after a
+// failed tab refresh) could only follow a failed first one for the same token, and the cooldown
+// refuses it. A session the refresh cannot heal therefore costs the provider no extra traffic.
+// 🔑 THE COOLDOWN IS KEYED BY THE DEAD TOKEN, NOT GLOBAL (Codex R1-B1): after an account switch the
+// plain endpoint hands back a different token, and that account's own expiry must still get its
+// refresh. The key is a short tail of the token, held in memory only and never sent anywhere.
+// 🔑 No token is cached for reuse: each attempt re-reads the session of the browser's CURRENT
+// account, so an account switch can never be answered with another account's token.
+const SESSION_PATH = '/api/auth/session';
+const SESSION_REFRESH_PATH = '/api/auth/session?refresh=true&reason=token_expired';
+const TOKEN_EXPIRED_CODE = 'token_expired';
+const REFRESH_COOLDOWN_MS = 10 * 60 * 1000;
+const TOKEN_TAG_CHARS = 16;
+// tag → blocked-until. One entry per dead token (Codex R2-B1: a single slot let account B's outcome
+// erase account A's cooldown). Expired entries are pruned on every write, so it stays tiny.
+const refreshBlocked = new Map();
+
+function tokenTag(token) {
+  return typeof token === 'string' ? token.slice(-TOKEN_TAG_CHARS) : '';
+}
+
+function isTokenExpiredResponse(status, bodyText) {
+  if (status !== 401 || typeof bodyText !== 'string') return false;
+  try {
+    const body = JSON.parse(bodyText);
+    return !!body && typeof body === 'object' && body.error?.code === TOKEN_EXPIRED_CODE;
+  } catch {
+    return false;
+  }
+}
+
+function refreshAllowed(tag) {
+  return !(Date.now() < (refreshBlocked.get(tag) || 0));
+}
+
+function noteRefreshOutcome(tag, healed) {
+  const now = Date.now();
+  for (const [t, until] of refreshBlocked) if (until <= now) refreshBlocked.delete(t);
+  if (healed) refreshBlocked.delete(tag);
+  else refreshBlocked.set(tag, now + REFRESH_COOLDOWN_MS);
+}
+
+// Test hook: the cooldown is module state, and a guard needs each case to start clean.
+export function _resetChatgptTokenRefreshForTest() {
+  refreshBlocked.clear();
+}
+
 // === ChatGPT API call helper (hybrid: tab-first, cookie fallback) ===
 // ChatGPT requires Authorization: Bearer <JWT> — obtained via /api/auth/session
 export async function fetchChatGPTApi(path, options = {}) {
@@ -67,6 +125,12 @@ export async function fetchChatGPTApi(path, options = {}) {
     // actionable observation for the bucket we are trying to empty. Codex reproduced it (배포차단).
     // Only a code that says what the provider actually ANSWERED beats "we never reached them".
     const tabMsg = tabError ? tabError.message : '';
+    // 🔴 A TAB THAT HEARD `token_expired` FROM THE PROVIDER (and could not refresh it) outranks
+    // what the fallback says — `no_cookies` in particular would tell a user whose tab is open and
+    // signed in to "keep a tab open" (Codex R1-B2). The one exception is a fallback the provider
+    // RATE-LIMITED: that is also the provider's own answer, and its fix (wait) comes first
+    // (Codex R2-B2).
+    if (tabMsg === 'err_chatgpt_token_expired' && cookieError.message !== 'err_chatgpt_rate_limit') throw tabError;
     const tabNamesDiagnosis = tabMsg.indexOf('err_') === 0 && tabMsg !== 'err_chatgpt_collect_failed';
     if (cookieError.message === 'err_chatgpt_network' && tabNamesDiagnosis) {
       throw tabError;
@@ -95,13 +159,33 @@ export async function fetchChatGPTApi(path, options = {}) {
 
 // --- Tab-based fetch: 2-step auth in MAIN world ---
 async function fetchChatGPTViaTab(tabId, fullUrl) {
+  let result = await runChatGPTTabFetch(tabId, fullUrl, SESSION_PATH);
+  if (result && result._err && isTokenExpiredResponse(result.status, result.body)) {
+    const tag = tokenTag(result.staleToken);
+    if (!refreshAllowed(tag)) throw new Error('err_chatgpt_token_expired');
+    try {
+      result = await runChatGPTTabFetch(tabId, fullUrl, SESSION_REFRESH_PATH);
+    } catch (e) {
+      noteRefreshOutcome(tag, false);
+      throw e;
+    }
+    const stillExpired = !!result && result._err && isTokenExpiredResponse(result.status, result.body);
+    noteRefreshOutcome(tag, !!result && !result._err);
+    if (stillExpired) throw new Error('err_chatgpt_token_expired');
+  }
+  return chatgptTabResult(result);
+}
+
+// The MAIN-world half. `sessionPath` is the plain session endpoint, or its refresh form on the one
+// retry fetchChatGPTViaTab allows — the page function itself never decides to refresh.
+async function runChatGPTTabFetch(tabId, fullUrl, sessionPath) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: async (url) => {
+    func: async (url, sessionUrl) => {
       try {
         // Step 1: Get Bearer token from session endpoint
-        const sessionResp = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+        const sessionResp = await fetch(sessionUrl, { credentials: 'include', cache: 'no-store' });
         if (!sessionResp.ok) {
           return { _err: true, status: sessionResp.status, message: 'session_fetch_failed' };
         }
@@ -121,17 +205,22 @@ async function fetchChatGPTViaTab(tabId, fullUrl) {
         });
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
-          return { _err: true, status: resp.status, body: text.slice(0, 500) };
+          // `staleToken` only on a 401: the caller keys its refresh cooldown by the dead token and
+          // drops it at once (memory only, never stored or sent).
+          return { _err: true, status: resp.status, body: text.slice(0, 500),
+            staleToken: resp.status === 401 ? session.accessToken : undefined };
         }
         return { _err: false, data: await resp.json() };
       } catch (e) {
         return { _err: true, status: 0, message: e.message };
       }
     },
-    args: [fullUrl],
+    args: [fullUrl, sessionPath],
   });
+  return results?.[0]?.result;
+}
 
-  const result = results?.[0]?.result;
+function chatgptTabResult(result) {
   if (!result || result._err) {
     const status = result?.status || 'unknown';
     const msg = result?.message || '';
@@ -190,6 +279,30 @@ async function fetchChatGPTWithCookies(url) {
     'Origin': CHATGPT_API_BASE,
   };
 
+  let { resp, token } = await fetchChatGPTCookieAttempt(url, commonHeaders, SESSION_PATH);
+  if (resp.status === 401) {
+    const text = await resp.text().catch(() => '');
+    if (isTokenExpiredResponse(401, text)) {
+      const tag = tokenTag(token);
+      if (!refreshAllowed(tag)) throw new Error('err_chatgpt_token_expired');
+      try {
+        ({ resp } = await fetchChatGPTCookieAttempt(url, commonHeaders, SESSION_REFRESH_PATH));
+      } catch (e) {
+        noteRefreshOutcome(tag, false);
+        throw e;
+      }
+      const retryText = resp.status === 401 ? await resp.text().catch(() => '') : '';
+      noteRefreshOutcome(tag, resp.ok);
+      if (isTokenExpiredResponse(resp.status, retryText)) throw new Error('err_chatgpt_token_expired');
+    }
+  }
+  return chatgptCookieResult(resp);
+}
+
+// One session read + one API call. `sessionPath` is the plain endpoint, or its refresh form on the
+// single retry fetchChatGPTWithCookies allows. → { resp: the API Response (any status), token: the
+// bearer it used, for the refresh cooldown key only }; throws only codes.
+async function fetchChatGPTCookieAttempt(url, commonHeaders, sessionPath) {
   // Step 1: Get Bearer token via session endpoint
   //
   // 🔴 A REJECTED FETCH IS ITS OWN FAILURE, NOT "collection failed". `fetch` rejects when the
@@ -206,7 +319,7 @@ async function fetchChatGPTWithCookies(url) {
   // splits it (`err_claude_network`, bg/api.js:184); ChatGPT did not. (#1415-adjacent, #1417 계열)
   let sessionResp;
   try {
-    sessionResp = await fetch(`${CHATGPT_API_BASE}/api/auth/session`, {
+    sessionResp = await fetch(`${CHATGPT_API_BASE}${sessionPath}`, {
       headers: { ...commonHeaders, 'Accept': 'application/json' },
       cache: 'no-store',
     });
@@ -224,9 +337,8 @@ async function fetchChatGPTWithCookies(url) {
   }
 
   // Step 2: Call actual API with Bearer token
-  let resp;
   try {
-    resp = await fetch(url, {
+    const resp = await fetch(url, {
       headers: {
         ...commonHeaders,
         'Authorization': 'Bearer ' + session.accessToken,
@@ -234,11 +346,14 @@ async function fetchChatGPTWithCookies(url) {
       },
       cache: 'no-store',
     });
+    return { resp, token: session.accessToken };
   } catch (e) {
     console.debug(`[Claude Tuner] ChatGPT cookie api fetch rejected: ${e && e.message}`);
     throw new Error('err_chatgpt_network');
   }
+}
 
+async function chatgptCookieResult(resp) {
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
     if (resp.status === 403) throw new Error('err_chatgpt_cloudflare');

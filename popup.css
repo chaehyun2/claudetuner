@@ -146,8 +146,10 @@
     /* Ad/promo banners use color:inherit; give the container an adaptive text color so text stays readable in dark mode (else it falls back to UA-default black). */
     #ct-popup-promos { color: var(--text-primary); }
     .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-    .header h1 { font-size: 14px; font-weight: 600; color: var(--text-primary); }
-    .header-actions { display: flex; align-items: center; gap: 2px; }
+    /* The header must fit the 340px popup with every item showing (English + notices + prompts):
+       no gap between the 24px hit areas, and the title gives way (ellipsis) before an icon is cut. */
+    .header h1 { font-size: 14px; font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .header-actions { display: flex; align-items: center; gap: 0; flex: none; }
     /* #1717: every header/status/chart control is at least a 24×24 hit area (WCAG 2.2 SC 2.5.8) —
        min sizes only, so the glyphs and their spacing look the same. */
     .hdr-btn { flex: none; min-height: 24px; padding: 4px 6px; border: none; border-radius: 5px; font-size: 11px; cursor: pointer; font-weight: 500; line-height: 1.2; }

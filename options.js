@@ -354,6 +354,7 @@ function doSave() {
   const compareEnabled = document.getElementById('compare-enabled').checked;
   const compareMsgButtonEnabled = document.getElementById('compare-msg-button-enabled').checked;
   const compareSuggestEnabled = document.getElementById('compare-suggest-enabled').checked;
+  const promptButtonEnabled = document.getElementById('prompt-button-enabled').checked;
 
   const notifyResetSoon = document.getElementById('notify-reset-soon').checked;
   const notifyResetDone = document.getElementById('notify-reset-done').checked;
@@ -364,7 +365,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, promptButtonEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
   // #2092 P2 reset-pass toggles — written only once their stored state has been shown. Before that
   // the boxes hold no decision (options.html leaves them unchecked), and saving them would turn
   // every one OFF for a user who only touched another setting.
@@ -388,7 +389,7 @@ function doSave() {
       if (userEmail) {
         const extSettings = {
           usageDisplayMode, thresholdWarn, thresholdDanger,
-          sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, optimizationMode,
+          sidebarUsageEnabled, inputUsageEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, promptButtonEnabled, optimizationMode,
           collectClaude, collectChatGPT, collectGemini,
           notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger,
           notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup,
@@ -475,7 +476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, compareSuggestEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, compareSuggestEnabled: true, promptButtonEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -539,6 +540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
       document.getElementById('compare-msg-button-enabled').checked = config.compareMsgButtonEnabled !== false;
       document.getElementById('compare-suggest-enabled').checked = config.compareSuggestEnabled !== false;
+      document.getElementById('prompt-button-enabled').checked = config.promptButtonEnabled !== false;
       // A change seen meanwhile (onChanged below) is newer than this read — it wins (Codex G2).
       chrome.storage.local.get({ compareHistorySync: true }, (v) => { if (!_histSyncSeenChange) document.getElementById('compare-history-sync').checked = !v || v.compareHistorySync !== false; });
       syncCompareMsgButtonRow();
@@ -606,6 +608,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('compare-enabled').addEventListener('change', () => { syncCompareMsgButtonRow(); autoSave(); });
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-suggest-enabled').addEventListener('change', autoSave);
+  document.getElementById('prompt-button-enabled').addEventListener('change', autoSave);
   // #2081: the history's server copy — per BROWSER (chrome.storage.local, never the synced config) and written AT
   // ONCE by its own change only (batch r5 G1: written by the debounced autosave of any setting, a stale checkbox
   // turned back on a switch the 「최근」 panel had turned off, and an 「off」 waited 800 ms while an upload went).

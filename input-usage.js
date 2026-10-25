@@ -255,6 +255,15 @@
 }
 .ct-cmp-btn:hover:not(:disabled) { color: var(--text); }
 .ct-cmp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* The prompt picker chip (#2038): the same pill as .ct-cmp-btn beside it — line bookmark + 「프롬프트」. */
+.ct-prompt-btn {
+  display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 7px; margin-right: 4px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+  color: var(--muted); font: inherit; font-size: 10px; font-weight: 600; line-height: 1;
+  cursor: pointer; white-space: nowrap; transition: color 0.15s;
+}
+.ct-prompt-btn:hover { color: var(--text); }
+.ct-prompt-btn svg { width: 11px; height: 11px; flex-shrink: 0; }
   `;
 
   // ── Composer detection ──
@@ -441,6 +450,32 @@
     if (_fitStop) _fitStop();
     _fitStop = null;
     _fitTarget = null;
+    if (_labelFitStop) _labelFitStop();
+    _labelFitStop = null;
+    _labelFitTarget = null;
+  }
+  // The prompt chip's 「프롬프트」 label is the FIRST thing a narrow strip drops (the bookmark stays),
+  // measured with the same rule as the compare button (CORE.fitCompareButton never lets an element add a
+  // line). Its observer is created before the compare button's, so on a resize the label is judged first
+  // and the compare button only goes when the icon-only chip still does not fit (Codex R7).
+  let _labelFitStop = null;
+  let _labelFitTarget = null;
+  /** The compare button, then the 「프롬프트」 label, each kept only if it adds no line — CORE.fitStripParts. */
+  function refitStripButtons(strip) {
+    if (!CORE || !CORE.fitCompareButton || _cmpGen !== globalThis.__ctCmpInputGen) return;
+    const parts = [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')];
+    if (CORE.fitStripParts) CORE.fitStripParts(strip, parts);
+    else if (parts[0]) CORE.fitCompareButton(strip, parts[0]);   // a usage-shared.js older than fitStripParts (#1421)
+  }
+  function ensurePromptLabelFit(strip) {
+    if (!CORE || !CORE.fitCompareButton) return;
+    refitStripButtons(strip);
+    if (_labelFitTarget === strip || typeof ResizeObserver !== 'function') return;
+    if (_labelFitStop) _labelFitStop();
+    _labelFitTarget = strip;
+    const ro = new ResizeObserver(() => { try { refitStripButtons(strip); } catch { /* detached */ } });
+    ro.observe(strip);
+    _labelFitStop = () => ro.disconnect();
   }
   // ── Compare button (#1452, plan docs/plans/multi-ai-compare.md §3.5) ──
   // 「AI 크로스체크」 / "AI Cross-Check" (formerly 「다른 AI에게도 물어보기」 / "Ask other AIs too", renamed 2026-09-17) sits in the strip's right-hand group. Gate = the CDN dark-launch flag
@@ -554,9 +589,36 @@
     return el.matches(CMP_MSG_SELECTOR) ? el : el.querySelector(CMP_MSG_SELECTOR);
   }
 
+  // Prompt picker (#2038 in-page, docs/plans/prompt-inpage.md): a bookmark chip in the strip + a bookmark-save on each sent
+  // message. ui/prompt-picker.js is a SOFT dependency like the rows above (#1421) — absent, both
+  // simply do not appear.
+  const PROMPT_BTN_CLASS = 'ct-prompt-btn';
+  const _picker = globalThis.__ctPromptPicker ? globalThis.__ctPromptPicker.create({
+    document, chrome, site: CMP_PROVIDER,
+    getEditor: () => document.querySelector('div.ProseMirror[contenteditable="true"], div[contenteditable="true"][role="textbox"]'),
+    // The whole input box (editor + toolbar + our strip): the popover opens above it, never over the text.
+    anchor: () => findComposerWrapper() || document.getElementById(HOST_ID),
+    lang: () => _lang,
+    isDark: isDarkTheme,
+    // The options page's 「입력창 프롬프트 버튼」 changed: chip and message bookmarks follow (renderStrip re-syncs rows).
+    onEnabledChange: () => { if (_cmpGen === globalThis.__ctCmpInputGen) renderStrip(); },
+  }) : null;
+
+  function mountPromptButton(strip) {
+    if (_cmpGen !== globalThis.__ctCmpInputGen) return;
+    const chip = strip.querySelector('.' + PROMPT_BTN_CLASS);
+    if (_picker && !_picker.enabled()) { if (chip) chip.remove(); return; }   // renderStrip re-fits after this
+    if (!_picker || chip) return;
+    const right = strip.querySelector('.ct-right') || strip;
+    right.insertBefore(_picker.button(PROMPT_BTN_CLASS), right.firstChild);
+    ensurePromptLabelFit(strip);
+  }
+
   const _msgRows = globalThis.__ctCmpMsgRows ? globalThis.__ctCmpMsgRows.create({
     document, chrome, provider: CMP_PROVIDER,
     bubbleSelector: CMP_MSG_SELECTOR,
+    decorate: _picker ? (row, ownerOf) => { row.appendChild(_picker.starButton('ct-cmp-msg-star', ownerOf)); } : null,
+    decorateAllowed: () => !_picker || _picker.enabled(),
     anchorOf: (bubble) => { const card = anchorOfBubble(bubble); return card.parentNode ? { parent: card.parentNode, before: card.nextSibling } : null; },
     rowOwnerOf: (row) => bubbleOfAnchor(row.previousElementSibling),
     readText: readMessageText,
@@ -581,7 +643,7 @@
     renderStripInner();
     const shadow = $shadow();
     const strip = shadow && shadow.querySelector('.ct-strip');
-    if (strip) mountCompareButton(strip);
+    if (strip) { mountPromptButton(strip); mountCompareButton(strip); refitStripButtons(strip); }
     syncMessageButtons();
   }
 

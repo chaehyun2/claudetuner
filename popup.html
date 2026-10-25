@@ -7,24 +7,27 @@
 </head>
 <body>
   <div class="header">
-    <h1><a href="https://claudetuner.com" target="_blank" style="color:inherit;text-decoration:none">ClaudeTuner</a></h1>
+    <h1><a href="https://claudetuner.com" target="_blank" data-ga="logo" style="color:inherit;text-decoration:none">ClaudeTuner</a></h1>
     <div class="header-actions">
-      <button id="collect-btn" class="hdr-btn hdr-btn-primary" data-i18n="btn_collect"></button>
-      <a href="https://claudetuner.com/dashboard" data-dash-link target="_blank" class="hdr-btn hdr-btn-link" data-i18n-title="btn_detail" title="Analytics"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style="flex:none"><path d="M3 3a1 1 0 011 1v12h12a1 1 0 110 2H3a1 1 0 01-1-1V4a1 1 0 011-1zm14 3a1 1 0 011 1v2a1 1 0 11-2 0V9.414l-3.293 3.293a1 1 0 01-1.414 0L9 10.414l-2.293 2.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0L12 10.586 14.586 8H13a1 1 0 110-2h4z"/></svg></a>
-      <button id="notice-toggle-btn" class="hdr-btn-icon" title="Announcements" style="display:none;position:relative">
+      <button id="collect-btn" data-ga="collect" class="hdr-btn hdr-btn-primary" data-i18n="btn_collect"></button>
+      <a href="https://claudetuner.com/dashboard" data-dash-link data-ga="dashboard" target="_blank" class="hdr-btn hdr-btn-link" data-i18n-title="btn_detail" title="Analytics"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style="flex:none"><path d="M3 3a1 1 0 011 1v12h12a1 1 0 110 2H3a1 1 0 01-1-1V4a1 1 0 011-1zm14 3a1 1 0 011 1v2a1 1 0 11-2 0V9.414l-3.293 3.293a1 1 0 01-1.414 0L9 10.414l-2.293 2.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0L12 10.586 14.586 8H13a1 1 0 110-2h4z"/></svg></a>
+      <a href="https://claudetuner.com/dashboard/prompts/" target="_blank" data-ga="prompts" class="hdr-btn-icon" data-i18n-title="btn_prompts" title="Prompts">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd"/></svg>
+      </a>
+      <button id="notice-toggle-btn" data-ga="notices" class="hdr-btn-icon" title="Announcements" style="display:none;position:relative">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-2.83-2h5.66A3 3 0 0110 18z"/></svg>
         <span id="notice-badge" style="display:none;position:absolute;top:-2px;right:-2px;background:#ef4444;color:white;font-size:8px;font-weight:700;min-width:13px;height:13px;border-radius:50%;align-items:center;justify-content:center;line-height:1">0</span>
       </button>
-      <a href="https://tally.so/r/q4dyQk" target="_blank" class="hdr-btn-icon" title="Feedback">
+      <a href="https://tally.so/r/q4dyQk" target="_blank" data-ga="feedback" class="hdr-btn-icon" title="Feedback">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>
       </a>
-      <button id="open-tab-btn" class="hdr-btn-icon" title="Open as side panel">
+      <button id="open-tab-btn" data-ga="switch_mode" class="hdr-btn-icon" title="Open as side panel">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm1 0v12h4V4H4zm6 0v12h6V4h-6z" clip-rule="evenodd"/></svg>
       </button>
-      <button id="theme-toggle-btn" class="hdr-btn-icon" title="Theme">
+      <button id="theme-toggle-btn" data-ga="theme" class="hdr-btn-icon" title="Theme">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
       </button>
-      <button id="options-btn" class="hdr-btn-icon" title="Settings">
+      <button id="options-btn" data-ga="settings" class="hdr-btn-icon" title="Settings">
         <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
       </button>
     </div>
@@ -171,8 +174,8 @@
        #overview-section so it stays in the same spot in both views (#1719 ①) — below it, the
        tab the user just pressed jumped from under the cards to the top. -->
   <div id="view-tabs" class="view-tabs hidden">
-    <button id="tab-overview" class="view-tab" data-i18n="ov_title"></button>
-    <button id="tab-detail" class="view-tab" data-i18n="ov_detail"></button>
+    <button id="tab-overview" data-ga="tab_overview" class="view-tab" data-i18n="ov_title"></button>
+    <button id="tab-detail" data-ga="tab_detail" class="view-tab" data-i18n="ov_detail"></button>
   </div>
 
   <!-- Overview ("모아 보기") master screen — one card per collected org/provider.

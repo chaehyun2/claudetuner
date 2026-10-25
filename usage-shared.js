@@ -1262,6 +1262,24 @@
     ro.observe(container);
     return () => ro.disconnect();
   }
+  // Several optional strip parts in priority order (the compare button, then the prompt chip's
+  // 「프롬프트」 label, #2038): BUILT UP, not taken away — all start hidden and each is shown back only
+  // if it adds no line (fitCompareButton). Taking them away one at a time fails where only removing
+  // BOTH gets back to one line: each alone looks free, so both stayed and the strip wrapped (Codex
+  // R7/R8 on claude.ai, measured at ~470px). The result never depends on a previous fit.
+  function fitStripParts(container, parts) {
+    const list = (parts || []).filter(Boolean);
+    for (const el of list) el.style.display = 'none';
+    for (const el of list) fitCompareButton(container, el);
+  }
+  // fitStripParts again whenever the container resizes; `findParts()` answers the current parts
+  // (an empty list from a superseded instance makes it a no-op). Returns a disconnect function.
+  function observeStripParts(container, findParts) {
+    if (typeof ResizeObserver !== 'function' || !container) return () => {};
+    const ro = new ResizeObserver(() => { try { fitStripParts(container, findParts()); } catch { /* detached */ } });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }
 
   // Buckets in `additional_rate_limits[]` that are NOT per-feature model limits, and so must not be
   // listed under a heading that calls them limits. Shared by every extension surface that renders
@@ -1533,6 +1551,8 @@
     noDataReason,
     fitCompareButton,
     observeCompareFit,
+    fitStripParts,
+    observeStripParts,
     isNonModelBucket,
     bucketDisplayName,
     CLAUDE_ACTIVE_ORG_COOKIE,
