@@ -449,6 +449,7 @@
     document, chrome, site: PROVIDER,
     getEditor: () => { const form = findComposerForm(); return form ? form.querySelector(PROMPT_EDITOR_SELECTOR) : null; },
     anchor: () => { const form = findComposerForm(); return (form && composerBox(form)) || document.getElementById(STRIP_ID); },
+    strip: () => document.getElementById(STRIP_ID),
     lang: () => _lang,
     isDark: () => { const h = document.documentElement; return h.classList.contains('dark') || h.classList.contains('dark-oled') || h.getAttribute('data-theme') === 'dark'; },
     // The options page's 「입력창 프롬프트 버튼」 changed: chip and message bookmarks follow (renderStrip re-syncs rows).

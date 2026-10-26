@@ -298,6 +298,7 @@ export function chatgptInactivePersonal(data, usageKey) {
   if (!active || active.account.account_id === acc.account_id) return null;
   return {
     orgKey,
+    accountId: acc.account_id,
     plan: chatgptWorkspacePlan(def.entitlement, acc.plan_type, acc.plan_display_name),
     renewal: def.entitlement?.renews_at || null,
     ...parseChatGPTScheduledChange(def),
@@ -1020,4 +1021,23 @@ export function isChatGPTAccountSwitch(info, lastSeen) {
   if (!c || info.removed || c.name !== CHATGPT_ACCOUNT_COOKIE) return false;
   if (typeof c.domain !== 'string' || !/(^|\.)chatgpt\.com$/.test(c.domain)) return false;
   return typeof c.value === 'string' && c.value !== '' && c.value !== lastSeen;
+}
+
+/**
+ * A JWT's `exp` as unix milliseconds, or null when it cannot be read. Reads the payload only — no
+ * signature check (the provider is the one that validates it); used to bound how long a kept bearer
+ * is retried (#2620). Pure; never throws.
+ */
+export function decodeJwtExpiry(token) {
+  try {
+    if (typeof token !== 'string') return null;
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4)));
+    const exp = json && json.exp;
+    return typeof exp === 'number' && Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
 }

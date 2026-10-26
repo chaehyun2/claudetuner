@@ -1,4 +1,5 @@
-import { fetchChatGPTApi, isChatGPTLoggedIn } from './api-chatgpt.js';
+import { fetchChatGPTApi, fetchChatGPTApiWithToken, fetchChatGPTWithKeptToken, isChatGPTLoggedIn } from './api-chatgpt.js';
+import { keepChatGPTToken, keptChatGPTToken, forgetChatGPTToken } from './chatgpt-token-cache.js';
 import { platformField } from './platform.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import it
 // (#1315). Names are unchanged on purpose: the call sites below are what several guards match on.
@@ -235,6 +236,58 @@ async function withResetPassDetail(summary, accountId) {
   return mergeChatGPTResetDetail(summary, detail, now);
 }
 
+// The usage half of a ChatGPT org, from one /wham/usage answer — the active account's, or (#2620) an
+// inactive one read with its kept bearer. One builder, so the two reads cannot drift apart.
+function usageFieldsFrom(usage) {
+  const { w5h, w7d } = classifyWindows(usage.rate_limit);
+  return {
+    h5: w5h?.used_percent ?? null,
+    d7: w7d?.used_percent ?? null,
+    resetsAt5h: unixToResetTime(w5h?.reset_at),
+    resetsAt7d: unixToResetTime(w7d?.reset_at),
+    // Reported window lengths. `w7s` is 2592000 (30 days) for Free/Go and 604800 for everyone
+    // else — the popup labels from this rather than assuming the slot's nominal length (#954).
+    w5s: windowSpan(w5h),
+    w7s: windowSpan(w7d),
+    // No metered windows at all (Enterprise pilot) — the in-page widgets say "no usage limits"
+    // instead of "collecting…", which would never come true. Same flag the Gemini collector sets.
+    noLimits: isUnmeteredChatgptUsage(usage),
+    // Per-feature limit buckets (e.g. Codex weekly) — display-only, popup gauges.
+    additionalLimits: decoration('additional_rate_limits', () => parseAdditionalLimits(usage), []),
+    // Models the provider is currently gating (empty on a healthy account — see
+    // parseModelAvailability: availability, NOT a usage percentage).
+    modelGates: decoration('model_usage', () => parseModelAvailability(usage), []),
+    // Which limit the account actually ran into, per the provider. null = nothing exhausted,
+    // which is the normal state even at 100% on the weekly window (chat is unmetered since 08-06).
+    reachedType: decoration('rate_limit_reached_type', () => parseReachedType(usage), undefined),
+  };
+}
+
+// Statuses that mean a kept bearer will never read its account again: expired/revoked (401),
+// workspace gone (402 deactivated_workspace). NOT 403 — that is also Cloudflare's answer, which says
+// nothing about the token.
+const KEPT_TOKEN_DEAD_STATUSES = new Set([401, 402]);
+
+// #2620 — an account the web app is NOT on, read with the bearer kept from when it was. Its usage
+// fields when the answer is that very account for that very ChatGPT user; null otherwise (no kept
+// token, a failed read, or an answer about someone/something else — that token is dropped).
+async function readWithKeptToken(orgKey, isThisAccount, userId) {
+  const token = await keptChatGPTToken(orgKey, userId);
+  if (!token) return null;
+  const r = await fetchChatGPTWithKeptToken(CHATGPT_USAGE_PATH, token);
+  if (!r.ok) {
+    if (KEPT_TOKEN_DEAD_STATUSES.has(r.status)) await forgetChatGPTToken(orgKey);
+    return null;
+  }
+  const u = r.data;
+  if (!u || u.user_id !== userId || !isThisAccount(chatgptUsageAccountId(u))) {
+    await forgetChatGPTToken(orgKey);
+    return null;
+  }
+  if (!u.rate_limit && !isUnmeteredChatgptUsage(u)) return null;
+  return usageFieldsFrom(u);
+}
+
 /**
  * Collect ChatGPT usage data.
  * Returns { success, orgs: [{ uuid, name, plan, provider, isPrimary, h5, d7, ... }] }
@@ -258,7 +311,7 @@ export async function collectChatGPT(force = false, userManual = false) {
   // an earlier failure (see sendChatGPTSnapshot).
   const sendOutcome = { failed: null, ok: 0 };
   try {
-    const usage = await fetchChatGPTApi(CHATGPT_USAGE_PATH);
+    const { data: usage, token: usageToken } = await fetchChatGPTApiWithToken(CHATGPT_USAGE_PATH);
 
     // 🔴 Computed on the RAW response, before the give-up below and before parseAdditionalLimits
     // truncates the bucket list to 5. Neither the early return nor the payload can answer "what did
@@ -280,7 +333,6 @@ export async function collectChatGPT(force = false, userManual = false) {
     }
     await noteDriftOutcome('chatgpt', 'success', null);
 
-    const { w5h, w7d } = classifyWindows(usage.rate_limit);
     const accountId = chatgptUsageAccountId(usage);
     const email = usage.email || null;
 
@@ -303,6 +355,11 @@ export async function collectChatGPT(force = false, userManual = false) {
     // account (not the roster's `default`), only while one is ours, at most hourly. Orders are keyed by
     // the org key, so this is too.
     void checkChatgptReservation(orgKey).catch(() => {});
+    // #2620: keep this account's bearer (memory only) so it can still be read after the user switches
+    // the web app to another account. Filed under the org key, for this ChatGPT user only.
+    if (usageToken && typeof usage.user_id === 'string') {
+      await keepChatGPTToken(orgKey, usageToken, usage.user_id).catch(() => {});
+    }
 
     const org = {
       uuid: orgKey,
@@ -314,17 +371,7 @@ export async function collectChatGPT(force = false, userManual = false) {
       // The account chatgpt.com is on right now (/wham/usage answers for it). The in-page panel shows
       // this one even when another ChatGPT account is pinned (Codex R1-B2).
       isActive: true,
-      h5: w5h?.used_percent ?? null,
-      d7: w7d?.used_percent ?? null,
-      resetsAt5h: unixToResetTime(w5h?.reset_at),
-      resetsAt7d: unixToResetTime(w7d?.reset_at),
-      // Reported window lengths. `w7s` is 2592000 (30 days) for Free/Go and 604800 for everyone
-      // else — the popup labels from this rather than assuming the slot's nominal length (#954).
-      w5s: windowSpan(w5h),
-      w7s: windowSpan(w7d),
-      // No metered windows at all (Enterprise pilot) — the in-page widgets say "no usage limits"
-      // instead of "collecting…", which would never come true. Same flag the Gemini collector sets.
-      noLimits: isUnmeteredChatgptUsage(usage),
+      ...usageFieldsFrom(usage),
       renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
       // Scheduled plan change from accounts/check entitlement.scheduled_plan_change
       // (e.g. "changes to Plus on 7/22"); null when no downgrade/change is scheduled.
@@ -333,14 +380,6 @@ export async function collectChatGPT(force = false, userManual = false) {
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
-      // Per-feature limit buckets (e.g. Codex weekly) — display-only, popup gauges.
-      additionalLimits: decoration('additional_rate_limits', () => parseAdditionalLimits(usage), []),
-      // Models the provider is currently gating (empty on a healthy account — see
-      // parseModelAvailability: availability, NOT a usage percentage).
-      modelGates: decoration('model_usage', () => parseModelAvailability(usage), []),
-      // Which limit the account actually ran into, per the provider. null = nothing exhausted,
-      // which is the normal state even at 100% on the weekly window (chat is unmetered since 08-06).
-      reachedType: decoration('rate_limit_reached_type', () => parseReachedType(usage), undefined),
       // Raw-array census for server-side observation only — never rendered (#1184).
       bucketCensus: decoration('bucket_census', () => summarizeLimitBuckets(usage), null),
       // Reset passes held (#2092) — `rate_limit_reset_credits`, already in this response. Kept
@@ -417,9 +456,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     void trackPendingSend(resolveIngestIdentity(email).then((ingest) => syncChatGPTProModelSignal(accountId, ingest)).catch(() => {}));
 
     // Extra workspaces (Phase 1): enumerate every active, accessible workspace the
-    // user belongs to beyond the active account. Per-workspace usage needs a
-    // per-account token (/wham/usage is scoped to the JWT's active account), so
-    // these carry plan + renewal only — usage stays null until a later phase.
+    // user belongs to beyond the active account. /wham/usage is scoped to the bearer's account, so
+    // these carry plan + renewal only — UNLESS a bearer kept from when that workspace was active is
+    // still alive (#2620): then its usage is read with it, below.
     //
     // 🔴 The `ws.accountId !== org.uuid` filter is the invariant itself, stated where the two
     // sends are visible together: ONE CYCLE NEVER SENDS TWO SNAPSHOTS FOR THE SAME ORG KEY. The
@@ -454,6 +493,40 @@ export async function collectChatGPT(force = false, userManual = false) {
       extraUsage: null,
     }));
 
+    // #2620 — fill each inactive account's usage from its kept bearer, when there is one. The
+    // personal account while a workspace is active (accounts/check still names it `default`, so the
+    // roster leaves it out) is read the same way; read, it is sent like any workspace — unread, it is
+    // LISTED, NEVER SENT (see chatgptInactivePersonal): a usage-null row under its key would overwrite
+    // the real one, and a carried-over number would read as current (Codex R1-B1). `localOnly` also
+    // keeps it out of rec reconciliation and history.
+    const ip = roster.inactivePersonal;
+    const localOrgs = [];
+    try {
+      const userId = typeof usage.user_id === 'string' ? usage.user_id : null;
+      if (userId) {
+        for (const ex of extraOrgs) {
+          const read = await readWithKeptToken(ex.uuid, (id) => id === ex.uuid, userId);
+          if (read) Object.assign(ex, read);
+        }
+      }
+      if (ip && ip.orgKey !== org.uuid && !extraOrgs.some((ex) => ex.uuid === ip.orgKey)) {
+        const personal = {
+          uuid: ip.orgKey, name: email || 'ChatGPT', email: email || null, plan: ip.plan, provider: 'chatgpt',
+          isPrimary: false, h5: null, d7: null, resetsAt5h: null, resetsAt7d: null, w5s: null, w7s: null,
+          renewalDate: ip.renewal, pendingPlan: ip.pendingPlan || null, pendingChangeDate: ip.pendingChangeDate || null,
+          spendUsed: null, spendLimit: null, extraUsage: null,
+        };
+        // /wham/usage names the personal account by its `user-…` key or, now and then, its UUID (#2458).
+        const read = userId
+          ? await readWithKeptToken(ip.orgKey, (id) => id === ip.orgKey || id === ip.accountId, userId)
+          : null;
+        if (read) extraOrgs.push(Object.assign(personal, read));
+        else localOrgs.push({ ...personal, localOnly: true });
+      }
+    } catch (e) {
+      console.warn('[Claude Tuner] ChatGPT kept-token reads skipped:', e && e.message);
+    }
+
     // 🔴 THE WORKSPACE LOOP CANNOT TAKE THE PRIMARY ORG WITH IT. By this line the primary snapshot
     // has gone out (or been gated) and `org` holds the numbers every surface renders from; a throw
     // below used to fall through to the catch and return `orgs: []` — the server had the
@@ -462,14 +535,21 @@ export async function collectChatGPT(force = false, userManual = false) {
     // list is returned regardless.
     try {
     for (const ex of extraOrgs) {
-      // Gate per workspace uuid so unchanged workspaces only re-send on the
-      // heartbeat floor (with usage null there's never a "changed" trigger).
+      // Gate per workspace uuid so unchanged workspaces only re-send on the heartbeat floor. Usage is
+      // null unless a kept bearer read it (#2620) — then a usage change triggers like the primary's.
       const exGate = await gateProviderSnapshot(
         ex.uuid,
-        { h5: null, d7: null, extraUsed: null, resetsAt5h: null, resetsAt7d: null, plan: ex.plan, pendingPlan: ex.pendingPlan, pendingChangeDate: ex.pendingChangeDate },
+        { h5: ex.h5, d7: ex.d7, extraUsed: null, resetsAt5h: ex.resetsAt5h, resetsAt7d: ex.resetsAt7d, plan: ex.plan, pendingPlan: ex.pendingPlan, pendingChangeDate: ex.pendingChangeDate },
         { force, provider: 'chatgpt', userManual },
       );
       if (!exGate.send) continue;
+      // An account NOT read this cycle whose last send carried real usage (it was active, or read with
+      // a kept token that has since expired): ANY snapshot now would overwrite those numbers on the
+      // server — latest_snapshot takes the usage columns as sent, null included (#2620 R1-B1/R2-B1, the
+      // #1144 harm by another route). Nothing goes out, not even a plan change: the gate keeps its last
+      // sent values, so the change is sent the next time this account is actually read.
+      const unread = ex.h5 == null && ex.d7 == null && !ex.noLimits;
+      if (unread && exGate.hadUsage) continue;
       // A workspace is never the user's primary data source, so force is_extra_org
       // even for ChatGPT-only users (must not overwrite the users row's plan). A
       // plan/pending change (or a user-manual collect) marks the POST force so the server
@@ -492,19 +572,6 @@ export async function collectChatGPT(force = false, userManual = false) {
     // workspace 2xx erase the primary's failure (Codex DEPLOY-BLOCKER).
     if (sendOutcome.failed) await noteProviderSendError('chatgpt', sendOutcome.failed);
     else if (sendOutcome.ok) await noteProviderSendOk('chatgpt');
-    // The personal account while a workspace is active (accounts/check still names it `default`, so
-    // the roster leaves it out). LISTED, NEVER SENT — see chatgptInactivePersonal. Its usage stays null
-    // like any extra workspace's: a carried-over number would be stale (a reset, or use elsewhere) yet
-    // read as current (Codex R1-B1). `localOnly` also keeps it out of rec reconciliation and history.
-    const ip = roster.inactivePersonal;
-    const localOrgs = ip && ip.orgKey !== org.uuid && !extraOrgs.some((ex) => ex.uuid === ip.orgKey)
-      ? [{
-        uuid: ip.orgKey, name: email || 'ChatGPT', email: email || null, plan: ip.plan, provider: 'chatgpt',
-        isPrimary: false, h5: null, d7: null, resetsAt5h: null, resetsAt7d: null, w5s: null, w7s: null,
-        renewalDate: ip.renewal, pendingPlan: ip.pendingPlan || null, pendingChangeDate: ip.pendingChangeDate || null,
-        spendUsed: null, spendLimit: null, extraUsage: null, localOnly: true,
-      }]
-      : [];
     return { success: true, orgs: [org, ...extraOrgs, ...localOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);

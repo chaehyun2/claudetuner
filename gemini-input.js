@@ -345,6 +345,7 @@
     document, chrome, site: PROVIDER,
     getEditor: findEditor,
     anchor: () => findAnchor() || document.getElementById(STRIP_ID),
+    strip: () => document.getElementById(STRIP_ID),
     lang: () => _lang,
     isDark: isDarkTheme,
     onEnabledChange: () => { if (isCurrent()) renderStrip(); },   // the options page's 「입력창 프롬프트 버튼」

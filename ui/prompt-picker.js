@@ -9,6 +9,7 @@
 //   opts.site                  — 'claude' | 'chatgpt' | 'gemini' (create's `source`, GA `site`)
 //   opts.getEditor()           — the composer's contenteditable, or null
 //   opts.anchor()              — the element the popover sits above (the strip host), or null
+//   opts.strip()               — optional: the usage strip right under the anchor; opening below starts under it
 //   opts.lang()                — 'ko' | 'en'
 //   opts.isDark()              — the site's theme
 //   opts.onEnabledChange()     — optional: the options page switched the picker on/off (promptButtonEnabled) —
@@ -34,7 +35,6 @@
   const POPOVER_GAP = 8;
   const POPOVER_MIN_W = 320;
   const POPOVER_MAX_W = 560;
-  const POPOVER_MIN_ABOVE = 260;           // less room than this above the anchor → open below
   const POPOVER_MAX_H = 480;               // also capped by the room actually left on screen (position())
   const VIEWPORT_MARGIN = 8;
   // 내 프롬프트 with fewer than FILL_UNDER saved: popular 추천 rows are laid under them (up to FILL_COUNT),
@@ -108,12 +108,14 @@
 :host { all: initial; }
 .pp { position: fixed; z-index: 2147483000; box-sizing: border-box; display: flex; flex-direction: column;
   max-height: 480px; border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; color: #111827;
-  box-shadow: 0 10px 30px rgba(0,0,0,.18); font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
+  box-shadow: 0 10px 30px rgba(0,0,0,.18); font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden auto; }
 .pp.dark { background: #1f1f1e; border-color: #3a3a38; color: #ececec; }
 .pp-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; }
 .pp-search { flex: 1; min-width: 0; border: 1px solid rgba(127,127,127,.3); border-radius: 8px; padding: 5px 8px; background: transparent; color: inherit; font: inherit; outline: none; }
 .pp-x { border: 0; background: none; color: inherit; opacity: .5; font-size: 16px; cursor: pointer; padding: 0 4px; }
-.pp-list { overflow-y: auto; padding: 4px; flex: 1; }
+/* The rows keep at least ~1.5 rows; in a short box the chip row and the preview give up their height instead (a box
+   too short even for that scrolls as a whole — .pp overflow-y). */
+.pp-list { overflow-y: auto; padding: 4px; flex: 1; min-height: 72px; }
 .pp { container-type: inline-size; }
 .pp-item { display: flex; gap: 8px; align-items: flex-start; padding: 7px 8px; border-radius: 8px; cursor: pointer; }
 .pp-item.on { background: rgba(127,127,127,.12); }
@@ -125,7 +127,7 @@
 /* The chosen row's prompt as it will be typed (line breaks kept) in a FIXED-height pane under the list: rows stay one
    line, so moving the pointer never reflows the list under it (an expanding hovered row did — the next row slid under
    the pointer and took the selection). */
-.pp-prev { flex-shrink: 0; box-sizing: border-box; height: 92px; margin: 0 6px 4px; padding: 7px 10px; border-radius: 8px; background: rgba(127,127,127,.08);
+.pp-prev { flex-shrink: 1; min-height: 0; box-sizing: border-box; height: 92px; margin: 0 6px 4px; padding: 7px 10px; border-radius: 8px; background: rgba(127,127,127,.08);
   font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; opacity: .85;
   -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent); mask-image: linear-gradient(to bottom, #000 72%, transparent); }
 .pp-prev:empty { display: none; }
@@ -147,9 +149,11 @@
 .pp-item.pp-undo { cursor: default; align-items: center; opacity: .75; font-size: 12px; }
 .pp-undo-btn { border: 0; background: none; color: #7c3aed; font: inherit; font-weight: 600; cursor: pointer; padding: 0 4px; }
 .pp.dark .pp-undo-btn { color: #c4b5fd; }
-.pp-cats { display: flex; align-items: center; gap: 6px; padding: 4px 10px 8px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; border-bottom: 1px solid rgba(127,127,127,.2); }
+/* Chips wrap onto more lines instead of scrolling sideways: a hidden-scrollbar row left the right-most categories
+   with no visible way to reach them (2026-10-27 user report). Past three lines (a narrow composer) the row scrolls
+   down, with its scrollbar shown. */
+.pp-cats { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 10px 8px; max-height: 84px; min-height: 28px; overflow-y: auto; flex-shrink: 1; box-sizing: border-box; border-bottom: 1px solid rgba(127,127,127,.2); }
 .pp-cats-sep { flex-shrink: 0; width: 1px; height: 14px; background: rgba(127,127,127,.3); }
-.pp-cats::-webkit-scrollbar { display: none; }
 .pp-cat { flex-shrink: 0; border: 1px solid rgba(127,127,127,.3); background: none; color: inherit; border-radius: 999px; font: inherit; font-size: 11px; font-weight: 600; padding: 2px 9px; cursor: pointer; opacity: .75; white-space: nowrap; }
 .pp-cat:hover { opacity: 1; }
 .pp-cat.on { opacity: 1; background: rgba(124,58,237,.12); border-color: transparent; color: #7c3aed; }
@@ -538,12 +542,19 @@
       const w = Math.min(POPOVER_MAX_W, Math.max(POPOVER_MIN_W, r.width), innerWidth - 16);
       pp.style.width = w + 'px';
       pp.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
-      const above = r.top >= POPOVER_MIN_ABOVE;
+      // Below starts under the site's usage strip when one sits right under the composer (ChatGPT, Gemini): opening
+      // below a centred composer covered it (deploy-1.56.4 batch R1-B1). Not under it → the anchor's own bottom.
+      const s = opts.strip && opts.strip();
+      const sr = s && s !== a ? s.getBoundingClientRect() : null;
+      const belowEdge = sr && sr.height > 0 && sr.top >= r.top ? Math.max(r.bottom, sr.bottom) : r.bottom;
+      // Above when the full height fits there, else the side with more room (a centred composer, a short window).
+      const above = r.top >= POPOVER_MAX_H + POPOVER_GAP + VIEWPORT_MARGIN || r.top >= innerHeight - belowEdge;
       if (above) { pp.style.bottom = (innerHeight - r.top + POPOVER_GAP) + 'px'; pp.style.top = ''; }
-      else { pp.style.top = (r.bottom + POPOVER_GAP) + 'px'; pp.style.bottom = ''; }
-      // Never past the screen edge: only as tall as the room on its side of the anchor.
-      const room = (above ? r.top : innerHeight - r.bottom) - POPOVER_GAP - VIEWPORT_MARGIN;
-      pp.style.maxHeight = Math.max(POPOVER_MIN_ABOVE - POPOVER_GAP - VIEWPORT_MARGIN, Math.min(POPOVER_MAX_H, room)) + 'px';
+      else { pp.style.top = (belowEdge + POPOVER_GAP) + 'px'; pp.style.bottom = ''; }
+      // Never past the screen edge: only as tall as the room on its side of the anchor. A fixed height, not a cap:
+      // sized to its rows, the box jumped every time a tab, chip or search changed how many rows there were.
+      const room = (above ? r.top : innerHeight - belowEdge) - POPOVER_GAP - VIEWPORT_MARGIN;
+      pp.style.height = Math.max(0, Math.min(POPOVER_MAX_H, room)) + 'px';
     }
 
     function renderList(list) {
@@ -870,9 +881,10 @@
       if (old) old.replaceWith(pp); else shadow.appendChild(pp);
       renderList(list);   // attached first: the rows fill the preview pane through the shadow root
       position(pp);
-      // The chosen chip in view — after position(): the popover's width (and so the row's scroll range) is set there (Codex R1).
+      // The chosen chip in view when the wrapped row scrolls — after position(): the popover's width (and so where the
+      // chips wrap) is set there (Codex R1).
       const onChip = chips.querySelector('.on');
-      if (onChip) chips.scrollLeft = Math.max(0, onChip.offsetLeft - chips.clientWidth / 2 + onChip.offsetWidth / 2);
+      if (onChip) chips.scrollTop = Math.max(0, onChip.offsetTop - chips.offsetTop - chips.clientHeight / 2 + onChip.offsetHeight / 2);
       const focused = shadow.activeElement;
       if (!focused || focused === document.body || !pp.contains(focused)) search.focus();
       const at = search.value.length; search.setSelectionRange(at, at);

@@ -74,6 +74,17 @@ export function _resetChatgptTokenRefreshForTest() {
 // === ChatGPT API call helper (hybrid: tab-first, cookie fallback) ===
 // ChatGPT requires Authorization: Bearer <JWT> — obtained via /api/auth/session
 export async function fetchChatGPTApi(path, options = {}) {
+  return fetchChatGPTApiImpl(path, false);
+}
+
+// The same read, resolving to `{ data, token }` — the bearer this very call used (#2620: kept in
+// memory so the account can still be read after the user switches away). A separate entry point, not
+// an option: `fetchChatGPTApi` must never read its `options` (provider-fetch-no-store guard).
+export async function fetchChatGPTApiWithToken(path) {
+  return fetchChatGPTApiImpl(path, true);
+}
+
+async function fetchChatGPTApiImpl(path, wantToken) {
   const fullUrl = `${CHATGPT_API_BASE}${path}`;
 
   // Primary: tab-based (most reliable — runs in page context with full auth)
@@ -102,7 +113,7 @@ export async function fetchChatGPTApi(path, options = {}) {
 
   if (tabs.length > 0) {
     try {
-      return await fetchChatGPTViaTab(tabs[0].id, fullUrl);
+      return await fetchChatGPTViaTab(tabs[0].id, fullUrl, wantToken);
     } catch (e) {
       tabError = e;
       console.warn('[Claude Tuner] ChatGPT tab fetch failed, trying cookie fallback:', e.message);
@@ -113,7 +124,7 @@ export async function fetchChatGPTApi(path, options = {}) {
 
   // Fallback: cookie-based direct call
   try {
-    return await fetchChatGPTWithCookies(fullUrl);
+    return await fetchChatGPTWithCookies(fullUrl, wantToken);
   } catch (cookieError) {
     // 🔴 `network` IS THE WEAKEST CODE, AND ORDER HAD TO LEARN THAT. It says one thing — this path
     // never got an answer. If the OTHER path DID get one, that observation is strictly better, and
@@ -158,7 +169,7 @@ export async function fetchChatGPTApi(path, options = {}) {
 }
 
 // --- Tab-based fetch: 2-step auth in MAIN world ---
-async function fetchChatGPTViaTab(tabId, fullUrl) {
+async function fetchChatGPTViaTab(tabId, fullUrl, wantToken = false) {
   let result = await runChatGPTTabFetch(tabId, fullUrl, SESSION_PATH);
   if (result && result._err && isTokenExpiredResponse(result.status, result.body)) {
     const tag = tokenTag(result.staleToken);
@@ -173,7 +184,8 @@ async function fetchChatGPTViaTab(tabId, fullUrl) {
     noteRefreshOutcome(tag, !!result && !result._err);
     if (stillExpired) throw new Error('err_chatgpt_token_expired');
   }
-  return chatgptTabResult(result);
+  const data = chatgptTabResult(result);
+  return wantToken ? { data, token: typeof result.token === 'string' ? result.token : null } : data;
 }
 
 // The MAIN-world half. `sessionPath` is the plain session endpoint, or its refresh form on the one
@@ -210,7 +222,9 @@ async function runChatGPTTabFetch(tabId, fullUrl, sessionPath) {
           return { _err: true, status: resp.status, body: text.slice(0, 500),
             staleToken: resp.status === 401 ? session.accessToken : undefined };
         }
-        return { _err: false, data: await resp.json() };
+        // The bearer goes back to the service worker only (never into storage the page can read);
+        // fetchChatGPTViaTab drops it unless its caller asked for it.
+        return { _err: false, data: await resp.json(), token: session.accessToken };
       } catch (e) {
         return { _err: true, status: 0, message: e.message };
       }
@@ -262,7 +276,7 @@ function chatgptTabResult(result) {
 }
 
 // --- Cookie-based fallback: 2-step auth via cookies ---
-async function fetchChatGPTWithCookies(url) {
+async function fetchChatGPTWithCookies(url, wantToken = false) {
   const cookies = await chrome.cookies.getAll({ url: CHATGPT_API_BASE });
   if (!cookies.length) {
     throw new Error('err_chatgpt_no_cookies');
@@ -280,13 +294,14 @@ async function fetchChatGPTWithCookies(url) {
   };
 
   let { resp, token } = await fetchChatGPTCookieAttempt(url, commonHeaders, SESSION_PATH);
+  let usedToken = token;
   if (resp.status === 401) {
     const text = await resp.text().catch(() => '');
     if (isTokenExpiredResponse(401, text)) {
       const tag = tokenTag(token);
       if (!refreshAllowed(tag)) throw new Error('err_chatgpt_token_expired');
       try {
-        ({ resp } = await fetchChatGPTCookieAttempt(url, commonHeaders, SESSION_REFRESH_PATH));
+        ({ resp, token: usedToken } = await fetchChatGPTCookieAttempt(url, commonHeaders, SESSION_REFRESH_PATH));
       } catch (e) {
         noteRefreshOutcome(tag, false);
         throw e;
@@ -296,7 +311,40 @@ async function fetchChatGPTWithCookies(url) {
       if (isTokenExpiredResponse(resp.status, retryText)) throw new Error('err_chatgpt_token_expired');
     }
   }
-  return chatgptCookieResult(resp);
+  const data = await chatgptCookieResult(resp);
+  return wantToken ? { data, token: usedToken } : data;
+}
+
+// === Read with a KEPT bearer (#2620) ===
+// GET `path` with a token kept from when that account was active, instead of the browser's current
+// session — /wham/usage answers for the token's account even after the user switched away
+// (measured 2026-10-27). Never refreshes (a refresh mints a token for the CURRENT account) and never
+// SETS a cookie. The browser's cookies ride along (Cloudflare may want them); the `_account` among
+// them does not override the bearer's account (measured 2026-10-27: old bearer + `_account=personal`
+// still read the workspace). → `{ ok: true, data }` or `{ ok: false, status }`; never throws, so one
+// dead token cannot fail the cycle.
+// Bounded: these reads run inside the collect cycle (and its shared lock), so a request the
+// provider leaves hanging must not stall the rest of ChatGPT, Gemini after it, or a switch collect
+// waiting on the lock (#2620 R1-B2).
+const KEPT_TOKEN_READ_TIMEOUT_MS = 8000;
+export async function fetchChatGPTWithKeptToken(path, token) {
+  if (typeof token !== 'string' || !token) return { ok: false, status: 0 };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), KEPT_TOKEN_READ_TIMEOUT_MS);
+  try {
+    const resp = await fetch(`${CHATGPT_API_BASE}${path}`, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+      credentials: 'include',
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return { ok: false, status: resp.status };
+    return { ok: true, data: await resp.json() };
+  } catch {
+    return { ok: false, status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // One session read + one API call. `sessionPath` is the plain endpoint, or its refresh form on the

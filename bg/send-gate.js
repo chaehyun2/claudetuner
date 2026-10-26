@@ -246,5 +246,9 @@ export async function gateProviderSnapshot(uuid, currentValues, { force = false,
   const commit = async () => {
     await chrome.storage.local.set({ [key]: { lastValues: currentValues, lastSentAt: Date.now() } });
   };
-  return { send, reason, commit, meta: sendMeta(prev.lastValues, currentValues, reason, { userManual, ignoreIdleReset: true }) };
+  // Whether the last snapshot this org sent carried real usage — i.e. the server holds numbers a
+  // usage-null send would overwrite (#2620 R1-B1: an account no longer readable must not blank them).
+  const lv = prev.lastValues;
+  const hadUsage = !!lv && (lv.h5 != null || lv.d7 != null);
+  return { send, reason, commit, hadUsage, meta: sendMeta(prev.lastValues, currentValues, reason, { userManual, ignoreIdleReset: true }) };
 }
