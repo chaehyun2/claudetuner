@@ -6,7 +6,8 @@ import {
   chatgptPlanName, unixToResetTime, parseAccountsRoster, windowSpan, classifyWindows,
   parseAdditionalLimits, parseModelAvailability, parseReachedType, summarizeLimitBuckets,
   pickScopedModel, parseChatGPTResetSummary, parseChatGPTResetDetail, mergeChatGPTResetDetail,
-  CHATGPT_USAGE_PATH, chatgptUsageAccountId, chatgptPersonalOrgKey,
+  CHATGPT_USAGE_PATH, chatgptUsageAccountId, chatgptPersonalOrgKey, chatgptActiveDisplayPlan, chatgptInactivePersonal,
+  isUnmeteredChatgptUsage,
 } from './parse-chatgpt.js';
 import { unknownResetPassSummary } from './reset-pass-model.js';
 import { resetPassField } from './reset-pass-payload.js';
@@ -102,7 +103,13 @@ async function getChatGPTAccountsRoster(activeAccountId, activePlanType, forceRe
     // against the same active account it is served for — the exclusion cannot go stale here.
     // `personalOrgKey` (#2458) rides the cached roster: it is a function of this same response and
     // active id, so it is exactly as fresh as the exclusion — no second cache to keep in step.
-    const roster = { ...parseAccountsRoster(data, activeAccountId), personalOrgKey: chatgptPersonalOrgKey(data, activeAccountId) };
+    // `activeDisplayPlan` rides it the same way.
+    const roster = {
+      ...parseAccountsRoster(data, activeAccountId),
+      personalOrgKey: chatgptPersonalOrgKey(data, activeAccountId),
+      activeDisplayPlan: chatgptActiveDisplayPlan(data, activeAccountId),
+      inactivePersonal: chatgptInactivePersonal(data, activeAccountId),
+    };
     // One line per (at most hourly) refresh: what the LIVE response carried. This is the
     // signal that was missing while diagnosing the null-pending incident — it separates
     // "the API didn't return a scheduled change" from "we parsed/sent it wrong" at a glance.
@@ -258,7 +265,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     // the response actually look like" once those have happened.
     const shape = chatgptUsageShape(usage);
 
-    if (!usage?.rate_limit) {
+    // An unmetered account (Enterprise pilot: rate_limit null, credits unlimited) is collected with
+    // usage null rather than dropped as a malformed response.
+    if (!usage?.rate_limit && !isUnmeteredChatgptUsage(usage)) {
       console.warn('[Claude Tuner] ChatGPT: unexpected /wham/usage response');
       await noteProviderError('chatgpt', 'err_chatgpt_collect_failed');
       // Same early-return hole as the Gemini twin: no snapshot means no observation unless the
@@ -272,7 +281,6 @@ export async function collectChatGPT(force = false, userManual = false) {
     await noteDriftOutcome('chatgpt', 'success', null);
 
     const { w5h, w7d } = classifyWindows(usage.rate_limit);
-    const plan = chatgptPlanName(usage.plan_type);
     const accountId = chatgptUsageAccountId(usage);
     const email = usage.email || null;
 
@@ -284,6 +292,9 @@ export async function collectChatGPT(force = false, userManual = false) {
     // from an unrelated Claude trigger (e.g. a Claude 429) and shouldn't hit accounts/check.
     const roster = await getChatGPTAccountsRoster(accountId, usage.plan_type, userManual);
     const renewalDate = roster.defaultRenewal;
+    // The menu's label when accounts/check gives a trusted one for THIS account (Enterprise pilot:
+    // /wham/usage says 'business'), else /wham/usage's plan_type as before.
+    const plan = roster.activeDisplayPlan || chatgptPlanName(usage.plan_type);
     // #2458: /wham/usage sometimes keys the PERSONAL account by its UUID instead of its usual `user-…`
     // id. File it under `user-…` so it stays one org (history, send gate, 3-org cap, auto orders) — the
     // reads that ask ChatGPT about "the active account" (reset detail, VAT, training) keep `accountId`.
@@ -308,6 +319,9 @@ export async function collectChatGPT(force = false, userManual = false) {
       // else — the popup labels from this rather than assuming the slot's nominal length (#954).
       w5s: windowSpan(w5h),
       w7s: windowSpan(w7d),
+      // No metered windows at all (Enterprise pilot) — the in-page widgets say "no usage limits"
+      // instead of "collecting…", which would never come true. Same flag the Gemini collector sets.
+      noLimits: isUnmeteredChatgptUsage(usage),
       renewalDate, // next-billing date (accounts/check entitlement.renews_at); may be null
       // Scheduled plan change from accounts/check entitlement.scheduled_plan_change
       // (e.g. "changes to Plus on 7/22"); null when no downgrade/change is scheduled.
@@ -475,7 +489,20 @@ export async function collectChatGPT(force = false, userManual = false) {
     // workspace 2xx erase the primary's failure (Codex DEPLOY-BLOCKER).
     if (sendOutcome.failed) await noteProviderSendError('chatgpt', sendOutcome.failed);
     else if (sendOutcome.ok) await noteProviderSendOk('chatgpt');
-    return { success: true, orgs: [org, ...extraOrgs] };
+    // The personal account while a workspace is active (accounts/check still names it `default`, so
+    // the roster leaves it out). LISTED, NEVER SENT — see chatgptInactivePersonal. Its usage stays null
+    // like any extra workspace's: a carried-over number would be stale (a reset, or use elsewhere) yet
+    // read as current (Codex R1-B1). `localOnly` also keeps it out of rec reconciliation and history.
+    const ip = roster.inactivePersonal;
+    const localOrgs = ip && ip.orgKey !== org.uuid && !extraOrgs.some((ex) => ex.uuid === ip.orgKey)
+      ? [{
+        uuid: ip.orgKey, name: email || 'ChatGPT', email: email || null, plan: ip.plan, provider: 'chatgpt',
+        isPrimary: false, h5: null, d7: null, resetsAt5h: null, resetsAt7d: null, w5s: null, w7s: null,
+        renewalDate: ip.renewal, pendingPlan: ip.pendingPlan || null, pendingChangeDate: ip.pendingChangeDate || null,
+        spendUsed: null, spendLimit: null, extraUsage: null, localOnly: true,
+      }]
+      : [];
+    return { success: true, orgs: [org, ...extraOrgs, ...localOrgs] };
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection failed:', e.message);
     // The reason dies here otherwise: the caller only sees `success:false`, and background.js

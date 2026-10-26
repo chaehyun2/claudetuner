@@ -239,6 +239,14 @@ export function appendUsageWithheldTip(el, org) {
   el.append(' ', icon);
 }
 
+// A ChatGPT account the collector LISTS but did not READ: an extra workspace (accounts/check gives
+// plan and renewal only) or the personal account while a workspace is active (`localOnly`). /wham/usage
+// answers for the active account only, so "no numbers" here means unknown — not unlimited (that is
+// `noLimits`, set only when the provider said so) and not Claude's usage-based Enterprise layout.
+export function chatgptUsageUnread(org) {
+  return !!org && org.provider === 'chatgpt' && org.h5 == null && org.d7 == null && !org.noLimits;
+}
+
 export function usageWithheldForDisplay(org, util5h, util7d, extraUsage) {
   // 🔴 EXTRA USAGE COUNTS AS SOMETHING TO SHOW. Without this the popup printed "Claude isn't
   // providing usage for this account" directly above a working spend gauge — the account has null

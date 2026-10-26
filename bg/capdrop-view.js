@@ -62,6 +62,27 @@ function identity(provider, uuid) {
 const NAMES_SHOWN_MAX = 2;
 
 /**
+ * The orgs the server is currently dropping at the cap, as `provider|uuid` identities — what the org
+ * chips test membership with (same identity as the banner's, so the two never disagree about an org).
+ * Accepts the raw CAP_DROP_KEY record; anything malformed is simply no drops.
+ */
+export function capDroppedIds(record) {
+  const orgs = record && Array.isArray(record.orgs) ? record.orgs : [];
+  const ids = new Set();
+  for (const o of orgs) {
+    if (!o || typeof o.key !== 'string') continue;
+    const uuid = uuidOf(o.key);
+    if (uuid) ids.add(identity(o.provider, uuid));
+  }
+  return ids;
+}
+
+/** An org's identity on the same axis as capDroppedIds. */
+export function capDropIdentity(org) {
+  return identity(org && org.provider, org && org.uuid);
+}
+
+/**
  * Decide what the banner renders.
  *
  * @param {Array<{key:string, provider:string}>} orgs   the CAP_DROP_KEY (bg/constants.js) entries

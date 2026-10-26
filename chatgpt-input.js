@@ -57,8 +57,8 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)', cmp_msg_tip: '이 질문을 Claude·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)' },
-    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)', cmp_msg_tip: 'Send this question to Claude & Gemini too and cross-check the answers (AI Cross-Check)' },
+    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', no_limit: '사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)', cmp_msg_tip: '이 질문을 Claude·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)' },
+    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', no_limit: 'No usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)', cmp_msg_tip: 'Send this question to Claude & Gemini too and cross-check the answers (AI Cross-Check)' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -498,6 +498,14 @@
     // Prefer the 5h window; fall back to the 7d window for plans that expose
     // only a weekly limit (e.g. ChatGPT Pro 5x 'prolite', where h5 is null).
     const use7d = _data && _data.h5 == null && _data.d7 != null;
+    // An unmetered account (Enterprise pilot) has no window to draw, and "수집 중" would never come
+    // true — say there is no limit, with the plan, the way gemini-input.js does for its no-limit seats.
+    if (_data && _data.noLimits && _data.h5 == null && _data.d7 == null) {
+      const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'chatgpt')}` : '');
+      const logo = chrome.runtime.getURL('icons/icon16.png');
+      strip.innerHTML = `<div class="ct-cg-strip-inner"><img src="${logo}" class="ct-cg-strip-logo" alt="CT"><span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(msg)}</span></div>`;
+      return;
+    }
     if (!_data || (_data.h5 == null && _data.d7 == null)) {
       // 🔴 "수집 중" is a claim. When the background knows collection is FAILING it says so
       // (`err`, bg/sidebar-usage.js noDataReason) and this line must not contradict it (#1592).
@@ -661,7 +669,7 @@
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
-            _data.plan === res.plan && _data.err === res.err) return;
+            _data.plan === res.plan && _data.noLimits === res.noLimits && _data.err === res.err) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang
         // (a Claude-snapshot field that defaults to 'en' for ChatGPT).

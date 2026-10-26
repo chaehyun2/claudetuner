@@ -1,7 +1,7 @@
 // Org selector + multi-org badges for the popup. Top of the UI dependency graph: a full view
 // switch, so it imports charts/prediction/recommend. Imports are one-way (no ui/* module imports
 // this); i18n `t` + CT_CONFIG are globals from classic scripts.
-import { escHtml, planDisplayName, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS } from './util.js';
+import { chatgptUsageUnread, escHtml, planDisplayName, gaugeColor, formatResetAbsolute, refreshDashboardLinks, setRenewalDisplay, recType, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS } from './util.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
@@ -10,7 +10,8 @@ import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, 
 import { renderResetPassChip } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
-import { PROVIDER_LABELS } from '../bg/constants.js';
+import { PROVIDER_LABELS, CAP_DROP_KEY } from '../bg/constants.js';
+import { capDroppedIds, capDropIdentity } from '../bg/capdrop-view.js';
 import { planOrderRank } from './plan-order.js';
 import { TRAINING_CACHE_KEY_CHATGPT, chatgptTrainingStateFor } from '../bg/training-view.js';
 import { renderLoginNudgeSpark } from './login-nudge.js';
@@ -212,10 +213,14 @@ export function selectOrg(orgId, container) {
     const providerKey = orgData.provider || 'claude';
     const isClaudeOrg = providerKey === 'claude';
     const isEnterprise = /Enterprise/i.test(orgData.plan);
-    const isUsageBased = isEnterprise && orgData.h5 == null && orgData.d7 == null;
-    // No-limit Gemini plan (Workspace/Business/Enterprise): flagged by the collector
-    // by plan (these seats report 0% windows). Show "no usage limits" not "0%".
-    const isNoLimitGemini = providerKey === 'gemini' && !!orgData.noLimits;
+    // No-limit plan, flagged by the collector: Gemini Workspace/Business/Enterprise seats (they
+    // report 0% windows) and an unmetered ChatGPT account (Enterprise pilot: no windows at all).
+    // Show "no usage limits", not "0%" — and not the Claude usage-based Enterprise layout below:
+    // unlimited credits say nothing about how the seat is billed.
+    const isNoLimitPlan = (providerKey === 'gemini' || providerKey === 'chatgpt') && !!orgData.noLimits;
+    // A ChatGPT account listed but not read this cycle: its usage is unknown (deploy-1.56.2 R1-B3).
+    const isUsageUnread = chatgptUsageUnread(orgData);
+    const isUsageBased = isEnterprise && orgData.h5 == null && orgData.d7 == null && !isNoLimitPlan && !isUsageUnread;
     // No 5h window (e.g. ChatGPT after the 5h limit was removed): h5 is null but 7d
     // is still reported. Hide the 5h gauge row entirely instead of showing "N/A".
     // Data-driven (not provider-gated) so a ChatGPT plan that DOES expose a 5h window
@@ -257,7 +262,14 @@ export function selectOrg(orgId, container) {
           + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + t('enterprise_unlimited') + '</div>'
           + '</div>';
       }
-    } else if (isNoLimitGemini) {
+    } else if (isUsageUnread) {
+      // Same centred layout as the no-limit branch, saying the numbers were not read — not "0%"/"N/A".
+      if (renewalGroup) renewalGroup.style.display = 'none';
+      gaugeSection.innerHTML = '<div style="text-align:center;padding:6px 0">'
+        + '<div style="font-size:13px;font-weight:600;color:var(--accent)">' + escHtml(_providerOrgLabel(orgData) || orgData.plan || 'ChatGPT') + '</div>'
+        + '<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">' + escHtml(t('org_usage_unread')) + '</div>'
+        + '</div>';
+    } else if (isNoLimitPlan) {
       // No 5h/7d limits — mirror the Enterprise-unlimited layout with the plan name.
       if (renewalGroup) renewalGroup.style.display = 'none';
       gaugeSection.innerHTML = '<div style="text-align:center;padding:6px 0">'
@@ -556,13 +568,13 @@ export function selectOrg(orgId, container) {
     };
     // No 5h/7d limits (Enterprise usage-based or no-limit Gemini): no tab rolling
     // needed, stop it. Restored on org switch.
-    if (isUsageBased || isNoLimitGemini) {
+    if (isUsageBased || isNoLimitPlan) {
       _stopChartAutoRoll();
     } else if (isChartAutoRoll() && !isChartRolling()) {
       _startChartAutoRoll();
     }
     const chartSection = document.getElementById('chart-section');
-    if ((hist.length >= 2 || isUsageBased) && !isNoLimitGemini) {
+    if ((hist.length >= 2 || isUsageBased) && !isNoLimitPlan) {
       if (chartSection) chartSection.style.display = '';
       drawCharts(hist, orgPlan, orgSnapshot);
     } else {
@@ -572,7 +584,7 @@ export function selectOrg(orgId, container) {
     }
 
     // === 9. Status banner ===
-    if (isUsageBased || isNoLimitGemini) {
+    if (isUsageBased || isNoLimitPlan) {
       // No 5h/7d data (usage-based Enterprise or no-limit Gemini): hide banner
       const banner = document.getElementById('status-banner');
       if (banner) banner.classList.add('hidden');
@@ -646,6 +658,7 @@ export function showMultiOrgBadges(collectedOrgs) {
     chip.className = 'org-chip' + (org.isPrimary ? ' primary' : '') + (isSelected ? ' selected' : '');
     chip.title = org.name;
     chip.dataset.orgId = org.uuid;
+    chip.dataset.capId = capDropIdentity(org);
 
     const isEnterprise = /Enterprise/i.test(org.plan);
     let usageText;
@@ -654,6 +667,11 @@ export function showMultiOrgBadges(collectedOrgs) {
       const limit = Math.round(org.spendLimit / 100);
       const pct = org.spendLimit > 0 ? Math.round((org.spendUsed || 0) / org.spendLimit * 100) : 0;
       usageText = `$${used}/$${limit} (${pct}%)`;
+    } else if (org.noLimits && org.d7 == null) {
+      // Two different "no number" states must not both read "-" (deploy-1.56.2 R1-B1).
+      usageText = t('org_no_limit_short');
+    } else if (chatgptUsageUnread(org)) {
+      usageText = t('org_usage_unread_short');
     } else {
       usageText = org.d7 != null ? Math.round(org.d7) + '%' : '-';
     }
@@ -728,6 +746,27 @@ export function showMultiOrgBadges(collectedOrgs) {
   }
 
   userInfo.parentNode.insertBefore(wrapper, userInfo);
+  markCapDroppedChips(wrapper);
+}
+
+// Grey out the chips of orgs the server is not storing (not chosen among the dashboard's active orgs
+// — the same drops the cap banner counts) and say so in place of a usage number that is not being
+// kept. Async on purpose: the chips render first, the drop record only restyles them; popup.js calls
+// showMultiOrgBadges again when CAP_DROP_KEY changes, so a fixed selection un-greys on the next POST.
+function markCapDroppedChips(wrapper) {
+  try {
+    chrome.storage.local.get({ [CAP_DROP_KEY]: null }, (r) => {
+      const dropped = capDroppedIds(r && r[CAP_DROP_KEY]);
+      if (!dropped.size) return;
+      wrapper.querySelectorAll('.org-chip').forEach((chip) => {
+        if (!dropped.has(chip.dataset.capId)) return;
+        chip.classList.add('cap-dropped');
+        chip.title = t('org_not_collected_tip');
+        const usage = chip.querySelector('.org-chip-usage');
+        if (usage) usage.textContent = t('org_not_collected');
+      });
+    });
+  } catch { /* context gone — the chips just stay as drawn */ }
 }
 
 function showOrgBadge(orgs, selectedId) {

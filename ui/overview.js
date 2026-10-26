@@ -8,7 +8,7 @@
 // rather than re-implementing them. The detail renderer itself is left untouched — the
 // overview only hides the detail sections via a body class, so removing that class
 // restores each section to whatever its own logic last set (zero regression risk).
-import { escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, windowLabel } from './util.js';
+import { chatgptUsageUnread, escHtml, gaugeColor, _isDark, refreshDashboardLinks, planDisplayName, windowLabel } from './util.js';
 import { state, OVERVIEW_CLASS, isDetailHidden } from './state.js';
 import { popupForecastCache } from './prediction-core.js';
 import { planOrderRank } from './plan-order.js';
@@ -299,10 +299,10 @@ function _resetPassIcon(org, sameProviderCount, hist) {
 function _renderCard(org, hist, sameProviderCount = 1) {
   const provider = org.provider || 'claude';
   const isEnterprise = /Enterprise/i.test(org.plan);
-  const isUsageBased = isEnterprise && org.h5 == null && org.d7 == null;
-  // No-limit Gemini plan (Workspace/Business/Enterprise): flagged by the collector
-  // by plan (these seats report 0% windows). Show "no usage limits" not "0%".
-  const isNoLimitGemini = provider === 'gemini' && !!org.noLimits;
+  // No-limit plan (Gemini Workspace seats, unmetered ChatGPT Enterprise pilot) — see selectOrg.
+  const isNoLimitPlan = (provider === 'gemini' || provider === 'chatgpt') && !!org.noLimits;
+  const isUsageUnread = chatgptUsageUnread(org);
+  const isUsageBased = isEnterprise && org.h5 == null && org.d7 == null && !isNoLimitPlan && !isUsageUnread;
   // The brand logo identifies the provider, so the plan name no longer needs a
   // "GPT "/"Gemini " text prefix.
   const beta = (provider === 'chatgpt' || provider === 'gemini') ? '<span class="org-chip-beta">Beta</span>' : '';
@@ -317,7 +317,10 @@ function _renderCard(org, hist, sameProviderCount = 1) {
       ? _spendRow(org)
       // No spend cap configured: Enterprise unlimited fallback (mirrors selectOrg).
       : `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('enterprise_unlimited'))}</span></div>`;
-  } else if (isNoLimitGemini) {
+  } else if (isUsageUnread) {
+    // Listed, not read (deploy-1.56.2 R1-B2): say so instead of a card with no rows.
+    rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('org_usage_unread'))}</span></div>`;
+  } else if (isNoLimitPlan) {
     // Gemini plan with no 5h/7d limits: single "no usage limits" row.
     rows = `<div class="gauge-row"><span class="ov-unlimited">${escHtml(t('gemini_no_limit'))}</span></div>`;
   } else {

@@ -999,6 +999,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (changes[CAP_DROP_KEY] || changes[CAP_DROP_ACK_KEY] || changes.collectedOrgs) {
       checkCapDrops();
     }
+    // The chips grey out cap-dropped orgs (ui/org-selector.js markCapDroppedChips) — redraw them when
+    // only the drop record moved; a collectedOrgs change redraws them below anyway.
+    if (changes[CAP_DROP_KEY] && !changes.collectedOrgs && state.collectedOrgs.length >= 2) {
+      showMultiOrgBadges(state.collectedOrgs);
+    }
 
     // Immediately refresh org chips when collectedOrgs changes
     if (changes.collectedOrgs) {

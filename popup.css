@@ -556,6 +556,8 @@
     .org-chip:not(:last-child) { border-bottom: 1px solid var(--border); }
     .org-chip:hover { background: var(--bg-hover); }
     .org-chip.selected { background: var(--accent-light); }
+    .org-chip.cap-dropped { opacity: .5; }
+    .org-chip.cap-dropped .org-chip-usage { font-weight: 500; font-size: 10px; color: var(--text-muted); }
     .org-chip-plan { font-weight: 600; color: var(--text-primary); font-size: 10px; }
     .org-chip.primary .org-chip-plan { color: #4f46e5; }
     .org-chip-name { color: var(--text-muted); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

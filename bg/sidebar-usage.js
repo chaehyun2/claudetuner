@@ -37,7 +37,10 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     if (!orgData) return null;
   }
   if (!orgData && collectedOrgs.length > 0) {
-    orgData = collectedOrgs.find(o => o.isPrimary) || collectedOrgs[0];
+    // A `localOnly` org (ChatGPT's personal account while a workspace is active) was not read and is
+    // not the account the page is on — never the in-page panel's pick, even when pinned (Codex R2-B1).
+    const readable = collectedOrgs.filter(o => !o.localOnly);
+    orgData = readable.find(o => o.isPrimary) || readable[0] || null;
   }
 
   // Prefer snapshot when it's for the same org and is newer than collectedOrgs.

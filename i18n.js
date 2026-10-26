@@ -627,6 +627,11 @@ const TRANSLATIONS = {
     'org_auto_on': 'Claude에서 선택한 조직을 따라갑니다 (⚡ = 활성)',
     'org_auto_off': '📌으로 고정된 조직을 사용 중',
     'org_pin_hint': '📌으로 메인 조직 고정',
+    'org_not_collected': '수집 안 함',
+    'org_no_limit_short': '제한 없음',
+    'org_usage_unread_short': '미확인',
+    'org_usage_unread': 'ChatGPT에서 이 계정으로 바꾸면 사용량을 읽어요',
+    'org_not_collected_tip': '대시보드 활성 조직에서 선택하지 않아 저장되지 않는 조직입니다. 대시보드 설정에서 바꿀 수 있어요.',
     'org_cap_hint': '조직이 3개를 초과합니다 — 활성 3개 선택하기 →',
     // Plan fitness matrix
     'collapse_model_limits': '모델별 한도',
@@ -1450,6 +1455,11 @@ const TRANSLATIONS = {
     'org_auto_on': 'Follows your active org in Claude (⚡ = active)',
     'org_auto_off': 'Using pinned org',
     'org_pin_hint': 'Pin 📌 to set main org',
+    'org_not_collected': 'Not collected',
+    'org_no_limit_short': 'No limit',
+    'org_usage_unread_short': 'Not read',
+    'org_usage_unread': 'Usage is read once you switch to this account in ChatGPT',
+    'org_not_collected_tip': 'Not one of the active orgs chosen on the dashboard, so its usage is not saved. Change it in dashboard settings.',
     'org_cap_hint': 'More than 3 orgs — pick your active 3 →',
     // Fitness matrix
     'collapse_model_limits': 'Model limits',

@@ -147,7 +147,9 @@ export async function mergeChatGPTOrgs(force = false, userManual = false) {
     // place, so without this the popup keeps rendering a rec whose signal is gone. Runs after the
     // collection (which POSTs and may store a FRESH rec), so a just-written rec is reconciled
     // against the very orgs it was computed from and survives.
-    await reconcileProviderRecs('chatgpt', result.orgs);
+    // A `localOnly` org (the personal account while a workspace is active) was NOT read this cycle, so
+    // it is not evidence that its stored rec still holds — left out, its rec is dropped (Codex R1-B2).
+    await reconcileProviderRecs('chatgpt', result.orgs.filter(o => !o.localOnly));
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonChatGPT = collectedOrgs.filter(o => o.provider !== 'chatgpt');
     if (result.orgs.length > 0) {
@@ -155,8 +157,8 @@ export async function mergeChatGPTOrgs(force = false, userManual = false) {
       const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;
       const merged = result.orgs.map(o => ({ ...o, isPrimary: o.uuid === prevPrimaryUuid }));
       await chrome.storage.local.set({ collectedOrgs: [...nonChatGPT, ...merged] });
-      // Save history for chart display
-      for (const org of result.orgs) {
+      // Save history for chart display. A local-only org was not read this cycle — no point.
+      for (const org of result.orgs.filter(o => !o.localOnly)) {
         await appendUsageHistory({
           t: Date.now(), h5: org.h5 ?? null, d7: org.d7 ?? null,
           // r5 = the 5h window's reset id. Without it a 5h boundary can only be inferred from the

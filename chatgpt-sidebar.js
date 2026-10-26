@@ -56,7 +56,7 @@
 
   const I18N = {
     ko: {
-      title: '사용량', session: '세션 (5h)', weekly: '주간', no_data: '데이터 수집 중...',
+      title: '사용량', session: '세션 (5h)', weekly: '주간', no_data: '데이터 수집 중...', no_limit: '사용량 제한 없음',
       dashboard: '대시보드 열기', settings: '설정', notices: '공지사항',
       tip_5h: '최근 5시간 사용량.\n리셋 후 초기화됩니다.\n\n' + NOTE,
       tip_7d: '7일 주간 사용량.\n리셋 주기가 더 깁니다.\n\n' + NOTE,
@@ -79,7 +79,7 @@
       addl_toggle: '추가 사용량 접기/펼치기',
     },
     en: {
-      title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...',
+      title: 'Usage', session: 'Session (5h)', weekly: 'Weekly', no_data: 'Collecting data...', no_limit: 'No usage limits',
       dashboard: 'Open dashboard', settings: 'Settings', notices: 'Notices',
       tip_5h: 'Usage in the last 5-hour window.\nResets periodically.\n\n' + NOTE_EN,
       tip_7d: 'Usage in the 7-day window.\nLonger reset cycle.\n\n' + NOTE_EN,
@@ -467,6 +467,12 @@
     const content = document.getElementById('ct-cg-content');
     if (!content) return;
 
+    // Unmetered account (Enterprise pilot): no window will ever arrive — see chatgpt-input.js.
+    if (_data && _data.noLimits && _data.h5 == null && _data.d7 == null) {
+      const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'chatgpt')}` : '');
+      content.innerHTML = `<div class="ct-cg-message text-token-text-tertiary">${CORE.escapeHtml(msg)}</div>`;
+      return;
+    }
     if (!_data || (_data.h5 == null && _data.d7 == null)) {
       // "수집 중" only when nothing is known to be wrong — see chatgpt-input.js (#1592).
       const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'ChatGPT') : t('no_data')) : t('no_data');
@@ -752,7 +758,7 @@
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
             _data.w5s === res.w5s && _data.w7s === res.w7s &&
-            _data.plan === res.plan && sameExtras && _data.err === res.err &&
+            _data.plan === res.plan && sameExtras && _data.noLimits === res.noLimits && _data.err === res.err &&
             _rpDrawn === resetPassChipHtml(res)) return;
         _data = res;
         // Note: _lang is driven by the user's extension language setting

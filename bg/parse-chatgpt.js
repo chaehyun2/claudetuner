@@ -60,6 +60,19 @@ const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
   self_serve_business_usage_based: 'Business',
 };
 
+// accounts/check `account.plan_display_name` — the label ChatGPT's own account menu shows. Read ONLY
+// through this table, for tiers the codes above misreport. Measured 2026-10-26 on an Enterprise pilot
+// workspace (`workspace_type: 'pilot'`): plan_display_name 'Enterprise', plan_type 'business',
+// subscription_plan 'chatgptfreeplan' — the subscription code alone recorded it as Free, and the
+// active-account path (/wham/usage plan_type) as Business, for a workspace the menu calls Enterprise.
+// It is free text, so only exact known labels are trusted; anything else falls through to the codes
+// ('Business Usage Based' on a usage-based Business workspace stays on its subscription code).
+const CHATGPT_DISPLAY_PLAN_NAMES = { enterprise: 'Enterprise' };
+export function chatgptDisplayPlan(displayName) {
+  if (typeof displayName !== 'string') return null;
+  return CHATGPT_DISPLAY_PLAN_NAMES[displayName.trim().toLowerCase()] || null;
+}
+
 // Derive a workspace's display plan without a per-workspace /wham/usage call:
 // prefer the entitlement's subscription_plan, then the account plan_type, then
 // fall back to the generic tier-code mapping. Returns null when NOTHING was observed.
@@ -96,11 +109,14 @@ const CHATGPT_ACCOUNT_PLAN_TYPE_NAMES = {
 //
 // 🔴 The non-string throw contract is UNCHANGED: a numeric plan_type still reaches .toLowerCase()
 // on the line above and throws, which parseChatGPTScheduledChange relies on validating against.
-export function chatgptWorkspacePlan(entitlement, accountPlanType) {
+export function chatgptWorkspacePlan(entitlement, accountPlanType, displayName = null) {
   // A Business Premium seat reports subscription_plan 'chatgptprolite' (the PERSONAL Pro 100 code)
   // next to plan_type 'self_serve_business_prolite'. The seat code wins so an extra workspace is
   // stored exactly like the active-account path stores it, not as personal 'Pro 5x' (#1925).
   if (String(accountPlanType || '').toLowerCase() === BUSINESS_PREMIUM_PLAN_TYPE) return chatgptPlanName(accountPlanType);
+  // A recognised menu label outranks the codes, which can say Free for an Enterprise pilot.
+  const shown = chatgptDisplayPlan(displayName);
+  if (shown) return shown;
   const sub = entitlement?.subscription_plan;
   if (sub && CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub]) return CHATGPT_SUBSCRIPTION_PLAN_NAMES[sub];
   const pt = (accountPlanType || '').toLowerCase();
@@ -242,13 +258,71 @@ export function resolveActiveChatgptAccount(data, usageKey) {
  */
 export function chatgptPersonalOrgKey(data, usageKey) {
   if (typeof usageKey !== 'string' || usageKey.startsWith('user-')) return null;
-  const acc = resolveActiveChatgptAccount(data, usageKey)?.account;
-  if (!acc || acc.structure !== 'personal') return null;
+  return personalUserKey(resolveActiveChatgptAccount(data, usageKey)?.account);
+}
+
+// A personal account's `user-…` org key from account_user_id = `${user_id}__${account_id}`, or null.
+function personalUserKey(acc) {
+  if (!isPlainObj(acc) || acc.structure !== 'personal') return null;
   const suffix = `__${acc.account_id}`;
   const au = acc.account_user_id;
   if (typeof au !== 'string' || !au.endsWith(suffix)) return null;
   const userKey = au.slice(0, -suffix.length);
   return /^user-[A-Za-z0-9]+$/.test(userKey) ? userKey : null;
+}
+
+/**
+ * The PERSONAL account while a workspace is the active one — { orgKey, plan, renewal, pendingPlan,
+ * pendingChangeDate } — or null. Pure.
+ *
+ * accounts/check keeps naming the personal account as `default` after the user switches the web app
+ * to a workspace (measured 2026-10-26: default = personal Plus while /wham/usage answered for an
+ * Enterprise workspace), and parseAccountsRoster excludes `default` from the extras (#1144). So the
+ * personal account vanished from the popup the moment a workspace was active.
+ *
+ * 🔴 FOR THE LOCAL ORG LIST ONLY — NEVER SENT. /wham/usage describes the active account only, so this
+ * account's usage is unknown here; a usage-null snapshot under its key would overwrite the real row
+ * the server stored while it was active (the #1144 harm, by another route). Keyed `user-…` like the
+ * active-path snapshot (#2458), so it is the same org as the server's and the dashboard's.
+ *
+ * Only when /wham/usage's account RESOLVES to a different account: an unresolved key might be this
+ * very account under an id accounts/check does not carry.
+ */
+export function chatgptInactivePersonal(data, usageKey) {
+  const def = isPlainObj(data?.accounts) && isPlainObj(data.accounts.default) ? data.accounts.default : null;
+  const acc = def && isPlainObj(def.account) ? def.account : null;
+  if (!acc || acc.is_deactivated || def.can_access_with_session === false) return null;
+  const orgKey = personalUserKey(acc);
+  if (!orgKey) return null;
+  const active = resolveActiveChatgptAccount(data, usageKey);
+  if (!active || active.account.account_id === acc.account_id) return null;
+  return {
+    orgKey,
+    plan: chatgptWorkspacePlan(def.entitlement, acc.plan_type, acc.plan_display_name),
+    renewal: def.entitlement?.renews_at || null,
+    ...parseChatGPTScheduledChange(def),
+  };
+}
+
+/**
+ * The active account's plan as ChatGPT's menu labels it, when that label is one chatgptDisplayPlan
+ * trusts — else null, and the caller keeps /wham/usage's plan_type. /wham/usage says 'business' for an
+ * Enterprise pilot workspace (measured 2026-10-26). Only the account /wham/usage reported on counts:
+ * accounts/check's `default` can be a different account (here: the personal Plus one). Pure.
+ */
+export function chatgptActiveDisplayPlan(data, usageKey) {
+  return chatgptDisplayPlan(resolveActiveChatgptAccount(data, usageKey)?.account?.plan_display_name);
+}
+
+/**
+ * /wham/usage for an account with no metered windows: `rate_limit` explicitly null AND the provider
+ * saying its credits are unlimited (an Enterprise pilot workspace, measured 2026-10-26). That is a
+ * real answer — no 5h/7d to report — not a malformed response, so the account is still collected
+ * with usage null (the UI renders an Enterprise org without usage as unlimited). Anything short of
+ * both signals stays a parse failure. Pure.
+ */
+export function isUnmeteredChatgptUsage(usage) {
+  return isPlainObj(usage) && usage.rate_limit === null && usage.credits?.unlimited === true;
 }
 
 /**
@@ -326,7 +400,7 @@ export function parseAccountsRoster(data, activeAccountId = null) {
       accountId: acc.account_id,
       name: acc.name || null,
       structure: acc.structure || null, // 'workspace' | 'personal'
-      plan: chatgptWorkspacePlan(a.entitlement, acc.plan_type),
+      plan: chatgptWorkspacePlan(a.entitlement, acc.plan_type, acc.plan_display_name),
       renewal: a.entitlement?.renews_at || null,
       hasActiveSubscription: !!a.entitlement?.has_active_subscription,
       ...parseChatGPTScheduledChange(a),
