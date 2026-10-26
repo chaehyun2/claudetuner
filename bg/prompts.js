@@ -46,6 +46,7 @@ const TRACK_EVENTS = {
   prompt_save: ['site', 'src', 'result'],
   prompt_delete: ['site'],
   prompt_intro: ['site', 'action'],
+  prompt_team_share: ['site', 'result'],
 };
 
 /** op → [method, path, needsId, sendsBody]. */
@@ -58,6 +59,10 @@ const OPS = {
   unlike: ['DELETE', '/api/ext/prompt-store/:id/like', true, false],
   use: ['POST', '/api/ext/prompt-store/:id/use', true, false],
   save: ['POST', '/api/ext/prompt-store/:id/save', true, false],
+  // Team prompts (#2601): the orgs' shared prompts — list, share one of mine into an org, count a use.
+  team: ['GET', '/api/ext/team-prompts', false, false],
+  team_share: ['POST', '/api/ext/team-prompts', false, true],
+  team_use: ['POST', '/api/ext/team-prompts/:id/use', true, false],
 };
 
 /** Only the fields a create may carry, as strings — the server validates lengths again. */
@@ -65,6 +70,12 @@ function createBody(body) {
   const b = body && typeof body === 'object' ? body : {};
   const source = SITES.includes(b.source) ? b.source : 'other';
   return { title: String(b.title || ''), body: String(b.body || ''), source };
+}
+
+/** A team share = a create's fields + the org (an integer — the server checks membership). */
+function teamShareBody(body) {
+  const orgId = Number(body && body.org_id);
+  return { ...createBody(body), org_id: Number.isSafeInteger(orgId) && orgId > 0 ? orgId : 0 };
 }
 
 /** Personal prompts get `sourceLabel` (where they were saved) — the picker shows it, and the names live in one place. */
@@ -87,7 +98,7 @@ async function callOp(message) {
   const options = { method };
   if (sendsBody) {
     options.headers = { 'Content-Type': 'application/json' };
-    options.body = JSON.stringify(createBody(message.body));
+    options.body = JSON.stringify(message.op === 'team_share' ? teamShareBody(message.body) : createBody(message.body));
   }
   const resp = await authedFetch(config, `${config.serverUrl}${path}`, options);
   if (!resp) return { ok: false, status: 0, code: 'no_token' };

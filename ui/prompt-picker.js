@@ -50,6 +50,7 @@
   const INTRO_BY = 'by Claude Tuner';      // product name — not translated
   const UNDO_MS = 6000;                    // a deleted row offers 「되돌리기」 this long
   const TRASH_PATHS = ['M3 6h18', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'];
+  const USERS_PATHS = ['M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2', 'M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8', 'M23 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'];
   const LOGIN_CODES = ['ext_token_required', 'login_proof_required', 'scope_insufficient', 'Unauthorized'];
 
   const I18N = {
@@ -71,6 +72,11 @@
       star_tip: '이 메시지를 프롬프트로 저장', star_done: '저장됨',
       saved_inline: '✓ 저장했어요', dup_inline: '✓ 이미 저장돼 있어요',
       btn_tip: '프롬프트 꺼내 쓰기 ({key})', btn_label: '프롬프트',
+      // Team prompts (#2601)
+      tab_team: '팀', team_empty: '아직 팀 프롬프트가 없어요. 내 프롬프트에 마우스를 올리고 팀 아이콘으로 공유해 보세요.',
+      share_team: '팀에 공유', share_ask_one: '{org} 팀원 모두에게 보여요 (공유한 사람으로 내 이름도)', share_ask_many: '어느 팀에 공유할까요? 팀원 모두에게 보여요',
+      share_btn: '공유', cancel: '취소', team_shared: '{org}에 공유했어요', team_exists: '{org}에 같은 프롬프트가 이미 있어요',
+      team_share_failed: '팀에 공유하지 못했어요', team_limit: '팀 프롬프트가 가득 찼어요({n}개)', team_by_gone: '떠난 멤버', team_by_me: '나',
     },
     en: {
       title: 'Prompts', tab_mine: 'My prompts', tab_store: 'Recommended', search: 'Search',
@@ -90,6 +96,11 @@
       star_tip: 'Save this message as a prompt', star_done: 'Saved',
       saved_inline: '✓ Saved', dup_inline: '✓ Already saved',
       btn_tip: 'Use a prompt ({key})', btn_label: 'Prompts',
+      // Team prompts (#2601)
+      tab_team: 'Team', team_empty: 'No team prompts yet. Hover one of your prompts and use the team icon to share it.',
+      share_team: 'Share with team', share_ask_one: 'Everyone in {org} will see it (and you as who shared it)', share_ask_many: 'Share with which team? Everyone there will see it',
+      share_btn: 'Share', cancel: 'Cancel', team_shared: 'Shared with {org}', team_exists: '{org} already has this prompt',
+      team_share_failed: 'Could not share with your team', team_limit: 'Your team\'s prompts are full ({n})', team_by_gone: 'former member', team_by_me: 'you',
     },
   };
 
@@ -127,6 +138,12 @@
 .pp-del svg { width: 14px; height: 14px; }
 .pp-del:hover { opacity: 1; color: #dc2626; background: rgba(220,38,38,.1); }
 .pp-item.on .pp-del { visibility: visible; }
+.pp-share { visibility: hidden; flex-shrink: 0; border: 0; background: none; color: inherit; opacity: .5; padding: 2px; border-radius: 6px; cursor: pointer; display: inline-flex; }
+.pp-share svg { width: 14px; height: 14px; }
+.pp-share:hover { opacity: 1; color: #7c3aed; background: rgba(124,58,237,.1); }
+.pp-item.on .pp-share { visibility: visible; }
+.pp-share-row { flex-wrap: wrap; }
+.pp-undo-btn:disabled { opacity: .4; cursor: default; }
 .pp-item.pp-undo { cursor: default; align-items: center; opacity: .75; font-size: 12px; }
 .pp-undo-btn { border: 0; background: none; color: #7c3aed; font: inherit; font-weight: 600; cursor: pointer; padding: 0 4px; }
 .pp.dark .pp-undo-btn { color: #c4b5fd; }
@@ -182,6 +199,10 @@
     // status / loadedAt are 내 프롬프트's; the 추천 list has its own (storeStatus: 'idle' | 'loading' | 'error' | 'ready')
     // so its failure shows as a failure on its tab and is retried on the next open (#2547).
     const state = { tab: 'mine', mine: null, store: null, status: 'idle', storeStatus: 'idle', code: null, query: '', active: 0, loadedAt: 0, storeLoadedAt: 0, storeLang: '', category: '', range: null, newId: null, saveNote: null, limit: '' };
+    // 팀 (#2601): every org's team prompts the account reads + those orgs. No org (or a worker without the route) → no 팀 chip.
+    // sharingId: the 내 프롬프트 row showing its 「팀에 공유」 confirmation in place.
+    Object.assign(state, { team: null, teamOrgs: [], teamStatus: 'idle', teamLoadedAt: 0, sharingId: null });
+    let sharing = false;   // one team share request at a time
     let host = null, shadow = null, toastTimer = null;
     // By id, never on the row objects: a list answer replaces those with fresh copies, which silently dropped
     // per-object marks (Codex UI R2 — R1-B1/B3/B4 still open).
@@ -259,6 +280,28 @@
       // A list in another language (the user switched the extension's language) is not shown at all.
       if (state.store && state.storeLang !== storeLang()) { state.store = null; state.storeStatus = 'idle'; }
       if (!loadingStore && !(state.storeStatus === 'ready' && Date.now() - state.storeLoadedAt < STALE_MS)) loadStore();
+      if (!loadingTeam && !(state.teamStatus === 'ready' && Date.now() - state.teamLoadedAt < STALE_MS)) loadTeam();
+    }
+
+    let loadingTeam = false;
+    async function loadTeam() {
+      loadingTeam = true;
+      const r = await send({ op: 'team' });
+      loadingTeam = false;
+      if (destroyed) return;
+      if (r.ok) {
+        state.team = r.data?.prompts || [];
+        state.teamOrgs = r.data?.orgs || [];
+        state.teamStatus = 'ready';
+        state.teamLoadedAt = Date.now();
+      } else if (r.status === 404 || r.status === 403 || isLoginFailure(r)) {
+        // No team route (older worker) or no access: nothing from an earlier answer stays on screen (Codex R3-B2).
+        state.team = null; state.teamOrgs = []; state.teamStatus = 'idle';
+      } else if (!state.team) {
+        state.teamStatus = 'error';   // no chip yet (no orgs known); the next open asks again
+      }
+      if (state.tab === 'team' && !state.teamOrgs.length) state.tab = 'mine';   // left the last org meanwhile
+      render();
     }
 
     async function loadMine() {
@@ -379,6 +422,7 @@
         track('prompt_insert', { kind, result: copied ? 'fallback_clipboard' : 'failed' });
       }
       if (kind === 'store') send({ op: 'use', id: item.id });
+      else if (kind === 'team') send({ op: 'team_use', id: item.id });
     }
 
     // ── save ──────────────────────────────────────────────────────────────────────────────────
@@ -472,7 +516,7 @@
     function rowsShown() {
       if (state.status === 'loading' && !state.mine) return false;   // 「불러오는 중…」 on either tab (Codex R2-B1)
       if (state.status === 'error' || state.status === 'inactive' || state.status === 'login') return false;
-      return state.tab === 'store' ? !!currentStore() : !!state.mine;
+      return state.tab === 'store' ? !!currentStore() : state.tab === 'team' ? !!state.team : !!state.mine;
     }
 
     /**
@@ -483,7 +527,8 @@
       if (!rowsShown()) return [];
       const q = state.query.toLowerCase();
       if (state.tab === 'store') return (currentStore() || []).filter((p) => matches(p, q) && (!state.category || p.category === state.category)).map((p) => ({ p, kind: 'store' }));
-      return (state.mine || []).filter((p) => matches(p, q)).map((p) => ({ p, kind: p.deleted ? 'undo' : 'mine' }))
+      if (state.tab === 'team') return (state.team || []).filter((p) => matches(p, q)).map((p) => ({ p, kind: 'team' }));
+      return (state.mine || []).filter((p) => matches(p, q)).map((p) => ({ p, kind: p.deleted ? 'undo' : p.id === state.sharingId && state.teamOrgs.length ? 'share' : 'mine' }))
         .concat(fillItems().filter((p) => matches(p, q)).map((p) => ({ p, kind: 'store' })));
     }
 
@@ -518,10 +563,14 @@
         list.appendChild(el('div', 'pp-msg', t(state.storeStatus === 'error' ? 'load_failed' : 'loading')));
         return;
       }
+      if (state.tab === 'team' && !state.team) {
+        list.appendChild(el('div', 'pp-msg', t(state.teamStatus === 'error' ? 'load_failed' : 'loading')));
+        return;
+      }
       const items = visibleItems();
       if (!items.length) {
-        const all = state.tab === 'mine' ? state.mine : currentStore();
-        list.appendChild(el('div', 'pp-msg', (all && all.length) ? t('no_match') : t(state.tab === 'mine' ? 'mine_empty' : 'store_empty')));
+        const all = state.tab === 'mine' ? state.mine : state.tab === 'team' ? state.team : currentStore();
+        list.appendChild(el('div', 'pp-msg', (all && all.length) ? t('no_match') : t(state.tab === 'mine' ? 'mine_empty' : state.tab === 'team' ? 'team_empty' : 'store_empty')));
         return;
       }
       if (state.tab === 'mine' && !liveMine().length && !state.query) list.appendChild(el('div', 'pp-note', t('mine_empty_short')));
@@ -529,9 +578,9 @@
       const painters = [];
       items.forEach(({ p, kind }, i) => {
         if (state.tab === 'mine' && kind === 'store' && (i === 0 || items[i - 1].kind !== 'store')) list.appendChild(el('div', 'pp-sep', t('fill_head')));
-        if (kind === 'undo') {
+        if (kind === 'undo' || kind === 'share') {
           // Selectable like any row (↑↓ shows where the keyboard is), with nothing to preview or insert (R1-B5).
-          const u = undoRow(p);
+          const u = kind === 'undo' ? undoRow(p) : shareRow(p);
           const paintUndo = (on) => { u.classList.toggle('on', on); if (on) showPreview(null); };
           paintUndo(i === state.active);
           painters.push(paintUndo);
@@ -545,14 +594,23 @@
         th.appendChild(el('div', 'pp-t', p.title || ''));
         // Where it was saved (내 프롬프트) / its category (추천) — small, after the title.
         // `sourceLabel` comes from the background proxy (bg/constants.js PROVIDER_LABELS — the one copy of those names).
-        const tag = kind === 'mine' ? p.sourceLabel : p.category;
+        const tag = kind === 'mine' ? p.sourceLabel : kind === 'team' ? (state.teamOrgs.length > 1 ? teamOrgName(p.org_id) : p.sourceLabel) : p.category;
         if (tag) th.appendChild(el('span', 'pp-tag', String(tag)));
         main.appendChild(th);
         const body = el('div', 'pp-b');
         main.appendChild(body);
         row.appendChild(main);
         if (kind === 'store') row.appendChild(storeSide(p));
+        else if (kind === 'team') row.appendChild(teamSide(p));
         else {
+          if (state.teamOrgs.length) {
+            const sh = el('button', 'pp-share');
+            sh.type = 'button'; sh.title = t('share_team'); sh.setAttribute('aria-label', t('share_team'));
+            sh.appendChild(icon(USERS_PATHS));
+            sh.addEventListener('mousedown', (e) => e.preventDefault());
+            sh.addEventListener('click', (e) => { e.stopPropagation(); state.sharingId = p.id; renderListOnly(); });
+            row.appendChild(sh);
+          }
           const del = el('button', 'pp-del');
           del.type = 'button'; del.title = t('del'); del.setAttribute('aria-label', t('del'));
           del.appendChild(icon(TRASH_PATHS));
@@ -611,6 +669,61 @@
       });
       side.appendChild(like);
       return side;
+    }
+
+    function teamOrgName(id) { const o = state.teamOrgs.find((x) => x.id === id); return o ? o.name : ''; }
+
+    /** 팀 row's right side: who shared it (the name before @; a sharer who left has none) and 「N명」 when someone used it. */
+    function teamSide(p) {
+      const side = el('div', 'pp-side');
+      const who = p.mine ? t('team_by_me') : p.created_by ? String(p.created_by).split('@')[0] : t('team_by_gone');
+      side.appendChild(el('span', 'pp-meta', who));
+      const users = Number(p.users) || 0;
+      if (users) side.appendChild(el('span', 'pp-meta', t('users_short', { n: users })));
+      return side;
+    }
+
+    /** A 내 프롬프트 row asking where to share it: one team → [공유], several → one button per team. Never inserts. */
+    function shareRow(p) {
+      const row = el('div', 'pp-item pp-undo pp-share-row');
+      const orgs = state.teamOrgs;
+      row.appendChild(el('span', 'pp-main', orgs.length > 1 ? t('share_ask_many') : t('share_ask_one', { org: orgs[0].name })));
+      const btn = (label, fn) => {
+        const b = el('button', 'pp-undo-btn', label);
+        b.type = 'button';
+        b.disabled = sharing;   // a re-render mid-request must not offer a second share
+        b.addEventListener('mousedown', (e) => e.preventDefault());
+        b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+        row.appendChild(b);
+      };
+      if (orgs.length > 1) for (const o of orgs) btn(o.name, () => shareTeam(p, o));
+      else btn(t('share_btn'), () => shareTeam(p, orgs[0]));
+      btn(t('cancel'), () => { state.sharingId = null; renderListOnly(); });
+      return row;
+    }
+
+    /** Shares one of my prompts into `org`. The server answers the existing row for the same body (no second copy). */
+    async function shareTeam(p, org) {
+      if (sharing) return;
+      sharing = true;
+      renderListOnly();
+      const r = await send({ op: 'team_share', body: { org_id: org.id, title: p.title, body: p.body, source: p.source } });
+      sharing = false;
+      if (destroyed) return;
+      state.sharingId = null;
+      let result;
+      if (r.ok && r.data?.prompt) {
+        const tp = r.data.prompt;
+        if (state.team) state.team = [tp].concat(state.team.filter((x) => x.id !== tp.id));
+        result = r.data.existing ? 'existing' : 'ok';
+        toast(t(r.data.existing ? 'team_exists' : 'team_shared', { org: org.name }));
+      } else {
+        const limit = r.status === 409 && r.code === 'limit_reached';
+        result = limit ? 'limit' : isLoginFailure(r) ? 'login' : 'error';
+        toast(limit ? t('team_limit', { n: r.data?.limit ?? '' }) : t('team_share_failed'));
+      }
+      track('prompt_team_share', { result });
+      if (isOpen()) render();
     }
 
     function icon(paths) {
@@ -718,6 +831,10 @@
       };
       const mineChip = chip('pp-cat pp-tab', t('tab_mine'), state.tab === 'mine', () => { state.tab = 'mine'; state.category = ''; });
       if (state.mine && liveMine().length) mineChip.appendChild(el('span', 'pp-n', String(liveMine().length)));
+      if (state.teamOrgs.length) {
+        const teamChip = chip('pp-cat pp-tab', t('tab_team'), state.tab === 'team', () => { state.tab = 'team'; state.category = ''; });
+        if (state.team && state.team.length) teamChip.appendChild(el('span', 'pp-n', String(state.team.length)));
+      }
       chip('pp-cat pp-tab', t('tab_store'), state.tab === 'store' && !state.category, () => { state.tab = 'store'; state.category = ''; });
       if (cats.length > 1) {
         chips.appendChild(el('span', 'pp-cats-sep'));
@@ -817,7 +934,7 @@
         return;
       }
       const cur = items[state.active];
-      if (e.key === 'Enter' && !e.isComposing && cur && cur.kind !== 'undo') { e.preventDefault(); use(cur.p, cur.kind); }
+      if (e.key === 'Enter' && !e.isComposing && cur && cur.kind !== 'undo' && cur.kind !== 'share') { e.preventDefault(); use(cur.p, cur.kind); }
     }
 
     function onOutside(e) {
@@ -841,7 +958,7 @@
     }
 
     function close() {
-      state.newId = null; state.saveNote = null;
+      state.newId = null; state.saveNote = null; state.sharingId = null;
       dropDeleted();
       const pp = shadow && shadow.querySelector('.pp');
       if (pp) pp.remove();
