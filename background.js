@@ -39,7 +39,7 @@ import { getProviderState, displayableProviderError, snoozeProviderError, report
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
 import { maybeSendInstallBeacon, maybeSendFirstGatedBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
-import { hasProviderPermission, registerChatGPTScripts, unregisterChatGPTScripts, injectChatGPTOpenTabs, registerGeminiScripts, unregisterGeminiScripts, injectGeminiOpenTabs, hasClaudeSession, mergeChatGPTOrgs, mergeGeminiOrgs, maybeCollectGeminiForTab } from './bg/providers.js';
+import { hasProviderPermission, registerChatGPTScripts, unregisterChatGPTScripts, injectChatGPTOpenTabs, registerGeminiScripts, unregisterGeminiScripts, injectGeminiOpenTabs, hasClaudeSession, mergeChatGPTOrgs, mergeGeminiOrgs, maybeCollectGeminiForTab, onChatGPTAccountCookieChanged } from './bg/providers.js';
 import { getResetNotifContext, resolveResetWindow, scheduleExpireAlarms } from './bg/reset-alarms.js';
 import { buildSidebarUsageData, pushSidebarUsage } from './bg/sidebar-usage.js';
 import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm } from './bg/ad-counters.js';
@@ -1182,6 +1182,8 @@ chrome.cookies.onChanged.addListener((info) => {
     chrome.runtime.sendMessage({ type: 'ORG_COOKIE_CHANGED', orgId: info.cookie.value }).catch(() => {});
     tryTabCollect('cookie-org-changed');
   }
+  // ChatGPT's active account switched (`_account` on .chatgpt.com) → collect ChatGPT shortly after.
+  onChatGPTAccountCookieChanged(info);
 });
 
 // === webRequest: detect Claude.ai completion 429 → collect immediately ===

@@ -39,8 +39,10 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   if (!orgData && collectedOrgs.length > 0) {
     // A `localOnly` org (ChatGPT's personal account while a workspace is active) was not read and is
     // not the account the page is on — never the in-page panel's pick, even when pinned (Codex R2-B1).
+    // ChatGPT marks the account the site is on (`isActive`): the panel sits ON that site, so it beats a
+    // pin to another account. Providers without the mark keep pinned → first.
     const readable = collectedOrgs.filter(o => !o.localOnly);
-    orgData = readable.find(o => o.isPrimary) || readable[0] || null;
+    orgData = readable.find(o => o.isActive) || readable.find(o => o.isPrimary) || readable[0] || null;
   }
 
   // Prefer snapshot when it's for the same org and is newer than collectedOrgs.

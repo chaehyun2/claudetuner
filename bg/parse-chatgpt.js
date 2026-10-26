@@ -1009,3 +1009,15 @@ export function parseChatGPTProModelSignal(data) {
     pro_selected: slugs ? Object.values(slugs).some(isProModelSlug) : null,
   };
 }
+
+// The `.chatgpt.com`-wide cookie naming the web app's active account: 'personal' for the personal
+// account, the workspace's account UUID otherwise (measured 2026-10-26: a switch reloads the page and
+// /wham/usage already answers for the new account right after). bg/providers.js collects on a change.
+export const CHATGPT_ACCOUNT_COOKIE = '_account';
+/** True when this cookie change is a ChatGPT account switch we should collect for. Pure. */
+export function isChatGPTAccountSwitch(info, lastSeen) {
+  const c = info && info.cookie;
+  if (!c || info.removed || c.name !== CHATGPT_ACCOUNT_COOKIE) return false;
+  if (typeof c.domain !== 'string' || !/(^|\.)chatgpt\.com$/.test(c.domain)) return false;
+  return typeof c.value === 'string' && c.value !== '' && c.value !== lastSeen;
+}

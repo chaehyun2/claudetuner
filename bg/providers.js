@@ -3,6 +3,7 @@
 import { withCollectLock } from './collect-lock.js';
 import { updateBadgeForSelectedOrg } from './badge.js';
 import { collectChatGPT } from './collect-chatgpt.js';
+import { isChatGPTAccountSwitch } from './parse-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
 import { appendUsageHistory, reconcileProviderRecs } from './storage.js';
 import { CLAUDE_SESSION_COOKIE, isUsableTab } from '../vendor-ai/sites.js';
@@ -139,8 +140,17 @@ export async function hasClaudeSession() {
 
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
 export async function mergeChatGPTOrgs(force = false, userManual = false) {
+  // The account generation this collect started under. A switch while it ran means its orgs describe
+  // the PREVIOUS account: the shared collect lock lets a periodic collect overlap the switch collect,
+  // and a late write from it would put the old account back over the new one (Codex R1-B1). Its POSTs
+  // already went out under the right keys; only the local list is skipped — the switch collect writes it.
+  const gen = _chatgptAccountGen;
   try {
     const result = await collectChatGPT(force, userManual);
+    if (gen !== _chatgptAccountGen) {
+      console.log('[Claude Tuner] ChatGPT account switched during collect — local list left to the switch collect');
+      return;
+    }
     // Reconcile the stored recs against what we just OBSERVED, on both branches — the empty one is
     // the whole point. collectChatGPT() returns no orgs when the user is signed out of ChatGPT (or
     // it is unreadable), and the merge below deliberately leaves the previously-collected orgs in
@@ -156,6 +166,9 @@ export async function mergeChatGPTOrgs(force = false, userManual = false) {
       // Preserve user-pinned primary org
       const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;
       const merged = result.orgs.map(o => ({ ...o, isPrimary: o.uuid === prevPrimaryUuid }));
+      // Checked again HERE, with no await before the write: the awaits above (rec reconcile, storage
+      // read) are where a switch could still land after the first check (Codex R2: R1-B1 not fixed).
+      if (gen !== _chatgptAccountGen) return;
       await chrome.storage.local.set({ collectedOrgs: [...nonChatGPT, ...merged] });
       // Save history for chart display. A local-only org was not read this cycle — no point.
       for (const org of result.orgs.filter(o => !o.localOnly)) {
@@ -264,5 +277,53 @@ export async function maybeCollectGeminiForTab() {
     }
   } finally {
     _geminiCollectInFlight = false;
+  }
+}
+
+// === ChatGPT account switch → collect now ===
+// The web app keeps its active account in the `.chatgpt.com`-wide `_account` cookie, and /wham/usage
+// answers for that account (docs/DESIGN-provider-account-keying.md). Nothing collected on a switch, so
+// the in-page strip and popup kept the previous account's numbers until the next cycle or a manual
+// collect. Same idea as Claude's lastActiveOrg cookie listener (background.js).
+// The delay lets the web app finish the switch (it re-mints the session and reloads); repeated changes
+// within it collapse into one collect, and a switch that lands mid-collect is collected again after.
+const CHATGPT_SWITCH_COLLECT_DELAY_MS = 4_000;
+let _chatgptAccountSeen = null;
+let _chatgptAccountGen = 0;
+let _chatgptSwitchTimer = null;
+let _chatgptSwitchInFlight = false;
+let _chatgptSwitchAgain = false;
+
+export function onChatGPTAccountCookieChanged(info) {
+  if (!isChatGPTAccountSwitch(info, _chatgptAccountSeen)) return;
+  _chatgptAccountSeen = info.cookie.value;
+  _chatgptAccountGen++;
+  clearTimeout(_chatgptSwitchTimer);
+  _chatgptSwitchTimer = setTimeout(runChatGPTSwitchCollect, CHATGPT_SWITCH_COLLECT_DELAY_MS);
+  // The stored `isActive` names the account the site WAS on. Drop it now, so a switch collect that
+  // fails (orgs: [] keeps the old list) cannot leave the in-page panel showing the previous account
+  // in preference to a pin or the list order (Codex R2-B1).
+  clearChatGPTActiveMark().catch(() => {});
+}
+
+async function clearChatGPTActiveMark() {
+  const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
+  if (!collectedOrgs.some(o => o.provider === 'chatgpt' && o.isActive)) return;
+  await chrome.storage.local.set({
+    collectedOrgs: collectedOrgs.map(o => (o.provider === 'chatgpt' && o.isActive ? { ...o, isActive: false } : o)),
+  });
+}
+
+async function runChatGPTSwitchCollect() {
+  if (_chatgptSwitchInFlight) { _chatgptSwitchAgain = true; return; }
+  _chatgptSwitchInFlight = true;
+  try {
+    const { collectChatGPT: enabled = true } = await chrome.storage.sync.get({ collectChatGPT: true });
+    if (!enabled || !(await hasProviderPermission('chatgpt'))) return;
+    console.log('[Claude Tuner] ChatGPT account switched → collecting');
+    await withCollectLock(() => mergeChatGPTOrgs(false)).catch(() => {});
+  } finally {
+    _chatgptSwitchInFlight = false;
+    if (_chatgptSwitchAgain) { _chatgptSwitchAgain = false; runChatGPTSwitchCollect(); }
   }
 }

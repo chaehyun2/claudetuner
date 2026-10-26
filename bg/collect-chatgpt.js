@@ -311,6 +311,9 @@ export async function collectChatGPT(force = false, userManual = false) {
       plan: plan,
       provider: 'chatgpt',
       isPrimary: false,
+      // The account chatgpt.com is on right now (/wham/usage answers for it). The in-page panel shows
+      // this one even when another ChatGPT account is pinned (Codex R1-B2).
+      isActive: true,
       h5: w5h?.used_percent ?? null,
       d7: w7d?.used_percent ?? null,
       resetsAt5h: unixToResetTime(w5h?.reset_at),
