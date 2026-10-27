@@ -49,7 +49,7 @@ async function init() {
     btn.hidden = true;
     return;
   }
-  const { label, origin, syncKey } = GRANTABLE[provider];
+  const { label, origin } = GRANTABLE[provider];
   document.title = t('grant_title', label);
   $('grant-title').textContent = t('grant_title', label);
   $('grant-desc').textContent = t('grant_desc', label);
@@ -70,9 +70,10 @@ async function init() {
       setStatus(t('grant_denied'), false);
       return;
     }
-    // Granting is asking to collect: a provider the user had switched off in Options would
-    // otherwise stay silent with the permission in hand — the very "granted but nothing" state.
-    await chrome.storage.sync.set({ [syncKey]: true });
+    // 🔴 No preference write (#2628): Settings is the ONE writer of the collect toggle. The welcome
+    // page only offers this for providers the user wants (get_status `enabled`), and the default
+    // toggle is on, so collection starts with the grant; a provider switched off in Settings stays
+    // off until Settings turns it back on.
     chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
     showGranted(label);
     setTimeout(goBack, GO_BACK_DELAY_MS);

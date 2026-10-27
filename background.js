@@ -18,7 +18,7 @@ import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
 import { getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
-import { isGrantable, GRANT_PAGE } from './bg/grantable.js';
+import { isGrantable, GRANT_PAGE, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
 import { updateBadgeForSelectedOrg, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
@@ -655,8 +655,9 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       // `lastError` is what is worth SHOWING, not merely what is stored: displayableProviderError()
       // applies the same staleness rule the popup uses, so the popup and the dashboard cannot
       // disagree about whether a provider is currently broken.
-      const { collectChatGPT: cgEnabled = true, collectGemini: gmEnabled = true } =
-        await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+      // `enabled` = the user wants it (Settings toggle on AND not "I don't use it", #2628) — the
+      // dashboard's connect offer reads it (site/shared/provider-connect.js).
+      const provPrefs = await chrome.storage.sync.get(PROVIDER_PREF_DEFAULTS);
       const pstate = await getProviderState();
       // Same rule as the popup (#1136): a paused install reports no SEND failure, because it was
       // asked to stop sending. This is what the dashboard reads, so both surfaces stay in step —
@@ -677,8 +678,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       };
       const providers = {
         claude: { collected: collectedBy('claude') || !!status?.success, hasPermission: true, enabled: true },
-        chatgpt: provInfo('chatgpt', chatgptPerm, cgEnabled !== false),
-        gemini: provInfo('gemini', geminiPerm, gmEnabled !== false),
+        chatgpt: provInfo('chatgpt', chatgptPerm, providerWanted(provPrefs, 'chatgpt', chatgptPerm === true)),
+        gemini: provInfo('gemini', geminiPerm, providerWanted(provPrefs, 'gemini', geminiPerm === true)),
       };
       const anyCollected = Object.values(providers).some(p => p.collected);
       sendResponse({

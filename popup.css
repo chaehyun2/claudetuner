@@ -57,10 +57,10 @@
        reuses this button for the same reason (#1408) and an ID-scoped rule would have left it
        styled as the PRIMARY action — i.e. "wave it away" would have outranked "fix it", the exact
        inversion the rule below is written to avoid. */
-    .perm-banner button.prov-err-dismiss { background: transparent; color: inherit; border: 1px solid currentColor; opacity: .75; font-weight: 500; }
-    .perm-banner button.prov-err-dismiss:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
-    [data-theme="dark"] .perm-banner button.prov-err-dismiss { background: transparent; }
-    [data-theme="dark"] .perm-banner button.prov-err-dismiss:hover { background: rgba(253, 230, 138, .16); }
+    .perm-banner button.prov-err-dismiss, .perm-banner button.perm-not-using { background: transparent; color: inherit; border: 1px solid currentColor; opacity: .75; font-weight: 500; }
+    .perm-banner button.prov-err-dismiss:hover, .perm-banner button.perm-not-using:hover { background: rgba(146, 64, 14, .12); opacity: 1; }
+    [data-theme="dark"] .perm-banner button.prov-err-dismiss, [data-theme="dark"] .perm-banner button.perm-not-using { background: transparent; }
+    [data-theme="dark"] .perm-banner button.prov-err-dismiss:hover, [data-theme="dark"] .perm-banner button.perm-not-using:hover { background: rgba(253, 230, 138, .16); }
     /* #1419: #capdrop-banner is INFORMATION, not a fault — the server stored nothing for an org the
        user did not select, which is the 3-org limit working. It sits directly under
        #prov-err-banner (a real failure with a real fix) and, painted in the same amber, the two

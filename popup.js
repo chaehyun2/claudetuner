@@ -7,6 +7,9 @@ import { withSwitchLock } from './bg/collect-lock.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY } from './bg/profile-photo.js';
 import { pinnedState } from './bg/analytics.js';
+import { GRANTABLE, notUsingPatch, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
+
+const hasPermissionFor = (p) => chrome.permissions.contains({ origins: [GRANTABLE[p].origin] }).catch(() => false);
 import { serverSyncWithheldReason, getLastStatus, isServerSyncPaused } from './bg/storage.js';
 import { liveProviderErrors, providerErrorAction, providerErrorSnoozed } from './bg/provider-state.js';
 import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from './bg/block-state.js';
@@ -112,7 +115,7 @@ async function checkProviderErrors(permMissing) {
   const seq = ++_provErrRenderSeq;
   const [{ providerCollectionState = {}, collectedOrgs = [] }, sync, syncPaused] = await Promise.all([
     chrome.storage.local.get({ providerCollectionState: {}, collectedOrgs: [] }),
-    chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true }),
+    chrome.storage.sync.get(PROVIDER_PREF_DEFAULTS),
     // A paused install is not failing to send — it was asked to stop (#1136). See
     // liveProviderErrors(): the send axis goes quiet, the read axis does not.
     isServerSyncPaused(),
@@ -120,7 +123,11 @@ async function checkProviderErrors(permMissing) {
   if (seq !== _provErrRenderSeq) return;          // a newer render is in flight — it owns the DOM
   banner.classList.add('hidden');
   banner.innerHTML = '';
-  const enabled = { chatgpt: sync.collectChatGPT !== false, gemini: sync.collectGemini !== false };
+  // Granted → the mark is irrelevant and errors must show; not granted → there is nothing to report
+  // beyond the permission banner's question. providerWanted(…, granted) encodes both.
+  const [cgGranted, gmGranted] = await Promise.all(['chatgpt', 'gemini'].map((p) => hasPermissionFor(p)));
+  if (seq !== _provErrRenderSeq) return;
+  const enabled = { chatgpt: providerWanted(sync, 'chatgpt', cgGranted), gemini: providerWanted(sync, 'gemini', gmGranted) };
   const lines = [];
   for (const key of ['chatgpt', 'gemini']) {
     if (!enabled[key]) continue;                 // the user turned this provider off — not a fault
@@ -227,13 +234,13 @@ async function checkProviderErrors(permMissing) {
 async function checkProviderPermissions() {
   const banner = document.getElementById('perm-banner');
   if (!banner) return;
-  const { collectChatGPT = true, collectGemini = true } = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true });
+  const prefs = await chrome.storage.sync.get(PROVIDER_PREF_DEFAULTS);
   const missing = [];
-  if (collectChatGPT) {
+  if (providerWanted(prefs, 'chatgpt', false)) {
     const ok = await chrome.permissions.contains({ origins: ['https://chatgpt.com/*'] });
     if (!ok) missing.push({ key: 'chatgpt', label: 'ChatGPT', origins: ['https://chatgpt.com/*'] });
   }
-  if (collectGemini) {
+  if (providerWanted(prefs, 'gemini', false)) {
     const ok = await chrome.permissions.contains({ origins: ['https://gemini.google.com/*'] });
     if (!ok) missing.push({ key: 'gemini', label: 'Gemini', origins: ['https://gemini.google.com/*'] });
   }
@@ -246,10 +253,13 @@ async function checkProviderPermissions() {
   banner.appendChild(document.createTextNode(t('perm_banner_text', names) || names + ' collection requires permission.'));
   const btn = document.createElement('button');
   btn.textContent = t('perm_banner_btn') || 'Grant';
+  // GA `provider` value for this banner: the providers it named, joined (chatgpt | gemini | chatgpt_gemini).
+  const gaProvider = missing.map(m => m.key).join('_');
   btn.addEventListener('click', async () => {
     try {
       const allOrigins = missing.flatMap(m => m.origins);
       const granted = await chrome.permissions.request({ origins: allOrigins });
+      sendGAEvent('perm_banner_action', { action: granted ? 'grant' : 'grant_denied', provider: gaProvider });
       if (granted) {
         banner.classList.add('hidden');
         chrome.runtime.sendMessage({ type: 'MANUAL_COLLECT' }).catch(() => {});
@@ -259,6 +269,27 @@ async function checkProviderPermissions() {
     }
   });
   banner.appendChild(btn);
+  // "I don't use it" (#2628): without the permission the extension cannot tell a ChatGPT/Gemini
+  // user from someone who never uses them, so the banner asks. The answer is a mark of its own
+  // (bg/grantable.js notUsingPatch — it never touches the Settings toggle): this banner and the
+  // error banner stay quiet, GA reports the install as `off`, the dashboard stops offering the
+  // connection. Granting access later from anywhere just works; Settings' toggle clears the mark.
+  const notUsing = document.createElement('button');
+  notUsing.className = 'perm-not-using';
+  notUsing.textContent = t('perm_banner_not_using');
+  notUsing.title = t('perm_banner_not_using_title');
+  notUsing.addEventListener('click', async () => {
+    try {
+      await chrome.storage.sync.set(notUsingPatch(missing.map(m => m.key)));
+    } catch (e) {
+      // Nothing was stored: leave the banner up rather than hide it and have it come back.
+      console.warn('[Claude Tuner] perm banner opt-out failed:', e?.message);
+      return;
+    }
+    sendGAEvent('perm_banner_action', { action: 'not_using', provider: gaProvider });
+    checkProviderPermissions().then(checkProviderErrors);
+  });
+  banner.appendChild(notUsing);
   banner.classList.remove('hidden');
   return missingKeys;
 }

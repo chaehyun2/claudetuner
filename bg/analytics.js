@@ -2,6 +2,7 @@
 import { serverSyncWithheldReason } from './storage.js';
 import { extTokenEmail } from './ext-token-claims.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
+import { providerWanted, PROVIDER_PREF_DEFAULTS } from './grantable.js';
 const GA_MEASUREMENT_ID = 'G-ZMWJBD64FQ';
 const GA_API_SECRET = 'emqPWfUzSqOvqvLtbh8BuQ';
 const GA_ENDPOINT = `https://www.google-analytics.com/mp/collect?measurement_id=${GA_MEASUREMENT_ID}&api_secret=${GA_API_SECRET}`;
@@ -97,20 +98,21 @@ export async function authState() {
  *
  *   yes     — permission granted (regardless of the collect toggle: the permission is the question)
  *   no      — not granted, collection toggle still on → the population a prompt would reach
- *   off     — not granted AND the user turned that provider's collection off → a deliberate opt-out,
+ *   off     — not granted AND the user turned that provider off (Settings, or the banner's "I don't
+ *             use it", bg/grantable.js providerWanted) → a deliberate opt-out,
  *             not a missed prompt; folding it into 'no' would overstate who is left to ask
  *   unknown — the probe itself failed
  */
 export async function providerPermState() {
   const out = {};
-  // null = toggles unreadable: a missing grant then cannot be told apart from an opt-out → 'unknown'.
-  let toggles = null;
-  try { toggles = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true }); } catch { /* unknown */ }
-  for (const [provider, toggleKey] of [['chatgpt', 'collectChatGPT'], ['gemini', 'collectGemini']]) {
+  // null = prefs unreadable: a missing grant then cannot be told apart from an opt-out → 'unknown'.
+  let prefs = null;
+  try { prefs = await chrome.storage.sync.get(PROVIDER_PREF_DEFAULTS); } catch { /* unknown */ }
+  for (const provider of ['chatgpt', 'gemini']) {
     let state;
     try {
       const granted = await chrome.permissions.contains({ origins: [SITE_TAB_PATTERNS[provider]] });
-      state = granted ? 'yes' : !toggles ? 'unknown' : (toggles[toggleKey] === false ? 'off' : 'no');
+      state = granted ? 'yes' : !prefs ? 'unknown' : (providerWanted(prefs, provider, false) ? 'no' : 'off');
     } catch {
       state = 'unknown';
     }

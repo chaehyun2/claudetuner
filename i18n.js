@@ -298,6 +298,8 @@ const TRANSLATIONS = {
     'perm_required_hint': '(권한 필요 — 토글을 다시 켜서 승인)',
     'perm_banner_text': '{0} 수집을 위해 사이트 접근 권한이 필요합니다.',
     'perm_banner_btn': '권한 허용',
+    'perm_banner_not_using': '안 써요',
+    'perm_banner_not_using_title': '이 서비스 사용량 수집을 끕니다. 설정에서 다시 켤 수 있어요.',
     // grant.html — one-provider site-access page opened from the welcome page (#2126)
     'grant_title': '{0} 사용량 수집 허용',
     'grant_desc': '{0}의 사용량을 보려면 {0} 사이트 접근 권한이 필요해요. 아래 버튼을 누르면 크롬이 허용할지 물어봐요. 허용하면 팝업과 대시보드에 {0} 사용량이 표시돼요.',
@@ -1147,6 +1149,8 @@ const TRANSLATIONS = {
     'perm_required_hint': '(permission needed — re-toggle to approve)',
     'perm_banner_text': '{0} collection requires site access permission.',
     'perm_banner_btn': 'Grant',
+    'perm_banner_not_using': "I don't use it",
+    'perm_banner_not_using_title': 'Turns off usage collection for this service. You can turn it back on in Settings.',
     // grant.html — one-provider site-access page opened from the welcome page (#2126)
     'grant_title': 'Allow {0} usage tracking',
     'grant_desc': 'To show your {0} usage, Claude Tuner needs access to the {0} site. Press the button and Chrome will ask you to allow it. Once allowed, your {0} usage shows up in the popup and the dashboard.',
