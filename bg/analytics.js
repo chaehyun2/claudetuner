@@ -1,6 +1,7 @@
 // GA4 Measurement Protocol for Chrome Extension MV3
 import { serverSyncWithheldReason } from './storage.js';
 import { extTokenEmail } from './ext-token-claims.js';
+import { SITE_TAB_PATTERNS } from './constants.js';
 const GA_MEASUREMENT_ID = 'G-ZMWJBD64FQ';
 const GA_API_SECRET = 'emqPWfUzSqOvqvLtbh8BuQ';
 const GA_ENDPOINT = `https://www.google-analytics.com/mp/collect?measurement_id=${GA_MEASUREMENT_ID}&api_secret=${GA_API_SECRET}`;
@@ -82,6 +83,40 @@ export async function authState() {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * Optional host permission state per provider — { perm_chatgpt, perm_gemini }, each
+ * 'yes' | 'no' | 'off' | 'unknown'.
+ *
+ * WHY THIS EXISTS. chatgpt.com / gemini.google.com are OPTIONAL host permissions on purpose: moving
+ * them to required `host_permissions` disables the extension for every install that has not
+ * granted them (the 1.24.0 incident). Whether we can ever make them effectively mandatory depends
+ * on how many installs are still missing them — a number nobody has. This sizes it, like
+ * pinnedState/authState: enums only, no identity.
+ *
+ *   yes     — permission granted (regardless of the collect toggle: the permission is the question)
+ *   no      — not granted, collection toggle still on → the population a prompt would reach
+ *   off     — not granted AND the user turned that provider's collection off → a deliberate opt-out,
+ *             not a missed prompt; folding it into 'no' would overstate who is left to ask
+ *   unknown — the probe itself failed
+ */
+export async function providerPermState() {
+  const out = {};
+  // null = toggles unreadable: a missing grant then cannot be told apart from an opt-out → 'unknown'.
+  let toggles = null;
+  try { toggles = await chrome.storage.sync.get({ collectChatGPT: true, collectGemini: true }); } catch { /* unknown */ }
+  for (const [provider, toggleKey] of [['chatgpt', 'collectChatGPT'], ['gemini', 'collectGemini']]) {
+    let state;
+    try {
+      const granted = await chrome.permissions.contains({ origins: [SITE_TAB_PATTERNS[provider]] });
+      state = granted ? 'yes' : !toggles ? 'unknown' : (toggles[toggleKey] === false ? 'off' : 'no');
+    } catch {
+      state = 'unknown';
+    }
+    out[`perm_${provider}`] = state;
+  }
+  return out;
 }
 
 export async function sendGAEvent(name, params = {}) {

@@ -32,6 +32,9 @@
   const STALE_MS = 60 * 1000;              // reopening within this reuses the lists (and refreshes after)
   const TOAST_MS = 3500;
   const INSERT_PROBE_CHARS = 24;           // how much of the body must show up to count as inserted
+  // Typed after a prompt that went into an EMPTY composer: a separator line and the caret on a fresh line below it,
+  // so what the user adds next (the text the prompt works on) starts apart from the instruction (2026-10-27 user ask).
+  const INSERT_TAIL = '\n\n---\n\n';
   const POPOVER_GAP = 8;
   const POPOVER_MIN_W = 320;
   const POPOVER_MAX_W = 560;
@@ -50,6 +53,7 @@
   const INTRO_BY = 'by Claude Tuner';      // product name — not translated
   const UNDO_MS = 6000;                    // a deleted row offers 「되돌리기」 this long
   const TRASH_PATHS = ['M3 6h18', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'];
+  const KEEP_PATHS = ['M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'];   // bookmark
   const USERS_PATHS = ['M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2', 'M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8', 'M23 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'];
   const LOGIN_CODES = ['ext_token_required', 'login_proof_required', 'scope_insufficient', 'Unauthorized'];
 
@@ -71,6 +75,7 @@
       inserted_fallback: '입력창에 넣지 못해 복사했어요. 붙여넣기(⌘V) 해 주세요.', copy_failed: '넣지 못했어요. 「전체 보기」에서 복사해 주세요.',
       star_tip: '이 메시지를 프롬프트로 저장', star_done: '저장됨',
       saved_inline: '✓ 저장했어요', dup_inline: '✓ 이미 저장돼 있어요',
+      keep: '내 프롬프트에 저장', kept: '내 프롬프트에 있어요',
       btn_tip: '프롬프트 꺼내 쓰기 ({key})', btn_label: '프롬프트',
       // Team prompts (#2601)
       tab_team: '팀', team_empty: '아직 팀 프롬프트가 없어요. 내 프롬프트에 마우스를 올리고 팀 아이콘으로 공유해 보세요.',
@@ -95,6 +100,7 @@
       inserted_fallback: 'Could not type it in, so it was copied. Paste it (Ctrl/⌘+V).', copy_failed: 'Could not insert. Copy it from “See all”.',
       star_tip: 'Save this message as a prompt', star_done: 'Saved',
       saved_inline: '✓ Saved', dup_inline: '✓ Already saved',
+      keep: 'Save to my prompts', kept: 'In my prompts',
       btn_tip: 'Use a prompt ({key})', btn_label: 'Prompts',
       // Team prompts (#2601)
       tab_team: 'Team', team_empty: 'No team prompts yet. Hover one of your prompts and use the team icon to share it.',
@@ -144,6 +150,15 @@
 .pp-share svg { width: 14px; height: 14px; }
 .pp-share:hover { opacity: 1; color: #7c3aed; background: rgba(124,58,237,.1); }
 .pp-item.on .pp-share { visibility: visible; }
+/* 「내 프롬프트에 저장」 on 추천 / 팀 rows: on the chosen row, and always (filled) once the prompt is in 내 프롬프트. */
+.pp-keep { visibility: hidden; flex-shrink: 0; border: 0; background: none; color: inherit; opacity: .5; padding: 2px; border-radius: 6px; cursor: pointer; display: inline-flex; }
+.pp-keep svg { width: 14px; height: 14px; }
+.pp-keep:hover { opacity: 1; color: #7c3aed; background: rgba(124,58,237,.1); }
+.pp-item.on .pp-keep, .pp-keep.on { visibility: visible; }
+.pp-keep.on { opacity: 1; color: #7c3aed; cursor: default; }
+.pp-keep.on svg { fill: currentColor; }
+.pp.dark .pp-keep.on, .pp.dark .pp-keep:hover { color: #c4b5fd; }
+.pp-keep:disabled:not(.on) { opacity: .3; cursor: default; }
 .pp-share-row { flex-wrap: wrap; }
 .pp-undo-btn:disabled { opacity: .4; cursor: default; }
 .pp-item.pp-undo { cursor: default; align-items: center; opacity: .75; font-size: 12px; }
@@ -359,6 +374,9 @@
     }
 
     const squash = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    // Two prompts whose text differs only in spaces / line breaks are the same prompt (2026-10-27 user report) —
+    // the server compares the same way (routes/prompts.ts sameBody).
+    const sameKey = (s) => String(s || '').replace(/\s+/g, '');
     // Gemini's last-resort composer is a <textarea> (gemini-input.js COMPOSER_SELECTORS): its text is `value`, and
     // innerText stays empty — reading that called every insert a failure and retried it (deploy-1.56.0 R1-B1).
     const isField = (el) => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT');
@@ -380,13 +398,29 @@
         : line(ch))).join('\n').trim();
     }
 
+    // What 「지금 입력 저장」 saves: the composer text, minus the separator WE appended after an inserted
+    // prompt (INSERT_TAIL) — only while the composer still reads exactly as our insert left it. Saving right
+    // after an insert stored 「prompt ---」 beside the existing prompt (deploy-1.56.5 R1-B1); a 「---」 the
+    // user typed themselves is their text and stays (R2-B1).
+    const TAIL_LINE = /\n[ \t]*-{3,}[ \t]*$/;
+    // Tied to the composer ELEMENT it was typed into, with the listener that clears it on the same element:
+    // a swapped composer can never satisfy the condition the old element's listener guards (deploy-1.56.5 R4).
+    let tail = null;   // { ed, text }: blockText right after an insert that appended INSERT_TAIL
+    const composerBody = () => {
+      const ed = opts.getEditor();
+      const b = blockText(ed);
+      return tail && ed === tail.ed && b === tail.text ? b.replace(TAIL_LINE, '').trim() : b;
+    };
+
     /** Type `text` into the composer at the remembered caret (else at the end). True when it landed. */
     function insertText(text) {
       const ed = opts.getEditor();
       if (!ed) return false;
       const hadFocus = document.activeElement === ed;
-      ed.focus();
+      // Probed on the prompt alone: the separator may render as a rule (no text) on a rich composer.
       const probe = squash(text).slice(0, INSERT_PROBE_CHARS);
+      if (!squash(composerText(ed))) text += INSERT_TAIL;
+      ed.focus();
       const count = () => squash(composerText(ed)).split(probe).length - 1;
       let replaced = '';
       if (isField(ed)) {
@@ -407,7 +441,12 @@
       let ok = false;
       try { ok = document.execCommand('insertText', false, text); } catch { ok = false; }
       const after = count();
-      return ok && !!probe && (after > before || (replacedHadIt && after >= 1));
+      const landed = ok && !!probe && (after > before || (replacedHadIt && after >= 1));
+      const rec = landed && text.endsWith(INSERT_TAIL) ? { ed, text: blockText(ed) } : null;
+      tail = rec;
+      // Any edit afterwards makes the text the user's own, even if it ends up reading the same (R3-B1).
+      if (rec) ed.addEventListener('input', () => { if (tail === rec) tail = null; }, { once: true });
+      return landed;
     }
 
     function copyText(text) {
@@ -456,7 +495,7 @@
       // Decided when the answer arrives, not when the click happened: the outcome is silent only if the button
       // that will show it is on screen — picker open AND the composer still holding this text. Closed, or
       // reopened over other text (the button then speaks for that text), the toast is the only place left.
-      const onButton = () => quiet && isOpen() && blockText(opts.getEditor()) === body;
+      const onButton = () => quiet && isOpen() && composerBody() === body;
       const say = (msg, onClick) => { if (!onButton()) toast(msg, onClick); };
       if (!body) { say(t('empty_input')); return 'empty'; }
       if (!state.mine) {
@@ -467,13 +506,18 @@
         if (r0.ok) adoptMine(r0.data?.prompts, mark);
       }
       // No list yet (every list request so far failed): what this page saved is all we know (Codex R1-B2).
-      const existing = (state.mine ? liveMine() : created).find((p) => String(p.body || '').trim() === body);
+      const key = sameKey(body);
+      const existing = (state.mine ? liveMine() : created).find((p) => sameKey(p.body) === key);
       if (existing) { state.newId = existing.id; say(t('dup')); return 'dup'; }
-      const r = await send({ op: 'create', body: { title: autoTitle(body), body, source: site } });
+      // The text of a 추천 / 팀 prompt (typed in from it): saved as THAT prompt's copy — its title, its use counted.
+      const store = (currentStore() || []).find((p) => sameKey(p.body) === key);
+      const team = !store && (state.team || []).find((p) => sameKey(p.body) === key);
+      const r = await send(store ? { op: 'save', id: store.id } : team ? { op: 'team_save', id: team.id }
+        : { op: 'create', body: { title: autoTitle(body), body, source: site } });
       if (r.ok && r.data?.prompt) {
-        created.push(r.data.prompt);
-        if (state.mine) state.mine.unshift(r.data.prompt);
+        adoptSaved(r.data.prompt);
         state.newId = r.data.prompt.id;
+        if (r.data.existing) { say(t('dup')); return 'dup'; }   // saved meanwhile (another tab, the dashboard)
         say(t('saved', { key: shortcut() }));
         track('prompt_save', { src, result: 'ok' });
         return 'saved';
@@ -485,6 +529,55 @@
       else say(t('save_failed'));
       track('prompt_save', { src, result: login ? 'login' : 'error' });
       return login ? 'login' : limit ? 'limit' : 'error';
+    }
+
+    /** A prompt the server just saved (or found saved) into 내 프롬프트, unless already listed there. */
+    function adoptSaved(p) {
+      if (!created.some((x) => x.id === p.id)) created.push(p);
+      if (state.mine && !state.mine.some((x) => x.id === p.id && !x.deleted)) state.mine.unshift(p);
+    }
+
+    /** The 내 프롬프트 row a 추천 / 팀 prompt already lives in: its store copy, or the same text. */
+    function savedCopy(p, kind) {
+      const key = sameKey(p.body);
+      return liveMine().find((m) => (kind === 'store' && m.store_id === p.id) || sameKey(m.body) === key) || null;
+    }
+
+    // 「내 프롬프트에 저장」 on a 추천 / 팀 row. The outcome shows on the button itself (filled = saved); only a failure toasts.
+    const keepingIds = new Set();
+    async function keep(p, kind) {
+      if (keepingIds.has(p.id) || savedCopy(p, kind)) return;
+      keepingIds.add(p.id);
+      renderListOnly();
+      const r = await send({ op: kind === 'team' ? 'team_save' : 'save', id: p.id });
+      keepingIds.delete(p.id);
+      if (destroyed) return;
+      let result;
+      if (r.ok && r.data?.prompt) {
+        adoptSaved(r.data.prompt);
+        result = r.data.existing ? 'dup' : 'ok';
+      } else {
+        const login = isLoginFailure(r);
+        const limit = r.status === 409 && r.code === 'limit_reached';
+        if (login) toast(t('save_login'), () => send({ op: 'open_login' }));
+        else if (limit) { state.limit = r.data?.limit ?? ''; toast(t('limit', { n: state.limit })); }
+        else toast(t('save_failed'));
+        result = login ? 'login' : limit ? 'limit' : 'error';
+      }
+      track('prompt_save', { src: kind, result });
+      if (isOpen()) render();   // the whole popover: 「내 프롬프트 N」 counts it too
+    }
+
+    function keepButton(p, kind) {
+      const on = !!savedCopy(p, kind);
+      const b = el('button', 'pp-keep' + (on ? ' on' : ''));
+      b.type = 'button';
+      b.title = t(on ? 'kept' : 'keep'); b.setAttribute('aria-label', b.title);
+      b.disabled = on || keepingIds.has(p.id);
+      b.appendChild(icon(KEEP_PATHS));
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', (e) => { e.stopPropagation(); keep(p, kind); });
+      return b;
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────────────────────
@@ -512,8 +605,8 @@
       const store = currentStore();
       if (mine.length >= FILL_UNDER || !store || !store.length) return [];
       const ids = new Set(mine.map((p) => p.store_id).filter(Boolean));
-      const bodies = new Set(mine.map((p) => String(p.body || '').trim()));
-      return store.filter((p) => !ids.has(p.id) && !bodies.has(String(p.body || '').trim())).slice(0, FILL_COUNT);
+      const bodies = new Set(mine.map((p) => sameKey(p.body)));
+      return store.filter((p) => !ids.has(p.id) && !bodies.has(sameKey(p.body))).slice(0, FILL_COUNT);
     }
 
     /** False while renderList shows a message (loading / error / login / deleted account) instead of rows — its checks, in its order. */
@@ -611,8 +704,10 @@
         const body = el('div', 'pp-b');
         main.appendChild(body);
         row.appendChild(main);
-        if (kind === 'store') row.appendChild(storeSide(p));
-        else if (kind === 'team') row.appendChild(teamSide(p));
+        if (kind === 'store' || kind === 'team') {
+          row.appendChild(kind === 'store' ? storeSide(p) : teamSide(p));
+          row.appendChild(keepButton(p, kind));
+        }
         else {
           if (state.teamOrgs.length) {
             const sh = el('button', 'pp-share');
@@ -799,8 +894,15 @@
         undoingIds.delete(p.id);
         if (destroyed) return;
         if (r.ok && r.data?.prompt) {
-          created.push(r.data.prompt);
-          if (state.mine) { const at = state.mine.findIndex((x) => x.id === p.id); if (at >= 0) state.mine[at] = r.data.prompt; else state.mine.unshift(r.data.prompt); }
+          const np = r.data.prompt;
+          if (!created.some((x) => x.id === np.id)) created.push(np);
+          if (state.mine) {
+            // The server may answer a row already listed (saved again from 추천 while this offered 「되돌리기」 —
+            // the same prompt, so `existing`): it takes this row's place, never shows twice (Codex picker-ux R1-B2).
+            state.mine = state.mine.filter((x) => x.id !== np.id);
+            const at = state.mine.findIndex((x) => x.id === p.id);
+            if (at >= 0) state.mine[at] = np; else state.mine.unshift(np);
+          }
           render();
         } else { if (b.isConnected) b.disabled = false; else renderListOnly(); toast(t('save_failed')); }
       });
@@ -867,7 +969,7 @@
         if (save.dataset.note === 'saved' || save.dataset.note === 'dup') return;   // this exact text is saved
         if (save.dataset.note === 'login') { send({ op: 'open_login' }); close(); return; }
         save.disabled = true;
-        const body = blockText(opts.getEditor());
+        const body = composerBody();
         const outcome = await saveText(body, 'composer', true);
         state.saveNote = { body, outcome };
         if (outcome === 'saved' || outcome === 'dup') { state.tab = 'mine'; state.query = ''; state.active = 0; }
@@ -899,7 +1001,7 @@
     function paintSave(save) {
       if (!save) return;
       const ed = opts.getEditor();
-      const current = blockText(ed);
+      const current = composerBody();
       const note = state.saveNote && state.saveNote.body === current ? state.saveNote.outcome : null;
       const done = note === 'saved' || note === 'dup';
       save.textContent = !note ? t('save_current') : done ? t(note === 'saved' ? 'saved_inline' : 'dup_inline')
@@ -1228,6 +1330,7 @@
 
     function destroy() {
       destroyed = true;
+      tail = null;
       endIntro('destroyed');
       clearTimeout(introTimer);
       close();

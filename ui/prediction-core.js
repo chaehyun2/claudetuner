@@ -85,6 +85,35 @@ function _priorDigest(priorCycles) {
     : '')).join(',');
 }
 
+// Exact copy of every sample's (t, d7, r7), checked on each hit. The learned 7d median (ui/diurnal.js
+// P7 GBM, #1689) reads earlier cycles at their own point in time (prevResid, priorGrowthSame), so a
+// change to ANY sample must miss — the lossy key fields only cover appends and trims (Codex R1), and
+// a 32-bit digest of the rest collides on real-looking histories (Codex R2). Building and comparing
+// is O(n) (~0.1ms at 8.6k samples) against ~1.8ms for the forecast it guards; memory ~24 B/sample
+// per entry, bounded by PRED_CACHE_MAX.
+function _d7Snapshot(history) {
+  const n = history.length;
+  const t = new Float64Array(n);
+  const d = new Float64Array(n);
+  const r = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = history[i];
+    t[i] = Number(p.t);
+    d[i] = p.d7 == null ? -Infinity : Number(p.d7);   // not a value any collector produces (Codex R3)
+    r[i] = p.r7 == null ? null : String(p.r7);
+  }
+  return { t, d, r };
+}
+
+// NaN never equals itself, so an unreadable value always misses (recompute), never serves.
+function _sameSnapshot(a, b) {
+  if (!a || !b || a.t.length !== b.t.length) return false;
+  for (let i = 0; i < a.t.length; i++) {
+    if (a.t[i] !== b.t[i] || a.d[i] !== b.d[i] || a.r[i] !== b.r[i]) return false;
+  }
+  return true;
+}
+
 function _predCacheKey(scope, history, key, currentUtil, resetsAt, fcOpts) {
   const n = history.length;
   const first = history[0];
@@ -95,17 +124,17 @@ function _predCacheKey(scope, history, key, currentUtil, resetsAt, fcOpts) {
     + `|${fcOpts.provider ?? ''}|${fcOpts.windowSeconds ?? ''}|${fcOpts.tzOffsetMin ?? ''}|${_priorDigest(fcOpts.priorCycles)}`;
 }
 
-function _predCacheGet(cache, cacheKey, nowMs) {
+function _predCacheGet(cache, cacheKey, nowMs, snap) {
   const hit = cache.get(cacheKey);
   if (!hit) return null;
-  if (nowMs - hit.at > PRED_CACHE_TTL_MS) { cache.delete(cacheKey); return null; }
+  if (nowMs - hit.at > PRED_CACHE_TTL_MS || !_sameSnapshot(hit.snap, snap)) { cache.delete(cacheKey); return null; }
   cache.delete(cacheKey);            // re-insert so the most recently used entry evicts last
   cache.set(cacheKey, hit);
   return hit.value;
 }
 
-function _predCacheSet(cache, cacheKey, value, nowMs) {
-  cache.set(cacheKey, { at: nowMs, value });
+function _predCacheSet(cache, cacheKey, value, nowMs, snap) {
+  cache.set(cacheKey, { at: nowMs, value, snap });
   while (cache.size > PRED_CACHE_MAX) cache.delete(cache.keys().next().value);
 }
 
@@ -174,8 +203,9 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
       && !(usesP7 && p7CycleHasPassDrop(samples, resetTime, now)))
       ? _predCacheKey(_scope, history, key, currentUtil, resetsAt, fcOpts)
       : null;
+    const snap = cacheKey ? _d7Snapshot(history) : null;
     if (cacheKey) {
-      const cached = _predCacheGet(_cache, cacheKey, now);
+      const cached = _predCacheGet(_cache, cacheKey, now, snap);
       // hoursToReset is recomputed from the live clock rather than served from the entry — it is
       // the one field rendered at minute granularity (renderGaugePrediction's tooltip).
       if (cached) return { ...cached, hoursToReset };
@@ -203,7 +233,7 @@ export function calcPredictedAtReset(history, key, currentUtil, resetsAt, opts =
     // A sub-hour observation window (a brand-new user, or the thin-data fallback) is NOT cached:
     // renderGaugePrediction renders `hoursDiff` in whole MINUTES below 1h, which is fine enough
     // to notice a TTL's worth of staleness — and such a short history is cheap to recompute.
-    if (cacheKey && dp.hoursDiff >= 1) _predCacheSet(_cache, cacheKey, { ...result }, now);
+    if (cacheKey && dp.hoursDiff >= 1) _predCacheSet(_cache, cacheKey, { ...result }, now, snap);
     return result;
   } else {
     // 5h: the SHARED flat projection (ui/usage-tiers.js). The dashboard runs the same function on

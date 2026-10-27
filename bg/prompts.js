@@ -63,6 +63,7 @@ const OPS = {
   team: ['GET', '/api/ext/team-prompts', false, false],
   team_share: ['POST', '/api/ext/team-prompts', false, true],
   team_use: ['POST', '/api/ext/team-prompts/:id/use', true, false],
+  team_save: ['POST', '/api/ext/team-prompts/:id/save', true, false],   // 「내 프롬프트에 저장」 on a 팀 row
 };
 
 /** Only the fields a create may carry, as strings — the server validates lengths again. */

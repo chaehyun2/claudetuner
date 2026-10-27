@@ -1,5 +1,5 @@
 // === ES Module Imports ===
-import { sendGAEvent, pinnedState, authState } from './bg/analytics.js';
+import { sendGAEvent, pinnedState, authState, providerPermState } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, RESET_ALARM_KEYS, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
@@ -326,7 +326,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     runWhatsNewOnUpdate({ previousVersion: details.previousVersion }).catch((e) => console.warn('[Claude Tuner] whats-new check failed:', e?.message || e));
   }
   await setupAlarm();
-  sendGAEvent('extension_installed', { reason: details.reason });
+  // Permission state rides the install/update event too: every install fires 'update' within a
+  // day or two of a release, so this gives the provider-permission baseline without waiting for
+  // browser restarts (extension_loaded in onStartup only samples installs that restarted).
+  // Detached: a permissions probe that never settles must not hold up the startup work below.
+  void providerPermState().then((perm) => sendGAEvent('extension_installed', { reason: details.reason, ...perm }));
   await restoreSidePanelPreference();
 
   // Re-inject content scripts into existing Claude.ai tabs (dev reload / extension update)
@@ -884,7 +888,7 @@ chrome.runtime.onStartup.addListener(async () => {
     // proven token the install is holding right now — onInstalled('update') fires once, this fires
     // on every browser start, so together they close the transition window.
     await markProvenIfStored();
-    sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState() });
+    sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState(), ...(await providerPermState()) });
   })();
   await restoreSidePanelPreference();
   // Re-register dynamic ChatGPT/Gemini scripts on browser restart (registrations
