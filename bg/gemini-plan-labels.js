@@ -73,12 +73,36 @@ const GEMINI_V3P2_POLICY_RE = /v3p2_(\w+)_policy/;
 // lite_three_thinking_levels_policy (their quota mixes the Free and Plus constants),
 // brownfield_default_policy, default_policy. They keep the planId fallback until the data says
 // which tier they are — a wrong entry here is worse than none, because it overrides planId.
+//
+// SECOND RENAME, 2026-10-09 (#2706). From 2026-10-10 00:53 UTC no pre-October name arrives; Google
+// moved to `launch_chat_<x>_policy` (10-09 17:13 ~ 10-13 16:04 UTC) and then `launch_<x>_policy` /
+// `launch_ultra_mode_<x>_policy` (10-13 15:52 UTC ~). Mapped by the same full-7d-quota constant
+// (AE, 25 days; every name sits on exactly one constant):
+//   12,096  basic  launch_chat_free, launch_free, launch_free_server_only (8 of ~54k rows at 24,192)
+//   24,192  plus   launch_chat_plus, launch_plus
+//   48,384  pro    launch_chat_pro, launch_pro, launch_ultra_mode_pro
+//   241,920 ultra  launch_chat_neon, launch_ultra_mode_neon   (5x)
+//   967,680 ultra  launch_chat_ultra, launch_ultra_mode_ultra (20x — the sub-tier comes from quota)
+// 🔴 `launch_ultra_mode_pro_policy` IS AI PRO (48,384), not Ultra: the "ultra_mode" in these names
+// is a model-picker mode, not the seat. Never read a tier off a launch_* name.
 export const GEMINI_POLICY_ALIAS = {
   basic_policy: 'basic',
   brownfield_basic_policy: 'basic',
   brownfield_paid_policy: 'plus',
   plus_policy: 'pro',     // 🔴 NOT plus — see above.
   neon_policy: 'ultra',
+  launch_chat_free_policy: 'basic',
+  launch_free_policy: 'basic',
+  launch_free_server_only_policy: 'basic',
+  launch_chat_plus_policy: 'plus',
+  launch_plus_policy: 'plus',
+  launch_chat_pro_policy: 'pro',
+  launch_pro_policy: 'pro',
+  launch_ultra_mode_pro_policy: 'pro',     // 🔴 Pro — see above.
+  launch_chat_neon_policy: 'ultra',
+  launch_ultra_mode_neon_policy: 'ultra',
+  launch_chat_ultra_policy: 'ultra',
+  launch_ultra_mode_ultra_policy: 'ultra',
 };
 
 /**

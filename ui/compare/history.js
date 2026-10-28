@@ -739,10 +739,14 @@ export function installHistory(ctx) {
    */
   ctx.pendingLoad = null; // an entry chosen before the status built the columns (Codex hist 1R #7)
   /** A continuation within the bounds, copied; null (the column loads / stores read-only) for anything else. */
+  // The one number a continuation may carry: Gemini's Google account /u/<n> (vendor-ai v0.50.0,
+  // #1953). Without this every kept Gemini chat lost its continuation at save (deploy-1.56.8 B1).
+  const continuationValueOk = (k, v) => (typeof v === 'string' && v.length <= CONTINUATION_MAX_VALUE_CHARS)
+    || (k === 'authuser' && Number.isInteger(v) && v >= 0 && v < 10);
   function boundContinuation(c) {
     if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
     const keys = Object.keys(c);
-    if (keys.length > CONTINUATION_MAX_KEYS || keys.some((k) => typeof c[k] !== 'string' || c[k].length > CONTINUATION_MAX_VALUE_CHARS)) return null;
+    if (keys.length > CONTINUATION_MAX_KEYS || keys.some((k) => !continuationValueOk(k, c[k]))) return null;
     return { ...c };
   }
   /**

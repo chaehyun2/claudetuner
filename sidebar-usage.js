@@ -648,6 +648,8 @@
       // better than a throw on a 1s interval.
       if (countEl && CORE && CORE.formatCountdown) countEl.textContent = CORE.formatCountdown(resetAt, _lang);
     });
+    // The folded header's 5h countdown (CORE.sidebarFoldSummaryHtml).
+    if (CORE && CORE.tickStripCountdowns) CORE.tickStripCountdowns(document.getElementById(CT_PANEL_ID), _lang);
   }
 
   // ── Mount / unmount ──

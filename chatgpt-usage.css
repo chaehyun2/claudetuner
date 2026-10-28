@@ -447,5 +447,9 @@ html.dark .ct-cg-rp .ct-rp-hot, html.dark-oled .ct-cg-rp .ct-rp-hot, html[data-t
 .ct-fold-btn:hover, .ct-fold-btn:focus-visible { opacity: 1; background: rgba(127, 127, 127, 0.15); }
 .ct-fold-btn svg { transition: transform 0.15s ease; }
 .ct-folded .ct-fold-btn svg { transform: rotate(-90deg); }
+/* Folded: the summary (with the 5h countdown) takes the title's room — the logo still names the panel. */
+.ct-folded .ct-sb-title, .ct-folded .ct-cg-title, .ct-folded .ct-gm-title { display: none; }
+/* …and starts where the title did: the header already spaces the logo (claude margin, ChatGPT/Gemini gap) — the summary's own lead is for following a title, and doubled it to ~21px (user screenshot). */
+.ct-folded .ct-fold-sum { margin-left: 0; }
 .ct-fold-dot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: #ef4444; }
 /* </sidebar-fold> */

@@ -703,6 +703,8 @@
       const countEl = el.querySelector('.ct-reset-count');
       if (countEl) countEl.textContent = CORE.formatCountdown(r, _lang);
     });
+    // The folded header's 5h countdown (CORE.sidebarFoldSummaryHtml).
+    if (CORE.tickStripCountdowns) CORE.tickStripCountdowns(document.getElementById(PANEL_ID), _lang);
   }
 
   // ── Mount / unmount ──

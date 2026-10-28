@@ -170,6 +170,21 @@
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // The Google account a google.com page is signed in as, from its account button (the sign-out
+  // link's aria-label carries the address). Lower-cased, or null. Gemini's panel matches its org by
+  // this rather than by /u/<n>, which shifts when an earlier account signs out (#2709).
+  const GOOGLE_ACCOUNT_LINK = 'a[href*="accounts.google.com/SignOutOptions"][aria-label]';
+  const EMAIL_IN_LABEL_RE = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
+  function googlePageAccountEmail() {
+    try {
+      const label = document.querySelector(GOOGLE_ACCOUNT_LINK)?.getAttribute('aria-label') || '';
+      const m = EMAIL_IN_LABEL_RE.exec(label);
+      return m ? m[0].toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  }
+
   function detectLang() {
     const browserLang = (navigator.language || 'en').slice(0, 2).toLowerCase();
     return browserLang === 'ko' ? 'ko' : 'en';
@@ -1537,6 +1552,9 @@
   // URGENT window (fuller at its reset) is always drawn in full; the other window's pieces and both
   // countdowns carry data-fit and are kept only while they add no line — each strip passes
   // stripFitParts() to fitStripParts. Order is fixed 5h → 7d so the eye finds each in one place.
+  // 🔴 BOTH countdowns outrank the buttons: the 5h reset is what people act on (「5시간 리셋 직전에
+  // 몰아 쓴다」) even while the 7d window is the urgent one — dropping it before the compare button
+  // hid it at an ordinary 700px composer (user inquiry, 2026-10-28).
   //
   // One markup and one stylesheet (STRIP_GAUGE_CSS) for all three sites; a strip only maps the
   // colour variables (--ct-g-muted / --ct-g-track / --ct-g-sep) onto its own theme tokens.
@@ -1560,15 +1578,15 @@
 
   /**
    * The optional strip parts, most important first (fitStripParts shows them back in this order):
-   * the urgent window's countdown, the other window's bar, then the strip's own `middle` parts
-   * (compare button, 「프롬프트」 label…), then the other window's estimate and countdown, then `tail`.
+   * both windows' countdowns (urgent first), the other window's bar, then the strip's own `middle`
+   * parts (compare button, 「프롬프트」 label…), then the other window's estimate, then `tail`.
    * Both windows' current % and the urgent window's bar and estimate are never parts.
    */
   function stripFitParts(container, middle, tail) {
     if (!container) return [];
     const q = (key) => container.querySelector(`[data-fit="${key}"]`);
-    return [q(STRIP_FIT.URGENT_RESET), q(STRIP_FIT.OTHER_BAR), ...(middle || []),
-      q(STRIP_FIT.OTHER_PRED), q(STRIP_FIT.OTHER_RESET), ...(tail || [])];
+    return [q(STRIP_FIT.URGENT_RESET), q(STRIP_FIT.OTHER_RESET), q(STRIP_FIT.OTHER_BAR), ...(middle || []),
+      q(STRIP_FIT.OTHER_PRED), ...(tail || [])];
   }
 
   /** The tag on a gauge — '5시간' / '7일' / '30일' / '5h' — from the reported span, else the slot's. */
@@ -1772,18 +1790,26 @@
     } catch { /* context dead */ }
   }
 
-  /** The folded header's summary: "5h 23% · 주 26%", each number in its gauge color. '' when none. */
+  /**
+   * The folded header's summary: "5시간 23% ↻57m · 7일 26%", each number in its gauge color. '' when
+   * none. The 5h window carries its reset countdown — the one number people act on, and the reason
+   * a folded panel was asked to show time at all (user inquiry, 2026-10-28). Only the 5h one: the
+   * header has room for one (the folded panel also hides its 「Usage」 title for it — each site's
+   * CSS). The countdown is a `.ct-g-cd[data-reset]`, ticked by the sidebars' tickStripCountdowns.
+   */
   function sidebarFoldSummaryHtml(d, lang) {
     if (!d || d.noUsage) return '';
     const tx = _foldText(lang);
     const parts = [];
-    const add = (util, span, fallback) => {
+    const add = (util, span, fallback, resetAt) => {
       if (util == null || !isFinite(util)) return;
       const label = windowUnitLabel(span, lang) || fallback;
-      parts.push(`<span class="ct-fold-part">${escapeHtml(label)} <b style="color:${gaugeColor(util)}">${Math.round(util)}%</b></span>`);
+      const cd = resetAt ? stripCountdown(resetAt, lang) : null;
+      const reset = cd ? ` <span class="ct-fold-reset" style="opacity:0.75">\u21bb<span class="ct-g-cd" data-reset="${escapeHtml(resetAt)}">${escapeHtml(cd)}</span></span>` : '';
+      parts.push(`<span class="ct-fold-part">${escapeHtml(label)} <b style="color:${gaugeColor(util)}">${Math.round(util)}%</b>${reset}</span>`);
     };
-    add(d.h5, d.w5s, tx.h5);
-    add(d.d7, d.w7s, tx.d7);
+    add(d.h5, d.w5s, tx.h5, d.r5);
+    add(d.d7, d.w7s, tx.d7, null);
     return parts.join('<span class="ct-fold-sep">·</span>');
   }
 
@@ -1843,6 +1869,7 @@
     formatResetAbsolute,
     buildResetCellInner,
     escapeHtml,
+    googlePageAccountEmail,
     detectLang,
     windowUnitLabel,
     extraGaugeDrawn,

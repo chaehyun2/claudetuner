@@ -12,7 +12,7 @@ import { resetPassSiteUrl, resetPassHelpUrl, clearNowCall, blockedSlotsOf, pastW
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 
 // === Sidebar Usage: build data for content script ===
-export async function buildSidebarUsageData(reqOrgId, provider) {
+export async function buildSidebarUsageData(reqOrgId, provider, account) {
   const wantProvider = provider || 'claude';
   const [status, history, local] = await Promise.all([
     getLastStatus(),
@@ -44,7 +44,24 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
     // ChatGPT marks the account the site is on (`isActive`): the panel sits ON that site, so it beats a
     // pin to another account. Providers without the mark keep pinned → first.
     const readable = collectedOrgs.filter(o => !o.localOnly);
-    orgData = readable.find(o => o.isActive) || readable.find(o => o.isPrimary) || readable[0] || null;
+    // Gemini (#2709): the tab's Google account. Once orgs carry `authuser`, a tab whose account has
+    // not been collected yet shows nothing rather than ANOTHER account's numbers — the defect this
+    // replaces. The address the page shows decides; /u/<n> alone is only a fallback, because it
+    // shifts when an earlier account signs out (Codex R1-B2) — and when both are known they must
+    // agree with the same org. Orgs from the single-account path carry no `authuser` and keep the old pick.
+    // A known page address applies to EVERY org, including ones an older version stored without
+    // `authuser` — otherwise such an org is shown under another account's page (Codex R2-B1).
+    const pageEmail = account && account.email ? account.email.toLowerCase() : null;
+    if (pageEmail) {
+      orgData = readable.find(o => (o.email || '').toLowerCase() === pageEmail) || null;
+      // Empty, not the provider's error: that status describes the DEFAULT account (collectGemini).
+      if (!orgData) return null;
+    } else if (account && Number.isInteger(account.authuser) && readable.some(o => Number.isInteger(o.authuser))) {
+      orgData = readable.find(o => o.authuser === account.authuser) || null;
+      if (!orgData) return null;
+    } else {
+      orgData = readable.find(o => o.isActive) || readable.find(o => o.isPrimary) || readable[0] || null;
+    }
   }
 
   // Prefer snapshot when it's for the same org and is newer than collectedOrgs.

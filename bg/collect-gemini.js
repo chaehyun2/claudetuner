@@ -1,4 +1,4 @@
-import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo } from './api-gemini.js';
+import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo, listGeminiAccounts, invalidateGeminiAccounts } from './api-gemini.js';
 import { platformField } from './platform.js';
 // The plan-policy RPC (`otAQ7b`) — the same call the vendored client reads the model picker from
 // (#2054), so its id is spelled once.
@@ -6,8 +6,8 @@ import { GEMINI_PICKER_RPC_ID } from '../vendor-ai/models.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import it
 // (#1315). collectGemini() keeps every await: parse-gemini.js decides from parsed values and only
 // REPORTS which stored state must then be consulted.
-import { parseGeminiWindows, parseGeminiPolicy, resolveGeminiPlan, geminiUltraSubTier }
-  from './parse-gemini.js';
+import { parseGeminiWindows, parseGeminiPolicy, resolveGeminiPlan, geminiUltraSubTier,
+  geminiTierFromQuota } from './parse-gemini.js';
 import { geminiUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
@@ -39,10 +39,62 @@ export async function collectGemini(force = false, userManual = false) {
     return { success: false, orgs: [] };
   }
 
+  // Every Google account signed in to this browser is its own Gemini account (#2709). A listing
+  // that fails or finds none leaves the single-account path exactly as it was.
+  let accounts = null;
+  try {
+    accounts = await listGeminiAccounts();
+  } catch (e) {
+    console.warn('[Claude Tuner] Gemini account listing failed:', e.message);
+  }
+  // Only an answer from the DEFAULT account (/u/0) may write the provider status here: when the
+  // first tab shows /u/1, its success is not the default account's (Codex R1-B3).
+  if (!accounts || accounts.length === 0) return collectGeminiAccount(undefined, { force, userManual, statusOnlyIfDefault: true });
+
+  // The default account (/u/0) is collected LAST and is the only one that writes the provider's
+  // status (error/success/send outcome): the popup's one Gemini status line describes it, and a
+  // secondary account's failure must neither hide its success nor be hidden by it. Secondary
+  // accounts send under the default account's identity, so a token-less install never turns one
+  // browser into several users.
+  const [primary, ...others] = accounts;
+  const orgs = [];
+  const gone = new Set();
+  for (const acc of [...others, primary]) {
+    const r = await collectGeminiAccount(acc.authuser, {
+      force, userManual, expect: acc, quiet: acc !== primary, identityEmail: primary.email,
+    });
+    orgs.push(...r.orgs);
+    if (r.gone) gone.add(acc.googleId);
+  }
+  orgs.sort((a, b) => a.authuser - b.authuser);
+  // Listed accounts that did not come back this cycle (a failure, an overlapping collection) keep
+  // their last stored org instead of vanishing from the list (Codex R1-B1) — except one shown to be
+  // signed out (its /u/<n> redirects or answers as someone else): the cached listing still names it,
+  // and keeping it would hold a signed-out account until the list expires (Codex R2-B2).
+  const keepUuids = accounts.map((a) => a.googleId).filter((id) => id && !gone.has(id) && !orgs.some((o) => o.uuid === id));
+  return { success: orgs.length > 0, orgs, keepUuids };
+}
+
+/**
+ * Collect ONE Gemini account.
+ * @param {number|undefined} authuser - the /u/<n> account; undefined = legacy single-account path.
+ * @param {object} opts
+ * @param {{googleId?: string|null, email?: string|null}} [opts.expect] - who the listing says /u/<n>
+ *   is. If the account that ANSWERED is someone else (indices shift on sign-out), nothing is stored.
+ * @param {boolean} [opts.quiet] - do not write the provider-level status (secondary accounts).
+ * @param {string|null} [opts.identityEmail] - provider email used to resolve the server identity.
+ * @param {boolean} [opts.statusOnlyIfDefault] - single-account path: become quiet once the answer
+ *   turns out to come from a /u/<n> other than the default account.
+ * Returns `{ success, orgs, gone? }` — `gone`: this account is shown to be signed out.
+ */
+async function collectGeminiAccount(authuser, { force = false, userManual = false, expect = null, quiet = false, identityEmail = null, statusOnlyIfDefault = false } = {}) {
   // Per-cycle send outcome — same rule as the ChatGPT twin.
   const sendOutcome = { failed: null, ok: 0 };
   try {
-    const data = await fetchGeminiRpc('jSf9Qc', '[]');
+    // Where THIS answer came from — the identity below must name the same observation (R1-B1).
+    const observe = {};
+    const data = await fetchGeminiRpc('jSf9Qc', '[]', authuser, observe);
+    if (statusOnlyIfDefault && Number.isInteger(observe.authuser) && observe.authuser !== 0) quiet = true;
 
     const shape = geminiUsageShape(data);
     const parsed = parseGeminiWindows(data);
@@ -51,7 +103,7 @@ export async function collectGemini(force = false, userManual = false) {
       // Same silent shape #852 is about: no throw, so no code, so nothing to show. The ChatGPT
       // twin records this; leaving Gemini out would reopen the defect on one provider only
       // (Codex DEPLOY-BLOCKER).
-      await noteProviderError('gemini', 'err_gemini_collect_failed');
+      if (!quiet) await noteProviderError('gemini', 'err_gemini_collect_failed');
       // 🔴 THE HOLE #1322 IS ABOUT. This return produces no snapshot, so without the line below the
       // broken response never reaches the server at all — it vanishes from the successful-ingest
       // population, and the observation goes blank at precisely the moment the provider changed
@@ -74,12 +126,27 @@ export async function collectGemini(force = false, userManual = false) {
     let email = null;
     let googleId = null;
     try {
-      const userInfo = await getGeminiUserInfo();
+      const userInfo = await getGeminiUserInfo(observe);
       email = userInfo.email;
       googleId = userInfo.googleId;
       if (!email && !googleId) console.warn('[Claude Tuner] Gemini: could not extract user info from page');
     } catch (e) {
       console.warn('[Claude Tuner] Gemini user info failed:', e.message);
+    }
+
+    // The listing named who /u/<n> is; the page that served the usage says who answered. A mismatch
+    // means the indices moved since the listing (a sign-out) — storing would file one account's
+    // usage under another's id, so this cycle stores nothing and the list is read again next time.
+    // An answer we could not NAME (the tab closed before the identity read) is skipped too, but it
+    // is no evidence of a sign-out — the account keeps its stored org (Codex R3-B1).
+    if (expect && !googleId && !email) {
+      console.warn('[Claude Tuner] Gemini: /u/' + authuser + ' answered but could not be identified — skipped');
+      return { success: false, orgs: [] };
+    }
+    if (expect && expect.googleId && googleId && expect.googleId !== googleId) {
+      console.warn('[Claude Tuner] Gemini: /u/' + authuser + ' answered as a different account — skipped');
+      invalidateGeminiAccounts();
+      return { success: false, orgs: [], gone: true };
     }
 
     const accountId = googleId || 'gemini-unknown';
@@ -90,8 +157,16 @@ export async function collectGemini(force = false, userManual = false) {
     let otResponse = null;
     let otOk = false;   // true only when otAQ7b returned a well-formed (array) response
     try {
-      otResponse = await fetchGeminiRpc(GEMINI_PICKER_RPC_ID, '[]');
+      const otObserve = {};
+      otResponse = await fetchGeminiRpc(GEMINI_PICKER_RPC_ID, '[]', authuser, otObserve);
       otOk = Array.isArray(otResponse);
+      // 🔴 THE SAME ACCOUNT AS THE USAGE (deploy-1.56.8 B3): /u/<n> can move between the two RPCs
+      // (an earlier account signs out) — a policy from another account would label this one.
+      // Unnamed or different → the policy is not used (planId / quota decide, as for a failed RPC).
+      if (otOk && Number.isInteger(authuser) && googleId) {
+        const otWho = await getGeminiUserInfo(otObserve).catch(() => null);
+        if (!otWho || otWho.googleId !== googleId) { otResponse = null; otOk = false; }
+      }
     } catch (e) {
       console.warn('[Claude Tuner] Gemini otAQ7b failed:', e.message);
     }
@@ -100,7 +175,8 @@ export async function collectGemini(force = false, userManual = false) {
     // The plan LABEL is decided from parsed signals only (bg/parse-gemini.js); the two state
     // lookups it can ask for are performed here, where their awaits are visible.
     let { plan, noLimits, needsUltraSubTier, needsStickyMetered } =
-      resolveGeminiPlan({ policies, tierWord, planId, otOk });
+      resolveGeminiPlan({ policies, tierWord, planId, otOk,
+        quotaTier: geminiTierFromQuota(remaining7d, pct7dRaw, remaining5h, pct5hRaw) });
 
     // Ultra 5x vs 20x share one policy — refine the label by quota so planMultiplier can
     // apply 5x vs 20x (ChatGPT "Pro 5x"/"Pro 20x" pattern). The quota (remaining) signal is
@@ -133,6 +209,10 @@ export async function collectGemini(force = false, userManual = false) {
       plan,
       provider: 'gemini',
       isPrimary: false,
+      // The /u/<n> the usage was read from — the in-page panel shows the org of the account on screen.
+      // Taken from the observation, so the single-account path (listing failed) tags the account it
+      // actually read too, not only the listed ones (Codex R1-B3).
+      ...(Number.isInteger(observe.authuser) ? { authuser: observe.authuser } : {}),
       h5,
       d7,
       resetsAt5h,
@@ -186,7 +266,7 @@ export async function collectGemini(force = false, userManual = false) {
         raw: policies.length ? (tierWord || 'policy')
           : (planId === null || planId === undefined ? null : String(planId)),
       });
-      const res = await sendGeminiSnapshot(org, email, plan, { force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider, sendMeta: gate.meta }).catch(e => {
+      const res = await sendGeminiSnapshot(org, email, plan, { identityEmail, force: shouldForceProviderPost(gate.reason, userManual), sendOutcome, driftRider, sendMeta: gate.meta }).catch(e => {
         console.warn('[Claude Tuner] Gemini snapshot send failed:', e.message);
         sendOutcome.failed = sendOutcome.failed || 'err_send_failed';
         return null;
@@ -196,12 +276,21 @@ export async function collectGemini(force = false, userManual = false) {
       console.log(`[Claude Tuner] Gemini delta-gate skip (${gate.reason})`);
     }
 
-    await noteProviderSuccess('gemini', email);
-    if (sendOutcome.failed) await noteProviderSendError('gemini', sendOutcome.failed);
-    else if (sendOutcome.ok) await noteProviderSendOk('gemini');
+    if (!quiet) {
+      await noteProviderSuccess('gemini', email);
+      if (sendOutcome.failed) await noteProviderSendError('gemini', sendOutcome.failed);
+      else if (sendOutcome.ok) await noteProviderSendOk('gemini');
+    }
     return { success: true, orgs: [org] };
   } catch (e) {
     console.warn('[Claude Tuner] Gemini collection failed:', e.message);
+    // A /u/<n> that redirects (err_gemini_not_logged_in, bg/api-gemini.js) is a signed-out account.
+    const gone = !!(e && e.message === 'err_gemini_not_logged_in');
+    if (gone) invalidateGeminiAccounts();
+    if (quiet) {
+      await noteDriftOutcome('gemini', 'error', { stage: 'collect', code: 'err_gemini_collect_failed' });
+      return { success: false, orgs: [], gone };
+    }
     const st = await noteProviderError('gemini', e);
     // 🔴 AN EVENT, NOT ONLY A COUNTER — and the reason is the HTTP STATUS.
     //
@@ -249,12 +338,12 @@ export async function collectGemini(force = false, userManual = false) {
     if (storedCode === 'err_gemini_collect_failed' && e && e.inBand && IN_BAND_CODE_RE.test(String(e.inBandCode))) driftCode = `err_gemini_in_band:${e.inBandCode}`;
     else if (storedCode === 'err_gemini_collect_failed' && rawMsg.indexOf('err_') !== 0) driftCode = unclassifiedCode('err_gemini_unclassified', e);
     await noteDriftOutcome('gemini', 'error', { stage: 'collect', code: driftCode });
-    return { success: false, orgs: [] };
+    return { success: false, orgs: [], gone };
   }
 }
 
 // Send Gemini snapshot to server (same /api/snapshots endpoint)
-async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendOutcome = null, driftRider = null, sendMeta = null } = {}) {
+async function sendGeminiSnapshot(org, geminiEmail, plan, { identityEmail = null, force = false, sendOutcome = null, driftRider = null, sendMeta = null } = {}) {
   const config = await getConfig();
   if (!config.serverUrl) return;
 
@@ -264,7 +353,7 @@ async function sendGeminiSnapshot(org, geminiEmail, plan, { force = false, sendO
   // `accountCache` is still read here for isExtraOrg below (a Claude account means this
   // provider is an extra org, which is a different question from identity).
   const { accountCache } = await chrome.storage.local.get({ accountCache: null });
-  const serverEmail = await resolveIngestIdentity(geminiEmail);
+  const serverEmail = await resolveIngestIdentity(identityEmail || geminiEmail);
   if (!serverEmail) {
     console.warn('[Claude Tuner] Gemini snapshot skipped: no email (no Claude/independent account and no Gemini email)');
     return;

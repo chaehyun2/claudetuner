@@ -42,17 +42,53 @@ export function extractGeminiPolicies(node, acc) {
 // tier constant; its ratio to Pro is the capacity multiplier. See docs/DESIGN §13–14.
 const GEMINI_PRO_QUOTA = { d7: 48384, h5: 2400 };
 
+// Capacity relative to AI Pro (full quota / Pro full quota), or null when unreadable. Prefers the
+// 7d window; both windows yield the same ratio (AE 2026-10: 5h 600/1200/2400/12000/48000 and 7d
+// 12,096/24,192/48,384/241,920/967,680 → 0.25/0.5/1/5/20).
+function geminiCapacityRatio(rem7d, pct7d, rem5h, pct5h) {
+  if (Number.isFinite(rem7d) && Number.isFinite(pct7d) && pct7d < 0.99) return (rem7d / (1 - pct7d)) / GEMINI_PRO_QUOTA.d7;
+  if (Number.isFinite(rem5h) && Number.isFinite(pct5h) && pct5h < 0.99) return (rem5h / (1 - pct5h)) / GEMINI_PRO_QUOTA.h5;
+  return null;
+}
+
+// Tier word per capacity ratio. Each band is ±15% around a constant; the constants are ≥2x apart,
+// so the bands never overlap.
+const GEMINI_CAPACITY_TIERS = [['basic', 0.25], ['plus', 0.5], ['pro', 1], ['ultra', 5], ['ultra', 20]];
+const GEMINI_CAPACITY_TOLERANCE = 0.15;
+
 // AI Ultra 5x and 20x share ONE policy (v3p2_ultra_policy, since 2026-08-09 neon_policy) — only the quota tells them apart.
 // Returns 'AI Ultra 5x' / 'AI Ultra 20x' from the capacity ratio, or null (unknown → keep base
-// 'AI Ultra'). Prefers the 7d window; both windows yield the same ratio.
+// 'AI Ultra').
 export function geminiUltraSubTier(rem7d, pct7d, rem5h, pct5h) {
-  let q = null;
-  if (Number.isFinite(rem7d) && Number.isFinite(pct7d) && pct7d < 0.99) q = (rem7d / (1 - pct7d)) / GEMINI_PRO_QUOTA.d7;
-  else if (Number.isFinite(rem5h) && Number.isFinite(pct5h) && pct5h < 0.99) q = (rem5h / (1 - pct5h)) / GEMINI_PRO_QUOTA.h5;
+  const q = geminiCapacityRatio(rem7d, pct7d, rem5h, pct5h);
   if (q == null) return null;
   if (Math.abs(q - 20) <= 3) return 'AI Ultra 20x';     // 20x ± ~15%
   if (Math.abs(q - 5) <= 0.75) return 'AI Ultra 5x';    // 5x ± ~15%
   return null;
+}
+
+/**
+ * The tier word the quota alone implies, or null. Used ONLY when the account carries a policy
+ * string we do not recognize (#2706): Google has renamed every policy twice (2026-08-09,
+ * 2026-10-09), and each time the planId fallback mislabelled accounts across capacities for weeks
+ * (AI Ultra 20x as 'AI Plus', Free as 'Work'). The full quota is the one signal that survived both
+ * renames unchanged, so it decides before planId does. A recognized policy still wins over it.
+ */
+export function geminiTierFromQuota(rem7d, pct7d, rem5h, pct5h) {
+  // Each window is judged on its own; when both are readable they must agree, because a wrong
+  // positive moves the multiplier and a null only defers to planId (Codex R1-B1).
+  // Compared by band, not tier word: Ultra 5x and 20x share the word 'ultra' (Codex R2-B1).
+  const b7 = geminiBandOfWindow(rem7d, pct7d, GEMINI_PRO_QUOTA.d7);
+  const b5 = geminiBandOfWindow(rem5h, pct5h, GEMINI_PRO_QUOTA.h5);
+  if (b7 && b5 && b7 !== b5) return null;
+  return (b7 || b5 || [null])[0];
+}
+
+// The GEMINI_CAPACITY_TIERS band one window falls in, or null when unreadable or in no band.
+function geminiBandOfWindow(rem, pct, proQuota) {
+  if (!Number.isFinite(rem) || rem <= 0 || !Number.isFinite(pct) || pct < 0 || pct >= 0.99) return null;
+  const q = (rem / (1 - pct)) / proQuota;
+  return GEMINI_CAPACITY_TIERS.find(([, ratio]) => Math.abs(q - ratio) <= ratio * GEMINI_CAPACITY_TOLERANCE) || null;
 }
 
 // Convert [seconds, nanos] timestamp to ISO string, then normalize to minute precision
@@ -150,15 +186,17 @@ export function parseGeminiPolicy(otResponse, otOk) {
  *   needsStickyMetered  — the planId-based Workspace guess needs the sticky-metered check before
  *                         `noLimits` can be trusted; the caller overrides `noLimits` with it.
  */
-export function resolveGeminiPlan({ policies, tierWord, planId, otOk }) {
+export function resolveGeminiPlan({ policies, tierWord, planId, otOk, quotaTier = null }) {
   if (policies.length > 0) {
     // A policy is present → metered consumer account (NEVER Workspace, even if the tier
     // word is unrecognized). Label from the tier word (unknown → title-cased so it surfaces in
-    // data); if a policy exists but names no recognized tier, use the planId label.
-    const plan = tierWord
-      ? (GEMINI_POLICY_LABEL[tierWord] || (tierWord.charAt(0).toUpperCase() + tierWord.slice(1)))
+    // data); if a policy exists but names no recognized tier, the quota decides
+    // (geminiTierFromQuota, #2706), and only without a readable quota the planId label.
+    const word = tierWord || quotaTier;
+    const plan = word
+      ? (GEMINI_POLICY_LABEL[word] || (word.charAt(0).toUpperCase() + word.slice(1)))
       : (GEMINI_PLAN_MAP[planId] || 'Gemini');
-    return { plan, noLimits: false, needsUltraSubTier: tierWord === 'ultra', needsStickyMetered: false };
+    return { plan, noLimits: false, needsUltraSubTier: word === 'ultra', needsStickyMetered: false };
   }
   if (otOk) {
     // Well-formed otAQ7b response with NO policy → Google Workspace seat (unmetered).

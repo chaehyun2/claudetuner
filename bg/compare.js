@@ -206,6 +206,7 @@ import { REVIEW_EVENTS, REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from '.
 import { ATTACH_TYPES, attachTypeOf, providerTakesTypes } from '../ui/compare/attach-types.js';
 import { pickProviderEntry } from '../ui/compare/usage-floor.js';
 import { detectPlan } from './plan-label.js';
+import { geminiAuthuserOfUrl } from './api-gemini.js';
 // The compare wire constants (port name, providers, column cap, id/share patterns, share limits) are
 // the page's, single-sourced in ui/compare/constants.js (#2065) and re-exported for this module's importers.
 import { COMPARE_PORT_NAME, COMPARE_PROVIDERS, MAX_COLUMNS, SHARE_ID_RE, SHARE_LINK_PATH_RE, SHARE_SITE_ORIGIN, SHARE_PASSWORD_MIN, SESSION_ID_RE, MODEL_ID_RE, SHARE_AUTHOR_MODES, SHARE_TITLE_MAX, SHARE_PASSWORD_MAX, SHARE_AUTHOR_NAME_MAX, CWS_EXT_ID } from '../ui/compare/constants.js';
@@ -676,6 +677,47 @@ export function sanitizeCompareExamples(json) {
 // its default (false): the tab we open stays open across sessions and the next one rides it —
 // dowoo's lifecycle, no re-open/re-verify churn per compare.
 export const CLIENT_OPTIONS = Object.freeze({ tabCreateProps: Object.freeze({ pinned: true }) });
+
+// ── Which Google account Gemini columns use (#1953, package v0.50.0 `authuser`) ──────────────────
+// A browser signed in to several Google accounts serves each Gemini account under /u/<n>; the
+// package keeps a client to one of them. The choice (user decision 2026-10-28): the account of the
+// Gemini page the compare was OPENED from (its 「Claude·ChatGPT에도 물어보기」), else the collected
+// Gemini account with the highest plan. Fixed per client — a session never moves account mid-chat.
+// Decided per compare TAB (Codex #1953 1R): one tab's choice never moves another's, and the
+// status (model list, plan) and every client of that tab's sessions use the same account.
+// `{ [tabId]: { n, at } }` in storage.local, bounded and aged out (tab ids restart with the browser).
+export const GEMINI_ACCOUNT_BY_TAB_KEY = 'cmpGeminiAccountByTab';
+const GEMINI_ACCOUNT_TAB_TTL_MS = 12 * 60 * 60 * 1000;
+const GEMINI_ACCOUNT_TAB_MAX = 20;
+const GEMINI_MAX_ACCOUNTS = 10;
+const GEMINI_LIVE_ACCOUNTS_TTL_MS = 60 * 1000;
+const GEMINI_LIVE_ACCOUNTS_TIMEOUT_MS = 8000;
+const EMAIL_MAX = 320;
+const validEmail = (v) => typeof v === 'string' && v.length <= EMAIL_MAX && /^[^\s@]+@[^\s@]+$/.test(v);
+// Higher = preferred. A personal AI Pro beats a Workspace seat (`Work`): same capacity, but the
+// personal plan is what the user pays for and carries the newest models (measured: 4 Argon on AI Pro
+// only). Unknown labels rank 0; a tie keeps the lower /u/<n> (the default account first).
+const GEMINI_PLAN_RANK = Object.freeze({
+  'AI Ultra 20x': 7, 'AI Ultra 5x': 6, 'AI Ultra': 6, 'AI Pro': 5, Work: 4, 'AI Plus': 3, Advanced: 3, Free: 1,
+});
+
+/** A valid /u/<n> index, or null. */
+export function validGeminiAuthuser(n) {
+  return Number.isInteger(n) && n >= 0 && n < GEMINI_MAX_ACCOUNTS ? n : null;
+}
+
+/** The /u/<n> of the collected Gemini account with the highest plan, or null when none carries one. */
+export function bestGeminiAuthuser(orgs) {
+  let best = null;
+  for (const o of Array.isArray(orgs) ? orgs : []) {
+    if (!o || o.provider !== 'gemini' || o.localOnly) continue;
+    const n = validGeminiAuthuser(o.authuser);
+    if (n === null) continue;
+    const rank = Object.prototype.hasOwnProperty.call(GEMINI_PLAN_RANK, o.plan) ? GEMINI_PLAN_RANK[o.plan] : 0;
+    if (!best || rank > best.rank || (rank === best.rank && n < best.n)) best = { n, rank };
+  }
+  return best ? best.n : null;
+}
 
 // ── Chrome crash mitigation levers (2026-09-16, cause UNCONFIRMED) ─────────────────────────────
 // The user's Chrome (browser process, CrBrowserMain) crashed three times on an identical CHECK
@@ -1228,6 +1270,8 @@ export function sanitizeResumeMap(raw) {
     for (const k of keys) {
       const v = c[k];
       if (typeof v === 'string' && v.length <= RESUME_MAX_VALUE_CHARS && /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(k)) clean[k] = v;
+      // Gemini's account (package v0.50.0): the one number a continuation may carry (#1953).
+      else if (k === 'authuser' && validGeminiAuthuser(v) !== null) clean[k] = v;
     }
     if (Object.keys(clean).length && !Object.hasOwn(out, col.id)) out[col.id] = clean;
   }
@@ -2038,6 +2082,10 @@ export function createCompareController({
   syncEntitlement = null,
   readCollectedOrgs, planLabel, sendGAEvent,
   drainPendingHides = null,
+  // `() => Promise<[{authuser, email}]>` — the Google accounts signed in NOW, read fresh by the
+  // SW (bg/api-gemini.js listGeminiAccounts after invalidating its cache). Optional: without it the
+  // collected orgs answer, which can lag a sign-out by a collection cycle.
+  listGoogleAccounts = null,
   fetch: fetchImpl = (...a) => globalThis.fetch(...a),
   now = () => Date.now(),
   setTimeout: setTimeoutImpl = (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -2085,8 +2133,115 @@ export function createCompareController({
   // `continuation` (package v0.4.0, ux3 item 6): the page's `resume[provider]` for a client this
   // SEND constructs, so its first send continues that conversation; omitted (not null) otherwise —
   // the key exists only when the page asked to resume.
-  const clientOptions = (provider, saveHistory = false, continuation = null) => ({
+  // ── The Gemini account of a compare tab (#1953) ──
+  async function readGeminiAccountMap() {
+    try {
+      const m = (await storage.get(GEMINI_ACCOUNT_BY_TAB_KEY))?.[GEMINI_ACCOUNT_BY_TAB_KEY];
+      return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+    } catch { return {}; }
+  }
+  // ONE writer at a time (Codex #1953 2R B1): two opens read-modify-writing the map at once would
+  // each drop the other's new row. `onlyIfAbsent`: a decided-by-plan value never overwrites a row.
+  let geminiAccountWrites = Promise.resolve();
+  // The same rows in memory (Codex #1953 3R B2): a storage write that fails must not leave the status
+  // and the session of one tab to decide apart — this worker answers from here first.
+  const geminiAccountMem = new Map();
+  function rememberGeminiAccountForTab(tabId, n, { onlyIfAbsent = false, email = null } = {}) {
+    if (!Number.isInteger(tabId) || validGeminiAuthuser(n) === null) return Promise.resolve(n);
+    const run = geminiAccountWrites.then(async () => {
+      const t = now();
+      const map = await readGeminiAccountMap();
+      const have = geminiAccountMem.get(String(tabId)) || map[String(tabId)];
+      if (onlyIfAbsent && have && validGeminiAuthuser(have.n) !== null && Number.isFinite(have.at) && t - have.at < GEMINI_ACCOUNT_TAB_TTL_MS) return have.n;
+      const row = { n, at: t, ...(validEmail(email) ? { email: email.toLowerCase() } : {}) };
+      const rows = Object.entries(map)
+        .filter(([id, v]) => id !== String(tabId) && v && Number.isFinite(v.at) && t - v.at < GEMINI_ACCOUNT_TAB_TTL_MS)
+        .sort((a, b) => b[1].at - a[1].at)
+        .slice(0, GEMINI_ACCOUNT_TAB_MAX - 1);
+      geminiAccountMem.set(String(tabId), row);
+      try { await storage.set({ [GEMINI_ACCOUNT_BY_TAB_KEY]: Object.fromEntries([[String(tabId), row], ...rows]) }); } catch { /* the memory row above still holds it for this worker */ }
+      return n;
+    });
+    geminiAccountWrites = run.catch(() => {});
+    return run;
+  }
+  // Compare tabs being opened right now (create + their account row): a status or send for a tab
+  // waits for them, so a page that asks before its row landed reads it (Codex #1953 2R B2).
+  const geminiOpensInFlight = new Set();
+  /**
+   * The /u/<n> Gemini columns of this compare tab use: the one recorded for the tab (opened from a
+   * Gemini page, or decided earlier), else the collected account with the highest plan — recorded,
+   * so the tab's later status reads and sends keep it. null = no account known (the package pins to
+   * the first it verifies).
+   */
+  // The live account list, shared for GEMINI_LIVE_ACCOUNTS_TTL_MS so a status and the send right
+  // after it read the same answer (and a page that polls does not refetch every account's page).
+  let liveAccounts = null; // { at, list }
+  async function liveGoogleAccounts() {
+    if (typeof listGoogleAccounts !== 'function') return null;
+    if (liveAccounts && now() - liveAccounts.at < GEMINI_LIVE_ACCOUNTS_TTL_MS) return liveAccounts.list;
+    const list = await withTimeout(Promise.resolve().then(() => listGoogleAccounts()), GEMINI_LIVE_ACCOUNTS_TIMEOUT_MS, null).catch(() => null);
+    if (Array.isArray(list)) liveAccounts = { at: now(), list };
+    return Array.isArray(list) ? list : null;
+  }
+  // The CURRENT /u/<n> of an account address: the live list first, else the collected orgs.
+  function authuserOfEmail(live, orgs, email) {
+    if (!validEmail(email)) return null;
+    const want = email.toLowerCase();
+    const at = (rows, isGemini) => (Array.isArray(rows) ? rows.find((r) => r && (!isGemini || r.provider === 'gemini') && typeof r.email === 'string' && r.email.toLowerCase() === want) : null);
+    const hit = live ? at(live, false) : null;
+    if (hit) return validGeminiAuthuser(hit.authuser);
+    if (live) return null; // the live list does not have it: signed out
+    return validGeminiAuthuser(at(orgs, true)?.authuser);
+  }
+  /**
+   * The /u/<n> Gemini columns of this compare tab use. The tab chose an ACCOUNT (its address): the
+   * one it was opened from, or the highest-plan one when first needed — and its /u/<n> is looked
+   * up NOW, because an earlier account signing out moves every later one down (deploy-1.56.8 B2:
+   * the stored index alone sent to whoever took that slot). null = no account known.
+   */
+  /** The tab's account address (lower-cased) once decided, else null — what the plan display matches. */
+  function geminiEmailForTab(tabId) {
+    const row = Number.isInteger(tabId) ? geminiAccountMem.get(String(tabId)) : null;
+    return row && validEmail(row.email) ? row.email : null;
+  }
+  async function geminiAuthuserForTab(tabId) {
+    if (geminiOpensInFlight.size) await Promise.allSettled([...geminiOpensInFlight]);
+    const [orgs, live] = await Promise.all([readCollectedOrgsBounded(), liveGoogleAccounts()]);
+    if (Number.isInteger(tabId)) {
+      const hit = geminiAccountMem.get(String(tabId)) || (await readGeminiAccountMap())[String(tabId)];
+      if (hit && validGeminiAuthuser(hit.n) !== null && Number.isFinite(hit.at) && now() - hit.at < GEMINI_ACCOUNT_TAB_TTL_MS) {
+        if (!geminiAccountMem.has(String(tabId))) geminiAccountMem.set(String(tabId), hit);
+        if (!validEmail(hit.email)) return hit.n;
+        return authuserOfEmail(live, orgs, hit.email);
+      }
+    }
+    const best = bestGeminiAuthuser(orgs);
+    if (best === null) return null;
+    const email = (orgs || []).find((o) => o && o.provider === 'gemini' && o.authuser === best)?.email || null;
+    // Its address decides; only an org with no address keeps the collected index. An address the
+    // live list no longer has is a signed-out account → no account (deploy-1.56.8 R3-B1).
+    const n = validEmail(email) ? authuserOfEmail(live, orgs, email) : best;
+    if (n === null) return null;
+    // Recorded only if the tab still has no row — a source row that landed meanwhile wins (it is
+    // re-resolved by ITS address).
+    if (Number.isInteger(tabId)) {
+      const recorded = await rememberGeminiAccountForTab(tabId, n, { onlyIfAbsent: true, email });
+      if (recorded === n) return n;
+      const row = geminiAccountMem.get(String(tabId)) || {};
+      return validEmail(row.email) ? authuserOfEmail(live, orgs, row.email) : recorded;
+    }
+    return n;
+  }
+  // A continuation that names its account wins: the package continues a chat only in its own account
+  // and would refuse it under another pin.
+  const geminiAccountOption = (provider, continuation, account) => (
+    provider === 'gemini' && validGeminiAuthuser(account) !== null && validGeminiAuthuser(continuation?.authuser) === null
+      ? { authuser: account } : {});
+  // `account`: the compare tab's Gemini /u/<n> (geminiAuthuserForTab) — Gemini clients only.
+  const clientOptions = (provider, saveHistory = false, continuation = null, account = null) => ({
     ...CLIENT_OPTIONS,
+    ...geminiAccountOption(provider, continuation, account),
     ...(pinDisabled ? { tabCreateProps: Object.freeze({ pinned: false }) } : {}),
     relayFile: PROVIDER_SITES[provider].relayFile,
     saveHistory: saveHistory === true,
@@ -2458,7 +2613,7 @@ export function createCompareController({
   function readCollectedOrgsBounded() {
     return withTimeout(Promise.resolve().then(() => readCollectedOrgs()), selectedModelsReadTimeoutMs, null).catch(() => null);
   }
-  async function planLabels({ claudeOrg = null, collected = null } = {}) {
+  async function planLabels({ claudeOrg = null, collected = null, geminiAccount = null, geminiEmail = null } = {}) {
     const out = {};
     for (const p of COMPARE_PROVIDERS) out[p] = null; // { plan, usage[, org, orgUuid] } per provider, or null when nothing was collected
     let orgs = null;
@@ -2467,7 +2622,17 @@ export function createCompareController({
     if (!Array.isArray(orgs)) return out;
     for (const p of COMPARE_PROVIDERS) {
       if (p === 'claude' && out.claude) continue;
-      const entry = pickProviderEntry(orgs, p); // ui/compare/usage-floor.js — the same pick the usage floor reads
+      // Gemini: the org of the account the tab's clients use (#1953 Codex 1R B4), else the default pick.
+      // Matched by the account's ADDRESS when known — the collected /u/<n> can lag a sign-out
+      // (deploy-1.56.8 R3-B2); by index only for an account recorded without one.
+      const accountUuid = p === 'gemini' && validGeminiAuthuser(geminiAccount) !== null
+        ? (orgs.find((o) => o && o.provider === 'gemini' && (validEmail(geminiEmail)
+          ? typeof o.email === 'string' && o.email.toLowerCase() === geminiEmail
+          : o.authuser === geminiAccount))?.uuid || null) : null;
+      // A chosen account with no collected row shows nothing — never another account's plan and
+      // gauges (Codex #1953 3R B1, the claudeFacts rule); the default pick only when none is chosen.
+      const chosenGemini = p === 'gemini' && validGeminiAuthuser(geminiAccount) !== null;
+      const entry = chosenGemini ? (accountUuid && pickProviderEntry(orgs, p, accountUuid)) : pickProviderEntry(orgs, p); // ui/compare/usage-floor.js — the same pick the usage floor reads
       if (!entry) continue;
       let label = null;
       if (typeof entry.plan === 'string' && entry.plan.trim()) {
@@ -2538,12 +2703,12 @@ export function createCompareController({
   // listeners cannot outlive the probe.
   // Returns `{ list, source }` — `source` per MODELS_SOURCE: the package's `models_listed` diag when
   // the list came from the client, `static` for the fallback below, `none` for an empty list.
-  async function providerModels(provider) {
+  async function providerModels(provider, geminiAccount = null) {
     let client = null;
     let source = null;
     try {
       await leversReady;
-      client = createClient(provider, clientDeps, clientOptions(provider));
+      client = createClient(provider, clientDeps, clientOptions(provider, false, null, geminiAccount));
       // `onEvent` (package v0.2.4): one `models_listed` diag naming the path — `categories` (the
       // site's own picker), `models` (its internal slug list, deduplicated) or `static` — plus the
       // tab lookup's `tab_found`. Logged only: COMPARE_STATUS has no port to forward to.
@@ -2569,12 +2734,12 @@ export function createCompareController({
   }
 
   /** `{ models, modelsSource, modelsPending, orgs }` for `providers`, in parallel (one cap, not N). `orgs[p]` = the org the listing resolved, or absent. */
-  async function catalogsFor(providers) {
+  async function catalogsFor(providers, geminiAccount = null) {
     const models = {};
     const modelsSource = {};
     const orgs = {};
     await Promise.all(providers.map(async (p) => {
-      const { list, source, org } = await providerModels(p);
+      const { list, source, org } = await providerModels(p, geminiAccount);
       models[p] = list;
       modelsSource[p] = source;
       if (org) orgs[p] = org;
@@ -2583,7 +2748,7 @@ export function createCompareController({
     return { models, modelsSource, modelsPending, orgs };
   }
 
-  async function buildStatus() {
+  async function buildStatus(sender = null) {
     const flags = await fetchCompareFlags();
     const flagOn = flags.on;
     // Example prompts: the cached document only (cachedCompareExamples) — never the network; a
@@ -2636,9 +2801,12 @@ export function createCompareController({
       // The collected-orgs read starts NOW, beside the catalogs (Codex #2054 1R: serialised after
       // them, a slow storage added its own bound to the status' worst case).
       const collectedP = readCollectedOrgsBounded();
-      catalogs = await catalogsFor(sendable);
+      // The tab's Gemini account (#1953): its picker is listed, and its plan shown.
+      const geminiAccount = sendable.includes('gemini') ? await geminiAuthuserForTab(sender?.tab?.id) : null;
+      const geminiEmail = geminiAccount !== null ? geminiEmailForTab(sender?.tab?.id) : null;
+      catalogs = await catalogsFor(sendable, geminiAccount);
       // AFTER the catalogs: the Claude listing names the org a send would use (#2054).
-      const facts = await planLabels({ claudeOrg: catalogs.orgs.claude || null, collected: collectedP });
+      const facts = await planLabels({ claudeOrg: catalogs.orgs.claude || null, collected: collectedP, geminiAccount, geminiEmail });
       for (const p of COMPARE_PROVIDERS) {
         providers[p].plan = facts[p] ? facts[p].plan : null;
         providers[p].usage = facts[p] ? facts[p].usage : null;
@@ -2966,7 +3134,7 @@ export function createCompareController({
   // ── Open the compare page from a provider tab (content script → SW) ───────────────────────
   // The ONE `tabs.create` outside the vendored clients, and it opens our own site shell only
   // (COMPARE_SITE_URL, which frames compare.html — see the constant).
-  async function openCompare(message) {
+  async function openCompare(message, sender = null) {
     const src = COMPARE_PROVIDERS.includes(message.src) ? message.src : null;
     const placement = COMPARE_PLACEMENTS.includes(message.placement) ? message.placement : COMPARE_DEFAULT_PLACEMENT;
     // A provider `src` wins whenever it is given (the src path is byte-identical to before); only
@@ -2981,7 +3149,19 @@ export function createCompareController({
       ? `${COMPARE_DEBATE_PLACEMENTS.includes(placement) ? COMPARE_DEBATE_SITE_URL : COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${placement}${dev}${langQ}`
       : `${COMPARE_SITE_URL}?${COMPARE_SITE_UTM}&utm_content=${src}_${placement}${dev}${langQ}#src=${src}&q=${encodeURIComponent(q)}`;
     emitEvent('button_click', { src: src || COMPARE_SRC_NONE, placement, has_q: q.length > 0 });
-    await tabs.create({ url, active: true });
+    // Opened from a Gemini page → that page's Google account (its tab url, which the page cannot
+    // forge) is the NEW compare tab's; no other tab's choice moves (Codex #1953 1R B1). The open is
+    // tracked until its row lands, so the new page's first status cannot read ahead of it (2R B2).
+    const geminiUrl = src === 'gemini' && typeof sender?.tab?.url === 'string' ? sender.tab.url : '';
+    const n = geminiUrl && providerForUrl(geminiUrl) === 'gemini' ? validGeminiAuthuser(geminiAuthuserOfUrl(geminiUrl)) : null;
+    const opening = (async () => {
+      const tab = await tabs.create({ url, active: true });
+      // The page's own account address (its account button, gemini-input.js) — not an index lookup
+      // in the collected orgs, which can name whoever holds that slot by now (deploy-1.56.8 R2-B1).
+      if (n !== null) await rememberGeminiAccountForTab(tab?.id, n, { email: validEmail(message.pageEmail) ? message.pageEmail : null });
+    })();
+    if (n !== null) geminiOpensInFlight.add(opening);
+    try { await opening; } finally { geminiOpensInFlight.delete(opening); }
     return { ok: true };
   }
 
@@ -3036,11 +3216,11 @@ export function createCompareController({
       return true;
     }
     if (message.type === 'COMPARE_STATUS') {
-      buildStatus().then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+      buildStatus(_sender).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));
       return true;
     }
     if (message.type === 'OPEN_COMPARE') {
-      openCompare(message).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+      openCompare(message, _sender).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e?.message || e) }));
       return true;
     }
     // Usage analytics from the page (ux3 item 8): validated, then off to GA. Answered at once —
@@ -3294,6 +3474,10 @@ export function createCompareController({
 
   // ── Streaming session: one Port = one session = one client per provider ──────────────────
   function createSession(port) {
+    // The compare tab's Gemini account (#1953), fixed at the session's first send: every Gemini
+    // column of the session — the first, one joining on a follow-up, a fresh suggestion — is on it.
+    const sessionTabId = port.sender?.tab?.id;
+    let sessionGemini;
     const clients = new Map();   // colId → vendored client INSTANCE (kept for follow-ups; cmp-columns)
     // colId → a THROWAWAY temporary client for the round in flight only (a `fresh` FOLLOWUP — the
     // suggested-question send, ui/compare/suggest.js): it asks in a conversation of its own, never the
@@ -3415,7 +3599,7 @@ export function createCompareController({
         const continuation = kept && Object.hasOwn(pendingResume, col.id) ? pendingResume[col.id] : null;
         delete pendingResume[col.id];
         if (continuation) logInfo(col.provider, 'resume', { col: col.id, keys: Object.keys(continuation) });
-        client = createClient(col.provider, clientDeps, clientOptions(col.provider, kept, continuation));
+        client = createClient(col.provider, clientDeps, clientOptions(col.provider, kept, continuation, sessionGemini));
         clients.set(col.id, client);
       }
       return client;
@@ -3775,7 +3959,7 @@ export function createCompareController({
       if (!pending.length || torndown) return;
       if (refreshingCatalogs) { refreshQueued = providers; return; }
       refreshingCatalogs = true;
-      Promise.resolve().then(() => catalogsFor(pending)).then(({ models, modelsSource, modelsPending }) => {
+      Promise.resolve().then(() => catalogsFor(pending, sessionGemini ?? null)).then(({ models, modelsSource, modelsPending }) => {
         for (const p of pending) if (!modelsPending.includes(p)) catalogPendingSet.delete(p);
         logInfo('models', 'refreshed', { providers: pending, modelsSource, stillPending: modelsPending });
         post({ type: PORT_MSG.MODELS, models, modelsSource, modelsPending });
@@ -3808,6 +3992,7 @@ export function createCompareController({
       const readyIds = () => ready.map((c) => c.id);
       try {
         await leversReady; // the pin policy is fixed before the session's first client exists
+        if (sessionGemini === undefined) sessionGemini = await geminiAuthuserForTab(sessionTabId); // #1953
         const text = typeof message.text === 'string' ? message.text : '';
         // The round's files (#1616) — validated HERE, before readiness opens a tab and long before
         // consume, so a page that sent a shape this build refuses spends nothing. `[]` when there
@@ -3861,7 +4046,7 @@ export function createCompareController({
             post({ type: PORT_MSG.CONSUME_FAIL, status: 0, code: 'bad_request' });
             return;
           }
-          for (const col of columns) freshClients.set(col.id, createClient(col.provider, clientDeps, clientOptions(col.provider, false)));
+          for (const col of columns) freshClients.set(col.id, createClient(col.provider, clientDeps, clientOptions(col.provider, false, null, sessionGemini)));
         }
         // History (package v0.3.1): a SEND's boolean is persisted — ONE write per SEND that carries
         // one — and becomes the current preference; the session's flag is fixed by the FIRST SEND

@@ -251,7 +251,10 @@ export async function mergeGeminiOrgs(force = false, userManual = false) {
       // Preserve user-pinned primary org
       const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;
       const merged = result.orgs.map(o => ({ ...o, isPrimary: o.uuid === prevPrimaryUuid }));
-      await chrome.storage.local.set({ collectedOrgs: [...nonGemini, ...merged] });
+      // Accounts still signed in but not read this cycle (#2709) keep their previous entry.
+      const keep = new Set(result.keepUuids || []);
+      const kept = collectedOrgs.filter(o => o.provider === 'gemini' && keep.has(o.uuid));
+      await chrome.storage.local.set({ collectedOrgs: [...nonGemini, ...merged, ...kept] });
       // Save history for chart display
       for (const org of result.orgs) {
         await appendUsageHistory({

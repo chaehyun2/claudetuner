@@ -301,7 +301,7 @@
       e.preventDefault();
       e.stopPropagation();
       const q = readComposerText();
-      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer' }); } catch { /* context dead */ }
+      try { chrome.runtime.sendMessage({ type: 'OPEN_COMPARE', src: PROVIDER, q, placement: 'composer', pageEmail: CORE.googlePageAccountEmail?.() || null }); } catch { /* context dead */ }
     });
     (strip.querySelector('.ct-gm-strip-inner') || strip).appendChild(btn);
   }
@@ -410,7 +410,7 @@
     if (!isCurrent() || !_enabled) return; // don't poll while disabled
     const seq = ++_reqSeq;
     try {
-      chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', provider: PROVIDER, orgId: null }, (res) => {
+      chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', provider: PROVIDER, orgId: null, pageEmail: CORE.googlePageAccountEmail?.() || null }, (res) => {
         if (!isCurrent()) return; // a newer instance superseded this one mid-flight
         if (seq !== _reqSeq) return;
         if (chrome.runtime.lastError) { scheduleEmptyRetry(); return; } // SW cold start — retry soon

@@ -44,7 +44,7 @@ import { getResetNotifContext, resolveResetWindow, scheduleExpireAlarms } from '
 import { buildSidebarUsageData, pushSidebarUsage } from './bg/sidebar-usage.js';
 import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm } from './bg/ad-counters.js';
 import { isChatGPTLoggedIn } from './bg/api-chatgpt.js';
-import { isGeminiLoggedIn } from './bg/api-gemini.js';
+import { isGeminiLoggedIn, geminiAuthuserOfUrl, listGeminiAccounts, invalidateGeminiAccounts } from './bg/api-gemini.js';
 import { createCompareController, COMPARE_PORT_NAME } from './bg/compare.js';
 import { createDebateNotifier } from './bg/debate-notify.js';
 import { createEntitlementCache } from './bg/entitlement-cache.js';
@@ -1540,6 +1540,8 @@ const compareController = createCompareController({
   storageSync: chrome.storage.sync,
   // Plan label per provider (ux3 item 3): what the collectors wrote, labelled the popup's way.
   readCollectedOrgs: () => chrome.storage.local.get({ collectedOrgs: [] }).then((r) => r.collectedOrgs),
+  // The Google accounts signed in NOW (#1953): a fresh /u/<n> listing, not the 10-minute cache.
+  listGoogleAccounts: () => { invalidateGeminiAccounts(); return listGeminiAccounts(); },
   planLabel: planDisplayName,
   // Usage analytics (ux3 item 8): the page's COMPARE_EVENTs and the SW's own `consume`, as cmp_*.
   sendGAEvent,
@@ -1844,7 +1846,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (provider !== 'claude') {
       hasProviderPermission(provider).then(ok => {
         if (!ok) { sendResponse({ revoked: true }); return; }
-        return buildSidebarUsageData(message.orgId, provider).then(sendResponse);
+        // Gemini: the panel shows the Google account its tab is on (#2709) — by the address the page
+        // shows, else by the /u/<n> of the sender's URL.
+        const account = provider === 'gemini' && _sender?.tab?.url
+          ? { authuser: geminiAuthuserOfUrl(_sender.tab.url), email: typeof message.pageEmail === 'string' ? message.pageEmail : null }
+          : undefined;
+        return buildSidebarUsageData(message.orgId, provider, account).then(sendResponse);
       });
       return true;
     }

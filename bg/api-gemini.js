@@ -31,7 +31,100 @@ function geminiHttpStatus(message) {
   return m ? m[1] : '';
 }
 
-export async function fetchGeminiRpc(rpcId, params = '[]') {
+// === Google multi-login (#2709) ===
+// Every signed-in Google account is served under its own `/u/<n>/` path (n = sign-in order; no
+// prefix = /u/0, the default account). Its page carries ITS at token, and batchexecute answers for
+// the account in the request PATH — so a /u/1 tab posting to the unprefixed path got HTTP 400
+// (at token of /u/1, account /u/0), fell back to the cookie path, and recorded the DEFAULT account's
+// usage while the user looked at another one (measured 2026-10-28). Requests therefore always carry
+// the prefix of the account they mean.
+// Google allows at most 10 accounts in one multi-login session.
+export const GEMINI_MAX_ACCOUNTS = 10;
+const AUTHUSER_PATH_RE = /^\/u\/(\d+)(?:\/|$)/;
+// How long a discovered account list is trusted before it is read again. The list only changes on
+// sign-in/out; an open tab on an index the list lacks forces a re-read (listGeminiAccounts).
+const ACCOUNT_LIST_TTL_MS = 10 * 60_000;
+
+/** The /u/<n> index a gemini.google.com URL addresses (no prefix = 0). */
+export function geminiAuthuserOfUrl(url) {
+  try {
+    const m = AUTHUSER_PATH_RE.exec(new URL(url).pathname);
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Path prefix for an account index. 0 keeps the unprefixed path every release has used.
+function authuserPrefix(authuser) {
+  return Number.isInteger(authuser) && authuser > 0 ? `/u/${authuser}` : '';
+}
+
+let _accountList = null;   // { ts, accounts: [{ authuser, email, googleId }] }
+
+/** Forget the discovered account list (an account answered as someone else → indices shifted). */
+export function invalidateGeminiAccounts() {
+  _accountList = null;
+}
+
+/**
+ * Every Google account signed in to this browser that Gemini serves, in /u/<n> order, or [] when
+ * none. Probes `/u/0/app`, `/u/1/app`, … with `redirect: 'manual'`: an index with no account
+ * redirects (opaqueredirect, no body downloaded) and ends the list; a duplicate identity ends it too.
+ * Each page read is kept for the RPCs that follow (rememberPageHtml), so listing costs no extra
+ * fetch for an account the cookie path collects anyway. Throws only when /u/0 itself could not be
+ * reached — the caller then uses the single-account path, as before.
+ */
+export async function listGeminiAccounts() {
+  const now = Date.now();
+  if (_accountList && now - _accountList.ts < ACCOUNT_LIST_TTL_MS && !(await openTabOutsideList(_accountList.accounts))) {
+    return _accountList.accounts;
+  }
+  const accounts = [];
+  const seen = new Set();
+  for (let n = 0; n < GEMINI_MAX_ACCOUNTS; n++) {
+    let resp;
+    try {
+      resp = await fetch(`${GEMINI_API_BASE}/u/${n}/app`, { credentials: 'include', cache: 'no-store', redirect: 'manual' });
+    } catch (e) {
+      if (n === 0) throw new Error('err_gemini_network');
+      break;
+    }
+    if (resp.type === 'opaqueredirect' || !resp.ok) break;
+    const html = await resp.text();
+    const { email, googleId } = extractUserInfoFromHtml(html);
+    const key = googleId || email;
+    if (!key || seen.has(key)) break;
+    seen.add(key);
+    rememberPageHtml(n, html);
+    accounts.push({ authuser: n, email, googleId });
+  }
+  _accountList = { ts: now, accounts };
+  return accounts;
+}
+
+// True when an open, usable Gemini tab addresses an index the list does not have (a fresh sign-in).
+async function openTabOutsideList(accounts) {
+  try {
+    const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter(isUsableTab);
+    return tabs.some((t) => !accounts.some((a) => a.authuser === geminiAuthuserOfUrl(t.url)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {string} rpcId
+ * @param {string} [params]
+ * @param {number} [authuser] - the /u/<n> account to ask. Omitted = the legacy single-account path
+ *   (first usable tab, whichever account it shows; else the default account).
+ * @param {object} [observe] - filled with WHERE the answer came from: `{ tabId, html, authuser }`.
+ *   Pass it to getGeminiUserInfo(observe) to name the account that produced THIS answer. The
+ *   module-level last-fetch state is shared by every caller, and two collections that overlap (a
+ *   tab-load collect and the alarm — the collect lock does not serialize them) overwrote each
+ *   other's, naming one account's usage with the other's id (Codex R1-B1, #2709).
+ */
+export async function fetchGeminiRpc(rpcId, params = '[]', authuser, observe) {
   // Primary: tab-based (most reliable — runs in page context with full auth)
   // 🪤 A REJECTION HERE IS NOT "our collection logic threw". `chrome.tabs.query` can reject, and it
   // sits OUTSIDE every code-minting path — the raw message escaped to the collector, whose new
@@ -48,6 +141,9 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
   // package's browser-crash suspect). Only usable tabs are tried (vendor-ai `isUsableTab`, #2054);
   // none left = the fallback path, as with no tab at all.
   tabs = tabs.filter(isUsableTab);
+  // A named account is read only from a tab showing THAT account (#2709); the legacy call keeps
+  // "first usable tab", now addressed with that tab's own prefix.
+  if (Number.isInteger(authuser)) tabs = tabs.filter((t) => geminiAuthuserOfUrl(t.url) === authuser);
   // 🔴 THE ERROR OBJECT, NOT A STRING NOBODY READS. This was `tabErrorMsg`, assigned on all three
   // branches and read only by the console.warn below — the same dead variable the ChatGPT twin had
   // (#1417). So every tab-path failure was discarded and the throw at the bottom said
@@ -57,8 +153,9 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
 
   if (tabs.length > 0) {
     try {
-      const viaTab = await fetchGeminiViaTab(tabs[0].id, rpcId, params);
+      const viaTab = await fetchGeminiViaTab(tabs[0].id, rpcId, params, authuserPrefix(geminiAuthuserOfUrl(tabs[0].url)));
       _lastFetchTabId = tabs[0].id;
+      if (observe) Object.assign(observe, { tabId: tabs[0].id, html: null, authuser: geminiAuthuserOfUrl(tabs[0].url) });
       return viaTab;
     } catch (e) {
       // The tab's account ANSWERED — with an in-band status instead of a payload (#2067). That is
@@ -76,8 +173,9 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
   // Fallback: service worker fetch with credentials: 'include'
   // .google.com cookies are automatically included via HTTP standard
   try {
-    const viaCreds = await fetchGeminiWithCredentials(rpcId, params);
-    _lastFetchTabId = null;   // this usage came from the DEFAULT cookie account, not a tab
+    const credAuthuser = Number.isInteger(authuser) ? authuser : 0;
+    const viaCreds = await fetchGeminiWithCredentials(rpcId, params, credAuthuser, observe);
+    _lastFetchTabId = null;   // this usage came from the cookie path's /u/<n> account, not a tab
     return viaCreds;
   } catch (credError) {
     // 🔴 `network` IS THE WEAKEST CODE, AND ORDER HAD TO LEARN THAT. It says one thing — this path
@@ -114,7 +212,7 @@ export async function fetchGeminiRpc(rpcId, params = '[]') {
 }
 
 // --- Tab-based fetch: execute batchexecute in MAIN world ---
-async function fetchGeminiViaTab(tabId, rpcId, params) {
+async function fetchGeminiViaTab(tabId, rpcId, params, prefix = '') {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
@@ -160,7 +258,7 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
         return { _err: true, status: 0, message: e.message };
       }
     },
-    args: [rpcId, params, batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)],
+    args: [rpcId, params, prefix + batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)],
   });
 
   const result = results?.[0]?.result;
@@ -218,33 +316,45 @@ async function fetchGeminiViaTab(tabId, rpcId, params) {
 // .google.com domain cookies (like __Secure-1PSID) are automatically included
 // in fetch requests to gemini.google.com via HTTP standard cookie propagation.
 // No need for chrome.cookies API or *.google.com host_permissions.
-async function fetchGeminiWithCredentials(rpcId, params) {
-  // Step 1: Fetch page HTML to extract AT token (SNlM0e)
-  // 🔴 Same split as the ChatGPT twin: a REJECTED fetch never got an answer and is not the same
-  // thing as "collection failed". See the note in bg/api-chatgpt.js.
-  let pageResp;
-  try {
-    pageResp = await fetch(`${GEMINI_API_BASE}/app`, {
-      credentials: 'include',
-      cache: 'no-store',
-    });
-  } catch (e) {
-    console.debug(`[Claude Tuner] Gemini page fetch rejected: ${e && e.message}`);
-    throw new Error('err_gemini_network');
+async function fetchGeminiWithCredentials(rpcId, params, authuser = 0, observe = null) {
+  const prefix = authuserPrefix(authuser);
+  // Step 1: the account's page HTML for its AT token (SNlM0e). The page the account LISTING just read
+  // is reused (PAGE_HTML_TTL_MS), so listing + two RPCs cost one ~0.8 MB page, not three. Only the
+  // listing fills that cache: a page fetched here is never reused, so a sign-out is still seen by
+  // the next RPC exactly as before (provider-fetch-diag-guard).
+  let html = cachedPageHtml(authuser);
+  if (!html) {
+    // 🔴 Same split as the ChatGPT twin: a REJECTED fetch never got an answer and is not the same
+    // thing as "collection failed". See the note in bg/api-chatgpt.js.
+    let pageResp;
+    try {
+      pageResp = await fetch(`${GEMINI_API_BASE}${prefix}/app`, {
+        credentials: 'include',
+        cache: 'no-store',
+      });
+    } catch (e) {
+      console.debug(`[Claude Tuner] Gemini page fetch rejected: ${e && e.message}`);
+      throw new Error('err_gemini_network');
+    }
+
+    if (pageResp.redirected && (pageResp.url.includes('accounts.google') || pageResp.url.includes('signin'))) {
+      throw new Error('err_gemini_not_logged_in');
+    }
+    // An index with no account redirects to /u/0 — reading on would record the DEFAULT account's
+    // usage as this one's (#2709).
+    if (authuser > 0 && geminiAuthuserOfUrl(pageResp.url) !== authuser) {
+      throw new Error('err_gemini_not_logged_in');
+    }
+    if (!pageResp.ok) {
+      throw new Error(`err_gemini_page_fetch:${pageResp.status}`);
+    }
+
+    html = await pageResp.text();
   }
 
-  if (pageResp.redirected && (pageResp.url.includes('accounts.google') || pageResp.url.includes('signin'))) {
-    throw new Error('err_gemini_not_logged_in');
-  }
-  if (!pageResp.ok) {
-    throw new Error(`err_gemini_page_fetch:${pageResp.status}`);
-  }
-
-  const html = await pageResp.text();
-
-  // Cache HTML for getGeminiUserInfo to extract email/googleId without extra fetch
+  // The HTML that served this RPC, for getGeminiUserInfo (same account as the usage)
   _lastPageHtml = html;
-  _lastPageHtmlTs = Date.now();
+  if (observe) Object.assign(observe, { tabId: null, html, authuser });
 
   const atMatch = html.match(/"SNlM0e":"([^"]+)"/);
   if (!atMatch) {
@@ -255,7 +365,7 @@ async function fetchGeminiWithCredentials(rpcId, params) {
   // Step 2: Call batchexecute with credentials
   const innerReq = JSON.stringify([[[rpcId, params, null, 'generic']]]);
   const body = `f.req=${encodeURIComponent(innerReq)}&at=${encodeURIComponent(atToken)}&`;
-  const url = `${GEMINI_API_BASE}${batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)}`;
+  const url = `${GEMINI_API_BASE}${prefix}${batchexecuteUrl(rpcId, USAGE_SOURCE_PATH)}`;
 
   let resp;
   try {
@@ -292,8 +402,17 @@ async function fetchGeminiWithCredentials(rpcId, params) {
 // usage — see the note there.
 let _lastFetchTabId = null;
 let _lastPageHtml = null;
-let _lastPageHtmlTs = 0;
 const PAGE_HTML_TTL_MS = 60_000; // 1 min
+const _pageHtmlByAuthuser = new Map();   // authuser → { html, ts }
+
+function rememberPageHtml(authuser, html) {
+  _pageHtmlByAuthuser.set(authuser, { html, ts: Date.now() });
+}
+
+function cachedPageHtml(authuser) {
+  const hit = _pageHtmlByAuthuser.get(authuser);
+  return hit && Date.now() - hit.ts < PAGE_HTML_TTL_MS ? hit.html : null;
+}
 
 /**
  * One RPC's payload out of a batchexecute answer — decoded by the vendored package's own framing
@@ -349,7 +468,9 @@ function inBandError(message, inBandCode) {
 }
 
 // === Extract user info from Gemini page (MAIN world) or cached HTML ===
-export async function getGeminiUserInfo() {
+export async function getGeminiUserInfo(observe) {
+  const lastTabId = observe ? observe.tabId : _lastFetchTabId;
+  const lastHtml = observe ? observe.html : _lastPageHtml;
   // 🔴 THE LABEL MUST COME FROM THE SAME PLACE AS THE USAGE. This used to query tabs on its own,
   // independently of how `fetchGeminiRpc` actually got the numbers — and those two can be different
   // Google accounts, which is not exotic: multi-account (/u/0, /u/1) is ordinary. Concretely, a tab
@@ -365,9 +486,11 @@ export async function getGeminiUserInfo() {
   // `_lastFetchTabId === null` means the credentials fallback served the usage → the only honest
   // source is the HTML that fallback itself fetched. Untouched when no usage fetch has run yet
   // (the id starts null and the cached HTML is null too, so it degrades to "unknown").
-  const tabs = _lastFetchTabId === null
+  const tabs = lastTabId == null
     ? []
-    : (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter((t) => t.id === _lastFetchTabId && isUsableTab(t));
+    : (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter((t) => t.id === lastTabId && isUsableTab(t)
+      // The tab must still show the account that answered — it may have switched since.
+      && (!observe || geminiAuthuserOfUrl(t.url) === observe.authuser));
   if (tabs.length > 0) {
     try {
       const results = await chrome.scripting.executeScript({
@@ -403,7 +526,7 @@ export async function getGeminiUserInfo() {
   }
 
   // Fallback: extract from cached page HTML (set by fetchGeminiWithCredentials)
-  return extractUserInfoFromHtml(_lastPageHtml);
+  return extractUserInfoFromHtml(lastHtml);
 }
 
 // Parse WIZ_global_data values from raw HTML string

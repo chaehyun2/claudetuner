@@ -411,6 +411,8 @@
       const countEl = el.querySelector('.ct-reset-count');
       if (countEl) countEl.textContent = CORE.formatCountdown(r, _lang);
     });
+    // The folded header's 5h countdown (CORE.sidebarFoldSummaryHtml).
+    if (CORE.tickStripCountdowns) CORE.tickStripCountdowns(document.getElementById(PANEL_ID), _lang);
   }
 
   // ── Mount / unmount ──
@@ -494,7 +496,7 @@
     if (!isCurrent() || !_enabled) return; // don't poll while disabled
     const seq = ++_reqSeq;
     try {
-      chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', provider: PROVIDER, orgId: null }, (res) => {
+      chrome.runtime.sendMessage({ type: 'GET_SIDEBAR_USAGE', provider: PROVIDER, orgId: null, pageEmail: CORE.googlePageAccountEmail?.() || null }, (res) => {
         if (!isCurrent()) return; // a newer instance superseded this one mid-flight
         if (seq !== _reqSeq) return;
         if (chrome.runtime.lastError) { scheduleEmptyRetry(); return; } // SW cold start — retry soon, don't wait 60s
