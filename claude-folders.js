@@ -72,7 +72,18 @@
       const dframeSidebar = document.querySelector('.dframe-sidebar-body');
       if (dframeSidebar) {
         const navScroll = dframeSidebar.querySelector('.dframe-nav-scroll');
-        if (navScroll) return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
+        if (navScroll) {
+          // claude.ai web moved to this layout in 2026-10 (it used to be desktop-only): inside the nav
+          // scroll come [new chat · search] [projects … customize] [pinned · recents]. Mount just above
+          // pinned/recents — under the nav rows, scrolling with the list, where the panel sat on the old
+          // web layout. Without that section, fall back to the top of the scroll box.
+          const recents = navScroll.querySelector(':scope > .dframe-recents-by-mode');
+          if (recents) {
+            const usagePanel = navScroll.querySelector(':scope > #ct-sidebar-usage');
+            return { parent: navScroll, ref: usagePanel ? usagePanel.nextSibling : recents, type: 'dframe' };
+          }
+          return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
+        }
       }
       const sidebarNav = document.querySelector('nav.flex');
       if (!sidebarNav) return null;

@@ -283,6 +283,7 @@
   function renderContent() {
     renderPanelBody();
     syncBanners();
+    syncFold();
   }
 
   function renderPanelBody() {
@@ -380,6 +381,18 @@
   function updateBellBadge() {
     if (!CORE || !CORE.renderBellBadge) return;
     CORE.renderBellBadge(document.getElementById('ct-gm-bell-badge'), _notices, _lastSeenId);
+    syncFold(); // the folded header's new-notice dot reads the same unseen count
+  }
+
+  // Header fold toggle (shared with the other sidebars, CORE.renderSidebarFold).
+  function syncFold() {
+    if (!CORE || !CORE.renderSidebarFold) return;
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    CORE.renderSidebarFold(panel, panel.querySelector('.ct-gm-head'), {
+      site: 'gemini', prefix: 'ct-gm', data: _data, lang: _lang,
+      unseen: CORE.getUnseenCount ? CORE.getUnseenCount(_notices, _lastSeenId) : 0, onToggle: syncFold,
+    });
   }
 
   function renderInlineNotice() {
@@ -510,6 +523,8 @@
 
   function onStorageChanged(changes, area) {
     if (!isCurrent()) return;
+    // Folded/expanded in another tab → follow it here.
+    if (CORE.syncSidebarFoldChange && CORE.syncSidebarFoldChange(changes, area)) syncFold();
     // Premium (1.32.0, AC3): the SW rewrote the entitlement cache (its own fetch or the compare
     // status write-through) → re-run the gated fetchAds now, not at the next rotation tick: a
     // Premium answer clears the slot, a free one brings the ads back. storage.onChanged is the
@@ -571,8 +586,16 @@
     });
     chrome.storage.sync.get({ lang: 'auto', geminiSidebarUsageEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
-      _enabled = cfg.geminiSidebarUsageEnabled !== false;
-      if (_enabled) { requestUsageData(); fetchNotices(); fetchAds(); }
+      // _enabled gates the first mount, so it is set only after the fold state is cached —
+      // otherwise a folded panel paints expanded first and then snaps shut.
+      const enable = () => {
+        if (!isCurrent()) return;
+        syncFold(); // a panel mounted while the read was pending (setting toggled on) gets the stored state (R2-B1)
+        // A settings change during the fold read already decided (Codex R1-B2) — don't revive the panel.
+        if (_enabled === null) _enabled = cfg.geminiSidebarUsageEnabled !== false;
+        if (_enabled) { requestUsageData(); fetchNotices(); fetchAds(); }
+      };
+      if (CORE.loadSidebarFold) CORE.loadSidebarFold(enable); else enable();
     });
 
     chrome.runtime.onMessage.addListener(onRuntimeMessage);

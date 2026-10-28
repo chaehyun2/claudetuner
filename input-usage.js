@@ -79,26 +79,11 @@
   }
 
   // ── Utility ──
-  // Gauge colour, countdown, absolute reset time and escaping are single-sourced in usage-shared.js
-  // (#2065) — the same helpers the Claude sidebar and the ChatGPT/Gemini strips use, so one page no
-  // longer shows "6h 05m" under the composer and "6h 5m" in the sidebar. Guarded like every core
-  // lookup here; the fallbacks DEGRADE (no colour, no reset segment, characters dropped) rather
-  // than restating the rules — a restated copy is what drifted in the first place.
-  const gaugeColor = (util) => (CORE && CORE.gaugeColor ? CORE.gaugeColor(util) : '');
+  // The gauges, their colours, countdowns and reset times come from usage-shared.js
+  // (buildStripGaugesHtml, #2065 single-sourcing) — the same markup the ChatGPT/Gemini strips draw.
+  // Guarded like every core lookup here; the fallback DEGRADES (characters dropped) rather than
+  // restating the rule — a restated copy is what drifted in the first place.
   const escapeHtml = (s) => (CORE && CORE.escapeHtml ? CORE.escapeHtml(s) : String(s).replace(/[&<>"]/g, ''));
-
-  // Bare countdown ("6h 5m" / "2d 3h" / "29m") — CORE.formatCountdown without its ⏱ prefix, which
-  // this strip renders as a separate label. Same shape as chatgpt-input.js resetLabel.
-  function formatResetTime(resetAt) {
-    if (!resetAt) return null;
-    if (new Date(resetAt).getTime() - Date.now() <= 0) return t('soon');
-    if (!CORE || !CORE.formatCountdown) return null;
-    return CORE.formatCountdown(resetAt, _lang).replace(/^⏱\s*/, '');
-  }
-
-  function formatResetAbsolute(resetAt) {
-    return CORE && CORE.formatResetAbsolute ? CORE.formatResetAbsolute(resetAt, _lang) : '';
-  }
 
   function isPeakNow() {
     // Disabled: Anthropic removed peak hour limit reduction (2026-05-07)
@@ -161,6 +146,10 @@
   --track: #d4d4d4;
   --text: #4a4a49;
   --muted: #7a7a79;
+  /* The shared gauges (CORE.STRIP_GAUGE_CSS) read these. */
+  --ct-g-muted: var(--muted);
+  --ct-g-track: var(--track);
+  --ct-g-sep: var(--border);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -299,6 +288,24 @@
     return target;
   }
 
+  // The shadow root's stylesheet: this strip's own, then the shared 5h · 7d gauge styles
+  // (usage-shared.js — one stylesheet for the three sites' strips). A stale core without them leaves
+  // the gauges unstyled, never broken.
+  function stripStyleText() {
+    return STRIP_CSS + ((CORE && CORE.STRIP_GAUGE_CSS) || '');
+  }
+  // 🔴 A host left by the PREVIOUS build is reused as-is: an update re-injects this file into open
+  // tabs (#2672) and mountWidget keeps the existing #ct-input-usage-host — with the old build's
+  // stylesheet, which has none of the gauge classes. Every gauge then rendered with no bar and no
+  // spacing, 「5시간41%→51%↻57m7일31%…」 (reported with a screenshot, 2026-10-28; reproduced by
+  // updating an unpacked build under an open claude.ai tab). So the text is re-asserted per render.
+  function syncStripStyle(shadow) {
+    const style = shadow && shadow.querySelector('style');
+    if (!style) return;
+    const want = stripStyleText();
+    if (style.textContent !== want) style.textContent = want;
+  }
+
   // ── Shadow DOM build (matches CUT pattern exactly) ──
   function buildShadowRoot() {
     const host = document.createElement('div');
@@ -308,7 +315,7 @@
     const shadow = host.attachShadow({ mode: 'open' });
 
     const style = document.createElement('style');
-    style.textContent = STRIP_CSS;
+    style.textContent = stripStyleText();
     shadow.appendChild(style);
 
     const root = document.createElement('div');
@@ -460,12 +467,16 @@
   // and the compare button only goes when the icon-only chip still does not fit (Codex R7).
   let _labelFitStop = null;
   let _labelFitTarget = null;
-  /** The compare button, then the 「프롬프트」 label, each kept only if it adds no line — CORE.fitStripParts. */
+  /** The optional strip parts (CORE.stripFitParts order: the gauges' optional pieces around the
+   *  compare button and the 「프롬프트」 label), each kept only if it adds no line — CORE.fitStripParts. */
   function refitStripButtons(strip) {
     if (!CORE || !CORE.fitCompareButton || _cmpGen !== globalThis.__ctCmpInputGen) return;
-    const parts = [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')];
-    if (CORE.fitStripParts) CORE.fitStripParts(strip, parts);
-    else if (parts[0]) CORE.fitCompareButton(strip, parts[0]);   // a usage-shared.js older than fitStripParts (#1421)
+    const buttons = [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')];
+    const parts = CORE.stripFitParts ? CORE.stripFitParts(strip, buttons) : buttons;
+    if (CORE.fitStripParts) { CORE.fitStripParts(strip, parts); return; }
+    // A usage-shared.js older than fitStripParts (#1421): fit the compare button alone, as before.
+    const cmp = strip.querySelector('.' + CMP_BTN_CLASS);
+    if (cmp) CORE.fitCompareButton(strip, cmp);
   }
   function ensurePromptLabelFit(strip) {
     if (!CORE || !CORE.fitCompareButton) return;
@@ -640,10 +651,13 @@
   // Every branch of renderStripInner replaces the strip's markup, so the compare button is
   // (re)attached here, after it, rather than inside each branch.
   function renderStrip() {
+    syncStripStyle($shadow());
     renderStripInner();
     const shadow = $shadow();
     const strip = shadow && shadow.querySelector('.ct-strip');
-    if (strip) { mountPromptButton(strip); mountCompareButton(strip); refitStripButtons(strip); }
+    // ensurePromptLabelFit refits now AND keeps a resize observer on the strip — needed even with no
+    // chip or button, because the gauge parts are fitted by the same pass.
+    if (strip) { mountPromptButton(strip); mountCompareButton(strip); ensurePromptLabelFit(strip); }
     syncMessageButtons();
   }
 
@@ -676,7 +690,7 @@
       return;
     }
 
-    if (!_data || _data.h5 == null) {
+    if (!_data || (_data.h5 == null && _data.d7 == null)) {
       let iconUrl = '';
       try { iconUrl = chrome.runtime.getURL('icons/icon16.png'); } catch { /* ignore */ }
       strip.innerHTML = `
@@ -690,43 +704,16 @@
       return;
     }
 
-    const util5h = Math.round(_data.h5 || 0);
-    const pred5h = _data.pred5h != null ? Math.round(_data.pred5h) : null;
-    const resetTime = formatResetTime(_data.r5);
-    const color5h = gaugeColor(util5h);
-
     let iconUrl = '';
     try { iconUrl = chrome.runtime.getURL('icons/icon16.png'); } catch { /* ignore */ }
 
     let html = '';
     if (iconUrl) html += `<a href="https://claudetuner.com/dashboard/?utm_source=input" target="_blank" class="ct-logo-link"><img src="${iconUrl}" class="ct-logo" alt="CT"></a>`;
 
-    html += `<div class="ct-seg"><span class="ct-seg-label">${escapeHtml(t('usage_5h'))}</span><span class="ct-seg-value" style="color:${color5h}">${util5h}%</span></div>`;
-
-    html += `<div class="ct-bar"><div class="ct-bar-fill" style="width:${Math.min(util5h, 100)}%;background:${color5h}"></div>`;
-    if (pred5h != null && pred5h > util5h) {
-      const pc = Math.min(pred5h, 100);
-      html += `<div class="ct-bar-pred" style="left:${Math.min(util5h, 100)}%;width:${pc - Math.min(util5h, 100)}%;color:${gaugeColor(pred5h)}"></div>`;
-      html += `<div class="ct-bar-marker" style="left:${pc}%;background:${gaugeColor(pred5h)}"></div>`;
-    }
-    html += `</div>`;
-
-    if (resetTime) {
-      const absTime = formatResetAbsolute(_data.r5);
-      const titleAttr = absTime ? ` title="${escapeHtml(absTime)}"` : '';
-      html += `<span class="ct-dot">\u00b7</span><span${titleAttr}><div class="ct-seg">`;
-      if (_lang === 'ko') {
-        html += `<span class="ct-seg-label">\u23f1</span><span class="ct-seg-value">${escapeHtml(resetTime)}</span><span class="ct-seg-label">\ub4a4 \ub9ac\uc14b</span>`;
-      } else {
-        html += `<span class="ct-seg-label">\u23f1 resets in</span><span class="ct-seg-value">${escapeHtml(resetTime)}</span>`;
-      }
-      html += `</div></span>`;
-    }
-
-    if (pred5h != null && pred5h > util5h) {
-      const pd = pred5h >= 100 ? '100%+' : pred5h + '%';
-      html += `<span class="ct-dot">\u00b7</span><div class="ct-seg"><span class="ct-seg-label">${escapeHtml(t('pred_label'))}</span><span class="ct-seg-value" style="color:${gaugeColor(pred5h)}">${pd}</span></div>`;
-    }
+    // The 5h · 7d gauges — one markup for all three sites' strips (usage-shared.js
+    // buildStripGaugesHtml). A stale core without it falls back to the bare percentages.
+    if (CORE && CORE.buildStripGaugesHtml) html += CORE.buildStripGaugesHtml(_data, _lang);
+    else html += `<div class="ct-seg"><span class="ct-seg-value">${[_data.h5, _data.d7].filter((v) => v != null).map((v) => Math.round(v) + '%').join(' · ')}</span></div>`;
 
     if (extraGaugeDrawn(_data)) {
       const uc = _data.eu || 0, lc = _data.el || 0;
@@ -802,6 +789,7 @@
         // filtered out as "no change" — the same reason the spans are compared (#1394).
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s && _data.hit5h === res.hit5h && _data.hit7d === res.hit7d &&
             _data.noUsage === res.noUsage && _data.noUsageFree === res.noUsageFree &&
             _data.eu === res.eu && _data.plan === res.plan) return;
         _data = res;

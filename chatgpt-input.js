@@ -57,20 +57,13 @@
   }
 
   const I18N = {
-    ko: { session: '5시간 사용률', weekly: '주간 사용률', no_data: '수집 중...', no_limit: '사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)', cmp_msg_tip: '이 질문을 Claude·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)' },
-    en: { session: '5-hour usage', weekly: 'Weekly usage', no_data: 'Collecting...', no_limit: 'No usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)', cmp_msg_tip: 'Send this question to Claude & Gemini too and cross-check the answers (AI Cross-Check)' },
+    ko: { no_data: '수집 중...', no_limit: '사용량 제한 없음', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·Gemini에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)', cmp_msg_tip: '이 질문을 Claude·Gemini에도 보내 답을 교차 검증해요 (AI 크로스체크)' },
+    en: { no_data: 'Collecting...', no_limit: 'No usage limits', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & Gemini too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)', cmp_msg_tip: 'Send this question to Claude & Gemini too and cross-check the answers (AI Cross-Check)' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
   // Clear reset wording (with a clock icon), mirroring claude.ai: "⏱ 1h 54m 뒤 리셋"
   // (ko) / "⏱ resets in 1h 54m" (en).
-  function resetLabel(resetAt) {
-    const diff = new Date(resetAt).getTime() - Date.now();
-    if (diff <= 0) return `⏱ ${t('reset_soon')}`;
-    const time = CORE.formatCountdown(resetAt, _lang).replace(/^⏱\s*/, '');
-    return _lang === 'ko' ? `⏱ ${time} 뒤 리셋` : `⏱ resets in ${time}`;
-  }
-
   // ── Anchor ──
   // Preferred: a full-width row directly below the composer box (sibling of the
   // composer form). Fallback: just above the bottom disclaimer line.
@@ -147,12 +140,26 @@
   // The composer form. 2026-09-26 chatgpt.com UI (Chat/Work tabs): `form[data-chatgpt-composer]`
   // (with `data-composer-placement="home"|"thread"`); the `data-type="unified-composer"` shape it
   // replaced is kept as a fallback in case the rollout is A/B. Single source for every lookup here.
-  const COMPOSER_FORM_SELECTOR = 'form[data-chatgpt-composer], form[data-type="unified-composer"]';
+  // 🔴 2026-10-28: the Work-mode composer DROPS `data-chatgpt-composer` and keeps only
+  // `data-composer-placement` — keyed on the attribute alone, the strip unmounted on every switch to
+  // Work (reported with a screenshot). The placement shape is matched by value (home/thread) so a
+  // message-edit composer cannot be taken for the main one, and it is tried only after the stricter
+  // shapes: earlier entries win when several are on the page.
+  const COMPOSER_FORM_SELECTORS = [
+    'form[data-chatgpt-composer], form[data-type="unified-composer"]',
+    'form[data-composer-placement="home"], form[data-composer-placement="thread"]',
+  ];
 
   /** The composer form, preferring a laid-out one if the page ever holds several; null if none. */
   function findComposerForm() {
-    const forms = Array.from(document.querySelectorAll(COMPOSER_FORM_SELECTOR));
-    return forms.find((f) => f.getClientRects().length > 0) || forms[0] || null;
+    let fallback = null;
+    for (const selector of COMPOSER_FORM_SELECTORS) {
+      const forms = Array.from(document.querySelectorAll(selector));
+      const shown = forms.find((f) => f.getClientRects().length > 0);
+      if (shown) return shown;
+      if (!fallback) fallback = forms[0] || null;
+    }
+    return fallback;
   }
 
   function findAnchor() {
@@ -192,50 +199,6 @@
     return strip;
   }
 
-  // `title` is optional; when present it is escaped into the attribute. The escaper turns a double
-  // quote into &quot;, so a locale string containing one cannot close the attribute early and
-  // truncate the tooltip — the failure #1209 had to guard against on the dashboard.
-  function seg(text, color, title) {
-    const attrs = (color ? ` style="color:${color}"` : '')
-      + (title ? ` title="${CORE.escapeHtml(title)}"` : '');
-    const s = `<span class="ct-cg-strip-seg"${attrs}>${CORE.escapeHtml(text)}</span>`;
-    return s;
-  }
-
-  // A label + percent followed by a compact inline gauge bar (current fill +
-  // optional prediction marker), mirroring the claude.ai input strip.
-  // 🔴 The label carries the same "excludes text chat" note as the sidebar panel, from the same
-  // CORE string. Both are injected into chatgpt.com together (background.js CHATGPT_INJECT) and
-  // render the SAME percentage; noting one and not the other is worse than noting neither, because
-  // the user compares the two and reads the bare one as "so THIS is the chat gauge". This strip's
-  // label is the weaker of the two — "주간 사용률" / "Weekly usage" is a bare claim with nothing
-  // qualifying it.
-  //
-  // ⚠️ A native title= does not open on touch (the constraint that made the dashboard's note a real
-  // <button> in #1209). Accepted here rather than worked around: this is a one-line composer strip
-  // with no room for an inline note, and it already uses title= for its reset cell, so the
-  // affordance is at least consistent. The sidebar panel on the same page carries the full note.
-  function metric(label, util, predUtil) {
-    const color = CORE.gaugeColor(util);
-    const clamped = Math.min(util, 100);
-    const showPred = predUtil != null && predUtil - util >= CORE.PRED_MIN_DELTA;
-    const predColor = showPred ? CORE.gaugeColor(predUtil) : null;
-    const clampedPred = showPred ? Math.min(predUtil, 100) : 0;
-    // Prediction fill (diagonal stripe) lives inside the clipped track between the
-    // current fill and the predicted level; the marker sits on top of the bar.
-    let bar = `<span class="ct-cg-strip-bar"><span class="ct-cg-strip-bar-track"><span class="ct-cg-strip-bar-fill" style="width:${clamped}%;background:${color}"></span>`;
-    if (showPred) {
-      bar += `<span class="ct-cg-strip-bar-pred-fill" style="left:${clamped}%;width:${clampedPred - clamped}%;color:${predColor}"></span>`;
-    }
-    bar += `</span>`;
-    if (showPred) {
-      bar += `<span class="ct-cg-strip-bar-marker" style="left:${clampedPred}%;background:${predColor}"></span>`;
-    }
-    bar += `</span>`;
-    const note = CORE.cgUsageNote ? CORE.cgUsageNote(_lang) : '';
-    return seg(`${label} ${Math.round(util)}%`, color, note) + bar;
-  }
-
   // Gear glyph (Feather "settings"). Canonical copy = ui/cmp-msg-rows.js GEAR_ICON_PATH (the
   // per-question row's gear draws it from there); the literal is the #1421 fallback for a load
   // without that shared script, and test/compare-button-guard.mjs asserts the two are identical.
@@ -253,7 +216,13 @@
   function ensureStripFit(strip) {
     if (!CORE || !CORE.fitCompareButton) return;
     // A superseded instance's observer answers no parts → no-op on the newest instance's strip.
-    const parts = () => (isCurrent() ? [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')] : []);
+    // CORE.stripFitParts: the gauges' optional pieces around the compare button and the 「프롬프트」
+    // label, the plan name last.
+    const parts = () => {
+      if (!isCurrent()) return [];
+      const buttons = [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')];
+      return CORE.stripFitParts ? CORE.stripFitParts(strip, buttons, [strip.querySelector('.ct-cg-strip-plan')]) : buttons;
+    };
     if (!CORE.fitStripParts) {
       const find = () => parts()[0] || null;
       CORE.fitCompareButton(strip, find());
@@ -496,9 +465,6 @@
   }
 
   function renderStripMarkup(strip) {
-    // Prefer the 5h window; fall back to the 7d window for plans that expose
-    // only a weekly limit (e.g. ChatGPT Pro 5x 'prolite', where h5 is null).
-    const use7d = _data && _data.h5 == null && _data.d7 != null;
     // An unmetered account (Enterprise pilot) has no window to draw, and "수집 중" would never come
     // true — say there is no limit, with the plan, the way gemini-input.js does for its no-limit seats.
     if (_data && _data.noLimits && _data.h5 == null && _data.d7 == null) {
@@ -519,31 +485,26 @@
       strip.innerHTML = `<div class="ct-cg-strip-inner"><span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(text)}</span></div>`;
       return;
     }
-    // 🔴 Labelled by the span the PROVIDER reported, not by the slot. ChatGPT Free and Go report a
-    // 30-day window that lands in the 7d slot, so a static t('weekly') printed "주간 사용률" right
-    // next to a 29-day countdown — one line contradicting itself (inquiry #198, confirmed against a
-    // live Free account: limit_window_seconds = 2592000). CORE falls back to the static label when
-    // there is no span, so Plus/Team/Pro and Claude render exactly as before.
-    const win = use7d
-      ? { label: CORE.windowLabel(_data.w7s, _lang, t('weekly')), util: _data.d7, reset: _data.r7, pred: _data.pred7d }
-      : { label: CORE.windowLabel(_data.w5s, _lang, t('session')), util: _data.h5, reset: _data.r5, pred: _data.pred5h };
+    // The 5h · 7d gauges — the markup all three sites' strips share (usage-shared.js
+    // buildStripGaugesHtml): both windows when both exist, else the one the plan has (Pro 5x
+    // 'prolite' has only the weekly one; Free/Go a 30-day window in the 7d slot).
+    // 🔴 Each gauge is labelled by the span the PROVIDER reported (CORE windowTag/windowLabel off
+    // _data.w5s/_data.w7s), never by the slot: a 30-day window says 「30일」, not 「7일」/「주간」
+    // (inquiry #198, limit_window_seconds = 2592000 on a live Free account).
+    // 🔴 The "excludes text chat" note (CORE.cgUsageNote) rides on every gauge's tooltip — the
+    // sidebar on the same page carries it too, and noting one surface but not the other reads as
+    // "so THIS is the chat gauge".
+    // 🔴 Guarded (#1421): a tab can keep an older usage-shared.js while this file is re-injected, and
+    // a throw here would stop the whole strip. Without the builder: the bare percentages.
+    if (CORE.ensureStripGaugeStyle) CORE.ensureStripGaugeStyle(document);
     const logoUrl = chrome.runtime.getURL('icons/icon16.png');
     const dot = '<span class="ct-cg-strip-dot">·</span>';
     let main = `<img src="${logoUrl}" class="ct-cg-strip-logo" alt="CT">`;
-    // current usage % + gauge bar (with prediction marker).
-    main += metric(win.label, win.util, win.pred);
-    // ⏱ N 뒤 리셋
-    if (win.reset) {
-      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-reset" data-reset="${win.reset}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(win.reset, _lang))}">${CORE.escapeHtml(resetLabel(win.reset))}</span>`;
-    }
-    // 리셋 시 예상 N% — predicted util at reset, percent colored by status.
-    if (win.pred != null) {
-      const predColor = CORE.gaugeColor(win.pred);
-      const predText = win.pred >= 100 ? '100%+' : `${Math.round(win.pred)}%`;
-      main += `${dot}<span class="ct-cg-strip-seg"><span class="ct-cg-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
-    }
+    main += CORE.buildStripGaugesHtml
+      ? CORE.buildStripGaugesHtml(_data, _lang, { note: CORE.cgUsageNote ? CORE.cgUsageNote(_lang) : '' })
+      : `<span class="ct-cg-strip-seg">${[_data.h5, _data.d7].filter((v) => v != null).map((v) => Math.round(v) + '%').join(' · ')}</span>`;
     if (_data.plan) {
-      main += `${dot}<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'chatgpt'))}</span>`;
+      main += `<span class="ct-cg-strip-plan">${dot}<span class="ct-cg-strip-seg ct-cg-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'chatgpt'))}</span></span>`;
     }
     strip.innerHTML =
       `<div class="ct-cg-strip-inner">` +
@@ -566,10 +527,39 @@
   }
 
   function updateCountdowns() {
-    document.querySelectorAll(`#${STRIP_ID} .ct-cg-strip-reset[data-reset]`).forEach(el => {
-      const r = el.dataset.reset;
-      if (r) el.textContent = resetLabel(r);
-    });
+    if (CORE.tickStripCountdowns) CORE.tickStripCountdowns(document.getElementById(STRIP_ID), _lang);
+  }
+
+  // ── Clearing what hangs below the anchor ──
+  // 🔴 In Work mode ChatGPT draws its tool tray (프로젝트 선택 / 파일 / 플러그인) as an ABSOLUTE
+  // `top-full` panel inside the form, so it hangs 8px below the form's box (measured 2026-10-28:
+  // form bottom 515, tray bottom 523) and takes no layout space. A strip placed after the form starts
+  // at 515 and sits glued under — partly beneath — the tray (reported with a screenshot). Like
+  // boxHasContentBelowForm this asks about STRUCTURE: whatever out-of-flow part of the anchor reaches
+  // below it, the strip starts below that, plus a small gap.
+  const OVERHANG_GAP_PX = 6;
+  const OVERHANG_MIN_HEIGHT_PX = 4; // ignore 1px sr-only / focus rings
+  // A tray LIPS over the form's edge (8px measured); a dropdown or popover opened inside the form
+  // drops far below it. Counting those would make the strip jump down while a menu is open and back
+  // when it closes (Codex R1), so anything hanging further than this is a popup, not a tray.
+  const OVERHANG_MAX_PX = 24;
+  function overhangBelow(anchorEl) {
+    const bottom = anchorEl.getBoundingClientRect().bottom;
+    let lowest = bottom;
+    for (const el of anchorEl.querySelectorAll('*')) {
+      const pos = getComputedStyle(el).position;
+      if (pos !== 'absolute' && pos !== 'fixed') continue;
+      const r = el.getBoundingClientRect();
+      if (r.height > OVERHANG_MIN_HEIGHT_PX && r.bottom > lowest && r.bottom - bottom <= OVERHANG_MAX_PX) lowest = r.bottom;
+    }
+    return Math.max(0, Math.ceil(lowest - bottom));
+  }
+  /** Push a below-anchor strip clear of anything hanging out of its anchor (idempotent per value). */
+  function clearOverhang(strip, anchor) {
+    if (anchor.type !== 'belowbox' && anchor.type !== 'belowcontainer') return;
+    const over = overhangBelow(anchor.el);
+    const want = over > 0 ? `${over + OVERHANG_GAP_PX}px` : '';
+    if (strip.style.marginTop !== want) strip.style.marginTop = want;
   }
 
   // ── Mount / unmount ──
@@ -590,6 +580,7 @@
     strip.dataset.ctAnchor = anchor.type;
     _anchorEl = anchor.el;
     _mounted = true;
+    clearOverhang(strip, anchor);
   }
 
   let _anchorEl = null;
@@ -628,7 +619,11 @@
     if (want.type !== el.dataset.ctAnchor || want.el !== _anchorEl || !placedRight) {
       unmount();
       mount();
+      return;
     }
+    // The tray can render after the strip mounted (and leave again on Chat ↔ Work), so re-measured
+    // every tick, not only on mount.
+    clearOverhang(el, want);
   }
 
   // Fully stop this instance (superseded by a newer injection, or ChatGPT
@@ -669,7 +664,7 @@
         // old — now false — label until some other field happened to differ.
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
-            _data.w5s === res.w5s && _data.w7s === res.w7s &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s && _data.hit5h === res.hit5h && _data.hit7d === res.hit7d &&
             _data.plan === res.plan && _data.noLimits === res.noLimits && _data.err === res.err) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang

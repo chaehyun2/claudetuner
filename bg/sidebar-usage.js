@@ -1,6 +1,8 @@
 // Builds the usage payload the in-page sidebar renders, and pushes it.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
 import { calcPredictedAtReset } from '../ui/prediction-core.js';
+import { capEtaHours } from '../ui/usage-tiers.js';
+import { formatDuration } from '../ui/card-view/format.js';
 import { usageWithheldIsFreeCutover } from '../ui/util.js';
 import { hasProviderPermission } from './providers.js';
 import { SITE_TAB_PATTERNS } from './constants.js';
@@ -96,8 +98,18 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   // _filteredHistory (ui/state.js). A secondary org must not inherit them: the 7d model reads prior
   // cycles from this history, so another org's past weeks would become this org's "usual final".
   const legacyIsThisOrg = wantProvider === 'claude' && (!orgData || !!orgData.isPrimary);
-  const pred5h = calcSidebarPrediction(history, 'h5', h5, r5, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider);
-  const pred7d = calcSidebarPrediction(history, 'd7', d7, r7, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider, orgData?.w7s ?? null);
+  const fc5h = calcSidebarPrediction(history, 'h5', h5, r5, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider);
+  const fc7d = calcSidebarPrediction(history, 'd7', d7, r7, reqOrgId || orgData?.uuid, legacyIsThisOrg, wantProvider, orgData?.w7s ?? null);
+  const pred5h = fc5h ? fc5h.predicted : null;
+  const pred7d = fc7d ? fc7d.predicted : null;
+  // When the forecast reaches the limit BEFORE the reset: the moment it does (epoch ms, to the
+  // minute). The input strips turn it into 「N 대기」 (reset − hit) — the popup's wait headline.
+  // The wait comes from the exact moment; the moment itself travels minute-rounded, which is all the
+  // tooltip shows and keeps the strips' "did anything change" comparison from firing every poll.
+  const wait5h = waitSpan(fc5h ? fc5h.hitAt : null, r5);
+  const wait7d = waitSpan(fc7d ? fc7d.hitAt : null, r7);
+  const hit5h = toMinute(fc5h ? fc5h.hitAt : null);
+  const hit7d = toMinute(fc7d ? fc7d.hitAt : null);
 
   // Language detection
   const lang = local.sidebarLang || (snapshot?.user_lang) || 'en';
@@ -171,7 +183,7 @@ export async function buildSidebarUsageData(reqOrgId, provider) {
   const noUsageFree = noUsage && usageWithheldIsFreeCutover(orgData?.noUsagePlan);
 
   return {
-    plan, h5, d7, r5, r7, w5s, w7s, noUsage, noUsageFree, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, lang, noLimits,
+    plan, h5, d7, r5, r7, w5s, w7s, noUsage, noUsageFree, eu: euUsed, el: euLimit, euEnabled, pred5h, pred7d, hit5h, hit7d, wait5h, wait7d, lang, noLimits,
     addl: addl && addl.length ? addl : null,
     gates: gates && gates.length ? gates : null,
     // Reset-pass summary of THIS org (#2092 P1-1), drawn by usage-shared.js buildResetPassChipHtml.
@@ -230,10 +242,13 @@ async function noDataReason(provider) {
   return err ? { err: err.code } : null;
 }
 
-// Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset)
+// Lightweight prediction for sidebar (mirrors popup calcPredictedAtReset).
+// Returns { predicted, hitAt } or null. `predicted` is the rounded at-reset %; `hitAt` (epoch ms,
+// minute-rounded, or null) is when the window reaches the limit before it resets — the popup's own
+// answer (ui/usage-tiers.js capEtaHours), so the strip's 「N 대기」 and the popup's wait agree.
 // `windowSeconds` is the provider-reported 7d-slot span (org `w7s`), used by the 7d forecast only.
 // `orgHistory` (bg/reset-pass-model.js) is the per-org row rule the popup's _filteredHistory uses.
-function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, includeLegacy, provider, windowSeconds) {
+export function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, includeLegacy, provider, windowSeconds) {
   if (!resetsAt || currentUtil == null || !history || history.length < 3) return null;
 
   const now = Date.now();
@@ -260,7 +275,7 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
     // grows by 2pt and would otherwise be hidden by the "< 3pt" rule below (Codex R1, #1681).
     const hitsCap = dp.willHit === true || (dp.predicted >= 100 && currentUtil < 100);
     if (!hitsCap && dp.predicted - currentUtil < 3) return null;
-    return Math.round(dp.predicted);
+    return { predicted: Math.round(dp.predicted), hitAt: capHitAt(dp, currentUtil, now, hoursToReset) };
   } else {
     const lookbacks = [2 * 3600000, 6 * 3600000, Infinity];
     let valid = [];
@@ -278,7 +293,29 @@ function calcSidebarPrediction(history, key, currentUtil, resetsAt, orgUuid, inc
   if (rate == null) return null;
   const predicted = currentUtil + (rate * hoursToReset);
   if (rate <= 0 || predicted - currentUtil < 3) return null;
-  return Math.round(predicted);
+  return { predicted: Math.round(predicted), hitAt: capHitAt({ predicted, rate }, currentUtil, now, hoursToReset) };
+}
+
+
+// The popup's wait rounding (ui/card-view/format.js formatDuration: minutes under an hour, else
+// whole hours) run with labels that return the PARTS, not words — so the classic-script strips
+// localize {d, h, m} themselves and never carry a copy of the rounding rule.
+const WAIT_PARTS = { durM: (m) => ({ m }), durH: (h) => ({ h }), durD: (d) => ({ d }), durDH: (d, h) => ({ d, h }) };
+const MINUTE_MS = 60000;
+const toMinute = (ms) => (ms != null ? Math.round(ms / MINUTE_MS) * MINUTE_MS : null);
+/** The expected wait at the limit (reset − hit) as {d?, h?, m?}, or null when there is none. */
+export function waitSpan(hitAt, resetsAt) {
+  const ms = hitAt != null ? Date.parse(resetsAt || '') - hitAt : NaN;
+  return ms > 0 ? formatDuration(ms, WAIT_PARTS) : null;
+}
+/** capEtaHours as an epoch-ms moment, only when the hit lands before the reset. Unrounded: the
+ *  wait is derived from it with the popup's own rounding (waitSpan), and rounding here first would
+ *  move the wait across that rounding's boundaries (59분 instead of the popup's 1시간). */
+function capHitAt(pred, currentUtil, now, hoursToReset) {
+  const h = capEtaHours(pred, currentUtil);
+  // 🪤 null first: `null >= 0` is true in JS, so "no hit" would read as "hit right now" (Codex R2).
+  if (h == null || !(h >= 0) || !(h < hoursToReset)) return null;
+  return now + h * 3600000;
 }
 
 // Notify in-page usage panels (Claude + provider) to re-fetch with their own

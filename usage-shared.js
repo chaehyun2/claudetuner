@@ -1530,6 +1530,312 @@
     });
   }
 
+  // ── Two-window input strip (5h · 7d) — shared by the claude.ai, chatgpt.com and Gemini strips ──
+  //
+  // Each window is one group: tag · bar · now% → at-reset% (or 「N 대기」) · ↻ countdown. The
+  // sentences ("5시간 사용률", "리셋 시 예상", the absolute reset time) are the group's tooltip. The
+  // URGENT window (fuller at its reset) is always drawn in full; the other window's pieces and both
+  // countdowns carry data-fit and are kept only while they add no line — each strip passes
+  // stripFitParts() to fitStripParts. Order is fixed 5h → 7d so the eye finds each in one place.
+  //
+  // One markup and one stylesheet (STRIP_GAUGE_CSS) for all three sites; a strip only maps the
+  // colour variables (--ct-g-muted / --ct-g-track / --ct-g-sep) onto its own theme tokens.
+  const STRIP_GAUGE_TEXT = {
+    ko: {
+      name5h: '5시간 사용률', name7d: '7일 사용률', tag5h: '5시간', tag7d: '7일', pred: '리셋 시 예상',
+      soon: '곧 리셋', wait: '{0} 대기', waitTip: '이 페이스면 {0}쯤 한도 도달 · {1} 대기 예상',
+      d: '{0}일', h: '{0}시간', m: '{0}분',
+    },
+    en: {
+      name5h: '5h usage', name7d: '7d usage', tag5h: '5h', tag7d: '7d', pred: 'est. at reset',
+      soon: 'soon', wait: '{0} wait', waitTip: 'At this pace the limit hits around {0} · {1} wait expected',
+      d: '{0}d', h: '{0}h', m: '{0}m',
+    },
+  };
+  function _sgText(lang, key, ...args) {
+    const s = (STRIP_GAUGE_TEXT[lang] || STRIP_GAUGE_TEXT.en)[key];
+    return s.replace(/\{(\d)\}/g, (m, i) => (args[i] != null ? args[i] : m));
+  }
+  const STRIP_FIT = { URGENT_RESET: 'urgent-reset', OTHER_BAR: 'other-bar', OTHER_PRED: 'other-pred', OTHER_RESET: 'other-reset' };
+
+  /**
+   * The optional strip parts, most important first (fitStripParts shows them back in this order):
+   * the urgent window's countdown, the other window's bar, then the strip's own `middle` parts
+   * (compare button, 「프롬프트」 label…), then the other window's estimate and countdown, then `tail`.
+   * Both windows' current % and the urgent window's bar and estimate are never parts.
+   */
+  function stripFitParts(container, middle, tail) {
+    if (!container) return [];
+    const q = (key) => container.querySelector(`[data-fit="${key}"]`);
+    return [q(STRIP_FIT.URGENT_RESET), q(STRIP_FIT.OTHER_BAR), ...(middle || []),
+      q(STRIP_FIT.OTHER_PRED), q(STRIP_FIT.OTHER_RESET), ...(tail || [])];
+  }
+
+  /** The tag on a gauge — '5시간' / '7일' / '30일' / '5h' — from the reported span, else the slot's. */
+  function windowTag(seconds, lang, fallbackText) {
+    if (!isSpanSeconds(seconds)) return fallbackText;
+    const days = seconds >= WINDOW_DAY_S;
+    const n = Math.round(seconds / (days ? WINDOW_DAY_S : WINDOW_HOUR_S));
+    if (lang === 'ko') return `${n}${days ? '일' : '시간'}`;
+    return `${n}${days ? 'd' : 'h'}`;
+  }
+
+  /** Bare countdown for a strip — "2h 19m" / "3d 3h" / 「곧 리셋」 — or null without a reset. */
+  function stripCountdown(resetAt, lang) {
+    if (!resetAt) return null;
+    if (new Date(resetAt).getTime() - Date.now() <= 0) return _sgText(lang, 'soon');
+    return formatCountdown(resetAt, lang).replace(/^⏱\s*/, '');
+  }
+
+  /** The SW's wait parts ({d, h, m} — the popup's rounding, bg/sidebar-usage.js waitSpan) in words. */
+  function formatWaitParts(w, lang) {
+    if (!w || typeof w !== 'object') return '';
+    const parts = [];
+    if (w.d > 0) parts.push(_sgText(lang, 'd', w.d));
+    if (w.h > 0) parts.push(_sgText(lang, 'h', w.h));
+    // {m: 0} is a real answer (the popup prints 「0분」), not "no wait".
+    if (w.m != null && !(w.d > 0) && !(w.h > 0)) parts.push(_sgText(lang, 'm', w.m));
+    return parts.join(' ');
+  }
+
+  /** The windows this payload has, 5h then 7d, with rounded figures; the urgent one flagged. */
+  function stripWindows(d, lang) {
+    const out = [];
+    if (!d) return out;
+    const add = (util, pred, reset, span, hit, wait, slot) => {
+      if (util == null) return;
+      const u = Math.round(util);
+      const p = pred != null ? Math.round(pred) : null;
+      const waitText = p != null ? formatWaitParts(wait, lang) : '';
+      out.push({
+        util: u, pred: (p != null && p - u >= PRED_MIN_DELTA) || waitText ? p : null, reset,
+        hit: waitText ? hit : null, waitText,
+        tag: windowTag(span, lang, _sgText(lang, 'tag' + slot)),
+        name: windowLabel(span, lang, _sgText(lang, 'name' + slot)),
+      });
+    };
+    add(d.h5, d.pred5h, d.r5, d.w5s, d.hit5h, d.wait5h, '5h');
+    add(d.d7, d.pred7d, d.r7, d.w7s, d.hit7d, d.wait7d, '7d');
+    let urgent = null;
+    for (const w of out) {
+      const v = w.pred != null ? w.pred : w.util;
+      if (!urgent || v > (urgent.pred != null ? urgent.pred : urgent.util)) urgent = w;
+    }
+    for (const w of out) w.urgent = w === urgent;
+    return out;
+  }
+
+  function _gaugeGroupHtml(w, lang, note) {
+    const fit = (key) => (key ? ` data-fit="${key}"` : '');
+    const color = gaugeColor(w.util);
+    const fill = Math.min(w.util, 100);
+    let tip = `${w.name} ${w.util}%`;
+    let bar = `<span class="ct-g-bar"${fit(w.urgent ? '' : STRIP_FIT.OTHER_BAR)}><span class="ct-g-bar-fill" style="width:${fill}%;background:${color}"></span>`;
+    let pred = '';
+    if (w.pred != null) {
+      const pc = Math.min(w.pred, 100);
+      const predColor = gaugeColor(w.pred);
+      const pd = w.pred >= 100 ? '100%+' : w.pred + '%';
+      bar += `<span class="ct-g-bar-pred" style="left:${fill}%;width:${pc - fill}%;color:${predColor}"></span>`;
+      bar += `<span class="ct-g-bar-mk" style="left:${pc}%;background:${predColor}"></span>`;
+      // Reaching the limit before the reset: the wait it means (reset − hit, the popup's headline)
+      // replaces the 「100%+」, which says only that it overflows, not for how long.
+      const predText = w.waitText ? _sgText(lang, 'wait', w.waitText) : pd;
+      pred = `<span class="ct-g-pred"${fit(w.urgent ? '' : STRIP_FIT.OTHER_PRED)}><span class="ct-g-arrow">→</span><span class="ct-g-val" style="color:${predColor}">${escapeHtml(predText)}</span></span>`;
+      tip += ` · ${_sgText(lang, 'pred')} ${pd}`;
+      if (w.waitText) {
+        const hitAbs = formatResetAbsolute(w.hit, lang, { compact: true });
+        if (hitAbs) tip += '\n' + _sgText(lang, 'waitTip', hitAbs, w.waitText);
+      }
+    }
+    bar += `</span>`;
+    let reset = '';
+    const cd = stripCountdown(w.reset, lang);
+    if (cd) {
+      // data-reset: the strips that tick their countdowns (tickStripCountdowns) find it here.
+      reset = `<span class="ct-g-reset"${fit(w.urgent ? STRIP_FIT.URGENT_RESET : STRIP_FIT.OTHER_RESET)}><span class="ct-g-ico">↻</span><span class="ct-g-cd" data-reset="${escapeHtml(w.reset)}">${escapeHtml(cd)}</span></span>`;
+      tip += '\n' + (formatResetAbsolute(w.reset, lang) || `↻ ${cd}`);
+    }
+    if (note) tip += '\n' + note;
+    return `<span class="ct-g" role="group" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip.replace(/\n/g, ' · '))}">`
+      + `<span class="ct-g-tag">${escapeHtml(w.tag)}</span>${bar}`
+      + `<span class="ct-g-val" style="color:${color}">${w.util}%</span>${pred}${reset}</span>`;
+  }
+
+  /**
+   * THE markup of a strip's usage gauges ('' when the payload has no window). `opts.note` is an
+   * extra tooltip line on every group (ChatGPT's "what this % counts" note).
+   */
+  function buildStripGaugesHtml(d, lang, opts) {
+    const note = opts && opts.note ? String(opts.note) : '';
+    return stripWindows(d, lang)
+      .map((w, i) => (i ? '<span class="ct-g-sep"></span>' : '') + _gaugeGroupHtml(w, lang, note))
+      .join('');
+  }
+
+  /** Re-render every ticking countdown under `root` (minute-level strips call it on their timer). */
+  function tickStripCountdowns(root, lang) {
+    if (!root) return;
+    root.querySelectorAll('.ct-g-cd[data-reset]').forEach((el) => {
+      const cd = stripCountdown(el.getAttribute('data-reset'), lang);
+      if (cd && el.textContent !== cd) el.textContent = cd;
+    });
+  }
+
+  const STRIP_GAUGE_CSS = `
+.ct-g { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ct-g-tag { font-size: 0.9em; font-weight: 700; letter-spacing: 0.02em; color: var(--ct-g-muted, #8a8a88); }
+.ct-g-bar { position: relative; display: inline-block; flex-shrink: 0; width: 48px; height: 4px; border-radius: 2px; background: var(--ct-g-track, rgba(127, 127, 127, 0.25)); }
+.ct-g-bar-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; transition: width 0.4s ease; }
+.ct-g-bar-pred { position: absolute; top: 0; height: 100%; opacity: 0.28; background-image: repeating-linear-gradient(-45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px); }
+.ct-g-bar-mk { position: absolute; top: -2px; width: 2px; height: 8px; border-radius: 1px; transform: translateX(-1px); }
+.ct-g-val { font-weight: 600; }
+.ct-g-pred { display: inline-flex; align-items: center; gap: 3px; }
+.ct-g-arrow { color: var(--ct-g-muted, #8a8a88); }
+.ct-g-reset { display: inline-flex; align-items: center; gap: 1px; color: var(--ct-g-muted, #8a8a88); }
+.ct-g-sep { display: inline-block; flex-shrink: 0; width: 1px; height: 10px; margin: 0 5px; background: var(--ct-g-sep, rgba(127, 127, 127, 0.3)); }
+`;
+  const STRIP_GAUGE_STYLE_ID = 'ct-strip-gauge-css';
+  /** Put STRIP_GAUGE_CSS into a light-DOM page once (chatgpt.com / Gemini); a newer build replaces it. */
+  function ensureStripGaugeStyle(doc) {
+    const d = doc || (typeof document !== 'undefined' ? document : null);
+    if (!d || !d.head) return;
+    let el = d.getElementById(STRIP_GAUGE_STYLE_ID);
+    if (!el) { el = d.createElement('style'); el.id = STRIP_GAUGE_STYLE_ID; d.head.appendChild(el); }
+    if (el.textContent !== STRIP_GAUGE_CSS) el.textContent = STRIP_GAUGE_CSS;
+  }
+
+  // ── Sidebar fold ──
+  // One header toggle shared by the three sidebars. Folded = header row with a compact usage
+  // summary + the ad slot; the gauges, footer and notice strip are hidden. The ad is NOT folded on
+  // purpose: folding is the middle ground between "full panel" and "panel off", and it must not
+  // cost the slot that turning the panel off would cost.
+  //
+  // 🔴 State is applied SYNCHRONOUSLY from a cache primed before the panel's first mount
+  // (loadSidebarFold). Reading storage at render time would paint the panel expanded and then snap
+  // it shut on every page load — same lesson as ui/collapsible.js.
+  //
+  // Hiding is a class on the panel + one CSS rule (`.ct-folded > .ct-fold-hide`) in each site's
+  // stylesheet, not inline display: renderSidebarNotice writes `style.display` on the notice strip
+  // after an async read, which would undo an inline hide. The CSS block is identical in the three
+  // stylesheets — test/sidebar-fold-guard.mjs pins that.
+  // One boolean key PER SITE (`ct_sidebar_folded_claude` …), so two sites toggling at the same moment
+  // never read-modify-write the same object and erase each other's choice (Codex R1-B1).
+  const SIDEBAR_FOLD_KEY = 'ct_sidebar_folded_'; // + site; true = folded, absent = expanded
+  const SIDEBAR_FOLD_SITES = ['claude', 'chatgpt', 'gemini'];
+  const FOLD_TEXT = {
+    ko: { fold: '접기', unfold: '펼치기', h5: '5h', d7: '주', notice: '새 공지' },
+    en: { fold: 'Collapse', unfold: 'Expand', h5: '5h', d7: '7d', notice: 'New notice' },
+  };
+  const FOLD_CHEVRON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+  const _foldState = {};
+  // Sites whose state arrived from a change event or a click while the initial read was in flight —
+  // the late initial answer must not overwrite those newer values (Codex R1-B3).
+  const _foldTouched = new Set();
+
+  function _foldText(lang) { return FOLD_TEXT[lang] || FOLD_TEXT.en; }
+
+  /** Prime the cache, then call `done` — call before the panel's first mount. Never throws. */
+  function loadSidebarFold(done) {
+    const defaults = {};
+    for (const site of SIDEBAR_FOLD_SITES) defaults[SIDEBAR_FOLD_KEY + site] = false;
+    try {
+      chrome.storage.local.get(defaults, (r) => {
+        for (const site of SIDEBAR_FOLD_SITES) {
+          if (!_foldTouched.has(site)) _foldState[site] = !!r && r[SIDEBAR_FOLD_KEY + site] === true;
+        }
+        done();
+      });
+    } catch { done(); } // context dead — expanded is the safe default
+  }
+  function isSidebarFolded(site) { return _foldState[site] === true; }
+  /** storage.onChanged hook: true when any site's fold state changed (another tab toggled it). */
+  function syncSidebarFoldChange(changes, area) {
+    if (area !== 'local' || !changes) return false;
+    let hit = false;
+    for (const site of SIDEBAR_FOLD_SITES) {
+      const c = changes[SIDEBAR_FOLD_KEY + site];
+      if (!c) continue;
+      _foldTouched.add(site);
+      _foldState[site] = c.newValue === true;
+      hit = true;
+    }
+    return hit;
+  }
+  function _setSidebarFolded(site, folded) {
+    _foldTouched.add(site);
+    _foldState[site] = folded;
+    try {
+      if (folded) chrome.storage.local.set({ [SIDEBAR_FOLD_KEY + site]: true });
+      else chrome.storage.local.remove(SIDEBAR_FOLD_KEY + site);
+    } catch { /* context dead */ }
+  }
+
+  /** The folded header's summary: "5h 23% · 주 26%", each number in its gauge color. '' when none. */
+  function sidebarFoldSummaryHtml(d, lang) {
+    if (!d || d.noUsage) return '';
+    const tx = _foldText(lang);
+    const parts = [];
+    const add = (util, span, fallback) => {
+      if (util == null || !isFinite(util)) return;
+      const label = windowUnitLabel(span, lang) || fallback;
+      parts.push(`<span class="ct-fold-part">${escapeHtml(label)} <b style="color:${gaugeColor(util)}">${Math.round(util)}%</b></span>`);
+    };
+    add(d.h5, d.w5s, tx.h5);
+    add(d.d7, d.w7s, tx.d7);
+    return parts.join('<span class="ct-fold-sep">·</span>');
+  }
+
+  /**
+   * Apply the fold state to a mounted panel. Idempotent — call after every (re)build and render.
+   * `prefix` names the panel's own containers (`#<prefix>-content`, `#<prefix>-notice`);
+   * `onToggle` re-renders the caller after a click.
+   */
+  function renderSidebarFold(panel, header, { site, prefix, data, lang, unseen, onToggle }) {
+    if (!panel || !header) return;
+    const tx = _foldText(lang);
+    for (const id of [`${prefix}-content`, `${prefix}-notice`]) {
+      const el = panel.querySelector(`#${id}`);
+      if (el) el.classList.add('ct-fold-hide');
+    }
+    let sum = header.querySelector('.ct-fold-sum');
+    let btn = header.querySelector('.ct-fold-btn');
+    if (!btn) {
+      sum = document.createElement('span');
+      sum.className = 'ct-fold-sum';
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ct-fold-btn';
+      btn.innerHTML = FOLD_CHEVRON_SVG + '<span class="ct-fold-dot"></span>';
+      // The Gemini header is itself a button (opens the dashboard on click and Enter/Space), so
+      // neither the click nor the key may bubble to it.
+      btn.addEventListener('keydown', (e) => e.stopPropagation());
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        _setSidebarFolded(site, !isSidebarFolded(site));
+        if (onToggle) onToggle();
+      });
+      header.appendChild(sum);
+      header.appendChild(btn);
+    }
+    const folded = isSidebarFolded(site);
+    panel.classList.toggle('ct-folded', folded);
+    btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+    const hasNew = folded && unseen > 0;
+    btn.title = (folded ? tx.unfold : tx.fold) + (hasNew ? ` · ${tx.notice}` : '');
+    btn.setAttribute('aria-label', btn.title);
+    btn.querySelector('.ct-fold-dot').style.display = hasNew ? '' : 'none';
+    const html = folded ? sidebarFoldSummaryHtml(data, lang) : '';
+    if (sum.innerHTML !== html) sum.innerHTML = html;
+    sum.style.display = html ? '' : 'none';
+  }
+
+  // Build stamp for background's liveness probe (#2672 revivePanelsInTab): an orphan left by
+  // the previous build has the old version, so the thawed tab still gets re-injected.
+  try { globalThis.__ctUsageCoreVer = chrome.runtime.getManifest().version; } catch { /* context dead */ }
+
   globalThis.__ctUsageCore = {
     gaugeColor,
     planDisplayName,
@@ -1541,6 +1847,15 @@
     windowUnitLabel,
     extraGaugeDrawn,
     windowLabel,
+    windowTag,
+    // ── Two-window input strip ──
+    STRIP_FIT,
+    STRIP_GAUGE_CSS,
+    stripFitParts,
+    stripCountdown,
+    buildStripGaugesHtml,
+    tickStripCountdowns,
+    ensureStripGaugeStyle,
     cgUsageNote,
     // ── Reset pass chip (#2092 P1-1) ──
     resetPassChip,
@@ -1587,5 +1902,13 @@
     renderSidebarAds,
     renderBellBadge,
     renderSidebarNotice,
+    // ── Sidebar fold ──
+    SIDEBAR_FOLD_KEY,
+    SIDEBAR_FOLD_SITES,
+    loadSidebarFold,
+    isSidebarFolded,
+    syncSidebarFoldChange,
+    sidebarFoldSummaryHtml,
+    renderSidebarFold,
   };
 })();

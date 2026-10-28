@@ -51,8 +51,8 @@
   let _email = '';
 
   const I18N = {
-    ko: { session: '5시간 사용률', no_data: '수집 중...', no_limit: '현재는 5시간·7일 사용량 제한 없음', reset_soon: '곧 리셋', est_reset: '리셋 시 예상', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·ChatGPT에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)' },
-    en: { session: '5-hour usage', no_data: 'Collecting...', no_limit: 'Currently no 5h/7d usage limits', reset_soon: 'Resetting soon', est_reset: 'est. at reset', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & ChatGPT too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)' },
+    ko: { no_data: '수집 중...', no_limit: '현재는 5시간·7일 사용량 제한 없음', settings: '설정', contact: '문의하기', cmp_ask_others: 'Claude·ChatGPT에도 물어보기', cmp_ask_others_tip: '같은 질문을 다른 AI에게도 보내 답을 교차 검증해요 (AI 크로스체크)' },
+    en: { no_data: 'Collecting...', no_limit: 'Currently no 5h/7d usage limits', settings: 'Settings', contact: 'Feedback', cmp_ask_others: 'Ask Claude & ChatGPT too', cmp_ask_others_tip: 'Send the same question to other AIs and cross-check the answers (AI Cross-Check)' },
   };
   function t(key) { return (I18N[_lang] || I18N.en)[key] || I18N.en[key] || key; }
 
@@ -79,13 +79,6 @@
   }
 
   // Clear reset wording (with a clock icon), mirroring claude.ai / ChatGPT.
-  function resetLabel(resetAt) {
-    const diff = new Date(resetAt).getTime() - Date.now();
-    if (diff <= 0) return `⏱ ${t('reset_soon')}`;
-    const time = CORE.formatCountdown(resetAt, _lang).replace(/^⏱\s*/, '');
-    return _lang === 'ko' ? `⏱ ${time} 뒤 리셋` : `⏱ resets in ${time}`;
-  }
-
   // ── Theme ──
   // Gemini uses <body class="dark-theme"> / <html dark>; fall back to the OS
   // preference. Detect all three so the strip tracks whichever the page uses.
@@ -154,32 +147,6 @@
     return strip;
   }
 
-  function seg(text, color) {
-    return `<span class="ct-gm-strip-seg"${color ? ` style="color:${color}"` : ''}>${CORE.escapeHtml(text)}</span>`;
-  }
-
-  // A label + percent followed by a compact inline gauge bar (current fill +
-  // optional prediction marker), mirroring the other providers' input strips.
-  function metric(label, util, predUtil) {
-    const color = CORE.gaugeColor(util);
-    const clamped = Math.min(util, 100);
-    const showPred = predUtil != null && predUtil - util >= CORE.PRED_MIN_DELTA;
-    const predColor = showPred ? CORE.gaugeColor(predUtil) : null;
-    const clampedPred = showPred ? Math.min(predUtil, 100) : 0;
-    // Prediction fill (diagonal stripe) lives inside the clipped track between the
-    // current fill and the predicted level; the marker sits on top of the bar.
-    let bar = `<span class="ct-gm-strip-bar"><span class="ct-gm-strip-bar-track"><span class="ct-gm-strip-bar-fill" style="width:${clamped}%;background:${color}"></span>`;
-    if (showPred) {
-      bar += `<span class="ct-gm-strip-bar-pred-fill" style="left:${clamped}%;width:${clampedPred - clamped}%;color:${predColor}"></span>`;
-    }
-    bar += `</span>`;
-    if (showPred) {
-      bar += `<span class="ct-gm-strip-bar-marker" style="left:${clampedPred}%;background:${predColor}"></span>`;
-    }
-    bar += `</span>`;
-    return seg(`${label} ${Math.round(util)}%`, color) + bar;
-  }
-
   const GEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
   // Chat-bubble icon for 문의하기 (matches the popup's Feedback button / other strips).
   const CONTACT_SVG = '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zm-4 0H9v2h2V9z" clip-rule="evenodd"/></svg>';
@@ -197,7 +164,7 @@
     // Collecting guard: no data yet. Transient state, so no gear/contact —
     // just the muted placeholder. Checked AFTER noLimits below because no-limit
     // plans report a 0% window (h5 is 0, not null) and must not fall in here.
-    if (!(_data && _data.noLimits) && (!_data || _data.h5 == null)) {
+    if (!(_data && _data.noLimits) && (!_data || (_data.h5 == null && _data.d7 == null))) {
       // "수집 중" only when nothing is known to be wrong — see chatgpt-input.js (#1592).
       const text = _data && _data.err ? (CORE.noDataReason ? CORE.noDataReason(_data.err, _lang, 'Gemini') : t('no_data')) : t('no_data');
       strip.innerHTML = `<div class="ct-gm-strip-inner"><span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(text)}</span></div>`;
@@ -215,20 +182,16 @@
       const msg = t('no_limit') + (_data.plan ? ` · ${CORE.planDisplayName(_data.plan, 'gemini')}` : '');
       main += `<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(msg)}</span>`;
     } else {
-      // 5h current usage % + gauge bar (with prediction marker).
-      main += metric(t('session'), _data.h5, _data.pred5h);
-      // ⏱ N 뒤 리셋
-      if (_data.r5) {
-        main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-reset" data-reset="${_data.r5}" title="${CORE.escapeHtml(CORE.formatResetAbsolute(_data.r5, _lang))}">${CORE.escapeHtml(resetLabel(_data.r5))}</span>`;
-      }
-      // 리셋 시 예상 N% — predicted util at reset, percent colored by status.
-      if (_data.pred5h != null) {
-        const predColor = CORE.gaugeColor(_data.pred5h);
-        const predText = _data.pred5h >= 100 ? '100%+' : `${Math.round(_data.pred5h)}%`;
-        main += `${dot}<span class="ct-gm-strip-seg"><span class="ct-gm-strip-muted">${CORE.escapeHtml(t('est_reset'))}</span> <span style="color:${predColor}">${predText}</span></span>`;
-      }
+      // The 5h · 7d gauges — the markup all three sites' strips share (usage-shared.js
+      // buildStripGaugesHtml); Gemini reports the 5h window, and a 7d one is drawn when present.
+      // 🔴 Guarded (#1421): an older usage-shared.js can outlive a re-injection of this file; a throw
+      // here would stop the whole strip. Without the builder: the bare percentages.
+      if (CORE.ensureStripGaugeStyle) CORE.ensureStripGaugeStyle(document);
+      main += CORE.buildStripGaugesHtml
+        ? CORE.buildStripGaugesHtml(_data, _lang)
+        : `<span class="ct-gm-strip-seg">${[_data.h5, _data.d7].filter((v) => v != null).map((v) => Math.round(v) + '%').join(' · ')}</span>`;
       if (_data.plan) {
-        main += `${dot}<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'gemini'))}</span>`;
+        main += `<span class="ct-gm-strip-plan">${dot}<span class="ct-gm-strip-seg ct-gm-strip-muted">${CORE.escapeHtml(CORE.planDisplayName(_data.plan, 'gemini'))}</span></span>`;
       }
     }
     strip.innerHTML =
@@ -255,7 +218,13 @@
   function ensureStripFit(strip) {
     if (!CORE || !CORE.fitCompareButton) return;
     // A superseded instance's observer answers no parts → no-op on the newest instance's strip.
-    const parts = () => (isCurrent() ? [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')] : []);
+    // CORE.stripFitParts: the gauges' optional pieces around the compare button and the 「프롬프트」
+    // label, the plan name last.
+    const parts = () => {
+      if (!isCurrent()) return [];
+      const buttons = [strip.querySelector('.' + CMP_BTN_CLASS), strip.querySelector('.ct-prompt-btn-label')];
+      return CORE.stripFitParts ? CORE.stripFitParts(strip, buttons, [strip.querySelector('.ct-gm-strip-plan')]) : buttons;
+    };
     if (!CORE.fitStripParts) {
       const find = () => parts()[0] || null;
       CORE.fitCompareButton(strip, find());
@@ -365,10 +334,7 @@
   }
 
   function updateCountdowns() {
-    document.querySelectorAll(`#${STRIP_ID} .ct-gm-strip-reset[data-reset]`).forEach(el => {
-      const r = el.dataset.reset;
-      if (r) el.textContent = resetLabel(r);
-    });
+    if (CORE.tickStripCountdowns) CORE.tickStripCountdowns(document.getElementById(STRIP_ID), _lang);
   }
 
   // ── Mount / unmount ──
@@ -457,6 +423,7 @@
         clearEmptyRetry(); // got data — stop fast-polling
         if (_data && _data.h5 === res.h5 && _data.d7 === res.d7 && _data.r5 === res.r5 &&
             _data.r7 === res.r7 && _data.pred5h === res.pred5h && _data.pred7d === res.pred7d &&
+            _data.w5s === res.w5s && _data.w7s === res.w7s && _data.hit5h === res.hit5h && _data.hit7d === res.hit7d &&
             _data.plan === res.plan && _data.noLimits === res.noLimits && _data.err === res.err) return;
         _data = res;
         // _lang follows the user's extension language setting, not res.lang.

@@ -135,3 +135,21 @@ export async function sendGAEvent(name, params = {}) {
     // Silently ignore GA failures
   }
 }
+
+/**
+ * In-page sidebar fold toggles. The content scripts write `ct_sidebar_folded_<site>`
+ * (usage-shared.js renderSidebarFold) and cannot reach GA themselves, so the service worker turns
+ * each storage change into one `sidebar_fold` event per site whose state flipped.
+ * @returns {{site: string, action: 'fold'|'unfold'}[]}
+ */
+export function sidebarFoldTransitions(changes) {
+  const out = [];
+  for (const [key, c] of Object.entries(changes || {})) {
+    const m = /^ct_sidebar_folded_(claude|chatgpt|gemini)$/.exec(key);
+    if (!m || !c) continue;
+    const was = c.oldValue === true;
+    const now = c.newValue === true;
+    if (was !== now) out.push({ site: m[1], action: now ? 'fold' : 'unfold' });
+  }
+  return out;
+}

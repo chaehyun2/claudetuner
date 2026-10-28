@@ -271,3 +271,16 @@ body.dark-theme, html[dark] body, html.dark-theme body, html[data-theme="dark"] 
 }
 /* Hoverable rows/spans get a default cursor to signal the tooltip affordance. */
 .ct-gm-limit, .ct-gm-pred, .ct-gm-reset { cursor: default; }
+
+/* <sidebar-fold> Header fold toggle (CORE.renderSidebarFold). This block is identical in
+   sidebar-usage.css, chatgpt-usage.css and gemini-usage.css — test/sidebar-fold-guard.mjs. */
+.ct-folded > .ct-fold-hide { display: none !important; }
+.ct-fold-sum { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 12px; line-height: 16px; opacity: 0.85; }
+.ct-fold-sum b { font-weight: 600; }
+.ct-fold-sep { opacity: 0.5; }
+.ct-fold-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; margin-left: auto; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; }
+.ct-fold-btn:hover, .ct-fold-btn:focus-visible { opacity: 1; background: rgba(127, 127, 127, 0.15); }
+.ct-fold-btn svg { transition: transform 0.15s ease; }
+.ct-folded .ct-fold-btn svg { transform: rotate(-90deg); }
+.ct-fold-dot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: #ef4444; }
+/* </sidebar-fold> */

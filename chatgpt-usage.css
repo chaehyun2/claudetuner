@@ -266,6 +266,10 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 
 /* ── Input strip ── */
 .ct-cg-strip {
+  /* The shared 5h · 7d gauges (usage-shared.js STRIP_GAUGE_CSS) read these. */
+  --ct-g-muted: var(--ct-cg-text-muted);
+  --ct-g-track: var(--ct-cg-track);
+  --ct-g-sep: var(--ct-cg-border);
   display: flex;
   justify-content: center;
   width: 100%;
@@ -335,39 +339,10 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 
 .ct-cg-strip-logo { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
 .ct-cg-strip-seg { font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* Compact inline gauge bar (current fill + optional prediction marker). */
-.ct-cg-strip-bar {
-  position: relative;
-  display: inline-block;
-  width: 56px;
-  height: 6px;
-  vertical-align: middle;
-  margin: 0 1px;
-}
-.ct-cg-strip-bar-track {
-  position: absolute; inset: 0;
-  background: rgba(127, 127, 127, 0.25);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.ct-cg-strip-bar-fill {
-  display: block; height: 100%; border-radius: 3px;
-  transition: width 0.4s ease;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-.ct-cg-strip-bar-pred-fill {
-  position: absolute; top: 0; height: 100%;
-  opacity: 0.28;
-  background-image: repeating-linear-gradient(-45deg, transparent, transparent 2px, currentColor 2px, currentColor 4px);
-}
-.ct-cg-strip-bar-marker {
-  position: absolute; top: -1.5px; width: 2px; height: 9px;
-  border-radius: 1px; transform: translateX(-1px);
-  transition: left 0.4s ease;
-}
 .ct-cg-strip-muted { color: var(--ct-cg-text-muted); }
-.ct-cg-strip-reset { color: var(--ct-cg-text-muted); }
 .ct-cg-strip-dot { color: var(--ct-cg-text-muted); opacity: 0.5; }
+/* The plan name with its separator — one fit part (dropped last on a narrow strip). */
+.ct-cg-strip-plan { display: inline-flex; align-items: center; gap: 7px; }
 /* Text-only strip (collecting / reason, #1594×#1595×#1596, 2026-09-21 batch review row 1): the
    muted seg is a DIRECT child of .ct-cg-strip-inner only in this branch (chatgpt-input.js's
    text-only innerHTML) — the plan-name seg also carrying .ct-cg-strip-muted is nested one level
@@ -461,3 +436,16 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
 /* Reset-pass line emphasis (#2092): readable amber per theme (≥4.5:1 on ChatGPT's sidebar). */
 .ct-cg-rp .ct-rp-hot { color: #b45309; }
 html.dark .ct-cg-rp .ct-rp-hot, html.dark-oled .ct-cg-rp .ct-rp-hot, html[data-theme="dark"] .ct-cg-rp .ct-rp-hot { color: #fbbf24; }
+
+/* <sidebar-fold> Header fold toggle (CORE.renderSidebarFold). This block is identical in
+   sidebar-usage.css, chatgpt-usage.css and gemini-usage.css — test/sidebar-fold-guard.mjs. */
+.ct-folded > .ct-fold-hide { display: none !important; }
+.ct-fold-sum { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 12px; line-height: 16px; opacity: 0.85; }
+.ct-fold-sum b { font-weight: 600; }
+.ct-fold-sep { opacity: 0.5; }
+.ct-fold-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 22px; height: 22px; margin-left: auto; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; }
+.ct-fold-btn:hover, .ct-fold-btn:focus-visible { opacity: 1; background: rgba(127, 127, 127, 0.15); }
+.ct-fold-btn svg { transition: transform 0.15s ease; }
+.ct-folded .ct-fold-btn svg { transform: rotate(-90deg); }
+.ct-fold-dot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: #ef4444; }
+/* </sidebar-fold> */

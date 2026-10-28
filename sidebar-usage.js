@@ -200,6 +200,18 @@
   function updateBellBadge() {
     if (!CORE || !CORE.renderBellBadge) return;
     CORE.renderBellBadge(document.getElementById('ct-sb-bell-badge'), _notices, _lastSeenId);
+    syncFold(); // the folded header's new-notice dot reads the same unseen count
+  }
+
+  // Header fold toggle (shared with the ChatGPT/Gemini sidebars, CORE.renderSidebarFold).
+  function syncFold() {
+    if (!CORE || !CORE.renderSidebarFold) return;
+    const panel = document.getElementById(CT_PANEL_ID);
+    if (!panel) return;
+    CORE.renderSidebarFold(panel, panel.querySelector('.ct-sb-header'), {
+      site: 'claude', prefix: 'ct-sb', data: _data, lang: _lang,
+      unseen: CORE.getUnseenCount ? CORE.getUnseenCount(_notices, _lastSeenId) : 0, onToggle: syncFold,
+    });
   }
 
   function renderInlineNotice() {
@@ -242,7 +254,20 @@
     const dframeSidebar = document.querySelector('.dframe-sidebar-body');
     if (dframeSidebar) {
       const navScroll = dframeSidebar.querySelector('.dframe-nav-scroll');
-      if (navScroll) return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
+      if (navScroll) {
+        // claude.ai web moved to this layout in 2026-10 (it used to be desktop-only): inside the nav
+        // scroll come [new chat · search] [projects … customize] [pinned · recents]. Mount just above
+        // pinned/recents — under the nav rows, scrolling with the list, where the panel sat on the old
+        // web layout. Without that section, fall back to the top of the scroll box.
+        const recents = navScroll.querySelector(':scope > .dframe-recents-by-mode');
+        if (recents) {
+          // Usage sits above the folders tree (claude-folders.js mounts right after us); when the
+          // panel is turned on after the tree is already there, go in front of it (Codex R1).
+          const folders = navScroll.querySelector(':scope > #ct-folders-panel');
+          return { parent: navScroll, ref: folders || recents, type: 'dframe' };
+        }
+        return { parent: navScroll.parentElement, ref: navScroll, type: 'desktop' };
+      }
     }
 
     // Web — find the nav sidebar
@@ -438,6 +463,7 @@
   function renderContent() {
     renderPanelBody();
     syncBanners();
+    syncFold();
   }
 
   function renderPanelBody() {
@@ -786,12 +812,20 @@
     });
     chrome.storage.sync.get({ lang: 'auto', sidebarUsageEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? detectLang() : cfg.lang;
-      _enabled = cfg.sidebarUsageEnabled !== false;
-      if (_enabled) {
-        requestUsageData();
-        fetchNotices();
-        fetchAds();
-      }
+      // _enabled gates the first mount, so it is set only after the fold state is cached —
+      // otherwise a folded panel paints expanded first and then snaps shut.
+      const enable = () => {
+        if (!isCurrent()) return;
+        syncFold(); // a panel mounted while the read was pending (setting toggled on) gets the stored state (R2-B1)
+        // A settings change during the fold read already decided (Codex R1-B2) — don't revive the panel.
+        if (_enabled === null) _enabled = cfg.sidebarUsageEnabled !== false;
+        if (_enabled) {
+          requestUsageData();
+          fetchNotices();
+          fetchAds();
+        }
+      };
+      if (CORE && CORE.loadSidebarFold) CORE.loadSidebarFold(enable); else enable();
     });
 
     // React to setting changes in real-time
@@ -837,6 +871,8 @@
     // status write-through) → re-run the gated fetchAds now, not at the next rotation tick: a
     // Premium answer clears the slot, a free one brings the ads back. storage.onChanged is the
     // one signal a content script gets; the key lives in `local`.
+    // Folded/expanded in another tab → follow it here.
+    if (CORE && CORE.syncSidebarFoldChange && CORE.syncSidebarFoldChange(changes, area)) syncFold();
     if (area === 'local' && changes.ct_entitlement) { if (_enabled) fetchAds(); return; } // a disabled panel has no slot to refresh (Codex U3 2R #7)
     if (area !== 'sync') return;
     if (changes.sidebarUsageEnabled) {

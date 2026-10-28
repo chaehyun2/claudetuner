@@ -1,5 +1,5 @@
 // === ES Module Imports ===
-import { sendGAEvent, pinnedState, authState, providerPermState } from './bg/analytics.js';
+import { sendGAEvent, pinnedState, authState, providerPermState, sidebarFoldTransitions } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, RESET_ALARM_KEYS, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
@@ -39,7 +39,7 @@ import { getProviderState, displayableProviderError, snoozeProviderError, report
 import { collectGemini } from './bg/collect-gemini.js';
 import { fetchRecommendations } from './bg/rec-fetch.js';
 import { maybeSendInstallBeacon, maybeSendFirstGatedBeacon, beaconJitterMinutes } from './bg/install-beacon.js';
-import { hasProviderPermission, registerChatGPTScripts, unregisterChatGPTScripts, injectChatGPTOpenTabs, registerGeminiScripts, unregisterGeminiScripts, injectGeminiOpenTabs, hasClaudeSession, mergeChatGPTOrgs, mergeGeminiOrgs, maybeCollectGeminiForTab, onChatGPTAccountCookieChanged } from './bg/providers.js';
+import { hasProviderPermission, registerChatGPTScripts, unregisterChatGPTScripts, injectChatGPTOpenTabs, registerGeminiScripts, unregisterGeminiScripts, injectGeminiOpenTabs, injectPanels, CLAUDE_REINJECT, revivePanelsInTab, hasClaudeSession, mergeChatGPTOrgs, mergeGeminiOrgs, maybeCollectGeminiForTab, onChatGPTAccountCookieChanged } from './bg/providers.js';
 import { getResetNotifContext, resolveResetWindow, scheduleExpireAlarms } from './bg/reset-alarms.js';
 import { buildSidebarUsageData, pushSidebarUsage } from './bg/sidebar-usage.js';
 import { AD_FLUSH_ALARM, incrementAdCounter, flushAdCounters, updateAdFlushAlarm } from './bg/ad-counters.js';
@@ -336,18 +336,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Re-inject content scripts into existing Claude.ai tabs (dev reload / extension update)
   try {
     // Discarded/frozen tabs are skipped (#2064, vendor-ai isUsableTab): no document to inject
-    // into, and the browser-crash suspect. Their manifest content scripts run when they reload.
+    // into, and the browser-crash suspect. A frozen one is revived when it thaws (#2672).
     const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.claude })).filter(isUsableTab);
-    for (const tab of tabs) {
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'input-usage.js'],
-      }).catch(() => {});
-      chrome.scripting.insertCSS({
-        target: { tabId: tab.id },
-        files: ['sidebar-usage.css', 'input-usage.css'],
-      }).catch(() => {});
-    }
+    for (const tab of tabs) injectPanels(tab.id, CLAUDE_REINJECT);
   } catch { /* tabs API may fail in some contexts */ }
 
   // Register + inject ChatGPT panel scripts (no-op without the optional permission)
@@ -418,6 +409,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && accountAppeared(changes.independentAccount)) {
     reportWhatsNewLogin().catch(() => {});
   }
+  // Sidebar fold toggles (usage-shared.js renderSidebarFold) — content scripts cannot reach GA.
+  if (area === 'local') for (const t of sidebarFoldTransitions(changes)) sendGAEvent('sidebar_fold', t);
 });
 
 // Handle messages from welcome page + dashboard login
@@ -1130,6 +1123,7 @@ async function tryTabCollect(reason) {
 
 // Detect URL changes (login complete, page navigation, etc.)
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.frozen === false) revivePanelsInTab(tab); // #2672 thawed after an update
   if (changeInfo.status === 'complete' && providerForUrl(tab.url) === 'claude') {
     // At least background state when a claude.ai tab is ready
     const prev = getActivityState();
@@ -1150,6 +1144,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
+    revivePanelsInTab(tab); // #2672: frozen through an update → panels gone until refresh
     if (providerForUrl(tab.url) === 'claude') {
       if (await setActivityState(ACTIVITY_STATES.ACTIVE)) await updatePollAlarm();
       tryTabCollect('tab-activated');

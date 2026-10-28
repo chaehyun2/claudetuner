@@ -6,7 +6,7 @@ import { collectChatGPT } from './collect-chatgpt.js';
 import { isChatGPTAccountSwitch } from './parse-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
 import { appendUsageHistory, reconcileProviderRecs } from './storage.js';
-import { CLAUDE_SESSION_COOKIE, isUsableTab } from '../vendor-ai/sites.js';
+import { CLAUDE_SESSION_COOKIE, isUsableTab, providerForUrl } from '../vendor-ai/sites.js';
 import { CLAUDE_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 
 // Check if optional host permission is granted for a provider
@@ -67,13 +67,10 @@ export async function unregisterChatGPTScripts() {
 export async function injectChatGPTOpenTabs() {
   try {
     if (!(await hasProviderPermission('chatgpt'))) return;
-    // Discarded/frozen tabs are skipped (#2064, vendor-ai isUsableTab) — the registered content
-    // scripts cover them when they reload.
+    // Discarded/frozen tabs are skipped (#2064, vendor-ai isUsableTab) — a discarded one gets the
+    // registered content scripts when it reloads, a frozen one is revived when it thaws (#2672).
     const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.chatgpt })).filter(isUsableTab);
-    for (const tab of tabs) {
-      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CHATGPT_INJECT.js }).catch(() => {});
-      chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: CHATGPT_INJECT.css }).catch(() => {});
-    }
+    for (const tab of tabs) injectPanels(tab.id, CHATGPT_INJECT);
   } catch { /* tabs API may fail in some contexts */ }
 }
 
@@ -119,13 +116,58 @@ export async function injectGeminiOpenTabs() {
   try {
     if (!(await hasProviderPermission('gemini'))) return;
     const tabs = (await chrome.tabs.query({ url: SITE_TAB_PATTERNS.gemini })).filter(isUsableTab); // #2064, as above
-    for (const tab of tabs) {
-      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: GEMINI_INJECT.js }).catch(() => {});
-      chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: GEMINI_INJECT.css }).catch(() => {});
-    }
+    for (const tab of tabs) injectPanels(tab.id, GEMINI_INJECT);
     if (tabs.length > 0) maybeCollectGeminiForTab(); // fill the freshly-injected panel
   } catch { /* tabs API may fail in some contexts */ }
 }
+
+// Inject a provider's panel scripts + styles into one open tab. Never rejects; callers that
+// must not overlap a second injection await it (revivePanelsInTab), the rest fire and forget.
+export function injectPanels(tabId, spec) {
+  return Promise.all([
+    chrome.scripting.executeScript({ target: { tabId }, files: spec.js }).catch(() => {}),
+    chrome.scripting.insertCSS({ target: { tabId }, files: spec.css }).catch(() => {}),
+  ]);
+}
+
+// claude.ai panels are manifest content scripts; this is only the re-injection set for tabs
+// that were already open (install/update, #2672 thaw). claude-folders.js is deliberately left
+// out — it is not re-injected on update either.
+export const CLAUDE_REINJECT = {
+  js: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'input-usage.js'],
+  css: ['sidebar-usage.css', 'input-usage.css'],
+};
+
+// #2672: the install/update re-injection skips frozen tabs (#2064), on the premise that they get
+// the content scripts when they reload — but a frozen tab never reloads, it just thaws. Its old
+// panels died with the previous extension context (and removed themselves), so the usage strip
+// stays gone until the user refreshes. When such a tab comes back (activated / unfrozen), probe
+// for a live panel of THIS build and re-inject if there is none. usage-shared.js stamps the
+// version, so an orphan from the previous build sharing the isolated world does not count.
+const PANEL_REINJECT = { claude: CLAUDE_REINJECT, chatgpt: CHATGPT_INJECT, gemini: GEMINI_INJECT };
+const _reviving = new Set(); // tab ids with a probe in flight (activation + thaw fire together)
+export async function revivePanelsInTab(tab) {
+  const provider = providerForUrl(tab?.url);
+  const spec = PANEL_REINJECT[provider];
+  if (!spec || !isUsableTab(tab) || _reviving.has(tab.id)) return;
+  _reviving.add(tab.id);
+  try {
+    if (!(await hasProviderPermission(provider))) return;
+    const [probe] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (ver) => globalThis.__ctUsageCoreVer === ver,
+      args: [chrome.runtime.getManifest().version],
+    });
+    if (probe?.result !== false) return; // live panels (or no answer — never inject blind)
+    // Held under _reviving until the scripts have run: a second event released earlier would
+    // probe before usage-shared.js stamps the version and inject a duplicate instance.
+    await injectPanels(tab.id, spec);
+    if (provider === 'gemini') maybeCollectGeminiForTab(); // fill the freshly-injected panel
+  } catch { /* tab closed / navigated mid-probe */ } finally {
+    _reviving.delete(tab.id);
+  }
+}
+
 // Whether the user currently has a Claude.ai session (sessionKey cookie).
 // Used to attempt Claude collection even for provider-first users who later
 // sign in to Claude — without it, skipClaude would permanently skip Claude.
