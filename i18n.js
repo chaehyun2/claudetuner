@@ -658,6 +658,8 @@ const TRANSLATIONS = {
     // review nudge
     'review_nudge_text': 'ClaudeTuner가 도움이 되셨나요?',
     'review_nudge_cta': '리뷰 남기기',
+    'review_nudge_confirm': '이미 리뷰했어요',
+    'review_nudge_followup': '리뷰를 남기셨나요?',
     // recommendation feedback
     'rec_fb_question': '이 추천이 도움이 되었나요?',
     'rec_fb_yes': '도움됐어요',
@@ -1488,6 +1490,8 @@ const TRANSLATIONS = {
     // review nudge
     'review_nudge_text': 'Enjoying ClaudeTuner?',
     'review_nudge_cta': 'Rate us ⭐',
+    'review_nudge_confirm': 'Already reviewed',
+    'review_nudge_followup': 'Did you leave a review?',
     // recommendation feedback
     'rec_fb_question': 'Was this recommendation helpful?',
     'rec_fb_yes': 'Helpful',

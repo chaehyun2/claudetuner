@@ -7,7 +7,7 @@ import { escHtml, _fmIcon, dashboardUrl, recType, planDisplayName } from './util
 import { _authedFetch } from './auth.js';
 import { isServerSyncStalled } from '../bg/server-reach.js';
 import { recDismissActive } from '../bg/rec-dismiss.js';
-import { REVIEW_NUDGE_KEY, REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, reviewNudgeDue, recordReviewNudgeAction } from '../bg/review-nudge.js';
+import { REVIEW_NUDGE_KEY, REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_ACTION_CONFIRMED, REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, reviewNudgeDue, reviewFollowupDue, recordReviewNudgeAction } from '../bg/review-nudge.js';
 
 const _planApiToLabel = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x' };
 
@@ -175,23 +175,36 @@ export async function loadFitnessMatrix() {
 }
 
 export function checkReviewNudge() {
-  chrome.storage.local.get({ [REVIEW_NUDGE_KEY]: null }, (store) => {
-    if (!reviewNudgeDue(store[REVIEW_NUDGE_KEY], { snapshot: state.currentSnapshot })) return;
+  chrome.storage.local.get({ [REVIEW_NUDGE_KEY]: null, ct_review_followup_for: null }, (store) => {
+    const rn = store[REVIEW_NUDGE_KEY];
+    const followup = reviewFollowupDue(rn, { snapshot: state.currentSnapshot,
+      promptedFor: store.ct_review_followup_for });
+    if (!followup && !reviewNudgeDue(rn, { snapshot: state.currentSnapshot })) return;
 
     const el = document.getElementById('review-nudge');
     el.style.display = 'flex';
-    document.getElementById('review-nudge-text').textContent = t('review_nudge_text');
-    document.getElementById('review-nudge-link').textContent = t('review_nudge_cta');
+    document.getElementById('review-nudge-text').textContent = t(followup ? 'review_nudge_followup' : 'review_nudge_text');
+    const link = document.getElementById('review-nudge-link');
+    link.style.display = followup ? 'none' : '';
+    link.textContent = t('review_nudge_cta');
+    if (followup) chrome.storage.local.set({ ct_review_followup_for: rn.clicked_at });
     sendGAEvent(REVIEW_EVENT_SHOWN, { source: 'popup' });
 
-    document.getElementById('review-nudge-link').addEventListener('click', () => {
+    link.addEventListener('click', () => {
       sendReviewNudgeAction(REVIEW_ACTION_CLICKED);
       sendGAEvent(REVIEW_EVENT_CLICKED, { source: 'popup' });
     });
     document.getElementById('review-nudge-close').addEventListener('click', () => {
       el.style.display = 'none';
-      sendReviewNudgeAction(REVIEW_ACTION_DISMISSED);
-      sendGAEvent(REVIEW_EVENT_DISMISSED, { source: 'popup' });
+      if (!followup) {
+        sendReviewNudgeAction(REVIEW_ACTION_DISMISSED);
+        sendGAEvent(REVIEW_EVENT_DISMISSED, { source: 'popup' });
+      }
+    });
+    document.getElementById('review-nudge-confirm').addEventListener('click', () => {
+      el.style.display = 'none';
+      sendReviewNudgeAction(REVIEW_ACTION_CONFIRMED);
+      sendGAEvent('review_nudge_confirmed', { source: 'popup' });
     });
   });
 }

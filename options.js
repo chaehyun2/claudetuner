@@ -689,6 +689,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     reviewBanner.style.display = 'none';
     recordReview((m) => [m.REVIEW_ACTION_DISMISSED, m.REVIEW_EVENT_DISMISSED]);
   });
+  document.getElementById('review-confirm').addEventListener('click', () => {
+    reviewBanner.style.display = 'none';
+    recordReview((m) => [m.REVIEW_ACTION_CONFIRMED, 'review_nudge_confirmed']);
+  });
 
   // Data reset button
   document.getElementById('reset-btn').addEventListener('click', () => {

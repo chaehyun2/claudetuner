@@ -101,7 +101,7 @@ export function whatsNewDecision({ storage, announcements, lang, now, previousVe
 
 // Signed-in page only: ask for a store review when the SAME gates as every other review-nudge
 // surface allow it (bg/review-nudge.js reviewNudgeDue — dismissals, snooze, install age, near-limit,
-// already clicked). Never re-decided here; the page just follows rv=1.
+// recent click, confirmed review or probable match). Never re-decided here; the page just follows rv=1.
 export function whatsNewReviewAsk({ acct, storage, now }) {
   if (!acct) return false;
   const s = storage || {};

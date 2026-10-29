@@ -6,13 +6,13 @@
 // conclusion alone, so the rating and the review are never asked at once, and never after a 👎).
 // At most once per page load, and only when the shared gates say so (bg/review-nudge.js
 // reviewNudgeDue — the popup's and the options page's rules, over the same `ct_review_nudge`).
-// The sentence is the link (the reviews page, new tab); × dismisses. A click / dismiss goes to the
+// The sentence is the link (the reviews page, new tab); × dismisses; a separate button confirms a review. Actions go to the
 // service worker (REVIEW_NUDGE_MSG_TYPE), which writes the local state and PATCHes the server —
 // this page holds no token. GA: the extension-wide review_nudge_* names with `source` only.
 //
 // See ui/compare/history.js for the ctx contract.
 
-import { REVIEW_NUDGE_KEY, REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, REVIEW_NUDGE_MSG_TYPE, CWS_REVIEW_URL, reviewNudgeDue } from '../../bg/review-nudge.js';
+import { REVIEW_NUDGE_KEY, REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_ACTION_CONFIRMED, REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, REVIEW_NUDGE_MSG_TYPE, CWS_REVIEW_URL, reviewNudgeDue } from '../../bg/review-nudge.js';
 import { sendMessage, storageGet } from './helpers.js';
 import { USER_MOVE_EVENTS } from './constants.js';
 
@@ -65,11 +65,14 @@ export function installReviewNudge(ctx) {
     box.id = 'cmp-review';
     box.setAttribute('role', 'note');
     const cta = link(CWS_REVIEW_URL, t(REVIEW_COPY[source]), 'cmp-review-link');
+    const confirm = el('button', 'cmp-review-confirm', t('review_nudge_confirm'));
+    confirm.type = 'button';
     const close = el('button', 'cmp-review-close', '×');
     close.type = 'button';
     close.title = t('review_nudge_dismiss');
     close.setAttribute('aria-label', t('review_nudge_dismiss'));
     box.appendChild(cta);
+    box.appendChild(confirm);
     box.appendChild(close);
     const settle = (action, event) => {
       if (box.parentNode) box.parentNode.removeChild(box);
@@ -78,6 +81,7 @@ export function installReviewNudge(ctx) {
     };
     cta.addEventListener('click', () => settle(REVIEW_ACTION_CLICKED, REVIEW_EVENT_CLICKED));
     close.addEventListener('click', () => settle(REVIEW_ACTION_DISMISSED, REVIEW_EVENT_DISMISSED));
+    confirm.addEventListener('click', () => settle(REVIEW_ACTION_CONFIRMED, 'review_nudge_confirmed'));
     // Above the footer line: the last thing on the page, under the docked composer.
     ctx.root.insertBefore(box, ctx.footer);
     track(REVIEW_EVENT_SHOWN, { source });

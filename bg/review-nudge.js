@@ -2,8 +2,8 @@
 // popup (ui/recommend.js checkReviewNudge), the options page banner (options.js) and the AI
 // cross-check / debate page (ui/compare/review-nudge.js, #1966).
 //
-// State: chrome.storage.local `ct_review_nudge` = `{ clicked, dismiss_count, last_dismissed,
-// first_seen_at }`, written from the server's snapshot response (bg/collect.js) and — so the other
+// State: chrome.storage.local `ct_review_nudge` includes click, dismissal, confirmed and probable
+// timestamps, written from the server's snapshot response (bg/collect.js) and — so the other
 // surfaces respect a click / dismiss before the next sync — by recordReviewNudgeAction here. The
 // timestamps are D1 `datetime('now')` strings: UTC without a zone ('YYYY-MM-DD HH:MM:SS'), so they
 // are parsed with a trailing 'Z' (without it they read as LOCAL time and every gate skews by the
@@ -15,18 +15,22 @@
 export const REVIEW_NUDGE_KEY = 'ct_review_nudge';
 export const REVIEW_ACTION_CLICKED = 'clicked';
 export const REVIEW_ACTION_DISMISSED = 'dismissed';
-const REVIEW_ACTIONS = Object.freeze([REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED]);
-// Gates (product decision, unchanged since the popup nudge): five dismissals end it, a dismissal
-// rests it this long, a new install is left alone this long, a nearly-spent limit is no moment to ask.
-export const REVIEW_MAX_DISMISSALS = 5;
+export const REVIEW_ACTION_CONFIRMED = 'confirmed';
+const REVIEW_ACTIONS = Object.freeze([REVIEW_ACTION_CLICKED, REVIEW_ACTION_DISMISSED, REVIEW_ACTION_CONFIRMED]);
+// A dismissal rests the nudge for two weeks, regardless of how many times it was dismissed.
+// A new install is left alone, and a nearly-spent limit is no moment to ask.
 export const REVIEW_SNOOZE_DAYS = 14;
+export const REVIEW_CLICK_SNOOZE_DAYS = 30;
+export const REVIEW_PROBABLE_SNOOZE_DAYS = 180;
+export const REVIEW_FOLLOWUP_DELAY_MS = 3600000;
 export const REVIEW_MIN_AGE_DAYS = 3;
 export const REVIEW_MAX_UTILIZATION = 80;
-// GA event names — the same three on every surface; `source` says which one.
+// GA event names shared by extension surfaces; `source` says which one.
 export const REVIEW_EVENT_SHOWN = 'review_nudge_shown';
 export const REVIEW_EVENT_CLICKED = 'review_nudge_clicked';
 export const REVIEW_EVENT_DISMISSED = 'review_nudge_dismissed';
-export const REVIEW_EVENTS = Object.freeze([REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED]);
+export const REVIEW_EVENT_CONFIRMED = 'review_nudge_confirmed';
+export const REVIEW_EVENTS = Object.freeze([REVIEW_EVENT_SHOWN, REVIEW_EVENT_CLICKED, REVIEW_EVENT_DISMISSED, REVIEW_EVENT_CONFIRMED]);
 // The compare page reports a click / dismiss through the service worker (it holds no token).
 export const REVIEW_NUDGE_MSG_TYPE = 'REVIEW_NUDGE_ACTION';
 export const CWS_REVIEW_URL = 'https://chromewebstore.google.com/detail/claude-tuner/ajnnckikagphjbgpicpoffockabnhond/reviews';
@@ -45,8 +49,12 @@ const d1Stamp = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' '
  */
 export function reviewNudgeDue(rn, { now = Date.now(), snapshot = null } = {}) {
   if (!rn) return false;
-  if (rn.clicked) return false;
-  if ((rn.dismiss_count || 0) >= REVIEW_MAX_DISMISSALS) return false;
+  if (rn.confirmed_at) return false;
+  const probable = d1Ms(rn.probable_at);
+  if (Number.isFinite(probable) && now - probable < REVIEW_PROBABLE_SNOOZE_DAYS * MS_PER_DAY) return false;
+  const clicked = d1Ms(rn.clicked_at);
+  if (Number.isFinite(clicked) && now - clicked < REVIEW_CLICK_SNOOZE_DAYS * MS_PER_DAY) return false;
+  if (rn.clicked && !Number.isFinite(clicked)) return false; // legacy state until the next server sync
   const dismissed = d1Ms(rn.last_dismissed);
   if (Number.isFinite(dismissed) && now - dismissed < REVIEW_SNOOZE_DAYS * MS_PER_DAY) return false;
   const firstSeen = d1Ms(rn.first_seen_at);
@@ -58,16 +66,31 @@ export function reviewNudgeDue(rn, { now = Date.now(), snapshot = null } = {}) {
   return true;
 }
 
+/** One low-pressure confirmation question after a review-link click, on the next popup open. */
+export function reviewFollowupDue(rn, { now = Date.now(), snapshot = null, promptedFor = null } = {}) {
+  if (!rn || rn.confirmed_at) return false;
+  const clicked = d1Ms(rn.clicked_at);
+  // The local click and the server PATCH can land in adjacent seconds. Treat them as one attempt.
+  if (promptedFor === rn.clicked_at || Math.abs(d1Ms(promptedFor) - clicked) <= 60000) return false;
+  if (!Number.isFinite(clicked) || now - clicked < REVIEW_FOLLOWUP_DELAY_MS
+    || now - clicked >= REVIEW_CLICK_SNOOZE_DAYS * MS_PER_DAY) return false;
+  const probable = d1Ms(rn.probable_at);
+  if (Number.isFinite(probable) && now - probable < REVIEW_PROBABLE_SNOOZE_DAYS * MS_PER_DAY) return false;
+  const maxUtil = Math.max(snapshot?.five_hour?.utilization ?? 0, snapshot?.seven_day?.utilization ?? 0);
+  return maxUtil < REVIEW_MAX_UTILIZATION;
+}
+
 /** The stored state after `action` at `now` — what the server will answer once it has the PATCH. Pure. */
 export function markReviewNudge(rn, action, now = Date.now()) {
-  const base = { clicked: false, dismiss_count: 0, last_dismissed: null, first_seen_at: null, ...(rn || {}) };
-  if (action === REVIEW_ACTION_CLICKED) return { ...base, clicked: true };
+  const base = { clicked: false, clicked_at: null, confirmed_at: null, probable_at: null, dismiss_count: 0, last_dismissed: null, first_seen_at: null, ...(rn || {}) };
+  if (action === REVIEW_ACTION_CLICKED) return { ...base, clicked: true, clicked_at: d1Stamp(now) };
+  if (action === REVIEW_ACTION_CONFIRMED) return { ...base, confirmed_at: d1Stamp(now) };
   if (action === REVIEW_ACTION_DISMISSED) return { ...base, dismiss_count: (base.dismiss_count || 0) + 1, last_dismissed: d1Stamp(now) };
   return base;
 }
 
 /**
- * Record a click / dismiss: the local state at once (every surface reads it), then PATCH the
+ * Record a click / dismiss / confirmation: the local state at once (every surface reads it), then PATCH the
  * server for the signed-in account. `storage` = chrome.storage.local (promise API), `getConfig`
  * → `{ serverUrl, … }` as `authedFetch(config, url, init)` takes it. Never throws; false = an
  * unknown action or a failed local write — a failed local write still sends the PATCH (the

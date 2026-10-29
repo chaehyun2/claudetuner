@@ -875,6 +875,7 @@ html[data-incognito="1"] .cmp-check-incognito { color: var(--text-primary); font
 .cmp-review-link { flex: 1 1 auto; min-width: 0; color: var(--accent); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
 .cmp-review-link:hover { text-decoration: underline; }
 .cmp-review-close { flex-shrink: 0; width: 28px; height: 28px; border: 0; border-radius: var(--radius-ctl); background: transparent; color: var(--text-secondary); font-size: 18px; line-height: 1; cursor: pointer; }
+.cmp-review-confirm { flex-shrink: 0; border: 0; background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; }
 .cmp-review-close:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 /* ── motion ── */
