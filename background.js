@@ -415,6 +415,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // Handle messages from welcome page + dashboard login
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  // Store installs must not disclose account identity, orgs, collection payloads or login
+  // results to PR previews. Keep GET_INFO public for install detection; unpacked builds
+  // retain preview testing under the same policy as OPEN_PERMISSION_PAGE.
+  if (['GET_ACCOUNT_EMAIL', 'GET_COLLECTED_ORGS', 'get_status', 'GET_CLAUDE_LOGIN',
+    'CAN_ACCEPT_EXT_TOKEN', 'force_collect'].includes(message?.type)
+      && !isProdSiteSenderOrDevBuild(sender)) {
+    sendResponse({ success: false, error: 'origin_not_allowed' });
+    return false;
+  }
   // A share page's 「이어서 질문하기」 (#1784 U4) — the compare controller checks the origin itself.
   if (compareController.handleExternalMessage(message, sender, sendResponse)) return true;
   // Our prompt pages' 「Claude / ChatGPT / Gemini」: open that site with the prompt typed in (#2584, bg/prompts.js).
@@ -425,8 +434,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   //
   // 🔴 Three guards, all load-bearing:
   //  [1] ORIGIN. externally_connectable also allows *.claude-tuner-site-git.pages.dev — every PR
-  //      preview. That is harmless for the read-only probes above, but a message that INSTALLS A
-  //      CREDENTIAL must come from production only.
+  //      preview. Public install detection is allowed there, but a message that INSTALLS A
+  //      CREDENTIAL must come from production only (including unpacked builds).
   //  [2] NO LOGIN-PROVEN TOKEN. This used to read "no existing token at all", which made the
   //      recovery near-useless: a shared-key TOFU mint already leaves an `ingest` token on most
   //      installs (measured 3,775 dashboard sign-ins vs 26 `full` tokens). An `ingest` token

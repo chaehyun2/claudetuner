@@ -866,6 +866,20 @@ function _wireEmailLink(claudeEmail) {
 
   if (!sendBtn.dataset.bound) {
     sendBtn.dataset.bound = '1';
+    // Opening the inbox closes Chrome's popup. Restore code entry from the server's pending
+    // challenge without requesting another email (resends may be throttled). Keep the request
+    // button available in case the old mail was lost; a failed poll leaves that path usable.
+    void (async () => {
+      try {
+        const cfg = await _linkCfg();
+        const res = await _authedFetch(cfg, cfg.serverUrl + '/api/auth/claude-link/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ claude_email: claudeEmail }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.pending) stepVer.classList.remove('hidden');
+      } catch { /* A read failure must not block requesting a fresh challenge. */ }
+    })();
     sendBtn.addEventListener('click', async () => {
       sendBtn.disabled = true; sendBtn.classList.add('spinning'); status.textContent = '';
       const restore = () => { sendBtn.disabled = false; sendBtn.classList.remove('spinning'); };
