@@ -105,11 +105,18 @@
     strip.classList.toggle('theme-light', !dark);
   }
 
+  // Gemini's message-edit box is the same Quill editor (`rich-textarea.edit-rich-textarea` inside
+  // <user-query>) and comes BEFORE the composer in document order. Taken for the composer, the strip
+  // was re-homed into the query's flex row and squeezed the edit box to one character per line
+  // (measured live 2026-10-29: editor 62px wide). An editor inside a sent message is never the composer.
+  const MESSAGE_EDIT_SELECTOR = 'user-query, .edit-rich-textarea, .edit-form';
+
   // ── Anchor ──
   function findEditor() {
     for (const sel of COMPOSER_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
+      for (const el of document.querySelectorAll(sel)) {
+        if (!el.closest(MESSAGE_EDIT_SELECTOR)) return el;
+      }
     }
     return null;
   }

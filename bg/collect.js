@@ -27,7 +27,7 @@ import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, noteScopeInsufficient, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 // #1122 — install-beacon imports only from storage.js, so this does not close an import cycle.
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import
@@ -67,8 +67,11 @@ async function maybeLinkClaudeAccount(config, sentToken) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${sentToken}` },
     });
+    // Keep the token pinned to the accepted snapshot. A proof failure only raises
+    // the existing login CTA; it neither clears that token nor retries collection.
+    if (res.status === 403) await noteScopeInsufficient(res, `${config.serverUrl}/api/auth/link-claude`, sentToken);
     const data = await res.json().catch(() => ({}));
-    if (data && data.ok) {
+    if (res.ok && data && data.ok) {
       // One-time reconcile: never call again. Keep `independentAccount` intact —
       // the ChatGPT/Gemini collectors still read it as a server-email fallback
       // (collect-chatgpt.js / collect-gemini.js), so removing it would fragment

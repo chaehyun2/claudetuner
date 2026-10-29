@@ -634,20 +634,23 @@ export async function authedFetch(config, url, options = {}, { requireTokenEmail
       } catch { /* ignore URL parse errors */ }
     }
   } else if (response.status === 403 && sentToken) {
-    await noteScopeInsufficient(response, url);
+    await noteScopeInsufficient(response, url, sentToken);
   }
   return response;
 }
 
 /**
  * Peek a 403 body (via clone, so the caller can still read it) for the Phase 2
- * `scope_insufficient` code and, if present, raise the needsFullLogin flag. Never clears
- * the token (it is valid — just insufficient scope) and never throws.
+ * `scope_insufficient` or `login_proof_required` code and raise the needsFullLogin flag. Never clears
+ * the token (it is valid — just insufficient scope) and never throws. Only flags while `sentToken`
+ * (the token that request carried) is still the stored one.
  */
-export async function noteScopeInsufficient(response, url) {
+export async function noteScopeInsufficient(response, url, sentToken) {
   try {
     const body = await response.clone().json();
-    if (body && body.code === 'scope_insufficient') {
+    if (body && (body.code === 'scope_insufficient' || body.code === 'login_proof_required')) {
+      // A late 403 for a token already replaced by a login must not re-raise the CTA for the new one.
+      if (await getExtToken() !== sentToken) return;
       await chrome.storage.local.set({ needsFullLogin: true });
       try {
         const path = new URL(url).pathname;
@@ -880,7 +883,7 @@ export async function simpleAuthedPost(config, url, payload) {
       } catch { /* ignore URL parse errors */ }
     }
   } else if (response.status === 403 && sentToken) {
-    await noteScopeInsufficient(response, url);
+    await noteScopeInsufficient(response, url, sentToken);
   } else if (response.status === 426) {
     // MIN_INGEST_VERSION gate, handled in this shared wrapper because the extra-org POST goes out
     // through here and inspects only `r.ok` — otherwise a version-blocked install's extra orgs

@@ -888,7 +888,7 @@ function _wireEmailLink(claudeEmail) {
         } else if (res.status === 409) {
           status.textContent = t('email_link_err_claimed') || 'This Claude account is linked to a different account.';
           restore();
-        } else if (res.status === 401) {
+        } else if (res.status === 401 || data.code === 'login_proof_required') {
           status.textContent = t('email_link_err_auth') || 'Please sign in again first.';
           restore();
         } else if (res.status === 400) {
@@ -943,6 +943,9 @@ function _wireEmailLink(claudeEmail) {
           // Success → _finishEmailLink reloads; keep the spinner on until the page
           // swaps so it doesn't stop and flash the button back before refreshing.
           if (!await _finishEmailLink(claudeEmail, data.canonical_email, status)) restore();
+        } else if (res.status === 401 || data.code === 'login_proof_required') {
+          status.textContent = t('email_link_err_auth') || 'Please sign in again first.';
+          restore();
         } else {
           status.textContent = t('email_link_err_invalid') || 'Invalid or expired code. Request a new one.';
           restore();
@@ -991,9 +994,12 @@ export async function renderClaudeLinkStatus() {
           body: JSON.stringify({ claude_email: claudeEmail }),
         });
         if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
           // Server delete failed (e.g. 401 expired token). Keep the local mapping so
           // the user can retry, rather than silently diverging from the server row.
-          textEl.textContent = t('email_link_unlink_err') || 'Could not unlink. Please try again.';
+          textEl.textContent = res.status === 401 || data.code === 'login_proof_required'
+            ? t('email_link_err_auth') || 'Please sign in again first.'
+            : t('email_link_unlink_err') || 'Could not unlink. Please try again.';
           restore();
           return;
         }

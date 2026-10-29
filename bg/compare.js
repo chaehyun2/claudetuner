@@ -3093,6 +3093,14 @@ export function createCompareController({
     }
     const body = await readJson(resp);
     if (!resp.ok) {
+      // This pinned-token path bypasses authedFetch. Keep the valid ingest token, but ask for
+      // login and use the page's existing "wait for login" result (including queued deletes).
+      if (resp.status === 403 && body?.code === 'login_proof_required') {
+        // Only while the pinned token is still the stored one: a login that finished while this was in flight
+        // already holds a proven token, and a late 403 must not ask it to log in again.
+        try { if (await getExtToken() === token) await storage.set({ needsFullLogin: true }); } catch { /* still refuse the operation */ }
+        return { ok: false, status: 403, code: 'ext_token_required' };
+      }
       // `code` first (400 bad_* / 403 account_deleted), else `error` (409 rev_conflict, 429 rate_limited, 503 busy vs
       // history_sync_disabled — the page tells those two apart by this value).
       const code = typeof body?.code === 'string' ? body.code.slice(0, OUTCOME_CODE_MAX) : typeof body?.error === 'string' ? body.error.slice(0, OUTCOME_CODE_MAX) : 'http_error';
