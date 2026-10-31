@@ -77,7 +77,7 @@ function renderFitnessMatrix(data) {
     const isRef = plan.ref;
     html += '<tr' + (isRef ? ' class="fm-ref"' : '') + '>';
     // Plan name + badges
-    html += '<td>' + escHtml(plan.name);
+    html += '<td>' + escHtml(planDisplayName(plan.name));
     if (!isRef && plan.name === data.current_plan) {
       html += '<span class="fm-badge fm-badge-current">' + t('fm_badge_current') + '</span>';
     }
@@ -399,7 +399,7 @@ export function _renderRecommendation(rec, provider, basisPlan) {
       // claude.ai plan change from a ChatGPT recommendation — wrong provider, wrong plan.
       if (recProvider === 'claude') {
         btn.classList.remove('hidden');
-        btn.textContent = t(isUpgrade ? 'opt_upgrade_btn' : 'opt_downgrade_btn', rec.to_plan);
+        btn.textContent = t(isUpgrade ? 'opt_upgrade_btn' : 'opt_downgrade_btn', planDisplayName(rec.to_plan));
         btn.style.background = isUpgrade ? '#d97706' : '#059669';
       } else {
         btn.classList.add('hidden');

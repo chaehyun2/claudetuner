@@ -35,4 +35,15 @@ export function providerWanted(sync, provider, granted) {
   return !!g && sync?.[g.syncKey] !== false && (granted === true || sync?.[g.notUsingKey] !== true);
 }
 
+// GA `perm_banner_shown` (#2628): the denominator for `perm_banner_action`. Once per install per
+// LOCAL day — the popup re-renders the banner on every open and account switch, so per-render
+// counts would measure opens, not people. storage.local holds the last day sent.
+export const PERM_BANNER_SHOWN_KEY = 'permBannerShownDay';
+export function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+export function permBannerShownDue(lastDay, today) {
+  return lastDay !== today;
+}
+
 export const GRANT_PAGE = 'grant.html';

@@ -7,7 +7,7 @@ import { withSwitchLock } from './bg/collect-lock.js';
 import { extTokenEmail } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY } from './bg/profile-photo.js';
 import { pinnedState } from './bg/analytics.js';
-import { GRANTABLE, notUsingPatch, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
+import { GRANTABLE, notUsingPatch, providerWanted, PROVIDER_PREF_DEFAULTS, PERM_BANNER_SHOWN_KEY, localDay, permBannerShownDue } from './bg/grantable.js';
 
 const hasPermissionFor = (p) => chrome.permissions.contains({ origins: [GRANTABLE[p].origin] }).catch(() => false);
 import { serverSyncWithheldReason, getLastStatus, isServerSyncPaused } from './bg/storage.js';
@@ -16,7 +16,7 @@ import { readBlockState, resolveBlockState, noteSurface, surfacesShown } from '.
 import { isUpgradeBlocked } from './bg/upgrade-gate.js';
 import { createCapDropBanner, CAP_DROP_KEY, CAP_DROP_ACK_KEY } from './ui/capdrop-banner.js';
 import { PROVIDER_LABELS, PLAN_HIERARCHY, PLAN_MONTHLY_COST_USD, ERR_PLAN_CHANGED_EXTERNALLY } from './bg/constants.js';
-import { dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels, dismissPrivacyRow } from './ui/util.js';
+import { planDisplayName, dashboardUrl, refreshDashboardLinks, _isDark, applyGaugeWindowLabels, dismissPrivacyRow } from './ui/util.js';
 import { loadFitnessMatrix, checkReviewNudge, showRecFeedback } from './ui/recommend.js';
 import { loadCollapseState, initCollapsibles } from './ui/collapsible.js';
 import { renderPlanAutoCard, watchPlanAutoCards } from './ui/plan-auto-card.js';
@@ -230,6 +230,23 @@ async function checkProviderErrors(permMissing) {
   banner.classList.remove('hidden');
 }
 
+// GA `perm_banner_shown` once per local day (bg/grantable.js). Detached: telemetry never holds up
+// the banner. The page flag is set synchronously, so the several renders of one open (load, account
+// switch, after an answer) cannot each read the stored day before any of them writes it.
+// Keyed by day, so a side panel left open overnight still reports the next day (Codex R1).
+let _permBannerShownPageDay = null;
+function reportPermBannerShown(gaProvider) {
+  const today = localDay();
+  if (_permBannerShownPageDay === today) return;
+  _permBannerShownPageDay = today;
+  (async () => {
+    const { [PERM_BANNER_SHOWN_KEY]: lastDay } = await chrome.storage.local.get(PERM_BANNER_SHOWN_KEY);
+    if (!permBannerShownDue(lastDay, today)) return;
+    await chrome.storage.local.set({ [PERM_BANNER_SHOWN_KEY]: today });
+    sendGAEvent('perm_banner_shown', { provider: gaProvider });
+  })().catch(() => {});
+}
+
 // Check optional provider permissions and show banner if needed
 async function checkProviderPermissions() {
   const banner = document.getElementById('perm-banner');
@@ -291,6 +308,7 @@ async function checkProviderPermissions() {
   });
   banner.appendChild(notUsing);
   banner.classList.remove('hidden');
+  reportPermBannerShown(gaProvider);
   return missingKeys;
 }
 
@@ -1317,7 +1335,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function openPlanConfirmModal({ fromPlan, toPlan, isUpgrade, fromCost, toCost, costDiff, onConfirm }) {
     document.getElementById('src-modal-title').textContent = t(isUpgrade ? 'confirm_upgrade_title' : 'confirm_downgrade_title');
-    document.getElementById('src-modal-plan').textContent = t('confirm_plan_change', fromPlan || '', toPlan || '');
+    document.getElementById('src-modal-plan').textContent = t('confirm_plan_change', planDisplayName(fromPlan), planDisplayName(toPlan));
 
     const costEl = document.getElementById('src-modal-cost');
     if (fromCost != null && toCost != null) {
@@ -1495,7 +1513,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       banner.dataset.po = JSON.stringify(po);
       document.getElementById('plan-order-body').innerHTML =
         `<strong>${po.org_name}</strong> ${t('plan_order_admin')}(${po.requested_by_name})<br>` +
-        `<strong>${po.from_plan} → ${po.to_plan}</strong> ${t('plan_order_request')}`;
+        `<strong>${planDisplayName(po.from_plan)} → ${planDisplayName(po.to_plan)}</strong> ${t('plan_order_request')}`;
       if (po.reason) {
         const reasonEl = document.getElementById('plan-order-reason');
         reasonEl.classList.remove('hidden');
@@ -1519,7 +1537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.style.background = '#f0fdf4';
       el.style.borderColor = '#bbf7d0';
       document.getElementById('plan-order-completed-body').innerHTML =
-        `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${completed.to_plan}${isUp ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
+        `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${planDisplayName(completed.to_plan)}${isUp ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
         `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">${isUp ? t('plan_upgrade_desc') : dDesc}</div>` +
         `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:var(--accent);text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
     }
@@ -1565,7 +1583,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const rd = new Date(state.currentSnapshot.subscription.renewal_date);
           downgradeDesc = t('plan_downgrade_desc_date', `${rd.getMonth() + 1}/${rd.getDate()}`);
         }
-        body.innerHTML = `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${_po.to_plan || ''}${isUpgrade ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
+        body.innerHTML = `<div style="font-size:13px;font-weight:600;margin-bottom:4px">✅ ${planDisplayName(_po.to_plan)}${isUpgrade ? t('plan_changed_now') : t('plan_changed_scheduled')}</div>` +
           `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px">${isUpgrade ? t('plan_upgrade_desc') : downgradeDesc}</div>` +
           `<a href="https://claude.ai/settings/billing" target="_blank" style="font-size:11px;color:var(--accent);text-decoration:none;font-weight:500">${t('plan_check_settings')} →</a>`;
         // Hide buttons

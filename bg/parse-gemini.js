@@ -40,7 +40,7 @@ export function extractGeminiPolicies(node, acc) {
 
 // Observed AI Pro per-window quota (the 1x baseline). full_quota = remaining/(1-percent) is a
 // tier constant; its ratio to Pro is the capacity multiplier. See docs/DESIGN §13–14.
-const GEMINI_PRO_QUOTA = { d7: 48384, h5: 2400 };
+export const GEMINI_PRO_QUOTA = { d7: 48384, h5: 2400 };
 
 // Capacity relative to AI Pro (full quota / Pro full quota), or null when unreadable. Prefers the
 // 7d window; both windows yield the same ratio (AE 2026-10: 5h 600/1200/2400/12000/48000 and 7d
@@ -85,7 +85,8 @@ export function geminiTierFromQuota(rem7d, pct7d, rem5h, pct5h) {
 }
 
 // The GEMINI_CAPACITY_TIERS band one window falls in, or null when unreadable or in no band.
-function geminiBandOfWindow(rem, pct, proQuota) {
+// Exported for the Worker's daily AE watch (label vs observed quota, #2732).
+export function geminiBandOfWindow(rem, pct, proQuota) {
   if (!Number.isFinite(rem) || rem <= 0 || !Number.isFinite(pct) || pct < 0 || pct >= 0.99) return null;
   const q = (rem / (1 - pct)) / proQuota;
   return GEMINI_CAPACITY_TIERS.find(([, ratio]) => Math.abs(q - ratio) <= ratio * GEMINI_CAPACITY_TOLERANCE) || null;

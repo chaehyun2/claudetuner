@@ -1242,7 +1242,16 @@ chrome.webRequest.onCompleted.addListener(
 
 // === Adaptive Boost: double local collection frequency on usage surge ===
 async function evaluateBoost(snapshot) {
-  if (snapshot?.five_hour?.utilization == null) return;
+  if (snapshot?.five_hour?.utilization == null) {
+    // No 5h window at all (Claude Ultra since 2026-10-30, #2768): a boost turned on while the window
+    // still existed would otherwise poll at double rate forever — nothing below runs to clear it.
+    if (snapshot?.seven_day?.utilization != null && await chrome.alarms.get(ALARM_BOOST)) {
+      chrome.alarms.clear(ALARM_BOOST);
+      await chrome.storage.local.set({ boostActive: false });
+      console.log('[Claude Tuner] Boost OFF: no 5h window');
+    }
+    return;
+  }
   const util5h = snapshot.five_hour.utilization;
   // Determine if usage is rising based on the last 2 data points
   const recent = await readLast(2, p => p.h5 != null);

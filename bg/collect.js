@@ -40,6 +40,7 @@ import { claudeUsagePath, isCedarEmberQueryOn } from './claude-usage-path.js';
 import { syncVatStatus } from './vat.js';
 import { claudeUsageShape, claudeCapsReport } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider, buildDriftEventsRider } from './drift-store.js';
+import { planDisplayName } from '../ui/util.js';
 
 // One-time server-side upgrade of an email (independent) account to a Claude
 // account, once Claude collection is confirmed working via a valid ext_token.
@@ -1416,7 +1417,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
             // (Composed from existing keys on purpose: new strings would need adding to BOTH
             // dictionaries plus a drift guard, which is #994 unit 3's work, not this one's.)
             title: await bt(autoAttemptFailed ? 'opt_fail_title' : 'po_title'),
-            message: await bt('po_msg', po.org_name, po.from_plan, po.to_plan),
+            message: await bt('po_msg', po.org_name, planDisplayName(po.from_plan), planDisplayName(po.to_plan)),
             buttons: [
               { title: await bt('po_accept') },
               { title: await bt('po_reject') },

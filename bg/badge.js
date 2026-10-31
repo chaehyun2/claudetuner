@@ -255,7 +255,7 @@ export async function refreshToolbarTip() {
     // A pending order is the one state with NO badge and NO icon (#994 unit 1) — this sentence is
     // its only glanceable surface, which is why it tops the ladder below the block.
     const order = pendingPlanOrder
-      ? await bt('tip_order', pendingPlanOrder.from_plan, pendingPlanOrder.to_plan)
+      ? await bt('tip_order', planDisplayName(pendingPlanOrder.from_plan), planDisplayName(pendingPlanOrder.to_plan))
       : null;
 
     // Spoken whenever the marker is ENTITLED to show, acknowledged or not. The icon's job is "have

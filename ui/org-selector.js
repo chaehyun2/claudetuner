@@ -65,7 +65,7 @@ function renderOrgSelector(container, orgs) {
     html += '<div class="org-option" data-org-id="' + org.uuid + '">';
     html += '<div class="org-check"></div>';
     html += '<span class="org-name">' + escHtml(org.name) + '</span>';
-    html += '<span class="org-plan">' + escHtml(org.plan) + '</span>';
+    html += '<span class="org-plan">' + escHtml(planDisplayName(org.plan)) + '</span>';
     html += '</div>';
   }
 
@@ -235,7 +235,7 @@ export function selectOrg(orgId, container) {
     const planEl = document.getElementById('plan');
     // Qualify non-Claude plans with the provider name (e.g. "Gemini Advanced")
     // so the provider is identifiable even when no org chips are shown.
-    if (planEl) planEl.textContent = _providerOrgLabel(orgData) || orgData.plan || '';
+    if (planEl) planEl.textContent = _providerOrgLabel(orgData) || planDisplayName(orgData.plan) || '';
 
     // === 2. Update gauges ===
     const gaugeSection = document.getElementById('gauge-section');
@@ -406,7 +406,7 @@ export function selectOrg(orgId, container) {
       if (state.currentSnapshot?.subscription?.pending_plan) {
         if (pendingRow) {
           pendingRow.classList.remove('hidden');
-          const planLabels = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x', cancel: t('pending_cancel') };
+          const planLabels = { pro_monthly: 'Pro', max_5x_monthly: planDisplayName('Max 5x'), max_20x_monthly: planDisplayName('Max 20x'), cancel: t('pending_cancel') };
           const pendingEl = document.getElementById('pending-plan');
           if (pendingEl) pendingEl.textContent = planLabels[state.currentSnapshot.subscription.pending_plan] || state.currentSnapshot.subscription.pending_plan;
           if (cancelDowngradeWrap && state.currentSnapshot.subscription.pending_plan !== 'cancel') {
@@ -783,7 +783,7 @@ function showOrgBadge(orgs, selectedId) {
   badge.id = 'org-badge';
   badge.className = 'org-badge';
   badge.title = t('org_select');
-  badge.textContent = org.name + ' (' + org.plan + ')';
+  badge.textContent = org.name + ' (' + planDisplayName(org.plan) + ')';
   badge.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options.html#collect-settings') }));
   userInfo.parentNode.insertBefore(badge, userInfo);
 }

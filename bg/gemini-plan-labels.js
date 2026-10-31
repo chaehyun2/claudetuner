@@ -85,6 +85,10 @@ const GEMINI_V3P2_POLICY_RE = /v3p2_(\w+)_policy/;
 //   967,680 ultra  launch_chat_ultra, launch_ultra_mode_ultra (20x — the sub-tier comes from quota)
 // 🔴 `launch_ultra_mode_pro_policy` IS AI PRO (48,384), not Ultra: the "ultra_mode" in these names
 // is a model-picker mode, not the seat. Never read a tier off a launch_* name.
+// THIRD NAME, 2026-10-28 21:11 UTC (#2732): `launch_ultra_mode_no_deepthink_policy` replaced both Ultra
+// names (neon/ultra stop the same day) and carries BOTH Ultra constants, 241,920 and 967,680 — so it is
+// 'ultra' and the 5x/20x sub-tier comes from quota as before. Found by the daily AE watch
+// (worker/src/services/gemini-signal-watch.ts), which alarms on any name not in this table.
 export const GEMINI_POLICY_ALIAS = {
   basic_policy: 'basic',
   brownfield_basic_policy: 'basic',
@@ -103,7 +107,17 @@ export const GEMINI_POLICY_ALIAS = {
   launch_ultra_mode_neon_policy: 'ultra',
   launch_chat_ultra_policy: 'ultra',
   launch_ultra_mode_ultra_policy: 'ultra',
+  launch_ultra_mode_no_deepthink_policy: 'ultra',
 };
+
+// Policy strings seen in AE and deliberately left unmapped (see above: ambiguous quota or too few
+// samples). The daily watch skips them; every OTHER unrecognized name alarms as a probable rename.
+export const GEMINI_POLICY_UNMAPPED = [
+  'lite_two_thinking_levels_policy',
+  'lite_three_thinking_levels_policy',
+  'brownfield_default_policy',
+  'default_policy',
+];
 
 /**
  * The tier word a single policy string names, or null when it names none we recognize.

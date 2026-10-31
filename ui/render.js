@@ -1,7 +1,7 @@
 // The popup's central render pass (_updateUICore), extracted from popup.js (refactor/popup-render).
 // Pure view rendering driven by shared state; calls into every leaf/domain module. One-way imports
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
-import { gaugeColor, formatTimeAgo, setRenewalDisplay, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
+import { planDisplayName, gaugeColor, formatTimeAgo, setRenewalDisplay, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
@@ -179,7 +179,7 @@ export function _updateUICore(status) {
       const infoSection = document.getElementById('info-section');
       if (infoSection) infoSection.classList.remove('hidden');
       const planEl = document.getElementById('plan');
-      if (planEl) planEl.textContent = label || provOrg.plan || '';
+      if (planEl) planEl.textContent = label || planDisplayName(provOrg.plan) || '';
       if (onboarding) onboarding.classList.add('hidden');
     } else {
       indicator.className = 'status-dot gray';
@@ -501,6 +501,11 @@ export function _updateUICore(status) {
         document.getElementById('gauge-7d-reset').textContent = plan.includes('free') ? t('free_no_7d') : t('team_no_7d');
       }
     }
+    // No 5h window but a weekly one (Claude Ultra since 2026-10-30, #2768): hide the 5h row instead of
+    // an empty N/A gauge — the same data-driven rule as ui/org-selector.js `no5h`. Set both ways so a
+    // re-render for a plan that has the window shows it again.
+    const row5h = document.getElementById('gauge-row-5h');
+    if (row5h) row5h.style.display = (util5h == null && util7d != null) ? 'none' : '';
 
     // If a window is already maxed out, overwrite the strip with a plain "limit reached — wait
     // until {reset}" message (overrides the collecting teaser renderGaugePrediction may have set).
@@ -570,7 +575,7 @@ export function _updateUICore(status) {
     // === Plan & subscription info ===
     const infoSection = document.getElementById('info-section');
     infoSection.classList.remove('hidden');
-    document.getElementById('plan').textContent = s.plan || 'unknown';
+    document.getElementById('plan').textContent = planDisplayName(s.plan) || 'unknown';
 
     // Display Privacy (grove_enabled)
     // A team-only account (no consumer workspace) has nothing this setting applies to (#1892).
@@ -590,7 +595,7 @@ export function _updateUICore(status) {
       const pendingRow = document.getElementById('pending-row');
       const pendingEl = document.getElementById('pending-plan');
       pendingRow.classList.remove('hidden');
-      const planLabels = { pro_monthly: 'Pro', max_5x_monthly: 'Max 5x', max_20x_monthly: 'Max 20x', cancel: t('pending_cancel') };
+      const planLabels = { pro_monthly: 'Pro', max_5x_monthly: planDisplayName('Max 5x'), max_20x_monthly: planDisplayName('Max 20x'), cancel: t('pending_cancel') };
       pendingEl.textContent = planLabels[s.subscription.pending_plan] || s.subscription.pending_plan;
       if (s.subscription.pending_plan !== 'cancel') {
         chrome.storage.local.get([...PLAN_AUTO_CARD_READ_KEYS, PLAN_AUTO_RESERVATIONS_KEY, 'hiddenDowngradePlan'], (st) => {

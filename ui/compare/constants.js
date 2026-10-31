@@ -362,6 +362,7 @@ export const CODE_AUTH_REQUIRED = ERROR_CODES.AUTH_REQUIRED;
 export const CODE_PERMISSION_REFUSED = ERROR_CODES.PERMISSION_REFUSED;
 export const CODE_MODEL_UNAVAILABLE = ERROR_CODES.MODEL_UNAVAILABLE;
 export const CODE_OVERLOADED = ERROR_CODES.OVERLOADED;
+export const CODE_PROVIDER_ERROR = ERROR_CODES.PROVIDER_ERROR;
 // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; ERROR.inBandCode carries the number.
 export const CODE_IN_BAND_ERROR = ERROR_CODES.IN_BAND_ERROR;
 // A provider refused one of the round's files (package `attachment_failed`); ERROR.attachment names it (#1951).

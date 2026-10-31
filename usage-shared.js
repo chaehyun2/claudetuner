@@ -351,7 +351,11 @@
   // (Plus/Go/Free/Team) and Claude/Gemini plans are already readable → pass through.
   // DISPLAY ONLY — stored labels stay 'Pro 5x' / 'Pro 20x' / 'Pro 25x' (twin of ui/util.js).
   function planDisplayName(plan, provider) {
+    // Claude Max 5x → Max, Max 20x → Ultra (#2768) — twin of ui/util.js CLAUDE_PLAN_DISPLAY. Inside the
+    // function so test/plan-mult-twins-guard.mjs can extract it whole.
+    const CLAUDE_PLAN_DISPLAY = { 'max 5x': 'Max', 'max 20x': 'Ultra' };
     const p = (plan || '').trim().toLowerCase();
+    if ((!provider || provider === 'claude') && CLAUDE_PLAN_DISPLAY[p]) return CLAUDE_PLAN_DISPLAY[p];
     if (provider === 'chatgpt') {
       if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
       if (p === 'pro' || p === 'pro 20x') return 'Pro 200';

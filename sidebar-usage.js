@@ -572,7 +572,7 @@
     if (_data.plan) {
       const planSpan = document.createElement('span');
       planSpan.className = 'ct-sb-plan';
-      planSpan.textContent = _data.plan;
+      planSpan.textContent = CORE && CORE.planDisplayName ? CORE.planDisplayName(_data.plan, 'claude') : _data.plan;
       attachTip(planSpan, 'tip_plan');
       footerLeft.appendChild(planSpan);
     }

@@ -6,6 +6,7 @@ import { logNotification, createCountedNotification } from './notifications.js';
 import { resetIcon , badgeLockedByAuthBlock, updateBadgeForSelectedOrg } from './badge.js';
 import { recordRecDismiss, clearDismissedClaudeRec } from './rec-dismiss.js';
 import { detectPlan } from './plan-label.js';
+import { planDisplayName } from '../ui/util.js';
 import { pickClaudeOrg } from '../vendor-ai/models.js';
 import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, SITE_ORIGINS } from '../vendor-ai/sites.js';
 
@@ -287,7 +288,7 @@ export async function executePlanChange(recommendation, { orgUuid = null } = {})
     const currentPlan = detectPlan(verifyOrg);
     if (currentPlan !== fromPlan) {
       console.log(`[Claude Tuner] Plan changed externally: expected ${fromPlan}, got ${currentPlan}`);
-      await notifyPlanChange(await bt('opt_already_title'), await bt('opt_already_msg', currentPlan));
+      await notifyPlanChange(await bt('opt_already_title'), await bt('opt_already_msg', planDisplayName(currentPlan)));
       await dismissRecommendationServer();
       return { success: false, error: ERR_PLAN_CHANGED_EXTERNALLY };
     }
@@ -339,7 +340,7 @@ export async function executePlanChange(recommendation, { orgUuid = null } = {})
     } catch (e) {
       console.warn('[Claude Tuner] badge repaint after plan change failed:', e?.message);
     }
-    await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', fromPlan, toPlan), 2);
+    await notifyPlanChange(await bt('opt_done_title'), await bt('opt_done_msg', planDisplayName(fromPlan), planDisplayName(toPlan)), 2);
 
     console.log(`[Claude Tuner] Plan change successful: ${fromPlan} → ${toPlan}`);
 
@@ -375,7 +376,7 @@ export async function cancelDowngrade({ orgUuid = null } = {}) {
     });
 
     console.log(`[Claude Tuner] Downgrade cancelled (was → ${fromPlan})`);
-    await notifyPlanChange(await bt('opt_cancel_title'), await bt('opt_cancel_msg', fromPlan), 2);
+    await notifyPlanChange(await bt('opt_cancel_title'), await bt('opt_cancel_msg', planDisplayName(fromPlan)), 2);
 
     // Record state change immediately (skip dedup)
     forceCollect('cancel');

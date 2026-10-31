@@ -977,7 +977,10 @@ function updateOrgHint() {
     chrome.storage.local.get({ autoSelectedOrg: null }, (data) => {
       const org = data.autoSelectedOrg;
       if (org) {
-        hint.textContent = t('org_auto_current', org.name, org.plan);
+        // Claude's current plan names (#2768). Classic script without usage-shared.js — a copy of
+        // ui/util.js CLAUDE_PLAN_DISPLAY, kept equal by test/plan-mult-twins-guard.mjs.
+        const OPTIONS_CLAUDE_PLAN_DISPLAY = { 'Max 5x': 'Max', 'Max 20x': 'Ultra' };
+        hint.textContent = t('org_auto_current', org.name, OPTIONS_CLAUDE_PLAN_DISPLAY[org.plan] || org.plan);
       } else {
         hint.textContent = t('org_select_hint');
       }

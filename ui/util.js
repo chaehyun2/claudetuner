@@ -327,8 +327,14 @@ export function formatDuration(ms) { return cv.formatDuration(ms, extLabels()); 
 // the STORED labels stay 'Pro 5x' / 'Pro 20x' / 'Pro 25x' everywhere (snapshots, multipliers,
 // canonicalPlanKey, rec engine). Never feed this function's output back into planToMultiplier() or a
 // plan table — 'Pro 200' would score 1x there, and substring ladders would read its '20'/'5'.
+// Claude renamed Max 5x → Max and Max 20x → Ultra (2026-10-30, #2768). Same DISPLAY-ONLY rule as the
+// ChatGPT price names above: stored labels stay 'Max 5x' / 'Max 20x'. Bare names (the transition
+// 'Ultra (← Max 20x)' was dropped the next day, 2026-10-31), so a substring ladder can no longer find the
+// tier in the output — consumers that read a display label back need exact 'max' / 'ultra' arms.
+const CLAUDE_PLAN_DISPLAY = Object.freeze({ 'max 5x': 'Max', 'max 20x': 'Ultra' });
 export function planDisplayName(plan, provider) {
   const p = (plan || '').trim().toLowerCase();
+  if ((!provider || provider === 'claude') && CLAUDE_PLAN_DISPLAY[p]) return CLAUDE_PLAN_DISPLAY[p];
   if (provider === 'chatgpt') {
     if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
     if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
@@ -413,8 +419,9 @@ export function planLimitTiers(provider, currentMult, win) {
   }
   return [
     { mult: 1, label: 'Pro', color: '#22c55e' },
-    { mult: 5, label: 'Max 5x', color: '#f97316' },
-    { mult: win === '7d' ? 10 : 20, label: 'Max 20x', color: '#ef4444' },
+    // Claude's current names for Max 5x / Max 20x (#2768) — chart rungs are too narrow for the old name.
+    { mult: 5, label: 'Max', color: '#f97316' },
+    { mult: win === '7d' ? 10 : 20, label: 'Ultra', color: '#ef4444' },
   ];
 }
 

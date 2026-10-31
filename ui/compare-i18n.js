@@ -736,6 +736,7 @@ export const COMPARE_I18N = {
     err_no_tab_discarded: '브라우저가 {0} 탭을 절전 상태로 내렸어요 — 다시 보내면 자동으로 깨워요',
     err_overloaded: '{0}이(가) 혼잡해요. 잠시 후 다시 시도해 주세요',
     err_empty_response: '빈 답변이 왔어요',
+    err_provider_error: '{0}에서 오류 응답이 왔어요. 잠시 후 다시 보내주세요',
     // Gemini (vendor-ai v0.20.0): the turn was still pending server-side when the stream ended — retryable.
     err_queued: '{0}이(가) 아직 답을 끝내지 않았어요 — 다시 시도해 주세요',
     // Gemini (vendor-ai v0.20.0): an in-band code the package does not map; {1} = the number (ERROR.inBandCode).
@@ -1547,6 +1548,7 @@ export const COMPARE_I18N = {
     err_no_tab_changed_during_verify: 'The {0} tab is still getting ready — send again',
     err_no_tab_discarded: 'The browser put the {0} tab to sleep — send again and it is woken automatically',
     err_overloaded: '{0} is overloaded. Please try again shortly',
+    err_provider_error: '{0} returned an error instead of an answer. Please try again shortly',
     err_empty_response: 'Received an empty reply',
     err_queued: "{0} hadn't finished answering yet — try again",
     err_in_band_error: '{0} refused the request (code {1})',

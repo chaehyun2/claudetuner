@@ -45,11 +45,15 @@ function freshFields(snapshot, prev = {}, now, noUsage = false) {
       updatedAt: now,
     };
   }
+  // A weekly reading with no 5h one is not a partial response: the plan has no 5h window (Claude
+  // Ultra since 2026-10-30, #2768). Keeping prev.h5 there froze the last pre-change 5h % — and its
+  // expired reset — on installs that never take the synced path (gated / paused).
+  const no5h = snapshot.five_hour?.utilization == null && snapshot.seven_day?.utilization != null;
   return {
     additionalLimits: scoped.length ? scoped : null,
-    h5: snapshot.five_hour?.utilization ?? prev.h5 ?? null,
+    h5: no5h ? null : (snapshot.five_hour?.utilization ?? prev.h5 ?? null),
     d7: snapshot.seven_day?.utilization ?? prev.d7 ?? null,
-    resetsAt5h: snapshot.five_hour?.resets_at ?? prev.resetsAt5h ?? null,
+    resetsAt5h: no5h ? null : (snapshot.five_hour?.resets_at ?? prev.resetsAt5h ?? null),
     resetsAt7d: snapshot.seven_day?.resets_at ?? prev.resetsAt7d ?? null,
     extraUsage: snapshot.extra_usage ?? prev.extraUsage ?? null,
     updatedAt: now,

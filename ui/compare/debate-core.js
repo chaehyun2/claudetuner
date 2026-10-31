@@ -237,8 +237,9 @@ export const CLAUDE_MODERATOR_FREE = CLAUDE_SONNET_MODEL;
 // known paid plan; whatever cannot be told is 'unknown' — never paid.
 // Claude: the label is the collector's display of vendor-ai claudeOrgPlan (bg/plan-label.js CLAUDE_PLAN_LABELS,
 // refined by a seat tier: `Team Premium`, `Max (<tier>)`) — read back to that key and judged by the package's
-// isPaidClaudePlan, the same rule the client gates models by.
-const CLAUDE_LABEL_KEYS = [[/^max 20x$/, 'max_20x'], [/^max 5x$/, 'max_5x'], [/^max( \(.+\))?$/, 'max'], [/^pro$/, 'pro'], [/^team( (premium|standard|tier 2))?$/, 'team'], [/^enterprise$/, 'enterprise'], [/^free$/, 'free'], [/^api$/, 'api']];
+// isPaidClaudePlan, the same rule the client gates models by. Ultra = the renamed Max 20x (#2768): ui/util.js
+// planDisplayName shows it as 「Ultra」; Max 5x shows as 「Max」 (the `max` arm below).
+const CLAUDE_LABEL_KEYS = [[/^max 20x$/, 'max_20x'], [/^ultra( \(.+\))?$/, 'max_20x'], [/^max 5x$/, 'max_5x'], [/^max( \(.+\))?$/, 'max'], [/^pro$/, 'pro'], [/^team( (premium|standard|tier 2))?$/, 'team'], [/^enterprise$/, 'enterprise'], [/^free$/, 'free'], [/^api$/, 'api']];
 // ChatGPT (bg/parse-chatgpt.js CHATGPT_PLAN_NAMES, ui/util.js planDisplayName) and Gemini (bg/gemini-plan-labels.js)
 // paid labels, lower-cased, matched WHOLE (Codex 1R: a prefix let 「Team Mystery」 / 「AI Pro 999x」 read as paid).
 // An unrecognised code reaches the label capitalised — 'unknown' here.
