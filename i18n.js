@@ -99,6 +99,8 @@ const TRANSLATIONS = {
     'rec_upgrade_pro': 'Pro 업그레이드 권장',
     'rec_downgrade_max5x': 'Max 다운그레이드 가능',
     'rec_downgrade_pro': 'Pro 다운그레이드 가능',
+    'rec_downgrade_max5x_strong': 'Max 다운그레이드 권장',
+    'rec_downgrade_pro_strong': 'Pro 다운그레이드 권장',
     // ChatGPT recommendation (v1) — popup strings are short-form; see docs/SPEC-chatgpt-plan-rec.md.
     // insufficient_data hides the row entirely; rec_cg_insufficient_data is a defensive fallback only.
     'rec_cg_insufficient_data': '데이터 부족',
@@ -124,6 +126,8 @@ const TRANSLATIONS = {
     'rec_team_upgrade_premium': '한도 임박 — Premium 시트 검토',
     'rec_team_near_limit': '한도 임박 — 관리자 문의',
     'rec_team_downgrade_standard': 'Standard 시트 전환 가능',
+    'rec_team_downgrade_standard_strong': 'Standard 시트 전환 권장',
+    'rec_team_adequate': '사용량 중간 — 추이 주시',
     'rec_team_good': '현재 시트 적합',
     'rec_high_cooldown': '사용량 높음',
     'plan_change_test': '플랜 변경 테스트',
@@ -956,6 +960,8 @@ const TRANSLATIONS = {
     'rec_upgrade_pro': 'Pro upgrade recommended',
     'rec_downgrade_max5x': 'Downgrade to Max possible',
     'rec_downgrade_pro': 'Downgrade to Pro possible',
+    'rec_downgrade_max5x_strong': 'Downgrade to Max recommended',
+    'rec_downgrade_pro_strong': 'Downgrade to Pro recommended',
     // ChatGPT recommendation (v1) — see the ko block above.
     'rec_cg_insufficient_data': 'Insufficient data',
     'rec_cg_adequate': 'Current plan is a good fit',
@@ -980,6 +986,8 @@ const TRANSLATIONS = {
     'rec_team_upgrade_premium': 'Near limit — consider Premium seat',
     'rec_team_near_limit': 'Near limit — contact admin',
     'rec_team_downgrade_standard': 'Standard seat may suffice',
+    'rec_team_downgrade_standard_strong': 'Standard seat recommended',
+    'rec_team_adequate': 'Moderate usage — monitor',
     'rec_team_good': 'Current seat is a good fit',
     'rec_high_cooldown': 'Usage is elevated',
     'plan_change_test': 'Plan Change Test',

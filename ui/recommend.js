@@ -422,9 +422,12 @@ export function _renderRecommendation(rec, provider, basisPlan) {
     }
   } else {
     let displayText = rec.text || '';
-    if (rec.text_key) {
-      const translated = t(rec.text_key);
-      if (translated !== rec.text_key) displayText = translated;
+    // A cooled-down downgrade keeps its original text_key (plan-auto reads it, #2412) while the
+    // verdict shown is "fits" — translate what is shown, not the hidden verdict (#2799).
+    const shownKey = rec.cooled_from === 'downgrade' ? 'rec_good' : rec.text_key;
+    if (shownKey) {
+      const translated = t(shownKey);
+      if (translated !== shownKey) displayText = translated;
     }
     if (rec.data_days != null && rec.min_days != null && rec.data_days < rec.min_days) {
       displayText = t('opt_data_collecting', rec.data_days, rec.min_days);

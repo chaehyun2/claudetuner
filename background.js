@@ -58,6 +58,7 @@ import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, isUsableTab, providerForUrl
 import { planDisplayName } from './ui/util.js';
 import { readLast } from './bg/usage-history-db.js';
 import { registerPromptsHandler, handlePromptExternal } from './bg/prompts.js';
+import { handleSkillImportExternal } from './bg/skills-import.js';
 import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
 import { REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './bg/review-nudge.js';
 
@@ -428,6 +429,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   if (compareController.handleExternalMessage(message, sender, sendResponse)) return true;
   // Our prompt pages' 「Claude / ChatGPT / Gemini」: open that site with the prompt typed in (#2584, bg/prompts.js).
   if (handlePromptExternal(message, sender, sendResponse)) return true;
+  // The team-skills dashboard's 「내 claude.ai 스킬에서 고르기」: personal skills read from claude.ai, ids only (#2771, bg/skills-import.js).
+  if (handleSkillImportExternal(message, sender, sendResponse, isProdSiteSenderOrDevBuild)) return true;
   // Silent recovery from the dashboard: the page is signed in, mints an ext_token server-side
   // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
   // recovery path we shipped needs them to notice something first, and none did (2026-07-27).

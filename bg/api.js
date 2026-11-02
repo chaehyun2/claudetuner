@@ -6,7 +6,31 @@ import { normalizeResetTime } from './reset-time.js';
 // load under plain Node; re-exported here so importers of './api.js' keep working unchanged.
 export { normalizeResetTime };
 
+// Accept for a binary download (any type). Built from pieces on purpose: a literal star-slash-star reads as the start of
+// a block comment to the regex comment strippers our guards run over this file (test/claude-ga-reason-guard.mjs).
+const ACCEPT_ANY = ['*', '/', '*'].join('');
+
 // === Claude.ai API call helper (hybrid: tab-first, cookie fallback) ===
+// options.binary = a byte cap: the body comes back as { base64, size } instead of JSON, or { tooLarge, size }
+// when it is over the cap (a claude.ai `.skill` download, bg/skills-import.js).
+// options.multipart = { field, base64, name, type, fields } sends a multipart form with one file built from `base64`
+// (a claude.ai skill upload, bg/skills-import.js) — no JSON body and no Content-Type of ours (the form sets it).
+// options.errorCode = an HTTP error throws `err_http:<status>:<code>` when claude.ai's body names an
+// `error.details.error_code` (only that token — never the body text, same rule as below).
+const CLAUDE_ERROR_CODE_RE = /^[a-z0-9_]{1,64}$/;
+
+/** claude.ai's machine error code in an error body, or ''. */
+export function claudeErrorCode(text) {
+  try {
+    const code = JSON.parse(text)?.error?.details?.error_code;
+    return typeof code === 'string' && CLAUDE_ERROR_CODE_RE.test(code) ? code : '';
+  } catch { return ''; }
+}
+
+function httpError(status, code) {
+  if (status >= 500) return new Error(`err_server:${status}`);
+  return new Error(code ? `err_http:${status}:${code}` : `err_http:${status}`);
+}
 export async function fetchClaudeApi(path, options = {}) {
   const fullUrl = `${CLAUDE_API_BASE}${path}`;
 
@@ -21,6 +45,10 @@ export async function fetchClaudeApi(path, options = {}) {
     try {
       return await fetchViaTab(tabs[0].id, fullUrl, options);
     } catch (tabError) {
+      // A write tried on the tab is never retried on the cookie path: claude.ai may already have it (a 200 whose body
+      // broke off reads as a network error — the retry would upload twice), and the retry's own failure (a Cloudflare
+      // 403) would replace the real answer (`upload_skill_already_exists`). Codex R1-B3 · batch 1.56.14 R1-B2.
+      if (options.multipart) throw tabError;
       tabErrorMsg = tabError.message;
       console.warn('[Claude Tuner] Tab fetch failed, trying cookie fallback:', tabErrorMsg);
     }
@@ -56,21 +84,43 @@ export async function fetchViaTab(tabId, fullUrl, options) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: async (url, method, body, headers) => {
+    func: async (url, method, body, headers, binary, accept, multipart) => {
       try {
         const opts = {
           method: method || 'GET',
           credentials: 'include',
           cache: 'no-store',
-          headers: { 'Accept': 'application/json', ...(headers || {}) },
+          headers: { 'Accept': accept, ...(headers || {}) },
         };
-        if (body && method && method !== 'GET') {
+        if (multipart && method && method !== 'GET') {
+          // Runs in the page: the form is built here (a FormData cannot cross executeScript).
+          const bin = atob(multipart.base64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const form = new FormData();
+          form.append(multipart.field, new File([bytes], multipart.name, { type: multipart.type }));
+          for (const [k, v] of Object.entries(multipart.fields || {})) form.append(k, v);
+          opts.body = form;
+        } else if (body && method && method !== 'GET') {
           opts.body = typeof body === 'string' ? body : JSON.stringify(body);
         }
         const resp = await fetch(url, opts);
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
-          return { _err: true, status: resp.status, body: text.slice(0, 500) };
+          // The machine code is read here, from the whole body — `body` below is cut for the log.
+          let code = '';
+          try { code = JSON.parse(text)?.error?.details?.error_code || ''; } catch { /* not JSON */ }
+          return { _err: true, status: resp.status, body: text.slice(0, 500), code: typeof code === 'string' ? code : '' };
+        }
+        if (binary) {
+          // Runs in the page: bytesToBase64 below cannot be called from here, so the same loop is inlined.
+          const declared = Number(resp.headers.get('content-length') || 0);
+          if (declared > binary) return { _err: false, data: { tooLarge: true, size: declared } };   // not read at all
+          const buf = new Uint8Array(await resp.arrayBuffer());
+          if (buf.length > binary) return { _err: false, data: { tooLarge: true, size: buf.length } };
+          let s = '';
+          for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+          return { _err: false, data: { base64: btoa(s), size: buf.length } };
         }
         const ct = resp.headers.get('content-type') || '';
         let data;
@@ -85,7 +135,8 @@ export async function fetchViaTab(tabId, fullUrl, options) {
         return { _err: true, status: 0, message: e.message };
       }
     },
-    args: [fullUrl, options.method || 'GET', options.body || null, options.headers || {}],
+    args: [fullUrl, options.method || 'GET', options.body || null, options.headers || {}, options.binary || 0,
+      options.binary ? ACCEPT_ANY : 'application/json', options.multipart || null],
   });
 
   const result = results?.[0]?.result;
@@ -124,10 +175,26 @@ export async function fetchViaTab(tabId, fullUrl, options) {
     if (!result) throw new Error('err_tab_no_result');
     const httpStatus = Number(status);
     if (!Number.isFinite(httpStatus)) throw new Error('err_network');
-    throw new Error(httpStatus >= 500 ? `err_server:${httpStatus}` : `err_http:${httpStatus}`);
+    const code = options.errorCode && CLAUDE_ERROR_CODE_RE.test(result.code || '') ? result.code : '';
+    throw httpError(httpStatus, code);
   }
 
   return result.data;
+}
+
+/** Bytes → base64 in chunks (String.fromCharCode.apply has an argument-count limit). */
+export function bytesToBase64(buf) {
+  let s = '';
+  for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** base64 → bytes. */
+export function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 // --- Cookie-based direct call (fallback when no tab available) ---
@@ -143,13 +210,13 @@ export async function fetchWithCookies(url, options = {}) {
   const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   const method = options.method || 'GET';
   const headers = {
-    'Accept': 'application/json',
+    'Accept': options.binary ? ACCEPT_ANY : 'application/json',
     'Cookie': cookieStr,
     'Referer': `${CLAUDE_API_BASE}/`,
     'Origin': CLAUDE_API_BASE,
     ...(options.headers || {}),
   };
-  if (method !== 'GET' && !headers['Content-Type']) {
+  if (method !== 'GET' && !headers['Content-Type'] && !options.multipart) {
     headers['Content-Type'] = 'application/json';
   }
 
@@ -165,7 +232,13 @@ export async function fetchWithCookies(url, options = {}) {
   // the one this line closes; it was not proven to be the path taken. Upstream/CDN staleness is
   // not covered here, and a server-side guard is tracked separately.
   const fetchOpts = { method, headers, cache: 'no-store' };
-  if (options.body && method !== 'GET') {
+  if (options.multipart && method !== 'GET') {
+    const m = options.multipart;
+    const form = new FormData();
+    form.append(m.field, new File([base64ToBytes(m.base64)], m.name, { type: m.type }));
+    for (const [k, v] of Object.entries(m.fields || {})) form.append(k, v);
+    fetchOpts.body = form;
+  } else if (options.body && method !== 'GET') {
     fetchOpts.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
   }
 
@@ -197,9 +270,15 @@ export async function fetchWithCookies(url, options = {}) {
     // and dropping it would change fetch behaviour, not just logging. It is logged rather than
     // thrown so the detail survives for diagnosis without becoming user copy or a GA value.
     console.debug(`[Claude Tuner] cookie fetch ${resp.status}: ${String(text).slice(0, 300)}`);
-    throw new Error(resp.status >= 500 ? `err_server:${resp.status}` : `err_http:${resp.status}`);
+    throw httpError(resp.status, options.errorCode ? claudeErrorCode(text) : '');
   }
 
+  if (options.binary) {
+    const declared = Number(resp.headers.get('content-length') || 0);
+    if (declared > options.binary) return { tooLarge: true, size: declared };
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    return buf.length > options.binary ? { tooLarge: true, size: buf.length } : { base64: bytesToBase64(buf), size: buf.length };
+  }
   const contentType = resp.headers.get('content-type') || '';
   if (contentType.includes('application/json')) return resp.json();
   const text = await resp.text();
