@@ -26,9 +26,12 @@ export const SKILL_ADD_TRACKED = 'SKILL_ADD_TRACKED';
 export const SKILL_TRACK_STATE = 'SKILL_TRACK_STATE';
 export const SKILL_TRACK_ACTION = 'SKILL_TRACK_ACTION';
 export const SKILL_UPDATE_PREF = 'SKILL_UPDATE_PREF';
-export const SKILL_TRACK_MESSAGES = [SKILL_TRACK_PROTO, SKILL_ADD_TRACKED, SKILL_TRACK_STATE, SKILL_TRACK_ACTION, SKILL_UPDATE_PREF];
-/** What a page asks with SKILL_TRACK_PROTO. SKILL_APPLY's probe only says 「바로 추가」 works, not that tracking does. */
-export const TRACK_PROTO_VERSION = 1;
+/** The dashboard's 「⚙ 설정」: open this extension's options at the auto-update switch (proto ≥ 2). */
+export const SKILL_OPEN_SETTINGS = 'SKILL_OPEN_SETTINGS';
+export const SKILL_TRACK_MESSAGES = [SKILL_TRACK_PROTO, SKILL_ADD_TRACKED, SKILL_TRACK_STATE, SKILL_TRACK_ACTION, SKILL_UPDATE_PREF, SKILL_OPEN_SETTINGS];
+/** What a page asks with SKILL_TRACK_PROTO. SKILL_APPLY's probe only says 「바로 추가」 works, not that tracking does.
+ *  2 = SKILL_OPEN_SETTINGS (the switch lives in the options page; the dashboard only links to it). */
+export const TRACK_PROTO_VERSION = 2;
 
 /** chrome.storage.local keys. */
 export const TRACK_KEY = 'skillTracked';      // { <team skill id>: record }
@@ -63,7 +66,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
  *  now(), newId()
  */
 export function createSkillUpdater(deps) {
-  const { fetchApi, server, store, notify = async () => false, now = Date.now, newId = () => crypto.randomUUID() } = deps;
+  const { fetchApi, server, store, notify = async () => false, now = Date.now, newId = () => crypto.randomUUID(), openSettings = async () => false } = deps;
 
   // ── the serial queue (①) ──
   let chain = Promise.resolve();
@@ -414,10 +417,11 @@ export function createSkillUpdater(deps) {
 
   async function state() {
     const { recs, meta, auto } = await load();
-    // Only the claude.ai account signed in now: another account's record says nothing about this one's copies (batch
-    // R1-B3). Not signed in → nothing to show.
+    // Another claude.ai account's records are hidden: they say nothing about this one's copies (batch R1-B3). When the
+    // account cannot be read now (no claude.ai tab and the cookie path blocked) they all show — hiding them made a tracked
+    // copy read 「✓ 있음」 after a new version (2026-11-03 report); a button only asks, and the write checks the account.
     const cacct = await claudeAccount();
-    const items = Object.entries(recs).filter(([, rec]) => rec && cacct && rec.cacct === cacct).map(([id, rec]) => {
+    const items = Object.entries(recs).filter(([, rec]) => rec && (!cacct || rec.cacct === cacct)).map(([id, rec]) => {
       const info = (meta.info && meta.info[id]) || {};
       let st = 'ok';
       if (rec.inflight || rec.check) st = 'check';
@@ -430,6 +434,8 @@ export function createSkillUpdater(deps) {
         last: rec.last && now() - rec.last.at < RECENT_UPDATE_MS ? rec.last : null,
         failed: !!(rec.fail && rec.fail.n >= FAIL_STOP && rec.fail.v === info.latest_version),
         summary: info.edit_summary || null, by: info.by || null, org_id: rec.org, skill_id: rec.sid, tuner: rec.tuner,
+        // The claude.ai account could not be read now: this record may be another account's (R1-B2).
+        unsure: !cacct,
       };
     });
     return { ok: true, proto: TRACK_PROTO_VERSION, auto, tuner: meta.me || null, lastCheck: meta.lastCheck || null, items };
@@ -546,7 +552,43 @@ export function createSkillUpdater(deps) {
     });
   }
 
-  return { add, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue };
+  return { add, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue, openSettings };
+}
+
+/**
+ * The dashboard's 「⚙ 설정」 → this extension's options at the auto-update switch. One tab: an open options tab is reused
+ * (found through runtime.getContexts — no `tabs` permission), and calls while one is opening share it — repeated clicks, or a
+ * page sending the message in a loop, never open more tabs (R1-B1). The tab we opened is remembered and tried first: a
+ * just-created tab is not in getContexts until its document loads (R2).
+ * deps: { url, page, contexts() → [{ documentUrl, tabId, windowId }], update(tabId, url) → tab, focus(windowId), create(url) → tab }
+ */
+export function makeSettingsOpener(deps) {
+  let opening = null;
+  let ours = null;   // { tabId, windowId } of the tab we created
+  return function open() {
+    if (opening) return opening;
+    opening = (async () => {
+      if (ours) {
+        try {
+          const t = await deps.update(ours.tabId, deps.url);
+          if (t && t.windowId >= 0) ours.windowId = t.windowId;   // the tab may have been moved to another window (R3)
+          if (ours.windowId >= 0) await Promise.resolve(deps.focus(ours.windowId)).catch(() => {});
+          return true;
+        } catch (e) { ours = null; }   // closed since: look again
+      }
+      const list = await Promise.resolve(deps.contexts()).catch(() => []);
+      const ctx = (Array.isArray(list) ? list : []).find((c) => c && String(c.documentUrl || '').startsWith(deps.page) && c.tabId >= 0);
+      if (ctx) {
+        await deps.update(ctx.tabId, deps.url);
+        if (ctx.windowId >= 0) await Promise.resolve(deps.focus(ctx.windowId)).catch(() => {});
+      } else {
+        const tab = await deps.create(deps.url);
+        if (tab && tab.id >= 0) ours = { tabId: tab.id, windowId: tab.windowId };
+      }
+      return true;
+    })().finally(() => { opening = null; });
+    return opening;
+  };
 }
 
 /**
@@ -561,6 +603,7 @@ export function handleSkillTrackExternal(message, sender, sendResponse, allowed,
   else if (message.type === SKILL_ADD_TRACKED) run = updater.add(message);
   else if (message.type === SKILL_TRACK_STATE) run = updater.state();
   else if (message.type === SKILL_TRACK_ACTION) run = updater.action(message);
+  else if (message.type === SKILL_OPEN_SETTINGS) run = Promise.resolve(updater.openSettings()).then((ok) => ({ ok: ok !== false }));
   else run = typeof message.auto === 'boolean' ? updater.setPref(message.auto) : Promise.resolve({ ok: false, reason: 'invalid' });
   run.then(sendResponse, () => sendResponse({ ok: false, reason: 'error' }));
   return true;

@@ -59,7 +59,7 @@ import { planDisplayName } from './ui/util.js';
 import { readLast } from './bg/usage-history-db.js';
 import { registerPromptsHandler, handlePromptExternal } from './bg/prompts.js';
 import { handleSkillImportExternal, SKILL_APPLY, SKILL_REMOVE } from './bg/skills-import.js';
-import { createSkillUpdater, handleSkillTrackExternal } from './bg/skill-update.js';
+import { createSkillUpdater, handleSkillTrackExternal, makeSettingsOpener } from './bg/skill-update.js';
 import { skillUpdateServer } from './bg/skill-update-server.js';
 import { SKILLS_PAGE_URL } from './bg/prompts.js';
 import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
@@ -94,7 +94,21 @@ async function skillUpdateNotify({ kind, items }) {
     buttons: [{ title: await bt('sku_update_all') }, { title: await bt('sku_view') }],
   }, 'skill-upd-wait').then((id) => !!id);
 }
-const skillUpdater = createSkillUpdater({ fetchApi: fetchClaudeApi, server: skillUpdateServer, store: chrome.storage.local, notify: skillUpdateNotify });
+const skillUpdater = createSkillUpdater({
+  fetchApi: fetchClaudeApi, server: skillUpdateServer, store: chrome.storage.local, notify: skillUpdateNotify,
+  openSettings: () => openSkillSettings(),
+});
+
+// The dashboard's 「⚙ 설정」 (bg/skill-update.js makeSettingsOpener — one options tab, reused). A literal hash:
+// test/options-deep-link-guard.mjs checks every options deep link points at a real element.
+const openSkillSettings = makeSettingsOpener({
+  url: chrome.runtime.getURL('options.html#skill-update-auto'),
+  page: chrome.runtime.getURL('options.html'),
+  contexts: () => (typeof chrome.runtime.getContexts === 'function' ? chrome.runtime.getContexts({ contextTypes: ['TAB'] }) : Promise.resolve([])),
+  update: (tabId, url) => chrome.tabs.update(tabId, { url, active: true }),
+  focus: (windowId) => chrome.windows.update(windowId, { focused: true }),
+  create: (url) => chrome.tabs.create({ url }),
+});
 
 async function scheduleSkillUpdate() {
   if (await chrome.alarms.get(ALARM_SKILL_UPDATE)) return;

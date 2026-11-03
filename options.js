@@ -406,6 +406,9 @@ function doSave() {
   });
 }
 
+// An open options tab reused with a new hash (the dashboard's 「⚙ 설정」, #2821) does not reload — scroll on the change.
+window.addEventListener('hashchange', () => { if (location.hash) _scrollToDeepLink(location.hash, 0, DEEP_LINK_WAIT_MS); });
+
 // === Initialization ===
 document.addEventListener('DOMContentLoaded', async () => {
   // Deep link (e.g. #notifications, #page-usage): FIRST, before any await, so the user-input
