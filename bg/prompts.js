@@ -8,7 +8,8 @@
 // 🔴 The ops are an ALLOW-LIST mapped to fixed method + path here — the content script never names a
 // URL or method, so a page that manages to message us still reaches only these prompt routes.
 // The server side is worker/src/routes/prompts.ts behind /api/ext (login-proven ext_token only).
-import { getConfig, authedFetch } from './storage.js';
+import { getConfig, authedFetch, getAuthHeaders, isLoginProvenToken } from './storage.js';
+import { extTokenEmailRaw } from './ext-token-claims.js';
 import { PROVIDER_LABELS, SITE_TAB_PATTERNS } from './constants.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
 import { sendGAEvent } from './analytics.js';
@@ -16,6 +17,16 @@ import { sendGAEvent } from './analytics.js';
 export const PROMPTS_MSG = 'ct_prompts';
 /** Where 「전체 보기」 and the login fallback go. */
 export const PROMPTS_PAGE_URL = 'https://claudetuner.com/dashboard/prompts/';
+/** Team skills (#2771 entry points): the page's skills view, and its 「스킬 등록」 form. `?from=` = where it was opened (GA). */
+export const SKILLS_PAGE_URL = PROMPTS_PAGE_URL + '#skills';
+const SKILLS_OPEN_URLS = {   // fixed addresses only — the message picks one by name, never sends a URL
+  banner: PROMPTS_PAGE_URL + '?from=ext_banner#skills',
+  picker: PROMPTS_PAGE_URL + '?from=ext_picker#skills',
+  banner_share: PROMPTS_PAGE_URL + '?from=ext_banner_share#skills/new',
+};
+/** chrome.storage.session { email, at, orgs } — which orgs of the signed-in account have team skills. */
+const SKILL_ORGS_CACHE_KEY = 'skillOrgsCache';
+const SKILL_ORGS_TTL_MS = 30 * 60 * 1000;
 const ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const SITES = ['claude', 'chatgpt', 'gemini'];
 /** 추천 languages the server filters on (`GET …/prompt-store?lang=`); anything else = no filter. */
@@ -47,6 +58,7 @@ const TRACK_EVENTS = {
   prompt_delete: ['site'],
   prompt_intro: ['site', 'action'],
   prompt_team_share: ['site', 'result'],
+  skills_entry: ['site', 'src'],   // 「팀 스킬」 entries: src = banner_shown · banner_browse · banner_share · banner_close · picker
 };
 
 /** op → [method, path, needsId, sendsBody]. */
@@ -106,6 +118,35 @@ async function callOp(message) {
   const data = resp.status === 204 ? null : await resp.json().catch(() => null);
   if (!resp.ok) return { ok: false, status: resp.status, code: data?.code || data?.error || null, data };
   return { ok: true, status: resp.status, data: labelSources(data) };
+}
+
+/**
+ * { ok, orgs:[{id,name}] } — the orgs where the signed-in account has team skills ([] when none, signed out, or unknown).
+ * The popup, the claude.ai picker and the claude.ai skills-page banner show a 「팀 스킬」 entry only when it leads somewhere.
+ * Cached per account (the email in the token actually sent) for SKILL_ORGS_TTL_MS; the server re-checks every page anyway.
+ */
+export async function skillOrgsCached() {
+  const config = await getConfig().catch(() => null);
+  if (!config?.serverUrl) return { ok: false, orgs: [] };
+  const auth = await getAuthHeaders(config).catch(() => ({}));
+  const tok = auth.Authorization?.startsWith('Bearer ') ? auth.Authorization.slice(7) : null;
+  // Only a login-proven token: an api_key-born token of the same email must not reuse a login's cache (Codex R1-B4).
+  const email = tok && isLoginProvenToken(tok) ? extTokenEmailRaw(tok) : null;
+  if (!email) return { ok: true, orgs: [] };   // not signed in with a login token: nothing to show
+  const store = chrome.storage?.session || null;
+  const cached = store ? (await store.get(SKILL_ORGS_CACHE_KEY).catch(() => ({})))[SKILL_ORGS_CACHE_KEY] : null;
+  if (cached && cached.email === email && Date.now() - cached.at < SKILL_ORGS_TTL_MS && Array.isArray(cached.orgs)) return { ok: true, orgs: cached.orgs };
+  const resp = await authedFetch(config, `${config.serverUrl}/api/ext/skill-orgs`, {}, { requireTokenEmail: email });
+  if (!resp || !resp.ok) return { ok: false, orgs: [] };
+  const data = await resp.json().catch(() => null);
+  const orgs = (data && Array.isArray(data.orgs) ? data.orgs : [])
+    .filter((o) => o && Number.isInteger(o.id) && typeof o.name === 'string').map((o) => ({ id: o.id, name: o.name }));
+  // The account changed while this was in flight: the answer is the previous account's — neither shown nor kept (Codex R1-B3).
+  const nowAuth = await getAuthHeaders(config).catch(() => ({}));
+  const nowTok = nowAuth.Authorization?.startsWith('Bearer ') ? nowAuth.Authorization.slice(7) : null;
+  if (!nowTok || !isLoginProvenToken(nowTok) || extTokenEmailRaw(nowTok) !== email) return { ok: false, orgs: [] };
+  if (store) await store.set({ [SKILL_ORGS_CACHE_KEY]: { email, at: Date.now(), orgs } }).catch(() => {});
+  return { ok: true, orgs };
 }
 
 /** Opens what lets the user sign in: the side panel when the browser allows it here, else the page. */
@@ -218,6 +259,12 @@ export function registerPromptsHandler() {
     if (sender?.id !== chrome.runtime.id) return false;
     if (message.op === 'track') { track(message); return false; }
     if (message.op === 'open_page') { chrome.tabs.create({ url: PROMPTS_PAGE_URL }).catch(() => {}); return false; }
+    if (message.op === 'open_skills' || message.op === 'open_skills_share') {
+      const key = message.op === 'open_skills_share' ? 'banner_share' : message.from === 'picker' ? 'picker' : 'banner';
+      chrome.tabs.create({ url: SKILLS_OPEN_URLS[key] }).catch(() => {});
+      return false;
+    }
+    if (message.op === 'skill_orgs') { skillOrgsCached().then(sendResponse, () => sendResponse({ ok: false, orgs: [] })); return true; }
     if (message.op === 'intro_claim' || message.op === 'intro_release') {
       introOp(message).then(sendResponse, () => sendResponse({ ok: false }));
       return true;

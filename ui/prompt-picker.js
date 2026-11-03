@@ -68,7 +68,7 @@
       hint_keys: '↑↓ 이동 · Enter 넣기', del: '삭제', deleted: '삭제했어요', undo: '되돌리기', delete_failed: '삭제하지 못했어요', users_short: '{n}명',
       login_text: 'Claude Tuner에 로그인하면 프롬프트를 저장하고 Claude·ChatGPT·Gemini 어디서든 꺼내 쓸 수 있어요.',
       login_btn: '로그인하기', inactive: '이 계정은 삭제 처리됐어요. 대시보드에 다시 로그인하면 복구돼요.',
-      save_current: '+ 지금 입력 저장', open_page: '전체 보기 ↗', close: '닫기',
+      save_current: '+ 지금 입력 저장', open_page: '전체 보기 ↗', team_skills: '팀 스킬 ↗', close: '닫기',
       users: '{n}명 사용', like: '좋아요',
       saved: '저장했어요 · {key}로 어디서든 꺼내 쓰기', dup: '이미 저장돼 있어요', empty_input: '입력창이 비어 있어요',
       limit: '저장 가능한 개수({n}개)를 다 썼어요', save_failed: '저장하지 못했어요', save_login: '저장하려면 Claude Tuner 로그인이 필요해요',
@@ -93,7 +93,7 @@
       hint_keys: '↑↓ move · Enter insert', del: 'Delete', deleted: 'Deleted', undo: 'Undo', delete_failed: 'Could not delete', users_short: '{n} used',
       login_text: 'Sign in to Claude Tuner to save prompts and use them in Claude, ChatGPT and Gemini.',
       login_btn: 'Sign in', inactive: 'This account was deleted. Sign in to the dashboard again to restore it.',
-      save_current: '+ Save current input', open_page: 'See all ↗', close: 'Close',
+      save_current: '+ Save current input', open_page: 'See all ↗', team_skills: 'Team skills ↗', close: 'Close',
       users: '{n} used', like: 'Like',
       saved: 'Saved · open it anywhere with {key}', dup: 'Already saved', empty_input: 'The input box is empty',
       limit: 'You have reached the limit ({n})', save_failed: 'Could not save', save_login: 'Sign in to Claude Tuner to save prompts',
@@ -250,6 +250,20 @@
         });
       } catch { resolve({ ok: false, status: -1 }); }
     });
+    // 「팀 스킬 ↗」 in the footer (#2771 entry points) — claude.ai only (skills are a claude.ai thing), and only when the
+    // account's org has team skills. Asked once per page; the background caches it.
+    // Asked again on every open (the background caches it): an account switch or logout is followed (Codex R1-B2).
+    let skillOrgs = [];
+    const askSkillOrgs = () => {
+      if (site !== 'claude') return;
+      send({ op: 'skill_orgs' }).then((r) => {
+        const next = r && r.ok !== false && Array.isArray(r.orgs) ? r.orgs : [];
+        const changed = (next.length > 0) !== (skillOrgs.length > 0);
+        skillOrgs = next;
+        if (changed && !destroyed && isOpen()) render();
+      });
+    };
+    askSkillOrgs();
     const track = (event, params) => { try { chrome.runtime.sendMessage({ type: MSG, op: 'track', event, params: { site, ...params } }); } catch { /* context dead */ } };
 
     function el(tag, cls, text) {
@@ -978,7 +992,17 @@
       const page = el('button', 'pp-link', t('open_page'));
       page.type = 'button';
       page.addEventListener('click', () => { send({ op: 'open_page' }); close(); });
-      foot.appendChild(save); foot.appendChild(el('span', 'pp-hint', t('hint_keys'))); foot.appendChild(page);
+      foot.appendChild(save); foot.appendChild(el('span', 'pp-hint', t('hint_keys')));
+      if (skillOrgs.length) {
+        const skills = el('button', 'pp-link', t('team_skills'));
+        skills.type = 'button';
+        skills.addEventListener('click', (e) => {
+          if (!e.isTrusted) return;   // the page's script cannot open tabs through us (Codex R1-B1)
+          track('skills_entry', { src: 'picker' }); send({ op: 'open_skills', from: 'picker' }); close();
+        });
+        foot.appendChild(skills);
+      }
+      foot.appendChild(page);
       pp.appendChild(foot);
       if (old) old.replaceWith(pp); else shadow.appendChild(pp);
       renderList(list);   // attached first: the rows fill the preview pane through the shadow root
@@ -1069,6 +1093,7 @@
       listenComposer(true);
       track('prompt_picker_open', { src });
       load();
+      askSkillOrgs();
     }
 
     function close() {

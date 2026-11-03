@@ -319,31 +319,9 @@ export function formatResetAbsolute(resetAt, opts) {
 
 export function formatDuration(ms) { return cv.formatDuration(ms, extLabels()); }
 
-// Provider-aware plan label. ChatGPT's raw plan_type uses internal aliases
-// ("Prolite" = the $100 tier, "Pro" = the $200 tier); remap them to the user-facing
-// names so the popup matches the dashboard's planDisplayName(). Other tiers
-// (Plus/Go/Free/Team) and Claude/Gemini plans are already readable → pass through.
-// 🔴 DISPLAY ONLY. OpenAI renamed the Pro tiers by price (Pro 100 / Pro 200 / Pro 500, 2026-09), but
-// the STORED labels stay 'Pro 5x' / 'Pro 20x' / 'Pro 25x' everywhere (snapshots, multipliers,
-// canonicalPlanKey, rec engine). Never feed this function's output back into planToMultiplier() or a
-// plan table — 'Pro 200' would score 1x there, and substring ladders would read its '20'/'5'.
-// Claude renamed Max 5x → Max and Max 20x → Ultra (2026-10-30, #2768). Same DISPLAY-ONLY rule as the
-// ChatGPT price names above: stored labels stay 'Max 5x' / 'Max 20x'. Bare names (the transition
-// 'Ultra (← Max 20x)' was dropped the next day, 2026-10-31), so a substring ladder can no longer find the
-// tier in the output — consumers that read a display label back need exact 'max' / 'ultra' arms.
-const CLAUDE_PLAN_DISPLAY = Object.freeze({ 'max 5x': 'Max', 'max 20x': 'Ultra' });
-export function planDisplayName(plan, provider) {
-  const p = (plan || '').trim().toLowerCase();
-  if ((!provider || provider === 'claude') && CLAUDE_PLAN_DISPLAY[p]) return CLAUDE_PLAN_DISPLAY[p];
-  if (provider === 'chatgpt') {
-    if (p === 'prolite' || p === 'pro 5x') return 'Pro 100';
-    if (p === 'pro' || p === 'pro 20x') return 'Pro 200';
-    if (p === 'pro 25x' || p === 'promax') return 'Pro 500';
-    if (p === 'self_serve_business_prolite') return 'Business Premium';
-    if (p === 'team') return 'Business Standard';
-  }
-  return plan || '';
-}
+// Provider-aware plan label (Pro 100/200/500, Max/Ultra — DISPLAY ONLY). Lives in card-view/format.js so
+// the desktop app shows the same names; re-exported here for the popup's existing imports.
+export const planDisplayName = cv.planDisplayName;
 
 // Provider-aware quota multiplier, mirroring the dashboard's planMultiplier().
 // ChatGPT/Gemini use exact-match tiers (their raw plan_type names differ from

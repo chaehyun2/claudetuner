@@ -257,6 +257,10 @@ export function getOrCreateInstallId() {
 // instead of surfacing the CTA. Fail-open, hence not a break for the fleet that predates this
 // build, but it is why the server change and this line ship together.
 const PROVEN_SRC = new Set(['ext_google', 'ext_email', 'dash_session', 'dash_claim']);
+/** A token a human login minted (full scope + a PROVEN_SRC) — what the server's login-proof routes accept. */
+export function isLoginProvenToken(token) {
+  return !!token && extTokenScope(token) === 'full' && PROVEN_SRC.has(extTokenSrc(token));
+}
 
 export async function setExtToken(token) {
   // 🔴 `everHadProvenToken` means "this install has held a LOGIN-PROVEN token", and the

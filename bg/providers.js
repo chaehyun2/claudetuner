@@ -134,7 +134,7 @@ export function injectPanels(tabId, spec) {
 // that were already open (install/update, #2672 thaw). claude-folders.js is deliberately left
 // out — it is not re-injected on update either.
 export const CLAUDE_REINJECT = {
-  js: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'input-usage.js'],
+  js: ['usage-shared.js', 'sidebar-usage.js', 'ui/cmp-msg-rows.js', 'ui/prompt-picker.js', 'ui/skills-banner.js', 'input-usage.js'],   // skills-banner: #2771 (Codex R1-B5)
   css: ['sidebar-usage.css', 'input-usage.css'],
 };
 

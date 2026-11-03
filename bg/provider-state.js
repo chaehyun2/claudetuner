@@ -484,6 +484,7 @@ export const CLAUDE_GA_REASON_CODES = [
   'err_claude_tab_no_result',    // the injected script returned nothing (tab moved, scripting denied)
   'err_claude_fallback_exhausted', // tab AND cookie both failed, cookie without a code
   'err_claude_unclassified',     // an exception from the collection logic, not the API layer
+  'err_claude_account_mismatch', // a write pinned to a claude.ai account found another one: not sent (skills only, #2821)
   // 🔴 SHOULD NOW APPROACH ZERO. Every throw carries a code and bg/collect.js labels the rest, so
   // a non-trivial count here means a path nobody has accounted for — it is a detector now, not a
   // bucket.

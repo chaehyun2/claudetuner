@@ -609,6 +609,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-suggest-enabled').addEventListener('change', autoSave);
   document.getElementById('prompt-button-enabled').addEventListener('change', autoSave);
+  // #2821 team skills auto-update: the background owns the value (it also resets the 「대기」 card state).
+  const skuBox = document.getElementById('skill-update-auto');
+  chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => { void chrome.runtime.lastError; if (r && typeof r.auto === 'boolean') skuBox.checked = r.auto; });
+  skuBox.addEventListener('change', () => {
+    chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'pref', auto: skuBox.checked }, () => { void chrome.runtime.lastError; });
+  });
   // #2081: the history's server copy — per BROWSER (chrome.storage.local, never the synced config) and written AT
   // ONCE by its own change only (batch r5 G1: written by the debounced autosave of any setting, a stale checkbox
   // turned back on a switch the 「최근」 panel had turned off, and an 「off」 waited 800 ms while an upload went).
@@ -978,7 +984,7 @@ function updateOrgHint() {
       const org = data.autoSelectedOrg;
       if (org) {
         // Claude's current plan names (#2768). Classic script without usage-shared.js — a copy of
-        // ui/util.js CLAUDE_PLAN_DISPLAY, kept equal by test/plan-mult-twins-guard.mjs.
+        // ui/card-view/format.js CLAUDE_PLAN_DISPLAY, kept equal by test/plan-mult-twins-guard.mjs.
         const OPTIONS_CLAUDE_PLAN_DISPLAY = { 'Max 5x': 'Max', 'Max 20x': 'Ultra' };
         hint.textContent = t('org_auto_current', org.name, OPTIONS_CLAUDE_PLAN_DISPLAY[org.plan] || org.plan);
       } else {

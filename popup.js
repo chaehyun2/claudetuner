@@ -389,8 +389,34 @@ async function initCompareEntry() {
   });
 }
 
+/** The header's 「팀 스킬」 icon (#2771): only when the signed-in account's org has team skills. Fails closed. */
+function initSkillsLink() {
+  const a = document.getElementById('skills-link');
+  if (!a) return;
+  chrome.runtime.sendMessage({ type: 'ct_prompts', op: 'skill_orgs' }, (r) => {
+    void chrome.runtime.lastError;
+    if (r && Array.isArray(r.orgs) && r.orgs.length) a.classList.remove('hidden');
+  });
+}
+
+/** 「팀 스킬: 업데이트 N개 · 확인 필요 N개」 (#2821) — only when something waits; the dashboard's update card does the rest. */
+function initSkillUpdateLine() {
+  const a = document.getElementById('skill-update-line');
+  if (!a) return;
+  chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => {
+    void chrome.runtime.lastError;
+    const items = r && Array.isArray(r.items) ? r.items : [];
+    const wait = items.filter((i) => i.state === 'wait').length, check = items.filter((i) => i.state === 'check').length;
+    if (!wait && !check) return;
+    a.textContent = [wait ? t('sku_line_wait', wait) : '', check ? t('sku_line_check', check) : ''].filter(Boolean).join(' · ');
+    a.classList.remove('hidden');
+  });
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
+  initSkillsLink();
+  initSkillUpdateLine();
   // Before ANY section renders: the remembered collapse state must be in hand so a collapsed
   // section is painted collapsed, not painted open and then snapped shut on every popup open.
   await loadCollapseState();

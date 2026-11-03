@@ -442,6 +442,15 @@
           </label>
           <div class="form-hint" data-i18n="prompt_btn_hint"></div>
         </div>
+        <!-- #2821: claude.ai copies of team skills follow new versions (bg/skill-update.js, default on). Stored by the
+             background (skillUpdateAuto), not in config — the switch on the dashboard's update card is the same value. -->
+        <div class="form-group" style="margin-top:12px">
+          <label class="check-label">
+            <input type="checkbox" id="skill-update-auto" checked>
+            <span data-i18n="sku_auto_label"></span>
+          </label>
+          <div class="form-hint" data-i18n="sku_auto_hint"></div>
+        </div>
       </div>
     </div>
 

@@ -58,9 +58,49 @@ import { CLAUDE_ACTIVE_ORG_COOKIE, CLAUDE_ORGS_PATH, isUsableTab, providerForUrl
 import { planDisplayName } from './ui/util.js';
 import { readLast } from './bg/usage-history-db.js';
 import { registerPromptsHandler, handlePromptExternal } from './bg/prompts.js';
-import { handleSkillImportExternal } from './bg/skills-import.js';
+import { handleSkillImportExternal, SKILL_APPLY, SKILL_REMOVE } from './bg/skills-import.js';
+import { createSkillUpdater, handleSkillTrackExternal } from './bg/skill-update.js';
+import { skillUpdateServer } from './bg/skill-update-server.js';
+import { SKILLS_PAGE_URL } from './bg/prompts.js';
 import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
 import { REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './bg/review-nudge.js';
+
+// ─── Team skills: claude.ai copies kept up to date (#2821, bg/skill-update.js, docs/plans/skill-team.md §15) ───
+const ALARM_SKILL_UPDATE = 'skill-update';
+const SKILL_UPDATE_PERIOD_MIN = 360;
+const SKILL_NOTIF_DONE = 'skill-upd-done';   // completed: fades by itself (no requireInteraction)
+const SKILL_NOTIF_WAIT = 'skill-upd-wait';   // manual mode: stays until acted on
+const SKILL_NOTIF_NAMES = 2;                 // names spelled out in a 「여러 개」 message
+const SKILL_UPDATES_URL = SKILLS_PAGE_URL.replace('#skills', '?from=ext_skill_update#skills');
+
+/** The two cards (plan §15-6). Resolves true when the browser showed it. */
+async function skillUpdateNotify({ kind, items }) {
+  if (kind === 'clear_wait') { chrome.notifications.clear(SKILL_NOTIF_WAIT); return true; }
+  const one = items.length === 1 ? items[0] : null;
+  const names = items.slice(0, SKILL_NOTIF_NAMES).map((i) => i.name).join(', ');
+  const listed = items.length > SKILL_NOTIF_NAMES ? await bt('sku_more', names, String(items.length - SKILL_NOTIF_NAMES)) : names;
+  // Not awaited inline (notif-telemetry guard): the dedup write follows the browser's answer through the promise.
+  if (kind === 'done') {
+    return createCountedNotification(SKILL_NOTIF_DONE, {
+      type: 'basic', iconUrl: 'icons/icon128.png', priority: 0,
+      title: one ? await bt('sku_done_one', one.name, String(one.v)) : await bt('sku_done_many', String(items.length)),
+      message: one ? (one.summary ? (one.by ? `${one.summary} — ${one.by}` : one.summary) : (one.by ? await bt('sku_by', one.by) : '')) : listed,
+    }, 'skill-upd-done').then((id) => !!id);
+  }
+  return createCountedNotification(SKILL_NOTIF_WAIT, {
+    type: 'basic', iconUrl: 'icons/icon128.png', priority: 1, requireInteraction: true,
+    title: one ? await bt('sku_wait_one', one.name, String(one.v)) : await bt('sku_wait_many', String(items.length)),
+    message: one ? (one.summary || await bt('sku_wait_msg')) : listed,
+    buttons: [{ title: await bt('sku_update_all') }, { title: await bt('sku_view') }],
+  }, 'skill-upd-wait').then((id) => !!id);
+}
+const skillUpdater = createSkillUpdater({ fetchApi: fetchClaudeApi, server: skillUpdateServer, store: chrome.storage.local, notify: skillUpdateNotify });
+
+async function scheduleSkillUpdate() {
+  if (await chrome.alarms.get(ALARM_SKILL_UPDATE)) return;
+  // Same de-sync jitter as scheduleRecFetch: a fleet-wide CWS update must not land every check on one grid.
+  chrome.alarms.create(ALARM_SKILL_UPDATE, { delayInMinutes: 2 + Math.random() * 58, periodInMinutes: SKILL_UPDATE_PERIOD_MIN });
+}
 
 // Google OAuth **web** client id — the SAME one the dashboard uses (site/shared/auth.js) and the
 // only audience the worker accepts (`aud !== GOOGLE_CLIENT_ID` → 401, utils/google-token.ts).
@@ -430,7 +470,15 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   // Our prompt pages' 「Claude / ChatGPT / Gemini」: open that site with the prompt typed in (#2584, bg/prompts.js).
   if (handlePromptExternal(message, sender, sendResponse)) return true;
   // The team-skills dashboard's 「내 claude.ai 스킬에서 고르기」: personal skills read from claude.ai, ids only (#2771, bg/skills-import.js).
-  if (handleSkillImportExternal(message, sender, sendResponse, isProdSiteSenderOrDevBuild)) return true;
+  // …and its claude.ai copies kept up to date (#2821) — the old page writes (SKILL_APPLY / SKILL_REMOVE) run in the
+  // updater's queue too, so a tracked copy is never written around it (plan §15-2 ①⑥).
+  if (handleSkillTrackExternal(message, sender, sendResponse, isProdSiteSenderOrDevBuild, skillUpdater)) return true;
+  if (handleSkillImportExternal(message, sender, sendResponse, isProdSiteSenderOrDevBuild, undefined, (m, job) => {
+    if (m.probe === true) return job();
+    if (m.type === SKILL_APPLY) return skillUpdater.legacyApply(m, job);
+    if (m.type === SKILL_REMOVE) return skillUpdater.removeTracked(m, job);
+    return job();
+  })) return true;
   // Silent recovery from the dashboard: the page is signed in, mints an ext_token server-side
   // (POST /api/auth/ext-from-session) and hands it over. Zero clicks for the user — every other
   // recovery path we shipped needs them to notice something first, and none did (2026-07-27).
@@ -939,6 +987,7 @@ async function setupAlarm() {
   await updatePollAlarm();
   await scheduleWeeklyReport();
   await scheduleRecFetch();
+  await scheduleSkillUpdate();
   await scheduleInstallBeacon();
   // #1122 — the EARLIEST gate observation, and for some installs the only one they ever produce.
   // scheduleInstallBeacon() above only ARMS the 12h alarm, whose first fire lands uniformly across
@@ -1145,6 +1194,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
     tryTabCollect('tab-updated');
     tryAutoOpenSidePanel(tabId);
+    skillUpdater.maybeCheck().catch(() => {});   // #2821: cheap no-op unless something is tracked and the last check is old
   }
   // Gemini has no server-side polling here; collect on tab load so its panel fills.
   if (changeInfo.status === 'complete' && providerForUrl(tab.url) === 'gemini') {
@@ -1393,6 +1443,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await fetchRecommendations(config);
     return;
   }
+  if (alarm.name === ALARM_SKILL_UPDATE) {
+    await skillUpdater.checkAll().catch((e) => console.warn('[skill-update] check failed', e?.message || e));
+    return;
+  }
   // Gated-install beacon (#1122, twice a day). Self-gating: it returns immediately unless server
   // sync is being withheld, so this dispatch costs one storage read on an install that syncs
   // normally. Never throws — the module swallows its own failures.
@@ -1612,6 +1666,12 @@ if (chrome.commands && chrome.commands.onCommand) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // #2821 the popup's 「팀 스킬 업데이트」 line and the options switch — extension pages only (a content script's sender.url is the site's), never a content script.
+  if (message?.type === 'ct_skill_update' && _sender?.id === chrome.runtime.id && String(_sender.url || '').startsWith(chrome.runtime.getURL(''))) {
+    const run = message.op === 'pref' && typeof message.auto === 'boolean' ? skillUpdater.setPref(message.auto) : skillUpdater.state();
+    run.then(sendResponse, () => sendResponse({ ok: false }));
+    return true;
+  }
   // COMPARE_FLAG / COMPARE_STATUS / OPEN_COMPARE — answered asynchronously by the controller.
   if (compareController.handleMessage(message, _sender, sendResponse)) return true;
   if (debateNotifier.handleMessage(message, _sender, sendResponse)) return true;
@@ -2239,6 +2299,11 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
   // category — the wrong number is worse than none, because it reads as "nobody engages".
   bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
   if (debateNotifier.handleClick(notifId)) return; // a debate card: its tab comes forward (#1971)
+  if (notifId === SKILL_NOTIF_DONE || notifId === SKILL_NOTIF_WAIT) {   // #2821: the dashboard's update card
+    chrome.tabs.create({ url: SKILL_UPDATES_URL });
+    chrome.notifications.clear(notifId);
+    return;
+  }
   // #2181 U4: an auto plan-order toast opens the page that explains the change (plan §6.1).
   if (notifId.startsWith(PLAN_AUTO_NOTIF_PREFIX)) {
     const orderId = Number(notifId.slice(PLAN_AUTO_NOTIF_PREFIX.length));
@@ -2267,6 +2332,13 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   // A button press and a body click are both "the user engaged", so they share one counter —
   // splitting them would need a dimension nobody has asked a question about yet.
   bumpNotifCounter(notifCategoryFromId(notifId), 'clk');
+  // #2821 manual mode: 「모두 업데이트」 runs what is waiting NOW (re-read, never the card's list); 「보기」 opens the card.
+  if (notifId === SKILL_NOTIF_WAIT) {
+    chrome.notifications.clear(notifId);
+    if (btnIdx === 0) skillUpdater.updateWaiting().catch(() => {});
+    else chrome.tabs.create({ url: SKILL_UPDATES_URL });
+    return;
+  }
   // Promo push (e.g. Product Hunt launch) → open the promo URL
   if (notifId.startsWith('promo-push-') && btnIdx === 0) {
     const promoId = notifId.replace('promo-push-', '');

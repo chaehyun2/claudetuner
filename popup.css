@@ -505,6 +505,9 @@
     .dash-nudge-arrow { margin-left: auto; }
     .dash-nudge-close { flex: none; background: none; border: none; color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
     .dash-nudge-close:hover { color: var(--text-primary); }
+    /* #2821 team skills waiting / held — a plain link line under the header; before `.hidden` so the class hides it. */
+    .skill-update-line { display: block; margin-bottom: 8px; padding: 8px 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--accent); text-decoration: none; }
+    .skill-update-line:hover { border-color: var(--accent); }
     /* AI Cross-Check shortcut row (2026-09-22) — under the gauges, above the extra-usage card.
        Existing tokens only (popup-contrast-guard reads them per theme); sits BEFORE `.hidden` in
        this file so the class can still hide it (same specificity, later rule wins). */

@@ -31,6 +31,10 @@ function httpError(status, code) {
   if (status >= 500) return new Error(`err_server:${status}`);
   return new Error(code ? `err_http:${status}:${code}` : `err_http:${status}`);
 }
+/** A write pinned with `expectAccount` was not sent: claude.ai is signed in as another account (or could not say).
+ *  The throws below spell it out — test/claude-ga-reason-guard.mjs reads literal codes. */
+export const ERR_ACCOUNT_MISMATCH = 'err_account_mismatch';
+
 export async function fetchClaudeApi(path, options = {}) {
   const fullUrl = `${CLAUDE_API_BASE}${path}`;
 
@@ -48,7 +52,8 @@ export async function fetchClaudeApi(path, options = {}) {
       // A write tried on the tab is never retried on the cookie path: claude.ai may already have it (a 200 whose body
       // broke off reads as a network error — the retry would upload twice), and the retry's own failure (a Cloudflare
       // 403) would replace the real answer (`upload_skill_already_exists`). Codex R1-B3 · batch 1.56.14 R1-B2.
-      if (options.multipart) throw tabError;
+      // Every write, not only uploads: a DELETE's 404 (already removed) must reach the caller, not a retry's 403 (#2812 R1-B3).
+      if (options.multipart || (options.method && options.method !== 'GET')) throw tabError;
       tabErrorMsg = tabError.message;
       console.warn('[Claude Tuner] Tab fetch failed, trying cookie fallback:', tabErrorMsg);
     }
@@ -57,7 +62,12 @@ export async function fetchClaudeApi(path, options = {}) {
     console.log('[Claude Tuner] No Claude.ai tab, using cookie fallback');
   }
 
-  // Fallback: cookie-based direct call
+  // Fallback: cookie-based direct call. A write pinned to an account checks it first on this path too (R1-B1).
+  if (options.expectAccount) {
+    let who = null;
+    try { who = (await fetchWithCookies(`${CLAUDE_API_BASE}/api/account`, {}))?.uuid || null; } catch (e) { who = null; }
+    if (who !== options.expectAccount) throw new Error('err_account_mismatch');
+  }
   try {
     const data = await fetchWithCookies(fullUrl, options);
     console.log(`[Claude Tuner] Cookie fallback succeeded for ${path}`);
@@ -84,7 +94,7 @@ export async function fetchViaTab(tabId, fullUrl, options) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: async (url, method, body, headers, binary, accept, multipart) => {
+    func: async (url, method, body, headers, binary, accept, multipart, expectAccount) => {
       try {
         const opts = {
           method: method || 'GET',
@@ -101,6 +111,13 @@ export async function fetchViaTab(tabId, fullUrl, options) {
           form.append(multipart.field, new File([bytes], multipart.name, { type: multipart.type }));
           for (const [k, v] of Object.entries(multipart.fields || {})) form.append(k, v);
           opts.body = form;
+          // The claude.ai account, read here as the request just before the write — no background round trip or tab
+          // re-pick in between (batch 1.56.15 R1-B1). Without a conditional write the race itself remains (§15-2 ⑦).
+          if (expectAccount) {
+            let who = null;
+            try { const a = await fetch('/api/account', { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } }); who = a.ok ? (await a.json())?.uuid : null; } catch { who = null; }
+            if (who !== expectAccount) return { _err: true, status: 0, accountMismatch: true };
+          }
         } else if (body && method && method !== 'GET') {
           opts.body = typeof body === 'string' ? body : JSON.stringify(body);
         }
@@ -136,10 +153,11 @@ export async function fetchViaTab(tabId, fullUrl, options) {
       }
     },
     args: [fullUrl, options.method || 'GET', options.body || null, options.headers || {}, options.binary || 0,
-      options.binary ? ACCEPT_ANY : 'application/json', options.multipart || null],
+      options.binary ? ACCEPT_ANY : 'application/json', options.multipart || null, options.expectAccount || null],
   });
 
   const result = results?.[0]?.result;
+  if (result && result.accountMismatch) throw new Error('err_account_mismatch');   // nothing was sent
   if (!result || result._err) {
     const status = result?.status || 'unknown';
     const body = result?.body || '';
