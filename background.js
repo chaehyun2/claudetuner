@@ -1,4 +1,5 @@
 // === ES Module Imports ===
+import { accountDeletedLifted } from './bg/block-state.js';
 import { sendGAEvent, pinnedState, authState, providerPermState, sidebarFoldTransitions } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, RESET_ALARM_KEYS, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
@@ -15,7 +16,7 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
-import { getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
 import { isGrantable, GRANT_PAGE, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
@@ -464,6 +465,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && accountAppeared(changes.independentAccount)) {
     reportWhatsNewLogin().catch(() => {});
   }
+  if (area === 'local' && accountDeletedLifted(changes.account_deleted)) {
+    restoreAfterAccountDeletedLifted().catch((e) => console.warn('[Claude Tuner] Recovery not applied:', e?.message || e));
+  }
   // Sidebar fold toggles (usage-shared.js renderSidebarFold) — content scripts cannot reach GA.
   if (area === 'local') for (const t of sidebarFoldTransitions(changes)) sendGAEvent('sidebar_fold', t);
 });
@@ -534,8 +538,11 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       // still win. That preserves the property this gate exists for: a working authenticated
       // install can never be re-pointed at whatever account the dashboard happens to be showing.
       // Identity is still checked below; this only decides whose token may be REPLACED.
+      // A `full` token on an install the server has refused with 410 protects nothing: that install is
+      // not working, and this handoff is how a dashboard recovery reaches it (deploy-1.56.17 R1-B1).
+      // The identity checks below still decide whose token may land here.
       const existing = await getExtToken();
-      if (!mayReplaceStoredToken(existing)) {
+      if (!mayReplaceStoredToken(existing) && !(await isAccountDeleted())) {
         sendResponse({ success: false, error: 'already_authed' });
         return;
       }
@@ -622,7 +629,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
           console.log('[Claude Tuner] stale claudeAliasLink cleared: it named a different canonical account than the new token');
         }
       }
-      await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
+      await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked', 'account_deleted']);
       console.log('[Claude Tuner] ext_token recovered from dashboard session');
       // Collect right away so the dashboard the user is looking at stops being stale.
       collectAndSend({ force: true }).catch(() => {});
@@ -667,7 +674,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   if (message && message.type === 'CAN_ACCEPT_EXT_TOKEN') {
     (async () => {
       try {
-        sendResponse({ canAccept: mayReplaceStoredToken(await getExtToken()) });
+        sendResponse({ canAccept: mayReplaceStoredToken(await getExtToken()) || await isAccountDeleted() });
       } catch {
         sendResponse({ canAccept: false });   // unreadable storage → assume not replaceable
       }
@@ -1058,6 +1065,14 @@ async function scheduleRecFetch() {
   const jitterMin = Math.random() * 59;
   chrome.alarms.create(ALARM_REC, { delayInMinutes: 1 + jitterMin, periodInMinutes: 360 });
   console.log(`[rec-fetch] Recommendation alarm scheduled (initial ${Math.round(1 + jitterMin)}m, then every 6h)`);
+}
+
+// A 410 removed the poll alarm and painted the red `!`; the next collection may be an hour away. An empty
+// snapshot still goes through updateBadge, so an install with no usage yet loses the `!` too.
+async function restoreAfterAccountDeletedLifted() {
+  await updatePollAlarm();
+  const lastStatus = await getLastStatus();
+  await updateBadgeForSelectedOrg(lastStatus?.snapshot || {});
 }
 
 // Adaptive poll alarm: adjusts interval based on activity state.
@@ -2103,7 +2118,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
         // `authBlocked` too: a login IS the fix for the email-provider 401, so the CTA must go
         // now rather than waiting for the next accepted POST to clear it (bg/storage.js).
-        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
+        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked', 'account_deleted']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
         // Same reason as the request path above: a silent catch here is why "the console is
@@ -2180,7 +2195,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const photo = profilePhotoRecord(data.email, decodeJwtPayload(idToken));
         if (photo) await chrome.storage.local.set({ [PROFILE_PHOTO_KEY]: photo });
         else await chrome.storage.local.remove(PROFILE_PHOTO_KEY);
-        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked']);
+        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked', 'account_deleted']);
         sendResponse({ success: true, email: data.email, name: data.name });
       } catch (e) {
         // launchWebAuthFlow rejects when the user closes the window — not an error worth surfacing

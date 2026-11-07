@@ -72,6 +72,15 @@ export function resolveBlockState(s = {}) {
   return null;
 }
 
+/**
+ * PURE. Did this storage change lift `account_deleted`? A 410 removes the poll alarm, and setupAlarm only
+ * runs on install, update and browser start, so whoever lifts the flag (three logins, the popup's recovery
+ * link) would otherwise leave periodic collection off until the next browser start (#2866).
+ */
+export function accountDeletedLifted(change) {
+  return !!change && change.oldValue === true && change.newValue !== true;
+}
+
 /** Gathers the state resolveBlockState() needs. Keep IO here so the decision stays testable. */
 export async function readBlockState(deps) {
   const { isUpgradeBlocked, serverSyncWithheldReason, getLastStatus } = deps;

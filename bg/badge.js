@@ -52,8 +52,10 @@ export async function updateBadgeForSelectedOrg(claudeSnapshot) {
  * (to e.g. badgeLockedByBlock) together with that guard when someone owns both.
  */
 export async function badgeLockedByAuthBlock() {
-  const { authBlocked } = await chrome.storage.local.get('authBlocked');
-  return authBlocked === true || await isUpgradeBlocked();
+  // account_deleted is read here rather than through storage.js, which imports this module. Collection has
+  // stopped, so a percentage would sit there as if it were current (deploy-1.56.17 R1-B2).
+  const { authBlocked, account_deleted } = await chrome.storage.local.get(['authBlocked', 'account_deleted']);
+  return authBlocked === true || account_deleted === true || await isUpgradeBlocked();
 }
 
 // === Badge update (based on usage display mode) ===
@@ -72,8 +74,8 @@ export async function updateBadge(util7d, util5h) {
   // notice clears, because the clearing path never runs. Every paint must settle the tooltip.
   // 🔴 The block is decided BEFORE the tooltip so the two can agree. It was decided after, and a
   // blocked install got a red `!` beside a tooltip about a pending plan order.
-  const { authBlocked } = await chrome.storage.local.get('authBlocked');
-  const blocked = authBlocked === true || await isUpgradeBlocked();
+  const { authBlocked, account_deleted } = await chrome.storage.local.get(['authBlocked', 'account_deleted']);
+  const blocked = authBlocked === true || account_deleted === true || await isUpgradeBlocked();
   await applyPinMoveTitle({ util7d, util5h, blocked });
   // Server sync is BLOCKED (email-provider guard 401 → bg/storage.js noteAuthBlocked). This wins
   // over every other badge state, including a pending order, for two reasons:

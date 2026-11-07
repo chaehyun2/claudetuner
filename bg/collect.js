@@ -27,7 +27,7 @@ import { upsertClaudeOrg, shouldKeepSkippedOrg } from './org-merge.js';
 import { noteProviderSuccess, reportClaudeCollectFail } from './provider-state.js';
 import { getRecDismiss, recDismissActive } from './rec-dismiss.js';
 import { isHeartbeatDue, nextHeartbeatRetry, HEARTBEAT_RETRY_KEY } from './heartbeat.js';
-import { getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, noteScopeInsufficient, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
+import { isAccountDeleted, markAccountDeleted, getConfig, setStatus, getLastStatus, appendUsageHistory, authedFetch, noteScopeInsufficient, simplePost, simpleAuthedPost, setExtTokenNoDowngrade, clearExtTokenIfMatches, getOrCreateInstallId, serverSyncWithheldReason, isServerSyncPaused, noteAuthBlocked, clearAuthBlocked, isAuthBlockSuppressed, noteTokenWithheld, resolveIngestIdentity, readLinkedCanonical } from './storage.js';
 // #1122 — install-beacon imports only from storage.js, so this does not close an import cycle.
 import { maybeSendFirstGatedBeacon } from './install-beacon.js';
 // Pure response parsing lives in its own chrome-free module so the contract runner can import
@@ -460,8 +460,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
   const _t0 = performance.now();
   const _timings = {};
   // Skip collection if account is deleted
-  const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
-  if (account_deleted) {
+  if (await isAccountDeleted()) {
     console.log('[Claude Tuner] Account deleted. Skipping collection.');
     return { success: false, account_deleted: true };
   }
@@ -1253,14 +1252,7 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       if (response.status === 410) {
         const errData = await response.json().catch(() => ({}));
         if (errData.account_deleted) {
-          console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
-          await chrome.storage.local.set({ account_deleted: true });
-          chrome.alarms.clear(ALARM_NAME);
-          // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
-          // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
-          // icon next to an alarm badge, which reads as two states at once. Chrome persists the
-          // icon across service-worker restarts, so a missed paint is permanent, not transient.
-          updateBadgeError();
+          await markAccountDeleted(sentToken);
           return;
         }
       }

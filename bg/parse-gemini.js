@@ -187,6 +187,8 @@ export function parseGeminiPolicy(otResponse, otOk) {
  *   needsStickyMetered  — the planId-based Workspace guess needs the sticky-metered check before
  *                         `noLimits` can be trusted; the caller overrides `noLimits` with it.
  */
+const GEMINI_WORKSPACE_LABEL = /Business|Enterprise|Work/i;
+
 export function resolveGeminiPlan({ policies, tierWord, planId, otOk, quotaTier = null }) {
   if (policies.length > 0) {
     // A policy is present → metered consumer account (NEVER Workspace, even if the tier
@@ -203,12 +205,24 @@ export function resolveGeminiPlan({ policies, tierWord, planId, otOk, quotaTier 
     // Well-formed otAQ7b response with NO policy → Google Workspace seat (unmetered).
     return { plan: 'Work', noLimits: true, needsUltraSubTier: false, needsStickyMetered: false };
   }
-  // otAQ7b failed → fall back to the (unreliable) planId map. `noLimits` here is PROVISIONAL:
+  // otAQ7b failed. The quota is a tier constant and planId is not (#2864: three 20x rows stored as
+  // 'AI Plus' with the quota readable in the same response). Not for a Workspace guess: Workspace seats
+  // have mixed quotas (DESIGN-gemini-policy-detection §17), so a quota cannot name them.
+  const mapped = GEMINI_PLAN_MAP[planId];
+  if (quotaTier && !GEMINI_WORKSPACE_LABEL.test(mapped || '')) {
+    return {
+      plan: GEMINI_POLICY_LABEL[quotaTier] || (quotaTier.charAt(0).toUpperCase() + quotaTier.slice(1)),
+      noLimits: false,
+      needsUltraSubTier: quotaTier === 'ultra',
+      needsStickyMetered: false,
+    };
+  }
+  // No readable quota, or a Workspace guess → the (unreliable) planId map. `noLimits` here is PROVISIONAL:
   // the sticky-metered guard the caller runs next is what settles it, by treating the account as
   // metered the moment we ever see real (>0) usage and remembering that, so a later 0% window
   // doesn't re-hide a consumer account. Genuine Workspace seats stay pinned at 0%, never get
   // marked, and keep noLimits.
-  const plan = GEMINI_PLAN_MAP[planId] || `Plan ${planId}`;
-  const planBasedNoLimits = /Business|Enterprise|Work/i.test(plan);
+  const plan = mapped || `Plan ${planId}`;
+  const planBasedNoLimits = GEMINI_WORKSPACE_LABEL.test(plan);
   return { plan, noLimits: planBasedNoLimits, needsUltraSubTier: false, needsStickyMetered: planBasedNoLimits };
 }

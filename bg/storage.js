@@ -751,6 +751,32 @@ export async function isAuthBlockSuppressed(email = null, now = Date.now()) {
  * showLoginPrompt/needsFullLogin on VERIFY_MAGIC_CODE). Drops the backoff record with it so a
  * later, unrelated block starts its ladder from the base wait rather than inheriting this one's.
  */
+/** The server answered 410 for this install's account. Every collector stops until a login clears it. */
+export async function isAccountDeleted() {
+  const { account_deleted } = await chrome.storage.local.get({ account_deleted: false });
+  return account_deleted === true;
+}
+
+/**
+ * Applies a 410 `account_deleted`. Ignored when the token the POST carried is no longer the stored one:
+ * a login replaced it while the answer was in flight, and that login is what brought the account back.
+ * The flag stops every collector, so a stale 410 would otherwise undo the login (#2863 R1-B1).
+ */
+export async function markAccountDeleted(sentToken) {
+  if (((await getExtToken()) || null) !== (sentToken || null)) {
+    console.log('[Claude Tuner] Ignoring account_deleted for a token that has since been replaced.');
+    return;
+  }
+  console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
+  await chrome.storage.local.set({ account_deleted: true });
+  chrome.alarms.clear(ALARM_NAME);
+  // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
+  // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
+  // icon next to an alarm badge, which reads as two states at once. Chrome persists the
+  // icon across service-worker restarts, so a missed paint is permanent, not transient.
+  updateBadgeError();
+}
+
 export async function clearAuthBlocked() {
   // Two calls, not one remove([...]): test/login-first-guard.mjs pins this exact
   // `remove('authBlocked')` as the recovery contract, and quietly reshaping it into an array
@@ -1001,14 +1027,7 @@ export async function postSnapshot(config, payload, onSendFailure) {
   if (response.status === 410) {
     const errData = await response.json().catch(() => ({}));
     if (errData.account_deleted) {
-      console.log('[Claude Tuner] Account has been deleted. Stopping collection.');
-      await chrome.storage.local.set({ account_deleted: true });
-      chrome.alarms.clear(ALARM_NAME);
-      // 🔴 Through updateBadgeError(), not a raw setBadgeText (#994). The icon is now a
-      // semantic channel: painting the `!` badge without the error icon leaves the NORMAL
-      // icon next to an alarm badge, which reads as two states at once. Chrome persists the
-      // icon across service-worker restarts, so a missed paint is permanent, not transient.
-      updateBadgeError();
+      await markAccountDeleted(sentToken);
     }
     return null;
   }

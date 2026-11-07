@@ -5,7 +5,7 @@ import { updateBadgeForSelectedOrg } from './badge.js';
 import { collectChatGPT } from './collect-chatgpt.js';
 import { isChatGPTAccountSwitch } from './parse-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
-import { appendUsageHistory, reconcileProviderRecs } from './storage.js';
+import { appendUsageHistory, isAccountDeleted, reconcileProviderRecs } from './storage.js';
 import { CLAUDE_SESSION_COOKIE, isUsableTab, providerForUrl } from '../vendor-ai/sites.js';
 import { CLAUDE_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
 
@@ -182,6 +182,9 @@ export async function hasClaudeSession() {
 
 // Merge ChatGPT orgs into collectedOrgs storage (independent of Claude collection)
 export async function mergeChatGPTOrgs(force = false, userManual = false) {
+  // #2863: the 410 is seen by postSnapshot, but only the Claude collector used to check the flag, so these
+  // two kept fetching and being refused until the token expired.
+  if (await isAccountDeleted()) return;
   // The account generation this collect started under. A switch while it ran means its orgs describe
   // the PREVIOUS account: the shared collect lock lets a periodic collect overlap the switch collect,
   // and a late write from it would put the old account back over the new one (Codex R1-B1). Its POSTs
@@ -239,6 +242,7 @@ export async function mergeChatGPTOrgs(force = false, userManual = false) {
 // Returns true when Gemini usage was actually collected + stored, false otherwise
 // (so callers can debounce only on success, not on a failed/empty attempt).
 export async function mergeGeminiOrgs(force = false, userManual = false) {
+  if (await isAccountDeleted()) return false; // #2863, see mergeChatGPTOrgs
   try {
     const result = await collectGemini(force, userManual);
     // Gemini has no rec engine today, so this normally finds nothing to do. It is wired anyway
