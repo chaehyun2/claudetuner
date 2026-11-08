@@ -19,7 +19,7 @@
 //    the upload can be overwritten.
 //
 // The page never sends a zip or a URL here — team skill ids only. The zip comes from our server (`server.download`).
-import { chatOrgsOf, personalSkillsOf, uploadSkillZip, checkApplyZip } from './skills-import.js';
+import { chatOrgsOf, personalSkillsOf, uploadSkillZip, checkApplyZip, rejectedResult } from './skills-import.js';
 
 export const SKILL_TRACK_PROTO = 'SKILL_TRACK_PROTO';
 export const SKILL_ADD_TRACKED = 'SKILL_ADD_TRACKED';
@@ -202,7 +202,7 @@ export function createSkillUpdater(deps) {
         if (up.reason === 'rejected') out.fail = { v: target, n: (r.fail && r.fail.v === target ? r.fail.n : 0) + 1 };
         return out;
       });
-      return { ok: false, reason: up.reason };
+      return up.reason === 'rejected' ? rejectedResult(up.code) : { ok: false, reason: up.reason };
     }
     if (up.skill.id !== rec.sid || up.skill.owner !== rec.cacct) {
       // ⑤ not the skill we meant: maybe a new one, maybe another. Kept for the user; never re-linked or removed.
@@ -398,7 +398,8 @@ export function createSkillUpdater(deps) {
       if (!up.ok) {
         if (up.reason === 'unknown') { await mutate(teamId, settleInflight); return { ok: false, reason: 'unknown' }; }
         await restore();   // answered, nothing written: the replaced record stands
-        return up.reason === 'exists' ? { ok: false, reason: 'exists', org_id: org.uuid } : { ok: false, reason: up.reason };
+        if (up.reason === 'exists') return { ok: false, reason: 'exists', org_id: org.uuid };
+        return up.reason === 'rejected' ? rejectedResult(up.code) : { ok: false, reason: up.reason };
       }
       const clash = (same && up.skill.id !== same.skill_id) || up.skill.owner !== ctx.cacct
         || Object.entries((await load()).recs).some(([tid, r]) => tid !== teamId && r && r.cacct === ctx.cacct && r.org === org.uuid && r.sid === up.skill.id);

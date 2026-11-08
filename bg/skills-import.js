@@ -2,7 +2,7 @@
 //
 //   page → us (onMessageExternal):  { type: 'SKILL_IMPORT_LIST' }                     →  { ok, skills: [{ org_id, org_name, skill_id, name, description, updated_at }] }
 //                                   { type: 'SKILL_IMPORT_FETCH', org_id, skill_id }  →  { ok, base64, size } | { ok: false, reason }
-//                                   { type: 'SKILL_APPLY', base64, org_id?, overwrite? } →  { ok, org_id, skill_id, name } | { ok: false, reason[, orgs] }
+//                                   { type: 'SKILL_APPLY', base64, org_id?, overwrite? } →  { ok, org_id, skill_id, name } | { ok: false, reason[, orgs | code] }
 //                                   { type: 'SKILL_APPLY', probe: true }               →  { ok: true, probe: true } (no claude.ai call)
 //                                   { type: 'SKILL_REMOVE', org_id, skill_id }        →  { ok } | { ok: false, reason }
 //                                   { type: 'SKILL_REMOVE', probe: true }              →  { ok: true, probe: true } (no claude.ai call)
@@ -40,6 +40,9 @@ const CHAT_CAPABILITY = 'chat';   // API-only organizations answer 403 to every 
 const UPLOAD_SOURCE = 'customize_upload';
 const UPLOAD_FILE_NAME = 'skill.skill';   // the name inside the zip decides the skill's name, not this
 const SKILL_EXISTS_CODE = 'upload_skill_already_exists';
+// claude.ai's refusal code (`error_code`, e.g. `skill_md_description_too_long`) is passed on as a token only — its `message`
+// text never leaves here (#2806). Anything that is not a plain lowercase token is dropped.
+const REJECT_CODE_RE = /^[a-z0-9_]{1,64}$/;
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];   // the zip local-header magic `PK\x03\x04`
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const SKILL_APPLY_MAX_BASE64 = Math.ceil(SKILL_IMPORT_MAX_BYTES / 3) * 4;
@@ -55,6 +58,11 @@ export function checkApplyZip(b64) {
 }
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+
+/** `{ ok: false, reason: 'rejected' }`, plus `code` when claude.ai named a token-shaped one (never its message). */
+export function rejectedResult(code) {
+  return typeof code === 'string' && REJECT_CODE_RE.test(code) ? { ok: false, reason: 'rejected', code } : { ok: false, reason: 'rejected' };
+}
 
 /** The personal skills in one org's `library/mine?kind=skill` answer, as list rows. */
 export function personalSkillRows(org, body) {
@@ -136,7 +144,11 @@ async function applySkill(message, fetchApi) {
     return { ok: false, reason: 'pick_org', orgs: got.orgs.map((o) => ({ org_id: o.uuid, org_name: str(o.name, TEXT_MAX.org_name) })) };
   }
   const up = await uploadSkillZip(fetchApi, org.uuid, b64, message.overwrite === true);
-  if (!up.ok) return up.reason === 'exists' ? { ok: false, reason: 'exists', org_id: org.uuid } : { ok: false, reason: up.reason === 'unknown' ? 'error' : up.reason };
+  if (!up.ok) {
+    if (up.reason === 'exists') return { ok: false, reason: 'exists', org_id: org.uuid };
+    if (up.reason === 'rejected') return rejectedResult(up.code);
+    return { ok: false, reason: up.reason === 'unknown' ? 'error' : up.reason };
+  }
   return { ok: true, org_id: org.uuid, skill_id: up.skill.id, name: up.skill.name };
 }
 
@@ -158,6 +170,7 @@ const ANSWERED_RE = /^err_(http:4\d\d|auth_failed|session_expired|no_cookies|rat
  * Upload a skill zip into one org (overwrite only when `overwrite === true`). Measured 2026-11-03 (plan §15-1): the answer
  * carries the write's own version (`backing_plugin_head_version`) and the claude.ai account (`owner.uuid`).
  * → { ok: true, skill: { id, name, head, owner } } | { ok: false, reason: 'exists' | 'rejected' | 'claude_login' | 'rate_limit' | 'error' | 'unknown' }
+ *   ('rejected' may carry `code`: claude.ai's `error_code` token, never its message — #2806)
  * ('error' = claude.ai answered a bare 4xx — not written; only 'unknown' may have been written)
  */
 export async function uploadSkillZip(fetchApi, orgUuid, b64, overwrite, expectAccount) {
@@ -171,13 +184,16 @@ export async function uploadSkillZip(fetchApi, orgUuid, b64, overwrite, expectAc
     const m = String((e && e.message) || '');
     if (m === ERR_ACCOUNT_MISMATCH) return { ok: false, reason: 'other_account' };   // checked in the request itself: not sent
     if (m === `err_http:400:${SKILL_EXISTS_CODE}`) return { ok: false, reason: 'exists' };
-    if (/^err_http:4\d\d:/.test(m)) return { ok: false, reason: 'rejected' };   // claude.ai refused the skill itself
+    if (/^err_http:4\d\d:/.test(m)) return rejectedResult(m.split(':')[2]);   // claude.ai refused the skill itself
     if (ANSWERED_RE.test(m)) return { ok: false, reason: failReason(e) };   // 'error' here = answered (a bare 4xx), not written
     return { ok: false, reason: 'unknown' };
   }
   const skill = r && r.skill;
   // 200 with `validation_errors` and no skill (§13-7): claude.ai refused it — nothing written (#2806).
-  if (!skill && r && Array.isArray(r.validation_errors) && r.validation_errors.length) return { ok: false, reason: 'rejected' };
+  if (!skill && r && Array.isArray(r.validation_errors) && r.validation_errors.length) {
+    const first = r.validation_errors[0];
+    return rejectedResult(first && first.error_code);
+  }
   if (!skill || typeof skill.id !== 'string' || !SKILL_ID_RE.test(skill.id)) return { ok: false, reason: 'unknown' };
   return {
     ok: true,

@@ -680,6 +680,7 @@ const TRANSLATIONS = {
     'account_deleted_msg': '계정 삭제됨',
     'account_deleted_detail': '이 계정은 삭제되었습니다. 데이터 수집이 중단되었습니다.',
     'account_recover_btn': '계정 복구',
+    'account_recover_hint': '대시보드에서 로그인하면 수집이 자동으로 다시 시작돼요.',
     'err_rate_limit': 'Claude.ai API 요청 제한 (Rate Limit). 잠시 후 자동으로 재시도됩니다.',
     // === provider 수집 실패 사유 (#852) ===
     // 확장이 던지던 err_* 코드들이 어디에도 안 나와 「ChatGPT 칸이 그냥 비어 있음」으로만 보였다.
@@ -1520,6 +1521,7 @@ const TRANSLATIONS = {
     'account_deleted_msg': 'Account deleted',
     'account_deleted_detail': 'This account has been deleted. Data collection has stopped.',
     'account_recover_btn': 'Recover Account',
+    'account_recover_hint': 'Sign in on the dashboard and collection resumes on its own.',
     // Error messages (keys from background.js)
     'err_rate_limit': 'Claude.ai rate limited. Will retry automatically.',
     // === provider collection failure reasons (#852) ===

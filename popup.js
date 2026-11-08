@@ -473,15 +473,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     const errorMsg = document.getElementById('error-msg');
     errorMsg.innerHTML = (t('account_deleted_detail') || 'This account has been deleted. Data collection has stopped.')
       + '<br><a id="recover-link" href="#" style="display:inline-block;margin-top:8px;padding:6px 14px;background:#7c3aed;color:#fff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">'
-      + (t('account_recover_btn') || 'Recover Account') + '</a>';
+      + (t('account_recover_btn') || 'Recover Account') + '</a>'
+      + '<br><span style="display:inline-block;margin-top:6px;font-size:11px;opacity:.8">'
+      + (t('account_recover_hint') || 'Sign in on the dashboard and collection resumes on its own.') + '</span>';
     errorBanner.classList.remove('hidden');
     noteSurface('account_deleted');
     // Hide hint area
     const hintEl = errorBanner.querySelector('.error-hint');
     if (hintEl) hintEl.style.display = 'none';
+    // 🔴 The link only opens the dashboard; it never clears `account_deleted` (#2871). The server
+    // account is still deleted until the user signs in, so clearing here repainted a normal badge
+    // until the next POST's 410. The flag is lifted by sign-in / token handoff only
+    // (background.js RECOVER_EXT_TOKEN, VERIFY_MAGIC_CODE, GOOGLE_SIGNIN).
     document.getElementById('recover-link').addEventListener('click', (e) => {
       e.preventDefault();
-      chrome.storage.local.remove('account_deleted');
       chrome.tabs.create({ url: 'https://claudetuner.com/dashboard/settings/' });
     });
     return;
