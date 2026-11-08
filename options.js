@@ -319,6 +319,16 @@ let _histSyncSeenChange = false;
 // #2092 P2: true once the reset-pass toggles show their stored (or default) state — see doSave.
 let _rpNotifyLoaded = false;
 
+// The dots switch only matters while the ChatGPT input strip itself is on (chatgpt-input.js unmounts everything
+// when chatgptInputUsageEnabled is off) — show it greyed out then, keeping its own stored value.
+function _syncDotsInputToggle() {
+  const parentOn = document.getElementById('chatgpt-input-usage-enabled').checked;
+  const cb = document.getElementById('chatgpt-dots-input-usage-enabled');
+  cb.disabled = !parentOn;
+  const label = cb.closest('label');
+  if (label) label.style.opacity = parentOn ? '' : '0.5';
+}
+
 function autoSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(doSave, 800);
@@ -348,6 +358,7 @@ function doSave() {
   const foldersEnabled = document.getElementById('folders-enabled').checked;
   const chatgptSidebarUsageEnabled = document.getElementById('chatgpt-sidebar-usage-enabled').checked;
   const chatgptInputUsageEnabled = document.getElementById('chatgpt-input-usage-enabled').checked;
+  const chatgptDotsInputUsageEnabled = document.getElementById('chatgpt-dots-input-usage-enabled').checked;
   const foldersEnabledChatgpt = document.getElementById('chatgpt-folders-enabled').checked;
   const geminiSidebarUsageEnabled = document.getElementById('gemini-sidebar-usage-enabled').checked;
   const geminiInputUsageEnabled = document.getElementById('gemini-input-usage-enabled').checked;
@@ -365,7 +376,7 @@ function doSave() {
   const notifyCollectFail = document.getElementById('notify-collect-fail').checked;
   const notifyAuthBlockedFollowup = document.getElementById('notify-authblock-followup').checked;
 
-  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, promptButtonEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
+  const config = { serverUrl, apiKey: apiKey || CT_CONFIG.DEFAULT_API_KEY, intervalExplicitlySet, optimizationMode, collectClaude, collectChatGPT, collectGemini, usageDisplayMode, thresholdWarn, thresholdDanger, sidebarUsageEnabled, inputUsageEnabled, foldersEnabled, chatgptSidebarUsageEnabled, chatgptInputUsageEnabled, chatgptDotsInputUsageEnabled, foldersEnabledChatgpt, geminiSidebarUsageEnabled, geminiInputUsageEnabled, compareEnabled, compareMsgButtonEnabled, compareSuggestEnabled, promptButtonEnabled, notifyResetSoon, notifyResetDone, notifyUsageWarn, notifyUsageDanger, notifyWeeklyReport, notifyPlanChange, notifyCollectFail, notifyAuthBlockedFollowup };
   // #2092 P2 reset-pass toggles — written only once their stored state has been shown. Before that
   // the boxes hold no decision (options.html leaves them unchecked), and saving them would turn
   // every one OFF for a user who only touched another setting.
@@ -479,7 +490,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load saved settings
   chrome.storage.sync.get(
-    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, compareSuggestEnabled: true, promptButtonEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
+    { serverUrl: CT_CONFIG.DEFAULT_SERVER_URL, apiKey: CT_CONFIG.DEFAULT_API_KEY, intervalMinutes: 10, intervalExplicitlySet: false, optimizationMode: 'notify_only', collectClaude: true, collectChatGPT: true, collectGemini: true, usageDisplayMode: '7d', thresholdWarn: 80, thresholdDanger: 95, sidebarUsageEnabled: true, inputUsageEnabled: true, foldersEnabled: true, chatgptSidebarUsageEnabled: true, chatgptInputUsageEnabled: true, chatgptDotsInputUsageEnabled: true, foldersEnabledChatgpt: true, geminiSidebarUsageEnabled: true, geminiInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true, compareSuggestEnabled: true, promptButtonEnabled: true, notifyResetSoon: true, notifyResetDone: true, notifyUsageWarn: false, notifyUsageDanger: true, notifyWeeklyReport: true, notifyPlanChange: true, notifyCollectFail: true, notifyAuthBlockedFollowup: true },
     (config) => {
       document.getElementById('server-url').value = config.serverUrl;
       document.getElementById('api-key').value = config.apiKey;
@@ -538,6 +549,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       _refreshFoldersAvailability();
       document.getElementById('chatgpt-sidebar-usage-enabled').checked = config.chatgptSidebarUsageEnabled !== false;
       document.getElementById('chatgpt-input-usage-enabled').checked = config.chatgptInputUsageEnabled !== false;
+      document.getElementById('chatgpt-dots-input-usage-enabled').checked = config.chatgptDotsInputUsageEnabled !== false;
+      _syncDotsInputToggle();
       document.getElementById('gemini-sidebar-usage-enabled').checked = config.geminiSidebarUsageEnabled !== false;
       document.getElementById('gemini-input-usage-enabled').checked = config.geminiInputUsageEnabled !== false;
       document.getElementById('compare-enabled').checked = config.compareEnabled !== false;
@@ -612,6 +625,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('compare-msg-button-enabled').addEventListener('change', autoSave);
   document.getElementById('compare-suggest-enabled').addEventListener('change', autoSave);
   document.getElementById('prompt-button-enabled').addEventListener('change', autoSave);
+  document.getElementById('chatgpt-dots-input-usage-enabled').addEventListener('change', autoSave);
+  document.getElementById('chatgpt-input-usage-enabled').addEventListener('change', _syncDotsInputToggle);
   // #2821 team skills auto-update: the background owns the value (it also resets the 「대기」 card state).
   const skuBox = document.getElementById('skill-update-auto');
   chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => { void chrome.runtime.lastError; if (r && typeof r.auto === 'boolean') skuBox.checked = r.auto; });

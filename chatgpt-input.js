@@ -27,6 +27,7 @@
 
   // ── State ──
   let _enabled = null;
+  let _dotsEnabled = true; // chatgptDotsInputUsageEnabled — the dots chat screen, under _enabled
   let _mounted = false;
   let _data = null;
   let _lang = 'en';
@@ -150,8 +151,36 @@
     'form[data-composer-placement="home"], form[data-composer-placement="thread"]',
   ];
 
-  /** The composer form, preferring a laid-out one if the page ever holds several; null if none. */
+  // Dots (chatgpt.com/dots/<id>, a chat with an agent — 2026-11-09 live-measured): its composer is NOT a
+  // form. The root is the outermost `[data-composer-layout]` box around a ProseMirror editor, inside a laid-out
+  // `div.relative`. 🔴 The page ALSO keeps the home `form[data-chatgpt-composer]` mounted but hidden, so the
+  // form lookup below would find it (as the fallback) and mount the strip somewhere invisible, and the compare
+  // button / prompt picker would read and fill the hidden editor. On a dots route the dots composer is the
+  // only answer — or none, when the user switched the dots strip off.
+  const DOTS_PATH_RE = /^\/dots(\/|$)/;
+  const COMPOSER_LAYOUT_ATTR = 'data-composer-layout';
+  function isDotsPage() { return DOTS_PATH_RE.test(location.pathname); }
+
+  /** The dots composer root (lowest laid-out one — the main box sits at the bottom); null if none. */
+  function findDotsComposer() {
+    let best = null, bestBottom = -Infinity;
+    for (const editor of document.querySelectorAll('div.ProseMirror[contenteditable="true"]')) {
+      if (editor.closest('form') || editor.getClientRects().length === 0) continue;
+      let root = editor.closest(`[${COMPOSER_LAYOUT_ATTR}]`);
+      while (root && root.parentElement && root.parentElement.closest(`[${COMPOSER_LAYOUT_ATTR}]`)) {
+        root = root.parentElement.closest(`[${COMPOSER_LAYOUT_ATTR}]`);
+      }
+      if (!root) continue;
+      const bottom = root.getBoundingClientRect().bottom;
+      if (bottom > bestBottom) { best = root; bestBottom = bottom; }
+    }
+    return best;
+  }
+
+  /** The composer form, preferring a laid-out one if the page ever holds several; null if none.
+   *  On a dots route: the dots composer root (a div, not a form) when that option is on, else null. */
   function findComposerForm() {
+    if (isDotsPage()) return _dotsEnabled ? findDotsComposer() : null;
     let fallback = null;
     for (const selector of COMPOSER_FORM_SELECTORS) {
       const forms = Array.from(document.querySelectorAll(selector));
@@ -173,6 +202,9 @@
       }
       return { type: 'belowbox', el: form };
     }
+    // A dots route has no disclaimer row of its own, and with the dots option off the null above is the
+    // answer — falling through to the disclaimer would put the strip back (Codex R1-B1).
+    if (isDotsPage()) return null;
     const disclaimer = findDisclaimer();
     if (disclaimer && disclaimer.parentNode) return { type: 'disclaimer', el: disclaimer };
     return null;
@@ -697,6 +729,10 @@
       _cmpMsgEnabled = changes.compareMsgButtonEnabled.newValue !== false;
       syncMessageButtons();
     }
+    if (changes.chatgptDotsInputUsageEnabled) {
+      // No unmount here: the next mount check finds no anchor on a dots route and removes the strip.
+      _dotsEnabled = changes.chatgptDotsInputUsageEnabled.newValue !== false;
+    }
     if (changes.chatgptInputUsageEnabled) {
       _enabled = changes.chatgptInputUsageEnabled.newValue !== false;
       if (!_enabled) unmount(); else { requestUsageData(); ensureCompareFlag(); }
@@ -743,9 +779,10 @@
 
   // ── Init ──
   function init() {
-    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true }, (cfg) => {
+    chrome.storage.sync.get({ lang: 'auto', chatgptInputUsageEnabled: true, chatgptDotsInputUsageEnabled: true, compareEnabled: true, compareMsgButtonEnabled: true }, (cfg) => {
       _lang = cfg.lang === 'auto' ? CORE.detectLang() : cfg.lang;
       _enabled = cfg.chatgptInputUsageEnabled !== false;
+      _dotsEnabled = cfg.chatgptDotsInputUsageEnabled !== false;
       _cmpEnabled = cfg.compareEnabled !== false;
       _cmpMsgEnabled = cfg.compareMsgButtonEnabled !== false;
       if (_enabled) requestUsageData();
