@@ -34,29 +34,40 @@ html.dark, html.dark-oled, html[data-theme="dark"] {
 }
 
 /* ── Sidebar panel (no card — blends into the native nav) ── */
+/* Native geometry (live-measured 2026-11-09, new sidebar): each section has a 6px side inset and
+   its rows pad 6px 10px, so icons start 16px and labels 42px (20px icon + 6px gap) from the nav
+   edge. The panel copies the 6px inset so every row below lines up with ChatGPT's own.
+   Vertical: the panel mounts at the top of the scroll area, which already sits 9px under the last
+   header row (nav list pb 1px + mb 8px) and pads its own top by 4px. -4px cancels that padding so
+   our header reads as the next menu row, not a new section (user screenshot 2026-11-09). Going
+   further would clip it: the scroll box's overflow cuts at its top edge. No bottom margin — the
+   scroll area's own 20px gap to the next section is the native section spacing. */
 .ct-cg-panel {
-  margin: 2px 0 8px;
+  margin: -4px 6px 0;
   font-family: inherit;
   white-space: normal;
   /* Establish an adaptive text color so color:inherit children (e.g. the shared
      ad banner) stay readable instead of depending on the host nav's inherited
-     color. Parity with the Claude/Gemini panels. */
-  color: var(--ct-cg-text);
+     color. Parity with the Claude/Gemini panels.
+     ChatGPT's nav redefines --color-text as an 85% mix of the text colour and its menu labels use it
+     (.text-default, live-measured 2026-11-09) — inherit that so our text matches theirs; our full-
+     strength token only stands in where the host variable is missing (older builds). */
+  color: var(--color-text, var(--ct-cg-text));
 }
 
 /* Header: our own one-row layout (no borrowed site class — #1715). The padding matches a native
    menu row's inset so the logo lines up with ChatGPT's own icons above it. */
-.ct-cg-head { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; cursor: default; }
+.ct-cg-head { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 10px; cursor: default; }
 .ct-cg-icon { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex-shrink: 0; }
 .ct-cg-logo { width: 18px; height: 18px; border-radius: 4px; display: block; }
-.ct-cg-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; color: var(--ct-cg-text); }
+.ct-cg-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 20px; color: var(--color-text, var(--ct-cg-text)); }
 
 /* Content aligns under the menu rows (icon column → right edge). */
 .ct-cg-content {
   display: flex;
   flex-direction: column;
   gap: 9px;
-  padding: 4px 14px 0;
+  padding: 4px 10px 0;
 }
 
 .ct-cg-message { font-size: 12px; padding: 2px 0; }
@@ -208,7 +219,7 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 4px 12px 0;
+  margin: 4px 10px 0;
   padding: 6px 8px;
   border-radius: 8px;
   background: rgba(127, 127, 127, 0.1);
@@ -224,9 +235,9 @@ button.ct-cg-subhead[aria-expanded="true"] .ct-cg-subhead-chev { transform: rota
   padding: 0 2px;
 }
 
-/* In-house ad banner — match the announcement's horizontal inset (12px) so it
-   doesn't run edge-to-edge; vertical spacing comes from the banner's own margin. */
-.ct-cg-ad { margin: 0 12px; }
+/* In-house ad banner — match the announcement's horizontal inset (10px, = the content column) so
+   it doesn't run edge-to-edge; vertical spacing comes from the banner's own margin. */
+.ct-cg-ad { margin: 0 10px; }
 /* Ad banner hover — the SAME overlay the panel's other clickable rows use, so the ad slot
    doesn't feel like a foreign element. The banner is drawn by the shared canonical builder
    with inline styles that set no background, so this rule wins without a specificity fight. */
