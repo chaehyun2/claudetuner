@@ -251,6 +251,9 @@ export async function mergeGeminiOrgs(force = false, userManual = false) {
     await reconcileProviderRecs('gemini', result.orgs);
     const { collectedOrgs = [] } = await chrome.storage.local.get({ collectedOrgs: [] });
     const nonGemini = collectedOrgs.filter(o => o.provider !== 'gemini');
+    // No orgs (every account signed out, or a failed cycle) writes nothing: the last Gemini orgs stay
+    // under the popup's status line, which says signed out (err_gemini_not_logged_in) — the same as
+    // ChatGPT above and Claude (background.js) do on sign-out (#2713, decided 2026-11-09).
     if (result.orgs.length > 0) {
       // Preserve user-pinned primary org
       const prevPrimaryUuid = collectedOrgs.find(o => o.isPrimary)?.uuid;

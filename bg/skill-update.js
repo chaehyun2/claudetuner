@@ -60,6 +60,7 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
  *  fetchApi(path, options)   claude.ai (bg/api.js fetchClaudeApi)
  *  server.tokenEmail()       the login-proven ext_token's email, or null (local — detects a switch mid-job)
  *  server.updates(ids)       → { ok: true, me, skills, gone } | { ok: false }
+ *  server.held(ids, email)   → { ok }  (#2915 — optional: absent = not reported; only with `email`'s token)
  *  server.download(id, v, use) → { ok: true, base64, version } | { ok: false, status }
  *  store.get(keys) / store.set(obj)   chrome.storage.local
  *  notify({ kind: 'done' | 'wait' | 'clear_wait', items })  → Promise<boolean> (shown) — the background words it
@@ -285,6 +286,16 @@ export function createSkillUpdater(deps) {
         const r = await runUpdate(id, 'auto', info, ctx, me);
         if (r.ok) done.push({ id, name: info.name, v: r.v, summary: info.edit_summary || null, by: infoView(info).by });
       }
+      // 「보유」 (#2915): only this account's records whose copy the claude.ai list just showed — never a guess.
+      if (server.held && (await sameContext(ctx))) {
+        const recsNow = (await load()).recs, held = [];
+        for (const id of ids) {
+          const rec = recsNow[id];
+          if (rec && ownedBy(rec, ctx, me) && !rec.inflight && !gone.has(id) && (await present(rec)) === true) held.push(id);
+        }
+        // Sent only with the token of the account pinned at the start (R2-B1): a switch while the lists were read sends nothing.
+        for (let i = 0; i < held.length && (await sameContext(ctx)); i += UPDATE_IDS_CHUNK) await server.held(held.slice(i, i + UPDATE_IDS_CHUNK), ctx.email).catch(() => null);
+      }
       const info = {};
       for (const [id, s] of rows) info[id] = infoView(s);
       const next = { ...(await load()).meta, me, lastCheck: now(), info };
@@ -412,6 +423,27 @@ export function createSkillUpdater(deps) {
       await saveMeta({ ...meta, me, info: { ...(meta.info || {}), [teamId]: infoView(info) } });
       return { ok: true, org_id: org.uuid, skill_id: up.skill.id, name: up.skill.name, v: info.latest_version };
     });
+  }
+
+  /**
+   * The claude.ai picker's 「스킬」 list (#2905): the team skills + which this account tracks now (Tuner key from the
+   * list answer + the current claude.ai account; a record of another account says nothing here). Read-only.
+   */
+  async function listForPicker() {
+    if (!server.list) return { ok: false, reason: 'unavailable' };
+    const r = await server.list();
+    if (!r.ok) return { ok: false, status: r.status || 0 };
+    const { recs, meta } = await load();
+    const cacct = await claudeAccount();
+    const tracked = {};
+    for (const [id, rec] of Object.entries(recs)) {
+      // The claude.ai account unknown (no tab, cookie path blocked): no record is claimed as this account's (R1-B1) —
+      // the button then offers 「추가」 and the add path decides with the account it reads itself.
+      if (!rec || !cacct || rec.tuner !== r.me || rec.cacct !== cacct) continue;
+      const latest = (r.skills.find((x) => x.id === id) || {}).latest_version || (meta.info && meta.info[id] && meta.info[id].latest_version) || 0;
+      tracked[id] = rec.inflight || rec.check ? 'check' : rec.paused ? 'paused' : latest > (rec.v || 0) ? 'stale' : 'have';
+    }
+    return { ok: true, me: r.me, skills: r.skills, tracked, unsure: !cacct };
   }
 
   // ── what the dashboard / popup shows ──
@@ -553,7 +585,7 @@ export function createSkillUpdater(deps) {
     });
   }
 
-  return { add, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue, openSettings };
+  return { add, listForPicker, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue, openSettings };
 }
 
 /**

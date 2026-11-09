@@ -37,6 +37,29 @@ export const skillUpdateServer = {
     if ((await tokenEmail()) !== email || !data) return { ok: false };
     return { ok: true, me: data.me, skills: Array.isArray(data.skills) ? data.skills : [], gone: Array.isArray(data.gone) ? data.gone : [] };
   },
+  /** The picker's 「스킬」 list (#2905): { ok, me, skills } — every team skill this account reads. */
+  async list() {
+    const email = await tokenEmail();
+    const resp = await get('/api/ext/team-skills/list', email);
+    if (!resp || !resp.ok) return { ok: false, status: resp ? resp.status : 0 };
+    const data = await resp.json().catch(() => null);
+    if ((await tokenEmail()) !== email || !data || typeof data.me !== 'string') return { ok: false };
+    const skills = (Array.isArray(data.skills) ? data.skills : []).filter((x) => x && TEAM_ID_RE.test(x.id) && typeof x.name === 'string')
+      .map((x) => ({ id: x.id, org_id: x.org_id, name: x.name, description: typeof x.description === 'string' ? x.description : '',
+        latest_version: Number(x.latest_version) || 0, holders: Number(x.holders) || 0 }));
+    return { ok: true, me: data.me, skills };
+  },
+  /** 「these are in my claude.ai now」 (#2915) — best effort; the dashboard's 「보유 N명」 is built from it. */
+  async held(ids, email) {
+    // `email` = the account the caller pinned: authedFetch refuses to send with any other token (R2-B1).
+    if (!Array.isArray(ids) || !ids.length || !ids.every((id) => TEAM_ID_RE.test(id)) || !email || (await tokenEmail()) !== email) return { ok: false };
+    const config = await getConfig().catch(() => null);
+    if (!config?.serverUrl || !email) return { ok: false };
+    const resp = await authedFetch(config, `${config.serverUrl}/api/ext/team-skills/held`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+    }, { requireTokenEmail: email }).catch(() => null);
+    return { ok: !!resp?.ok };
+  },
   async download(id, v, use) {
     if (!TEAM_ID_RE.test(id) || !Number.isInteger(v) || v < 1) return { ok: false };
     const email = await tokenEmail();

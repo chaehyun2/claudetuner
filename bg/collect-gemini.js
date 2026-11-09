@@ -1,4 +1,4 @@
-import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo, listGeminiAccounts, invalidateGeminiAccounts } from './api-gemini.js';
+import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo, listGeminiAccounts, invalidateGeminiAccounts, geminiAccountAt } from './api-gemini.js';
 import { platformField } from './platform.js';
 // The plan-policy RPC (`otAQ7b`) — the same call the vendored client reads the model picker from
 // (#2054), so its id is spelled once.
@@ -64,7 +64,7 @@ export async function collectGemini(force = false, userManual = false) {
       force, userManual, expect: acc, quiet: acc !== primary, identityEmail: primary.email,
     });
     orgs.push(...r.orgs);
-    if (r.gone) gone.add(acc.googleId);
+    if (r.gone || (!r.success && await signedOutSince(acc))) gone.add(acc.googleId);
   }
   orgs.sort((a, b) => a.authuser - b.authuser);
   // Listed accounts that did not come back this cycle (a failure, an overlapping collection) keep
@@ -73,6 +73,23 @@ export async function collectGemini(force = false, userManual = false) {
   // and keeping it would hold a signed-out account until the list expires (Codex R2-B2).
   const keepUuids = accounts.map((a) => a.googleId).filter((id) => id && !gone.has(id) && !orgs.some((o) => o.uuid === id));
   return { success: orgs.length > 0, orgs, keepUuids };
+}
+
+/**
+ * Whether a listed account whose collection just failed is shown to be signed out (#2714): its
+ * /u/<n> no longer has an account, or answers as someone else (the indices moved). A failure that
+ * proves neither — an HTTP error, a page we cannot name — keeps the account, as before; the
+ * consequence of `true` is only that its stored entry leaves the local list.
+ */
+async function signedOutSince(acc) {
+  if (!Number.isInteger(acc.authuser)) return false;
+  let who;
+  try { who = await geminiAccountAt(acc.authuser); } catch { return false; }
+  const gone = who === null
+    || (!!acc.googleId && !!who.googleId && who.googleId !== acc.googleId)
+    || (!acc.googleId && !!acc.email && !!who.email && who.email !== acc.email);
+  if (gone) invalidateGeminiAccounts();
+  return gone;
 }
 
 /**

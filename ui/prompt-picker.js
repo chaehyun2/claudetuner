@@ -82,6 +82,16 @@
       share_team: '팀에 공유', share_ask_one: '{org} 팀원 모두에게 보여요 (공유한 사람으로 내 이름도)', share_ask_many: '어느 팀에 공유할까요? 팀원 모두에게 보여요',
       share_btn: '공유', cancel: '취소', team_shared: '{org}에 공유했어요', team_exists: '{org}에 같은 프롬프트가 이미 있어요',
       team_share_failed: '팀에 공유하지 못했어요', team_limit: '팀 프롬프트가 가득 찼어요({n}개)', team_by_gone: '떠난 멤버', team_by_me: '나',
+      // Team skills (#2905) — claude.ai only
+      tab_skills: '팀 스킬', skills_empty: '아직 팀 스킬이 없어요.', skill_holders: '{n}명 사용 중',
+      skill_add: '+ claude.ai에 추가', skill_adding: '추가하는 중…', skill_have: '✓ 추가됨', skill_stale: '새 판 받기', skill_check: '확인 필요',
+      skill_added: 'claude.ai에 추가했어요 — 새 대화부터 Claude가 알아서 써요', skill_already: '이미 claude.ai에 있어요',
+      skill_pick_org: '어느 claude.ai 조직에 넣을까요?', skill_exists: '같은 이름의 스킬이 claude.ai에 이미 있어요 — 「팀 스킬 ↗」에서 바꿀 수 있어요',
+      skill_claude_login: '이 브라우저에서 claude.ai에 로그인돼 있어야 해요', skill_tuner_login: 'Claude Tuner 로그인이 필요해요',
+      skill_other_account: '계정이 바뀌었어요 — 다시 열어 주세요', skill_held: '이 스킬은 확인이 필요해요 — 「팀 스킬 ↗」에서 봐 주세요',
+      skill_rejected: 'claude.ai가 이 스킬을 받지 않았어요', skill_failed: '추가하지 못했어요 — 잠시 후 다시 눌러 주세요',
+      skill_hint: '↑↓ 이동 · Enter 추가',
+      nudge_title: '팀 스킬 {n}개가 있어요', nudge_body: '동료가 만든 스킬을 클릭 한 번으로 내 claude.ai에 넣어 보세요.',
     },
     en: {
       title: 'Prompts', tab_mine: 'My prompts', tab_store: 'Recommended', search: 'Search',
@@ -107,6 +117,16 @@
       share_team: 'Share with team', share_ask_one: 'Everyone in {org} will see it (and you as who shared it)', share_ask_many: 'Share with which team? Everyone there will see it',
       share_btn: 'Share', cancel: 'Cancel', team_shared: 'Shared with {org}', team_exists: '{org} already has this prompt',
       team_share_failed: 'Could not share with your team', team_limit: 'Your team\'s prompts are full ({n})', team_by_gone: 'former member', team_by_me: 'you',
+      // Team skills (#2905) — claude.ai only
+      tab_skills: 'Team skills', skills_empty: 'No team skills yet.', skill_holders: '{n} using',
+      skill_add: '+ Add to claude.ai', skill_adding: 'Adding…', skill_have: '✓ Added', skill_stale: 'Get new version', skill_check: 'Needs a look',
+      skill_added: 'Added to claude.ai — Claude uses it on its own from your next chat', skill_already: 'Already in your claude.ai',
+      skill_pick_org: 'Which claude.ai organization?', skill_exists: 'A skill with this name is already in your claude.ai — replace it from “Team skills ↗”',
+      skill_claude_login: 'Sign in to claude.ai in this browser first', skill_tuner_login: 'Sign in to Claude Tuner first',
+      skill_other_account: 'Your account changed — reopen this', skill_held: 'This skill needs a look — see “Team skills ↗”',
+      skill_rejected: 'claude.ai did not accept this skill', skill_failed: 'Could not add it — try again in a moment',
+      skill_hint: '↑↓ move · Enter add',
+      nudge_title: 'Your team has {n} skills', nudge_body: 'Add skills your teammates made to your claude.ai in one click.',
     },
   };
 
@@ -160,6 +180,14 @@
 .pp.dark .pp-keep.on, .pp.dark .pp-keep:hover { color: #c4b5fd; }
 .pp-keep:disabled:not(.on) { opacity: .3; cursor: default; }
 .pp-share-row { flex-wrap: wrap; }
+/* Team skills (#2905): the row's own button (the row click does the same) and its outcome / org choice under the text. */
+.pp-skill-btn { flex-shrink: 0; border: 1px solid rgba(124,58,237,.45); background: none; color: #7c3aed; border-radius: 999px; font: inherit; font-size: 11px; font-weight: 600; padding: 2px 9px; cursor: pointer; white-space: nowrap; }
+.pp-skill-btn:hover:not(:disabled) { background: rgba(124,58,237,.1); }
+.pp-skill-btn:disabled { cursor: default; opacity: .6; }
+.pp-skill-btn.have { border-color: transparent; color: inherit; opacity: .6; }
+.pp.dark .pp-skill-btn:not(.have) { color: #c4b5fd; border-color: rgba(196,181,253,.45); }
+.pp-skill-note { font-size: 11px; margin-top: 3px; opacity: .8; white-space: normal; }
+.pp-skill-orgs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .pp-undo-btn:disabled { opacity: .4; cursor: default; }
 .pp-item.pp-undo { cursor: default; align-items: center; opacity: .75; font-size: 12px; }
 .pp-undo-btn { border: 0; background: none; color: #7c3aed; font: inherit; font-weight: 600; cursor: pointer; padding: 0 4px; }
@@ -221,6 +249,12 @@
     // 팀 (#2601): every org's team prompts the account reads + those orgs. No org (or a worker without the route) → no 팀 chip.
     // sharingId: the 내 프롬프트 row showing its 「팀에 공유」 confirmation in place.
     Object.assign(state, { team: null, teamOrgs: [], teamStatus: 'idle', teamLoadedAt: 0, sharingId: null });
+    // 팀 스킬 (#2905, claude.ai only): the list, the account key the add path checks, what this account already tracks
+    // ({ id: 'have' | 'stale' | 'check' | 'paused' }), and per-row outcomes ({ id: { busy, note, orgs } }).
+    // skillsFresh: answered since this open — until then the 팀 스킬 tab shows 「불러오는 중」 and adds nothing (an account
+    // switch between opens must not show or act on the previous account's list, R1-B2). skillsUnsure: claude.ai account
+    // unknown → nothing is 「추가됨」 and no nudge (R1-B1).
+    Object.assign(state, { skills: null, skillsStatus: 'idle', skillsLoadedAt: 0, skillsMe: null, skillsTracked: {}, skillRows: {}, skillsFresh: false, skillsUnsure: false });
     let sharing = false;   // one team share request at a time
     let host = null, shadow = null, toastTimer = null;
     // By id, never on the row objects: a list answer replaces those with fresh copies, which silently dropped
@@ -261,6 +295,8 @@
         const changed = (next.length > 0) !== (skillOrgs.length > 0);
         skillOrgs = next;
         if (changed && !destroyed && isOpen()) render();
+        // For the 팀 스킬 nudge (#2905): the list is needed before the picker is ever opened — only where skills exist.
+        if (next.length && !destroyed && state.skillsStatus === 'idle' && !loadingSkills) loadSkills();
       });
     };
     askSkillOrgs();
@@ -314,6 +350,42 @@
       if (state.store && state.storeLang !== storeLang()) { state.store = null; state.storeStatus = 'idle'; }
       if (!loadingStore && !(state.storeStatus === 'ready' && Date.now() - state.storeLoadedAt < STALE_MS)) loadStore();
       if (!loadingTeam && !(state.teamStatus === 'ready' && Date.now() - state.teamLoadedAt < STALE_MS)) loadTeam();
+      // Every open asks again (the account may have changed since, R1-B2) — also when an ask from before this open is in flight.
+      if (site === 'claude' && (!loadingSkills || skillsAskGen !== openGen)) loadSkills();
+    }
+
+    let loadingSkills = false;
+    // openGen: bumped by every open. Only the LATEST ask's answer is applied at all (asks can overlap — an older one,
+    // even a failure, changes nothing: R2-B1), and it counts as 「fresh」 only when asked during the current open.
+    let openGen = 0, skillsAskGen = -1, skillsSeq = 0;
+    // id → the newest list ask (skillsSeq) when an add of that skill finished here: a list asked no later than that read
+    // the record before the add settled and must not repaint that row (deploy-1.56.21 R1-B2).
+    const addDoneSeq = {};
+    /** 팀 스킬 (#2905): the team skills this account reads + which it already has. No access / signed out → no chip. */
+    async function loadSkills() {
+      if (site !== 'claude') return;
+      loadingSkills = true;
+      const gen = skillsAskGen = openGen, seq = ++skillsSeq;
+      const r = await send({ op: 'team_skills' });
+      if (destroyed || seq !== skillsSeq) return;   // a newer ask is in flight: it decides
+      loadingSkills = false;
+      if (r && r.ok && Array.isArray(r.skills)) {
+        state.skills = r.skills;
+        state.skillsMe = r.me;
+        const tracked = r.tracked && typeof r.tracked === 'object' ? { ...r.tracked } : {};
+        for (const id of Object.keys(addDoneSeq)) if (seq <= addDoneSeq[id]) tracked[id] = 'have';
+        state.skillsTracked = tracked;
+        state.skillsUnsure = r.unsure === true;
+        state.skillsFresh = gen === openGen;
+        state.skillsStatus = 'ready';
+        state.skillsLoadedAt = Date.now();
+      } else {
+        // Signed out, no team skills, an older worker: nothing from an earlier answer stays (an account switch).
+        state.skills = null; state.skillsMe = null; state.skillsTracked = {}; state.skillsStatus = 'idle'; state.skillsFresh = false;
+      }
+      if (state.tab === 'skills' && !(state.skills && state.skills.length)) state.tab = 'mine';
+      render();
+      maybeNudge();
     }
 
     let loadingTeam = false;
@@ -469,6 +541,7 @@
     }
 
     async function use(item, kind) {
+      if (kind === 'skill') { addSkill(item); return; }   // a skill is added to claude.ai, never typed in
       close();
       const body = item.body || '';
       if (insertText(body)) {
@@ -625,6 +698,7 @@
 
     /** False while renderList shows a message (loading / error / login / deleted account) instead of rows — its checks, in its order. */
     function rowsShown() {
+      if (state.tab === 'skills') return !!state.skills && state.skillsFresh;   // its own list — 내 프롬프트's loading / error do not apply
       if (state.status === 'loading' && !state.mine) return false;   // 「불러오는 중…」 on either tab (Codex R2-B1)
       if (state.status === 'error' || state.status === 'inactive' || state.status === 'login') return false;
       return state.tab === 'store' ? !!currentStore() : state.tab === 'team' ? !!state.team : !!state.mine;
@@ -639,6 +713,7 @@
       const q = state.query.toLowerCase();
       if (state.tab === 'store') return (currentStore() || []).filter((p) => matches(p, q) && (!state.category || p.category === state.category)).map((p) => ({ p, kind: 'store' }));
       if (state.tab === 'team') return (state.team || []).filter((p) => matches(p, q)).map((p) => ({ p, kind: 'team' }));
+      if (state.tab === 'skills') return (state.skills || []).map((x) => ({ ...x, title: x.name, body: x.description })).filter((p) => matches(p, q)).map((p) => ({ p, kind: 'skill' }));
       return (state.mine || []).filter((p) => matches(p, q)).map((p) => ({ p, kind: p.deleted ? 'undo' : p.id === state.sharingId && state.teamOrgs.length ? 'share' : 'mine' }))
         .concat(fillItems().filter((p) => matches(p, q)).map((p) => ({ p, kind: 'store' })));
     }
@@ -665,6 +740,7 @@
     }
 
     function renderList(list) {
+      if (state.tab === 'skills') { renderSkills(list); return; }
       if (state.status === 'loading' && !state.mine) { list.appendChild(el('div', 'pp-msg', t('loading'))); return; }
       if (state.status === 'error') { list.appendChild(el('div', 'pp-msg', t('load_failed'))); return; }
       if (state.status === 'inactive') { list.appendChild(el('div', 'pp-msg', t('inactive'))); return; }
@@ -758,6 +834,94 @@
         state.active = i;
         if (painters[i]) painters[i](true);
       }
+    }
+
+    // ── 팀 스킬 (#2905) ────────────────────────────────────────────────────────────────────────
+    const SKILL_FAIL_KEYS = { claude_login: 'skill_claude_login', tuner_login: 'skill_tuner_login', other_account: 'skill_other_account',
+      check: 'skill_held', paused: 'skill_held', conflict: 'skill_held', unknown: 'skill_held', exists: 'skill_exists', linked_other: 'skill_exists',
+      rejected: 'skill_rejected', pick_org: 'skill_pick_org' };
+
+    function skillButtonLabel(p) {
+      const row = state.skillRows[p.id] || {};
+      if (row.busy) return { text: t('skill_adding'), off: true };
+      const st = state.skillsTracked[p.id];
+      // Still pressable: the copy may have been removed in claude.ai since — the add path checks and says 「이미 있어요」 or adds
+      // it again (deploy-1.56.21 R1-B1).
+      if (st === 'have') return { text: t('skill_have'), have: true };
+      if (st === 'stale') return { text: t('skill_stale') };
+      if (st === 'check' || st === 'paused') return { text: t('skill_check') };
+      return { text: t('skill_add') };
+    }
+
+    function renderSkills(list) {
+      if (!state.skills || !state.skillsFresh) { list.appendChild(el('div', 'pp-msg', t(state.skillsStatus === 'error' ? 'load_failed' : 'loading'))); return; }
+      const items = visibleItems();
+      if (!items.length) { list.appendChild(el('div', 'pp-msg', state.skills.length ? t('no_match') : t('skills_empty'))); return; }
+      state.active = Math.max(0, Math.min(state.active, items.length - 1));
+      const painters = [];
+      items.forEach(({ p }, i) => {
+        const row = el('div', 'pp-item');
+        row.setAttribute('role', 'option');
+        const main = el('div', 'pp-main');
+        const th = el('div', 'pp-th');
+        th.appendChild(el('div', 'pp-t', p.name));
+        if (p.holders > 0) th.appendChild(el('span', 'pp-tag', t('skill_holders', { n: p.holders })));
+        main.appendChild(th);
+        main.appendChild(el('div', 'pp-b', String(p.description || '').replace(/\s+/g, ' ').trim()));
+        const r = state.skillRows[p.id];
+        if (r && r.note) main.appendChild(el('div', 'pp-skill-note', r.note));
+        if (r && Array.isArray(r.orgs) && r.orgs.length) {
+          const orgs = el('div', 'pp-skill-orgs');
+          for (const o of r.orgs) {
+            const b = el('button', 'pp-skill-btn', o.org_name || o.org_id);
+            b.type = 'button';
+            b.addEventListener('mousedown', (e) => e.preventDefault());
+            b.addEventListener('click', (e) => { e.stopPropagation(); if (e.isTrusted) addSkill(p, o.org_id); });
+            orgs.appendChild(b);
+          }
+          main.appendChild(orgs);
+        }
+        row.appendChild(main);
+        const lab = skillButtonLabel(p);
+        const btn = el('button', 'pp-skill-btn' + (lab.have ? ' have' : ''), lab.text);
+        btn.type = 'button'; btn.disabled = !!lab.off;
+        btn.addEventListener('mousedown', (e) => e.preventDefault());
+        btn.addEventListener('click', (e) => { e.stopPropagation(); if (e.isTrusted) addSkill(p); });
+        row.appendChild(btn);
+        const paint = (on) => { row.classList.toggle('on', on); row.setAttribute('aria-selected', on ? 'true' : 'false'); if (on) showPreview(p); };
+        paint(i === state.active);
+        painters.push(paint);
+        row.addEventListener('mouseenter', () => { if (i === state.active) return; if (painters[state.active]) painters[state.active](false); state.active = i; paint(true); });
+        row.addEventListener('mousedown', (e) => e.preventDefault());
+        row.addEventListener('click', (e) => { if (e.isTrusted) addSkill(p); });
+        list.appendChild(row);
+      });
+    }
+
+    /**
+     * 「claude.ai에 추가」 — the background runs the updater's add (it fetches the zip from our server, writes it to this
+     * browser's claude.ai, starts tracking). One add per row at a time; the outcome stays on the row.
+     */
+    async function addSkill(p, orgId) {
+      const row = state.skillRows[p.id] || (state.skillRows[p.id] = {});
+      if (row.busy || !state.skillsMe || !state.skillsFresh) return;
+      row.busy = true; row.note = ''; row.orgs = null;
+      if (isOpen()) renderListOnly();
+      const r = await send({ op: 'skill_add', team_id: p.id, me: state.skillsMe, ...(orgId ? { org_id: orgId } : {}) });
+      row.busy = false;
+      if (destroyed) return;
+      const reason = r && r.ok ? (r.already ? 'already' : 'added') : String((r && r.reason) || 'error').slice(0, 24);
+      if (r && r.ok) {
+        state.skillsTracked[p.id] = 'have';
+        addDoneSeq[p.id] = skillsSeq;
+        row.note = t(r.already ? 'skill_already' : 'skill_added');
+        if (!r.already) toast(t('skill_added'));
+      } else {
+        row.note = t(SKILL_FAIL_KEYS[reason] || 'skill_failed');
+        if (reason === 'pick_org' && Array.isArray(r.orgs)) row.orgs = r.orgs.filter((o) => o && typeof o.org_id === 'string').slice(0, 10);
+      }
+      track('skill_add_picker', { result: reason });
+      if (isOpen()) renderListOnly();
     }
 
     /** 추천 categories of the current-language list, most used first (ties keep list order). */
@@ -962,6 +1126,10 @@
         const teamChip = chip('pp-cat pp-tab', t('tab_team'), state.tab === 'team', () => { state.tab = 'team'; state.category = ''; });
         if (state.team && state.team.length) teamChip.appendChild(el('span', 'pp-n', String(state.team.length)));
       }
+      if (state.skills && state.skills.length) {
+        const skChip = chip('pp-cat pp-tab', t('tab_skills'), state.tab === 'skills', () => { state.tab = 'skills'; state.category = ''; track('skills_entry', { src: 'picker_chip' }); });
+        skChip.appendChild(el('span', 'pp-n', String(state.skills.length)));
+      }
       chip('pp-cat pp-tab', t('tab_store'), state.tab === 'store' && !state.category, () => { state.tab = 'store'; state.category = ''; });
       if (cats.length > 1) {
         chips.appendChild(el('span', 'pp-cats-sep'));
@@ -992,7 +1160,7 @@
       const page = el('button', 'pp-link', t('open_page'));
       page.type = 'button';
       page.addEventListener('click', () => { send({ op: 'open_page' }); close(); });
-      foot.appendChild(save); foot.appendChild(el('span', 'pp-hint', t('hint_keys')));
+      foot.appendChild(save); foot.appendChild(el('span', 'pp-hint', t(state.tab === 'skills' ? 'skill_hint' : 'hint_keys')));
       if (skillOrgs.length) {
         const skills = el('button', 'pp-link', t('team_skills'));
         skills.type = 'button';
@@ -1072,7 +1240,11 @@
         return;
       }
       const cur = items[state.active];
-      if (e.key === 'Enter' && !e.isComposing && cur && cur.kind !== 'undo' && cur.kind !== 'share') { e.preventDefault(); use(cur.p, cur.kind); }
+      if (e.key === 'Enter' && !e.isComposing && cur && cur.kind !== 'undo' && cur.kind !== 'share') {
+        e.preventDefault();
+        if (cur.kind === 'skill' && !e.isTrusted) return;   // a write to claude.ai: a real key press only, as the clicks
+        use(cur.p, cur.kind);
+      }
     }
 
     function onOutside(e) {
@@ -1088,6 +1260,8 @@
       ensureHost();
       if (!isOpen()) { shadow.appendChild(el('div', 'pp')); }
       state.query = ''; state.active = 0;
+      openGen++;
+      if (site === 'claude') state.skillsFresh = false;   // re-asked below (load) — not shown / acted on until then
       render();
       document.addEventListener('mousedown', onOutside, true);
       listenComposer(true);
@@ -1170,6 +1344,41 @@
       claimIntro();
     }
 
+    // ── 팀 스킬 first nudge (#2905) ────────────────────────────────────────────────────────────
+    // claude.ai, an account whose org has team skills and that has none of them yet: the same ring + bubble as the
+    // chip's intro, once per browser (bg/prompts.js intro_claim 'claude_skills'), only after the chip's own intro is
+    // over (never both at once). The bubble opens the picker on 「팀 스킬」.
+    const NUDGE_KEY = 'claude_skills';
+    let nudgePhase = 'idle', nudgeTries = 0, nudgeTimer = null;
+    function nudgeWanted() {
+      return site === 'claude' && !destroyed && enabledOpt && !!(state.skills && state.skills.length) && !state.skillsUnsure && !Object.keys(state.skillsTracked).length;
+    }
+    function maybeNudge() {
+      if (nudgePhase !== 'idle' || !nudgeWanted()) return;
+      nudgePhase = 'waiting';
+      nudgeTimer = setTimeout(nudgeWait, INTRO_DELAY_MS);
+    }
+    function nudgeWait() {
+      nudgeTimer = null;
+      if (destroyed) { nudgePhase = 'done'; return; }
+      if (!nudgeWanted()) { nudgePhase = 'idle'; nudgeTries = 0; return; }
+      if (!enabledKnown || introPhase !== 'done' || !chipOnScreen() || isOpen()) {
+        if (++nudgeTries < INTRO_WAIT_TRIES) nudgeTimer = setTimeout(nudgeWait, INTRO_DELAY_MS);
+        else { nudgePhase = 'idle'; nudgeTries = 0; }
+        return;
+      }
+      send({ op: 'intro_claim', site: NUDGE_KEY }).then((r) => {
+        if (!r || !r.ok) { nudgePhase = 'done'; return; }   // shown before (any tab)
+        if (destroyed) { send({ op: 'intro_release', site: NUDGE_KEY }); return; }
+        if (!nudgeWanted() || introPhase !== 'done' || !chipOnScreen() || isOpen()) {
+          send({ op: 'intro_release', site: NUDGE_KEY }); nudgePhase = 'waiting'; nudgeTimer = setTimeout(nudgeWait, INTRO_DELAY_MS); return;
+        }
+        nudgePhase = 'done';
+        showIntro({ title: t('nudge_title', { n: state.skills.length }), body: t('nudge_body'), by: false, event: 'skills_nudge',
+          onClick: () => { state.tab = 'skills'; state.category = ''; open('skills_nudge'); } });
+      });
+    }
+
     // 「Once per site」 across tabs and windows is decided in ONE place: the background (bg/prompts.js intro_claim)
     // checks-and-marks per site in a serialized queue, so of two tabs asking at once exactly one gets yes — per-tab
     // storage reads and writes kept leaving gaps (Codex R1-B1, R2-B1/B2). Asked only while the chip is on screen.
@@ -1183,28 +1392,31 @@
       });
     }
 
-    function showIntro() {
+    // What the bubble on screen is — the chip's intro (default) or the 팀 스킬 nudge: its text, GA event and click.
+    let introCfg = null;
+    function showIntro(cfg) {
+      introCfg = cfg || { title: t('intro_title'), body: t('intro_body'), by: true, event: 'prompt_intro', onClick: () => open('intro') };
       introPhase = 'showing';
       ensureHost();
       introRing = el('div', 'pp-ring');
       introBubble = el('div', 'pp-intro');
       introBubble.setAttribute('role', 'status');
-      introBubble.appendChild(el('b', null, t('intro_title')));
-      introBubble.appendChild(el('span', null, t('intro_body')));
-      introBubble.appendChild(el('span', 'pp-intro-by', INTRO_BY));   // who made it (2026-10-25 user request)
+      introBubble.appendChild(el('b', null, introCfg.title));
+      introBubble.appendChild(el('span', null, introCfg.body));
+      if (introCfg.by) introBubble.appendChild(el('span', 'pp-intro-by', INTRO_BY));   // who made it (2026-10-25 user request)
       const x = el('button', 'pp-intro-x', '×');
       x.type = 'button'; x.title = t('close'); x.setAttribute('aria-label', t('close'));
       x.addEventListener('click', (e) => { e.stopPropagation(); endIntro('closed'); });
       introBubble.appendChild(x);
       introBubble.addEventListener('mousedown', (e) => e.preventDefault());   // keep the composer's caret
-      introBubble.addEventListener('click', () => { endIntro('clicked'); rememberSelection(); open('intro'); });
+      introBubble.addEventListener('click', () => { const go = introCfg.onClick; endIntro('clicked'); rememberSelection(); go(); });
       shadow.appendChild(introRing);
       shadow.appendChild(introBubble);
       placeIntro();
       introTrack = setInterval(placeIntro, INTRO_TRACK_MS);
       bindIntroEditor();
       introTimer = setTimeout(() => endIntro('timeout'), INTRO_SHOW_MS);
-      track('prompt_intro', { action: 'shown' });
+      track(introCfg.event, { action: 'shown' });
     }
 
     /** Ring on the chip, bubble above it (below when there is no room), its arrow pointing at the chip. */
@@ -1243,7 +1455,8 @@
       if (introRing) introRing.remove();
       if (introBubble) introBubble.remove();
       introRing = introBubble = null;
-      if (!destroyed) track('prompt_intro', { action });
+      if (!destroyed) track(introCfg ? introCfg.event : 'prompt_intro', { action });
+      introCfg = null;
     }
 
     function button(className) {

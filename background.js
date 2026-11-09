@@ -859,22 +859,27 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     return true;
   }
 
-  // Open side panel request from welcome page
+  // Open side panel request from the welcome / what's-new page.
+  // 🔴 sidePanel.open() only works inside the user gesture the page's click carried, so it must be
+  // called synchronously — awaiting anything first (the old tabs.query) let the gesture lapse.
+  // The sending tab is the target; without one, report failure so the page shows its manual hint
+  // (the old code answered ok:true without opening anything — a silent dead button).
   if (message && message.type === 'OPEN_SIDE_PANEL') {
-    (async () => {
-      try {
-        if (chrome.sidePanel && chrome.sidePanel.open) {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab) await chrome.sidePanel.open({ tabId: tab.id });
-          await chrome.storage.local.set({ sidePanelAutoOpened: true });
-          sendResponse({ ok: true });
-        } else {
-          sendResponse({ ok: false, error: 'sidePanel not supported' });
-        }
-      } catch (e) {
-        sendResponse({ ok: false, error: e.message });
-      }
-    })();
+    const tabId = sender.tab?.id;
+    if (!(chrome.sidePanel && chrome.sidePanel.open)) {
+      sendResponse({ ok: false, error: 'sidePanel not supported' });
+      return;
+    }
+    if (tabId == null) {
+      sendResponse({ ok: false, error: 'no_sender_tab' });
+      return;
+    }
+    chrome.sidePanel.open({ tabId })
+      .then(() => {
+        chrome.storage.local.set({ sidePanelAutoOpened: true }).catch(() => {});
+        sendResponse({ ok: true });
+      })
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true; // async sendResponse
   }
 
@@ -1683,7 +1688,7 @@ async function cancelScheduledAutoDown(card) {
 
 // Prompt picker (#2038 in-page): the content scripts' server proxy, and the keyboard shortcut
 // (manifest `commands` — the browser takes it before the page, and the user can rebind it).
-registerPromptsHandler();
+registerPromptsHandler({ skillUpdater });   // #2905 the picker's 「스킬」 chip adds through the updater
 if (chrome.commands && chrome.commands.onCommand) {
   chrome.commands.onCommand.addListener(async (command) => {
     if (command !== 'open-prompt-picker') return;

@@ -41,9 +41,12 @@ html.dark, html.dark-oled, html[data-theme="dark"] {
    header row (nav list pb 1px + mb 8px) and pads its own top by 4px. -4px cancels that padding so
    our header reads as the next menu row, not a new section (user screenshot 2026-11-09). Going
    further would clip it: the scroll box's overflow cuts at its top edge. No bottom margin — the
-   scroll area's own 20px gap to the next section is the native section spacing. */
+   scroll area's own 20px gap to the next section is the native section spacing.
+   The -4px is applied only for that new-sidebar mount (.ct-cg-panel--scroll, set by mount() from the
+   anchor's placement): the legacy fallback anchors (old nav / above the account footer) have no such
+   padding, so a negative margin there would overlap the element above and cover its clicks (#2894). */
 .ct-cg-panel {
-  margin: -4px 6px 0;
+  margin: 0 6px;
   font-family: inherit;
   white-space: normal;
   /* Establish an adaptive text color so color:inherit children (e.g. the shared
@@ -54,6 +57,7 @@ html.dark, html.dark-oled, html[data-theme="dark"] {
      strength token only stands in where the host variable is missing (older builds). */
   color: var(--color-text, var(--ct-cg-text));
 }
+.ct-cg-panel.ct-cg-panel--scroll { margin-top: -4px; }
 
 /* Header: our own one-row layout (no borrowed site class — #1715). The padding matches a native
    menu row's inset so the logo lines up with ChatGPT's own icons above it. */

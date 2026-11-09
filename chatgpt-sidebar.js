@@ -167,6 +167,9 @@
     try { return getComputedStyle(el).display === 'contents'; } catch { return false; }
   }
 
+  const SCROLL_PLACEMENT = 'scroll';
+  const SCROLL_PANEL_CLASS = 'ct-cg-panel--scroll';
+
   function findScrollSidebarAnchor() {
     for (const scroll of document.querySelectorAll(SIDEBAR_SCROLL_SEL)) {
       const nav = scroll.closest('nav');
@@ -177,11 +180,13 @@
       while (content.children.length === 1 && isPlainContentsWrapper(content.children[0])) {
         content = content.children[0];
       }
+      // placement 'scroll' tells mount() this is the new sidebar, whose scroll-top padding the
+      // panel's negative top margin cancels (.ct-cg-panel--scroll) — the legacy anchors must not get it.
       const section = content.querySelector(SIDEBAR_SECTION_SEL);
-      if (!section) return { parent: content, ref: null }; // no sections yet: append
+      if (!section) return { parent: content, ref: null, placement: SCROLL_PLACEMENT }; // no sections yet: append
       let ref = section;
       while (ref.parentElement && ref.parentElement !== content) ref = ref.parentElement;
-      if (ref.parentElement === content) return { parent: content, ref };
+      if (ref.parentElement === content) return { parent: content, ref, placement: SCROLL_PLACEMENT };
     }
     return null;
   }
@@ -713,6 +718,7 @@
     const anchor = findSidebarAnchor();
     if (!anchor) { _mounted = false; return; }
     const panel = buildPanel();
+    panel.classList.toggle(SCROLL_PANEL_CLASS, anchor.placement === SCROLL_PLACEMENT);
     renderContent();
     anchor.parent.insertBefore(panel, anchor.ref);
     _mounted = true;

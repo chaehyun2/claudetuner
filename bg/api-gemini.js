@@ -1,5 +1,5 @@
 import { GEMINI_API_BASE, SITE_TAB_PATTERNS } from './constants.js';
-import { isUsableTab } from '../vendor-ai/sites.js';
+import { isUsableTab, GOOGLE_SESSION_COOKIES } from '../vendor-ai/sites.js';
 import { batchexecuteUrl, decodeBatchEnvelope } from '../vendor-ai/gemini-batch.js';
 
 // The site path our usage RPCs claim to come from (the usage page), as they always have — the
@@ -85,12 +85,12 @@ export async function listGeminiAccounts() {
   for (let n = 0; n < GEMINI_MAX_ACCOUNTS; n++) {
     let resp;
     try {
-      resp = await fetch(`${GEMINI_API_BASE}/u/${n}/app`, { credentials: 'include', cache: 'no-store', redirect: 'manual' });
+      resp = await fetchAccountPage(n);
     } catch (e) {
       if (n === 0) throw new Error('err_gemini_network');
       break;
     }
-    if (resp.type === 'opaqueredirect' || !resp.ok) break;
+    if (!resp || !resp.ok) break;
     const html = await resp.text();
     const { email, googleId } = extractUserInfoFromHtml(html);
     const key = googleId || email;
@@ -101,6 +101,26 @@ export async function listGeminiAccounts() {
   }
   _accountList = { ts: now, accounts };
   return accounts;
+}
+
+/**
+ * Who `/u/<n>` serves right now, read the way the listing reads it (#2714): `{ email, googleId }`,
+ * or `null` when the index has no account (it redirects). Throws when there is no answer to read
+ * (network, a non-redirect error status) — unknown, never "signed out". Used only for an account
+ * whose collection failed, to tell a sign-out from a passing fault without waiting a cycle.
+ */
+export async function geminiAccountAt(authuser) {
+  const resp = await fetchAccountPage(authuser);
+  if (!resp) return null;
+  if (!resp.ok) throw new Error(`err_gemini_page_fetch:${resp.status}`);
+  return extractUserInfoFromHtml(await resp.text());
+}
+
+// One /u/<n> page, redirects NOT followed (no body is downloaded for an index with no account):
+// null = no account there; a rejected fetch rejects.
+async function fetchAccountPage(n) {
+  const resp = await fetch(`${GEMINI_API_BASE}/u/${n}/app`, { credentials: 'include', cache: 'no-store', redirect: 'manual' });
+  return resp.type === 'opaqueredirect' ? null : resp;
 }
 
 // True when an open, usable Gemini tab addresses an index the list does not have (a fresh sign-in).
@@ -546,6 +566,10 @@ function extractUserInfoFromHtml(html) {
 // is only the pre-check — the RPC fetch that follows is the verdict, and a signed-out open tab is
 // what err_gemini_no_at_token's copy (i18n.js) describes. Tightening it here would change that copy's
 // trigger and could drop logged-in users whose Google cookies are not enumerable (the ChatGPT Dia case).
+// A HEAD still unanswered after this long consults the Google session cookie (#2593, inquiry #246):
+// on some networks the HEAD outlasts the compare status probe (STATUS_PROBE_TIMEOUT_MS, 5 s) every
+// time and the page stayed on "could not check". Below that bound on purpose.
+export const GEMINI_LOGIN_HEAD_SOFT_MS = 3000;
 export async function isGeminiLoggedIn() {
   try {
     // Fast check: open Gemini tab implies logged in
@@ -553,17 +577,39 @@ export async function isGeminiLoggedIn() {
     if (tabs.length > 0) return true;
 
     // SW check: HEAD request with credentials — redirect to login means not logged in
-    const resp = await fetch(`${GEMINI_API_BASE}/app`, {
+    const head = fetch(`${GEMINI_API_BASE}/app`, {
       method: 'HEAD',
       credentials: 'include',
       redirect: 'manual',
       // A cached 200 here would report "logged in" for a signed-out user — this probe's
       // whole job is to read live auth state, so it is the last fetch that may be cached.
       cache: 'no-store',
-    });
     // 200 = logged in, 0 (opaque redirect) or 3xx = not logged in
-    return resp.status === 200;
+    }).then((resp) => resp.status === 200, () => false);
+    const SLOW = {};
+    let timer;
+    const first = await Promise.race([
+      head,
+      new Promise((res) => { timer = setTimeout(() => res(SLOW), GEMINI_LOGIN_HEAD_SOFT_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (first !== SLOW) return first;
+    // A session cookie answers "signed in" now. Its ABSENCE is not "signed out" — the cookie may
+    // not be enumerable (the 🪤 above) — so without one the HEAD still decides, however late.
+    if (await hasGoogleSessionCookie()) return true;
+    return await head;
   } catch {
     return false;
   }
+}
+
+// Whether a Google session cookie (vendor-ai GOOGLE_SESSION_COOKIES) is readable for Gemini.
+async function hasGoogleSessionCookie() {
+  for (const name of GOOGLE_SESSION_COOKIES) {
+    try {
+      const c = await chrome.cookies.get({ url: GEMINI_API_BASE, name });
+      if (c && c.value) return true;
+    } catch { /* no cookies API / permission: unknown, not signed out */ }
+  }
+  return false;
 }

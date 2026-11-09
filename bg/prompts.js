@@ -29,6 +29,9 @@ const SKILL_ORGS_CACHE_KEY = 'skillOrgsCache';
 const SKILL_ORGS_TTL_MS = 30 * 60 * 1000;
 const ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const SITES = ['claude', 'chatgpt', 'gemini'];
+/** Spotlight keys beyond the per-site chip intro: the claude.ai 「팀 스킬」 first nudge (#2905) — once per browser. */
+const INTRO_KEYS = [...SITES, 'claude_skills'];
+const TEAM_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** 추천 languages the server filters on (`GET …/prompt-store?lang=`); anything else = no filter. */
 const STORE_LANGS = ['ko', 'en'];
 /** chrome.storage.local, one key per site: the chip's first-visit spotlight was shown there. */
@@ -36,7 +39,7 @@ const INTRO_KEY_PREFIX = 'promptChipIntro_';
 /** Spotlight claims are serialized here: check-and-mark per site with nothing in between (no compare-and-set in storage). */
 let introChain = Promise.resolve();
 export function introOp(message) {
-  const site = SITES.includes(message.site) ? message.site : null;
+  const site = INTRO_KEYS.includes(message.site) ? message.site : null;
   if (!site) return Promise.resolve({ ok: false });
   const key = INTRO_KEY_PREFIX + site;
   const run = introChain.then(async () => {
@@ -59,6 +62,8 @@ const TRACK_EVENTS = {
   prompt_intro: ['site', 'action'],
   prompt_team_share: ['site', 'result'],
   skills_entry: ['site', 'src'],   // 「팀 스킬」 entries: src = banner_shown · banner_browse · banner_share · banner_close · picker
+  skill_add_picker: ['site', 'result'],   // #2905 the picker's 「스킬」 row: added · already · pick_org · exists · <reason>
+  skills_nudge: ['site', 'action'],       // #2905 the one-time 「팀 스킬」 bubble: shown · clicked · closed · timeout · typed · opened
 };
 
 /** op → [method, path, needsId, sendsBody]. */
@@ -252,7 +257,24 @@ export function handlePromptExternal(message, sender, sendResponse) {
   return true;
 }
 
-export function registerPromptsHandler() {
+/**
+ * The picker's 「스킬」 chip (#2905): the list + which of them this account already tracks, and 「추가」 through the
+ * updater's add — the one path that writes a team skill into claude.ai (bg/skill-update.js ②⑥, its own checks).
+ * The content script sends ids only; the account key comes back from the list and the add re-checks it with the server.
+ */
+async function skillOp(message, updater) {
+  if (!updater) return { ok: false, reason: 'unavailable' };
+  if (message.op === 'team_skills') {
+    const r = await updater.listForPicker();
+    return r;
+  }
+  const teamId = message.team_id, orgId = message.org_id;
+  if (typeof teamId !== 'string' || !ID_RE.test(teamId) || typeof message.me !== 'string' || message.me.length > 64
+    || (orgId !== undefined && (typeof orgId !== 'string' || !TEAM_UUID_RE.test(orgId)))) return { ok: false, reason: 'invalid' };
+  return updater.add({ acct_key: message.me, team_id: teamId, ...(orgId ? { org_id: orgId } : {}) });
+}
+
+export function registerPromptsHandler(deps = {}) {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.type !== PROMPTS_MSG) return false;
     // Only our own content scripts and pages (never another extension or a web page).
@@ -265,6 +287,10 @@ export function registerPromptsHandler() {
       return false;
     }
     if (message.op === 'skill_orgs') { skillOrgsCached().then(sendResponse, () => sendResponse({ ok: false, orgs: [] })); return true; }
+    if (message.op === 'team_skills' || message.op === 'skill_add') {
+      skillOp(message, deps.skillUpdater).then(sendResponse, () => sendResponse({ ok: false, reason: 'error' }));
+      return true;
+    }
     if (message.op === 'intro_claim' || message.op === 'intro_release') {
       introOp(message).then(sendResponse, () => sendResponse({ ok: false }));
       return true;
