@@ -93,7 +93,7 @@ async function renderClaimSwitchWidget() {
   // sync that is not happening.
   link.textContent = live
     ? (t('claim_switch_link') || 'Switch to another account')
-    : (t('claim_switch_link_expired') || 'Login expired — sign in again');
+    : (t('claim_switch_link_expired') || 'Sign-in expired — sign in again');
   document.getElementById('claim-switch-title').textContent =
     t('claim_switch_title') || 'Switch the collecting account';
   document.getElementById('claim-switch-msg').textContent =
@@ -115,7 +115,7 @@ async function renderClaimSwitchWidget() {
     hintEl.style.display = 'none';
   }
   sendBtn.textContent = t('login_cta_send') || 'Send code';
-  verifyBtn.textContent = t('login_cta_verify') || 'Verify & log in';
+  verifyBtn.textContent = t('login_cta_verify') || 'Verify & sign in';
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
   if (resendBtn) resendBtn.textContent = t('code_resend') || 'Send a new code';
   document.getElementById('claim-switch-close').textContent = t('claim_switch_close') || 'Close';

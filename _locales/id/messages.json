@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Claude Tuner - Claude Usage Tracker & Limit Forecast + ChatGPT & Gemini"
+  },
+  "appDescription": {
+    "message": "Pantau penggunaan & batas Claude (sesi, mingguan), prediksi kapan batas tercapai. Juga ChatGPT & Gemini. Gratis. UI bahasa Inggris."
+  }
+}

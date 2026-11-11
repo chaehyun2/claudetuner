@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Claude Tuner - Claude Usage Tracker & Limit Forecast + ChatGPT & Gemini"
+  },
+  "appDescription": {
+    "message": "追蹤 Claude 用量與限額（工作階段與每週），預測何時達到上限，協助選擇方案。也支援 ChatGPT 與 Gemini。免費。介面為英文。"
+  }
+}

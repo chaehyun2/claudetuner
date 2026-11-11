@@ -910,13 +910,17 @@
     + ' style=\'flex:none;vertical-align:-1px;margin-right:3px\'><path d=\'M13.5 8a5.5 5.5 0 1 1-1.8-4.1\'/>'
     + '<path d=\'M13.5 2.5v3.2h-3.2\'/></svg>';
   const RESET_PASS_DAY_MS = 86400000;
-  const RESET_PASS_KINDS = ['full', 'five_hour', 'weekly'];
+  // `model` (#2938): Claude's 「Fable 초기화」 — resets one model's scoped weekly limit. Its label is
+  // the model's name (summary.model_name), or a generic 「모델」 when the parser could not name it.
+  const RESET_PASS_KINDS = ['full', 'five_hour', 'weekly', 'model'];
   const RP_UI_TEXT = {
     ko: {
       rp_ui_chip_name: '초기화 패스',
       rp_ui_kind_full: '전체 {n}',
       rp_ui_kind_five_hour: '5시간 {n}',
       rp_ui_kind_weekly: '주간 {n}',
+      rp_ui_kind_model: '{m} {n}',
+      rp_ui_model_generic: '모델',
       rp_ui_chip_total: '{n}장 보유',
       rp_ui_chip_expires: '{d} 만료',
       rp_ui_line_now: '지금 풀 수 있어요',
@@ -933,7 +937,10 @@
       rp_ui_tk_label_full: '전체',
       rp_ui_tk_label_five_hour: '5시간',
       rp_ui_tk_label_weekly: '주간',
+      rp_ui_tk_label_model: '{m}',
       rp_ui_tk_what_full: '전체 초기화 — 5시간 + 주간 한도',
+      rp_ui_tk_what_model: '{m} 초기화 — {m} 한도만',
+      rp_ui_tk_what_model_back: '{m} 초기화 — {m} 한도 + 주간 한도에서 {m}로 쓴 만큼',
       rp_ui_tk_what_five_hour: '5시간 초기화 — 5시간 한도만',
       rp_ui_tk_what_weekly: '주간 초기화 — 주간 한도만',
       rp_ui_tk_expires: '{d} 만료',
@@ -947,12 +954,14 @@
       rp_ui_kind_full: 'Full {n}',
       rp_ui_kind_five_hour: '5-hour {n}',
       rp_ui_kind_weekly: 'Weekly {n}',
+      rp_ui_kind_model: '{m} {n}',
+      rp_ui_model_generic: 'Model',
       rp_ui_chip_total: '{n} held',
       rp_ui_chip_expires: 'expires {d}',
       rp_ui_line_now: 'can clear it now',
       rp_ui_chip_cg_scope: 'Codex & Work limits only',
-      rp_ui_tip_held: 'Usage limit reset passes held: {n}',
-      rp_ui_tip_kinds: 'Kinds: {k}',
+      rp_ui_tip_held: 'Reset passes held: {n}',
+      rp_ui_tip_kinds: 'Types: {k}',
       rp_ui_tip_expires: 'Earliest expiry: {d}',
       rp_ui_tip_cg_scope: 'ChatGPT passes apply to Codex & Work limits only (not chat)',
       rp_ui_tip_click: 'Click to open the usage settings — you can use a pass right there',
@@ -963,7 +972,10 @@
       rp_ui_tk_label_full: 'Full',
       rp_ui_tk_label_five_hour: '5-hour',
       rp_ui_tk_label_weekly: 'Weekly',
+      rp_ui_tk_label_model: '{m}',
       rp_ui_tk_what_full: 'Full reset — 5-hour + weekly limits',
+      rp_ui_tk_what_model: '{m} reset — the {m} limit only',
+      rp_ui_tk_what_model_back: '{m} reset — the {m} limit + the {m} share of your weekly limit',
       rp_ui_tk_what_five_hour: '5-hour reset — 5-hour limit only',
       rp_ui_tk_what_weekly: 'Weekly reset — weekly limit only',
       rp_ui_tk_expires: 'expires {d}',
@@ -976,8 +988,17 @@
   function rpText(lang, key, vars) {
     const table = RP_UI_TEXT[lang] || RP_UI_TEXT.en;
     let s = table[key] || RP_UI_TEXT.en[key] || '';
-    for (const k in (vars || {})) s = s.replace('{' + k + '}', String(vars[k]));
+    for (const k in (vars || {})) s = s.split('{' + k + '}').join(String(vars[k]));
     return s;
+  }
+  /** Vars for a kind's strings: `n` = count, `m` = the model name a `model` pass resets. */
+  function rpKindVars(summary, lang, n) {
+    const name = summary && typeof summary.model_name === 'string' && summary.model_name ? summary.model_name : '';
+    return { n, m: name || rpText(lang, 'rp_ui_model_generic') };
+  }
+  function rpTicketWhat(summary, lang, kind) {
+    const key = kind === 'model' && summary && summary.model_gives_back_weekly === true ? 'rp_ui_tk_what_model_back' : 'rp_ui_tk_what_' + kind;
+    return rpText(lang, key, rpKindVars(summary, lang));
   }
   function rpCount(n) { return Number.isInteger(n) && n > 0 ? n : 0; }
   /**
@@ -995,7 +1016,7 @@
     const kinds = s.by_kind || {};
     const kindParts = RESET_PASS_KINDS
       .filter((k) => rpCount(kinds[k]) > 0)
-      .map((k) => rpText(lang, 'rp_ui_kind_' + k, { n: rpCount(kinds[k]) }));
+      .map((k) => rpText(lang, 'rp_ui_kind_' + k, rpKindVars(s, lang, rpCount(kinds[k]))));
     // Kinds are shown only when the summary says it knows them AND they carry a count — a
     // ChatGPT summary read before its detail fetch has `available` but all-zero kinds.
     const kindsKnown = s.kinds_known !== false && kindParts.length > 0;
@@ -1032,7 +1053,7 @@
     const kinds = s.by_kind || {};
     const kindParts = RESET_PASS_KINDS
       .filter((k) => rpCount(kinds[k]) > 0)
-      .map((k) => rpText(lang, 'rp_ui_kind_' + k, { n: rpCount(kinds[k]) }));
+      .map((k) => rpText(lang, 'rp_ui_kind_' + k, rpKindVars(s, lang, rpCount(kinds[k]))));
     if (s.kinds_known !== false && kindParts.length) lines.push(rpText(lang, 'rp_ui_tip_kinds', { k: kindParts.join(', ') }));
     const expMs = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
     if (Number.isFinite(expMs)) {
@@ -1069,6 +1090,7 @@
     full: ['#6a58d6', 'rgba(106,88,214,0.15)'],
     five_hour: ['#17845f', 'rgba(23,132,95,0.15)'],
     weekly: ['#2f6bcf', 'rgba(47,107,207,0.15)'],
+    model: ['#c2410c', 'rgba(194,65,12,0.15)'],
   };
   // Kind colours are tint / band / perforation only — the text inherits the page colour, so it keeps
   // its contrast on light and dark pages alike (Codex 1R 후속: coloured 10.5px text was ~3:1).
@@ -1103,11 +1125,11 @@
       const soon = exp - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
       const [fg, bg] = RP_TICKET_COLORS[tk.kind];
       const d = new Date(exp);
-      const tip = [rpText(lang, 'rp_ui_tk_what_' + tk.kind), rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(exp) })]
+      const tip = [rpTicketWhat(s, lang, tk.kind), rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(exp) })]
         .concat(soon ? [rpText(lang, 'rp_ui_tk_soon')] : [], [rpText(lang, 'rp_ui_tk_click')]).join('\n');
       chips += link(
         '<span style="padding:2px 6px;font-weight:700;border-left:3px solid ' + fg + ';border-radius:5px 0 0 5px">'
-          + escapeHtml(rpText(lang, 'rp_ui_tk_label_' + tk.kind)) + '</span>'
+          + escapeHtml(rpText(lang, 'rp_ui_tk_label_' + tk.kind, rpKindVars(s, lang))) + '</span>'
           + '<span style="padding:2px 6px;border-left:1.5px dashed ' + fg + ';font-variant-numeric:tabular-nums'
           + (soon ? ';font-weight:700;background:' + RP_SOON_BG : '') + '">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span>',
         tip,
@@ -1156,7 +1178,7 @@
       if (soon) date = '<b class="ct-rp-hot" style="font-weight:600">' + date + '</b>';
     }
     const tip = [rpText(lang, 'rp_ui_tk_head', { n: total })]
-      .concat(tickets.slice(0, RESET_PASS_TICKETS_SHOWN).map((x) => rpText(lang, 'rp_ui_tk_label_' + x.kind)
+      .concat(tickets.slice(0, RESET_PASS_TICKETS_SHOWN).map((x) => rpText(lang, 'rp_ui_tk_label_' + x.kind, rpKindVars(s, lang))
         + ' · ' + rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(Date.parse(x.expires_at)) })))
       .concat(tickets.length > RESET_PASS_TICKETS_SHOWN ? [rpText(lang, 'rp_ui_tk_more', { n: tickets.length - RESET_PASS_TICKETS_SHOWN })] : [])
       .concat(!tickets.length ? [resetPassDetailTip(s, lang, pv)] : [])
@@ -1570,7 +1592,7 @@
     },
     en: {
       name5h: '5h usage', name7d: '7d usage', tag5h: '5h', tag7d: '7d', pred: 'est. at reset',
-      soon: 'soon', wait: '{0} wait', waitTip: 'At this pace the limit hits around {0} · {1} wait expected',
+      soon: 'soon', wait: '{0} wait', waitTip: 'At this pace you\'ll hit the limit around {0} · expect a {1} wait',
       d: '{0}d', h: '{0}h', m: '{0}m',
     },
   };

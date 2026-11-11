@@ -1,9 +1,9 @@
 {
   "appName": {
-    "message": "Claude Tuner - Claude·ChatGPT·Gemini Tracker"
+    "message": "Claude Tuner - 클로드 사용량 추적·한도 예측 (Claude Usage Tracker) + ChatGPT·Gemini"
   },
   "appDescription": {
-    "message": "Claude·ChatGPT·Gemini 사용량 실시간 추적 — 속도 제한 모니터링, 리셋 예측, 플랜 최적화, 팀 대시보드. 무료."
+    "message": "Claude(클로드)·ChatGPT·Gemini 사용량과 한도를 실시간 추적 — 한도 도달 예측, 리셋 시각, 플랜 최적화, 팀 대시보드. 무료."
   },
   "appDefaultTitle": {
     "message": "Claude Tuner - Claude·ChatGPT·Gemini 사용량 추적기"

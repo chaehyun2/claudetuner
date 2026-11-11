@@ -9,7 +9,7 @@
 // promises exactly these fields and nothing else: counts, count per type, earliest expiry DAY,
 // and — for Claude only — eligibility and its reason category. Service and plan already ride the
 // snapshot itself (`provider` / `plan`), so they are not repeated here. Never: pass ids/keys,
-// labels, org id/name, `unknown`-kind counts. Per-pass kind + expiry (`tickets`) ride only when
+// labels, org id/name, `unknown`- and `model`-kind counts, the model name. Per-pass kind + expiry (`tickets`) ride only when
 // resetPassDetail() says they are due (#2092 P3) — /privacy: "their type and expiry dates".
 //
 // Built field by field from scratch — never spread the summary — so a field added to
@@ -24,6 +24,14 @@ const isPassCount = (n) => Number.isInteger(n) && n >= 0;
 
 function wireCount(n) {
   return isPassCount(n) ? n : 0;
+}
+
+// The summary's `available` also counts `model` passes (Claude 「Fable 초기화」, #2938), which the
+// server's schema does not know: the wire carries the three account-window kinds only, so their sum
+// is what `available` means there. usable_now / next_expires_at already exclude model passes.
+function wireAvailable(summary) {
+  const model = summary.by_kind && isPassCount(summary.by_kind.model) ? summary.by_kind.model : 0;
+  return Math.max(0, wireCount(summary.available) - model);
 }
 
 function expiryDay(iso) {
@@ -45,7 +53,7 @@ export function resetPassField(summary) {
     const out = {};
     if (summary.known === true) {
       const k = summary.by_kind || {};
-      out.available = wireCount(summary.available);
+      out.available = wireAvailable(summary);
       out.usable_now = isPassCount(summary.usable_now) ? summary.usable_now : null;
       out.by_kind = { full: wireCount(k.full), five_hour: wireCount(k.five_hour), weekly: wireCount(k.weekly) };
       out.next_expires_day = expiryDay(summary.next_expires_at);
@@ -91,7 +99,7 @@ export function resetPassDetailSig(summary) {
     if (summary.available > 0 && summary.kinds_known !== true) return null;
     const k = summary.by_kind || {};
     return JSON.stringify([
-      summary.available, isPassCount(summary.usable_now) ? summary.usable_now : null,
+      wireAvailable(summary), isPassCount(summary.usable_now) ? summary.usable_now : null,
       wireCount(k.full), wireCount(k.five_hour), wireCount(k.weekly),
       wireTickets(summary.tickets).map((x) => `${x.kind}@${x.expires_at}`),
     ]);

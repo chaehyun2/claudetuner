@@ -93,8 +93,8 @@ export async function recordLoginNudgeOpen() {
 function applyNudgeText() {
   document.getElementById('login-nudge-title').textContent = t('login_nudge_title') || 'Bring your usage together in one account';
   document.getElementById('login-nudge-msg').textContent = t('login_nudge_msg')
-    || 'Log in to merge your usage across devices into one account, with limit prediction, trends & recommendations.';
-  document.getElementById('login-nudge-login').textContent = t('login_nudge_btn') || 'Log in';
+    || 'Sign in to merge your usage across devices into one account, with limit prediction, trends & recommendations.';
+  document.getElementById('login-nudge-login').textContent = t('login_nudge_btn') || 'Sign in';
   document.getElementById('login-nudge-close')?.setAttribute('aria-label', t('login_nudge_dismiss') || 'Maybe later');
 }
 
@@ -220,7 +220,7 @@ export function renderLoginNudgeSpark() {
   const label = t('login_nudge_spark_label') || 'My weekly usage · last 7 days';
   document.getElementById('login-nudge-spark-label').textContent = label;
   document.getElementById('login-nudge-spark-note').textContent = t('login_nudge_spark_note')
-    || 'Right now you can only see this here. Log in to keep it in your account and pick it up on other devices and the dashboard.';
+    || 'Right now you can only see this here. Sign in to keep it in your account and pick it up on other devices and the dashboard.';
   chart.firstElementChild?.setAttribute('aria-label', label);
   if (_sparkOrg === state.selectedOrgId) return;
   _sparkOrg = state.selectedOrgId;

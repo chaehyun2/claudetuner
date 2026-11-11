@@ -169,6 +169,13 @@ export function parseClaudeUsageWindows(usageData) {
 // without five_hour, `five_hour` five_hour alone. A grant clearing five_hour + only a scoped weekly
 // (seven_day_opus) is none of them — calling it `full` claimed it lifts the plain 7d limit (Codex
 // 1R). Such combinations are `unknown`: observed, never counted or offered.
+//
+// `model` (#2938): a grant clearing ONLY scoped weekly windows — no five_hour, no plain seven_day.
+// Measured 2026-11-11: the 「Fable 초기화」 grants (`launch-2610-fable*`) clear exactly
+// ['seven_day_overage_included'] with `gives_back_weekly: true`. It never lifts the 5h or the plain
+// 7d limit, so canClearNow / resetPassAdvice ignore it (it is not in KIND_CLEARS); it is held,
+// counted and drawn as its own ticket. 🔴 The grant's own `type` field is NOT used: the Fable grants
+// arrive as `type: "full"`, which they are not.
 const SEVEN_DAY_SLOT = 'seven_day';
 function claudeResetPassKind(clears) {
   const fiveHour = clears.includes(FIVE_HOUR_SLOT);
@@ -177,7 +184,38 @@ function claudeResetPassKind(clears) {
   if (fiveHour && sevenDay) return 'full';
   if (!fiveHour && sevenDay) return 'weekly';
   if (fiveHour && !anyWeekly) return 'five_hour';
+  if (!fiveHour && anyWeekly) return 'model';
   return 'unknown';
+}
+
+/**
+ * The model a `model` grant resets, or null. Needs TWO agreeing facts: the usage response's own
+ * scoped weekly limits (`limits[]` weekly_scoped display names) and the grant's label naming
+ * exactly one of them. The label is read here and dropped — never stored or sent (plan §2).
+ * Ambiguous or absent → null, and the surfaces say 「모델 초기화」 without a name.
+ */
+function scopedModelNames(usageData) {
+  return Array.isArray(usageData?.limits)
+    ? usageData.limits
+      .filter((l) => l && l.kind === 'weekly_scoped' && typeof l.scope?.model?.display_name === 'string')
+      .map((l) => l.scope.model.display_name.trim())
+      .filter(Boolean)
+    : [];
+}
+function grantModelName(label, names) {
+  if (typeof label !== 'string' || !names.length) return null;
+  const lower = label.toLowerCase();
+  const hits = [...new Set(names.filter((n) => lower.includes(n.toLowerCase())))];
+  return hits.length === 1 ? hits[0].slice(0, 40) : null;
+}
+
+/** `{ model_name, model_gives_back_weekly }` over the held model grants (null / false when none). */
+function modelPassFacts(grants) {
+  const names = new Set(grants.map((g) => g.name));
+  return {
+    model_name: names.size === 1 ? [...names][0] : null,
+    model_gives_back_weekly: grants.length > 0 && grants.every((g) => g.givesBack),
+  };
 }
 
 const isTimestamp = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
@@ -232,6 +270,10 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
     const passes = [];
     const usableByKind = emptyUsableKinds();
     let blocked = false;
+    const modelNames = scopedModelNames(usageData);
+    // Per `model` grant: the model it names (null = unnamed) and whether it also gives back the
+    // weekly usage that model consumed. Summarised below; nothing per grant leaves this function.
+    const modelGrants = [];
     for (const g of ce.grants) {
       // 🔴 A MALFORMED grant makes the whole summary 「모름」. Skipping it and answering
       // known:true would report "0장" for a pass we simply could not read.
@@ -262,6 +304,14 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
         raw_type: rawClears.join(',').slice(0, 200),
       });
       const grantBlocked = Array.isArray(g.blocking) && g.blocking.length > 0;
+      if (kind === 'model') {
+        modelGrants.push({ name: grantModelName(g.label, modelNames), givesBack: g.gives_back_weekly === true });
+        // claude.ai offers a model reset its own button beside the weekly one while `next_grant_id`
+        // names the weekly grant (measured 2026-11-11), so next_grant_id does not gate this kind.
+        // Its `blocking` does not feed blocked_by_other: that flag is about the 5h / 7d passes.
+        if (g.usable_now === true && !grantBlocked) usableByKind.model += g.resets_left;
+        continue;
+      }
       if (kind !== 'unknown' && grantBlocked) blocked = true;
       if (kind !== 'unknown' && g.usable_now === true && !grantBlocked && (nextGrantId === null || g.id === nextGrantId)) {
         usableByKind[kind] += g.resets_left;
@@ -276,6 +326,9 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
       byKind[p.kind] += p.left;
       if (p.kind === 'unknown') continue;
       available += p.left;
+      // A model pass is held (available, tickets) but says nothing about the account windows:
+      // usable_now and next_expires_at stay about the 5h / 7d passes, as the server reads them.
+      if (p.kind === 'model') continue;
       if (p.usable_now !== null) usableNow = (usableNow ?? 0) + (p.usable_now ? p.left : 0);
       if (nextExpires === null || Date.parse(p.expires_at) < Date.parse(nextExpires)) nextExpires = p.expires_at;
     }
@@ -294,6 +347,7 @@ export function parseClaudeResetPasses(usageData, now = Date.now()) {
         kinds_known: true,
         usable_by_kind: usableByKind,
         tickets: ticketsFromPasses(passes, now),
+        ...modelPassFacts(modelGrants),
       },
       passes,
     };

@@ -13,29 +13,38 @@
 // ResetPassSummary = {
 //   provider: 'claude' | 'chatgpt',
 //   known: boolean,                 // false = field absent / ineligible / unreadable → show nothing
-//   available: number,              // passes left, counting only full / five_hour / weekly
-//   usable_now: number | null,
-//   by_kind: { full, five_hour, weekly, unknown },  // unknown is observed, never shown or summed
-//   next_expires_at: string | null,
+//   available: number,              // passes left, counting full / five_hour / weekly / model
+//   usable_now: number | null,      // full / five_hour / weekly only (model: usable_by_kind.model)
+//   by_kind: { full, five_hour, weekly, model, unknown },  // unknown is observed, never shown or summed
+//   next_expires_at: string | null, // full / five_hour / weekly only
 //   blocked_by_other: boolean,
 //   cooldown_until: string | null,
 //   observed_at: number,            // ms
 //   eligible: boolean | null,       // claude: cedar_ember.eligible when boolean; chatgpt: null
 //   ineligible_reason: string | null,  // claude only, closed vocabulary (else 'other'); null when eligible
 //   kinds_known: boolean,           // claude known: true; chatgpt: false until the detail is merged
-//   usable_by_kind: { full, five_hour, weekly },  // passes usable NOW per kind (0 = not usable / unknown)
+//   usable_by_kind: { full, five_hour, weekly, model },  // passes usable NOW per kind (0 = not usable / unknown)
 //   tickets: [{ kind, expires_at }],  // one per held pass (known kinds only), earliest expiry first,
 //                                     // ≤ RESET_PASS_TICKETS_MAX — the popup's ticket chips. No id/key.
+//   model_name: string | null,      // claude: the model a `model` pass resets (e.g. 'Fable'), null = unnamed
+//   model_gives_back_weekly: boolean,  // claude: every held model pass also returns that model's weekly use
 // }
+//
+// `model` (#2938, Claude 「Fable 초기화」): clears a model-scoped weekly limit only. It is HELD — in
+// available, by_kind, tickets — but clears no account window, so KIND_CLEARS / canClearNow /
+// resetPassAdvice leave it out, and the wire (bg/reset-pass-payload.js) drops it: the server's
+// schema knows three kinds.
 
 export function emptyResetPassKinds() {
-  return { full: 0, five_hour: 0, weekly: 0, unknown: 0 };
+  return { full: 0, five_hour: 0, weekly: 0, model: 0, unknown: 0 };
 }
 
 /** Per-kind "usable now" counts — no `unknown` bucket: an unknown kind is never usable. */
 export function emptyUsableKinds() {
-  return { full: 0, five_hour: 0, weekly: 0 };
+  return { full: 0, five_hour: 0, weekly: 0, model: 0 };
 }
+
+export const MODEL_PASS_KIND = 'model';
 
 // Our weekly slot names: seven_day and every scoped seven_day_* (seven_day_opus, …_overage_included).
 export const WEEKLY_SLOT_RE = /^seven_day(?:_[a-z_]+)?$/;
@@ -122,30 +131,45 @@ export function unknownResetPassSummary(provider, now = Date.now()) {
     kinds_known: false,
     usable_by_kind: emptyUsableKinds(),
     tickets: [],
+    model_name: null,
+    model_gives_back_weekly: false,
   };
 }
 
 // Ticket chips (one per held pass) are capped: a pass with `left: 5` is five tickets, and a list
 // longer than this is summarised as 「+N」 by the renderer, which reads `available` for the total.
 export const RESET_PASS_TICKETS_MAX = 20;
-const TICKET_KINDS = new Set(['full', 'five_hour', 'weekly']);
+// The kinds the 「지금 쓰세요 / 아껴두세요」 advice weighs — every kind that clears an account window.
+const ADVICE_KINDS = new Set(['full', 'five_hour', 'weekly']);
 
 /**
  * Normalised passes → `[{ kind, expires_at }]`, one entry per pass held (a grant with `left: 2` is
  * two), known kinds only, unexpired at `now`, earliest expiry first, capped. Carries nothing that
  * identifies a pass (no pass_key / id) — only what the chips draw.
+ *
+ * The cap applies PER FAMILY — the account-window kinds and `model` each keep up to
+ * RESET_PASS_TICKETS_MAX — so model passes can never push a 5h / weekly / full ticket out of the
+ * list the wire sends (bg/reset-pass-payload.js drops model tickets AFTER this; #2938 Codex R1-B2).
+ * Each family stays earliest-first and capped, which is what resetPassLiveView's subtraction needs.
  */
 export function ticketsFromPasses(passes, now = Date.now()) {
+  const acct = ticketsOfFamily(passes, now, (k) => ADVICE_KINDS.has(k));
+  const model = ticketsOfFamily(passes, now, (k) => k === MODEL_PASS_KIND);
+  return byExpiry(acct.concat(model)).map(({ kind, expires_at }) => ({ kind, expires_at }));
+}
+
+const byExpiry = (xs) => xs.sort((a, b) => a._t - b._t || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+
+function ticketsOfFamily(passes, now, inFamily) {
   const out = [];
   for (const p of Array.isArray(passes) ? passes : []) {
-    if (!p || !TICKET_KINDS.has(p.kind) || typeof p.expires_at !== 'string') continue;
+    if (!p || !inFamily(p.kind) || typeof p.expires_at !== 'string') continue;
     const t = Date.parse(p.expires_at);
     if (!Number.isFinite(t) || t <= now) continue;
     const n = isPassCount(p.left) ? Math.min(p.left, RESET_PASS_TICKETS_MAX) : 0;
     for (let i = 0; i < n; i++) out.push({ kind: p.kind, expires_at: p.expires_at, _t: t });
   }
-  out.sort((a, b) => a._t - b._t || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
-  return out.slice(0, RESET_PASS_TICKETS_MAX).map(({ kind, expires_at }) => ({ kind, expires_at }));
+  return byExpiry(out).slice(0, RESET_PASS_TICKETS_MAX);
 }
 
 /** A pass count as the providers send it: a non-negative integer, anything else unreadable. */
@@ -174,6 +198,25 @@ export function canClearNow(summary, blockedSlots) {
   if (!usable || typeof usable !== 'object') return false;
   return Object.keys(KIND_CLEARS).some((kind) => isPassCount(usable[kind]) && usable[kind] > 0
     && blockedSlots.every(KIND_CLEARS[kind]));
+}
+
+/**
+ * A model pass (#2938, 「Fable 초기화」) would lift THIS scoped limit now: the summary names that very
+ * model, a model pass is usable, the limit is at 100%, and no account window is blocked — with the
+ * 5h or 7d limit also at its wall, spending the model pass would not let the user work, and
+ * clearNowCall speaks for that case. A different family from clearNowCall (which decides the
+ * account windows only); the two can never both fire, by the last condition.
+ *
+ * @param {object} summary      liveResetPasses(...) of the org
+ * @param {{name:string, used:number}} limit  one entry of org.additionalLimits
+ * @param {string[]} blockedSlots blockedSlotsOf(org) — account windows at their limit
+ */
+export function modelPassClearsNow(summary, limit, blockedSlots) {
+  if (summary?.known !== true || summary.kinds_known !== true) return false;
+  if (typeof summary.model_name !== 'string' || !summary.model_name || summary.model_name !== limit?.name) return false;
+  if (!(typeof limit.used === 'number' && limit.used >= 100)) return false;
+  if (!Array.isArray(blockedSlots) || blockedSlots.length) return false;
+  return isPassCount(summary.usable_by_kind?.model) && summary.usable_by_kind.model > 0;
 }
 
 /**
@@ -352,7 +395,7 @@ export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hour
   if (!holdsAny(s) || s.kinds_known !== true || !Number.isFinite(nowMs)) return null;
   const tickets = (Array.isArray(s.tickets) ? s.tickets : [])
     .map((x) => ({ kind: x && x.kind, exp: x ? Date.parse(x.expires_at) : NaN }))
-    .filter((x) => TICKET_KINDS.has(x.kind) && Number.isFinite(x.exp) && x.exp > nowMs)
+    .filter((x) => ADVICE_KINDS.has(x.kind) && Number.isFinite(x.exp) && x.exp > nowMs)
     .sort((a, b) => a.exp - b.exp);
   if (!tickets.length) return null;
   const weekly = tickets.filter((x) => WEEKLY_PASS_KINDS.has(x.kind));
@@ -365,7 +408,7 @@ export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hour
   // Held = the provider's per-kind count, not the tickets (capped at RESET_PASS_TICKETS_MAX, Codex 3R).
   const held = {};
   for (const x of tickets) held[x.kind] = (held[x.kind] || 0) + 1;
-  for (const k of TICKET_KINDS) held[k] = Math.max(held[k] || 0, isPassCount(s.by_kind?.[k]) ? s.by_kind[k] : 0);
+  for (const k of ADVICE_KINDS) held[k] = Math.max(held[k] || 0, isPassCount(s.by_kind?.[k]) ? s.by_kind[k] : 0);
   if (Object.keys(held).some((k) => { const u = s.usable_by_kind?.[k] || 0; return u > 0 && u < held[k]; })) return null;
   const weeklyUsable = weekly.filter(usableNow);
   const r7 = Number.isFinite(resets7dMs) ? resets7dMs : null;
@@ -454,8 +497,9 @@ export function resetPassAdvice({ summary, blocked, resets5hMs, resets7dMs, hour
  * left the count fallback and clearNowCall reading passes that had lapsed). A summary is observed at
  * collection time; by the time a card is decided — a deferred one at 08:00, a stale one after
  * failed collections — some passes it lists may have expired. Those are taken OUT here:
- *   · tickets are earliest-first and capped at RESET_PASS_TICKETS_MAX, so the lapsed ones are always
- *     inside the list and subtracting them from `available` / `by_kind` is exact even past the cap;
+ *   · tickets are earliest-first and capped at RESET_PASS_TICKETS_MAX per family, so the lapsed ones
+ *     are inside the list — except when a full family's last listed ticket lapsed, whose unlisted
+ *     passes are then counted lapsed too (they cannot be shown valid);
  *   · which pass the provider called usable is not known per ticket, so a summary with any lapsed
  *     pass is `stale` and each kind's usable count loses its lapsed passes (assumed usable) —
  *     clearNowCall (still the one judgement) is fed this view;
@@ -469,25 +513,48 @@ export function resetPassLiveView(rp, now) {
   const expiryKnown = rp.kinds_known === true && Array.isArray(rp.tickets);
   const stale = lapsed.length > 0 || (Number.isFinite(nextExp) && nextExp <= now);
   if (!stale) return { rp, stale, expiryKnown };
+  const lapsedBy = {};
+  for (const t of lapsed) lapsedBy[t.kind] = (lapsedBy[t.kind] || 0) + 1;
+  // A ticket family (account-window kinds / model — ticketsFromPasses caps each) whose list is FULL
+  // and whose last listed ticket lapsed: its unlisted passes expire no earlier, so they may have
+  // lapsed too and cannot be shown valid. They are counted lapsed — the side that never
+  // over-promises — until the next collection re-reads them (#2938 Codex R2-B1: 21 lapsed Fable
+  // passes left one counted and offered the Fable link).
+  for (const inFam of [(k) => k !== MODEL_PASS_KIND, (k) => k === MODEL_PASS_KIND]) {
+    const listed = tickets.filter((t) => inFam(t.kind));
+    if (listed.length < RESET_PASS_TICKETS_MAX || !lapsed.includes(listed[listed.length - 1])) continue;
+    const listedBy = {};
+    for (const t of listed) listedBy[t.kind] = (listedBy[t.kind] || 0) + 1;
+    for (const k of Object.keys(rp.by_kind || {})) {
+      if (k === 'unknown' || !inFam(k)) continue;
+      const extra = Math.max(0, (Number(rp.by_kind[k]) || 0) - (listedBy[k] || 0));
+      if (extra) lapsedBy[k] = (lapsedBy[k] || 0) + extra;
+    }
+  }
+  const lapsedTotal = Object.values(lapsedBy).reduce((a, n) => a + n, 0);
   const byKind = { ...(rp.by_kind || {}) };
-  for (const t of lapsed) byKind[t.kind] = Math.max(0, (Number(byKind[t.kind]) || 0) - 1);
+  for (const [k, n] of Object.entries(lapsedBy)) byKind[k] = Math.max(0, (Number(byKind[k]) || 0) - n);
   const live = tickets.filter((t) => !lapsed.includes(t));
   // Usable counts lose the lapsed passes of their kind — assuming each lapsed one was usable, the
   // side that never over-promises — so a still-valid pass keeps its 「지금 풀 수 있어요」 (Codex: zeroing
   // every kind on one lapse hid a valid weekly pass). A ticketless summary whose next expiry passed
   // cannot say which kind lapsed: nothing is usable until a fresh collection.
-  const lapsedBy = {};
-  for (const t of lapsed) lapsedBy[t.kind] = (lapsedBy[t.kind] || 0) + 1;
   const usable = {};
   for (const k of Object.keys(rp.usable_by_kind || {})) {
     usable[k] = lapsed.length ? Math.max(0, (Number(rp.usable_by_kind[k]) || 0) - (lapsedBy[k] || 0)) : 0;
   }
-  const usableNow = lapsed.length && Number.isFinite(rp.usable_now) ? Math.max(0, rp.usable_now - lapsed.length) : 0;
+  // usable_now counts no model pass, so a lapsed model pass does not come off it.
+  const lapsedAcct = lapsedTotal - (lapsedBy[MODEL_PASS_KIND] || 0);
+  // Only model passes lapsed: the account-window count is untouched, null included (Codex R1 후속).
+  const usableNow = lapsed.length && !lapsedAcct ? rp.usable_now
+    : lapsed.length && Number.isFinite(rp.usable_now) ? Math.max(0, rp.usable_now - lapsedAcct) : 0;
   return {
     stale, expiryKnown,
     rp: {
-      ...rp, available: Math.max(0, rp.available - lapsed.length), by_kind: byKind, tickets: live,
-      next_expires_at: live.length ? live[0].expires_at : null, usable_by_kind: usable, usable_now: usableNow,
+      ...rp, available: Math.max(0, rp.available - lapsedTotal), by_kind: byKind, tickets: live,
+      // next_expires_at stays about the account-window passes (the parser's rule — model excluded).
+      next_expires_at: live.find((t) => t.kind !== MODEL_PASS_KIND)?.expires_at ?? null,
+      usable_by_kind: usable, usable_now: usableNow,
     },
   };
 }

@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Claude Tuner - Claude Usage Tracker & Limit Forecast + ChatGPT & Gemini"
+  },
+  "appDescription": {
+    "message": "Использование и лимиты Claude (сессия, неделя) и прогноз, когда лимит закончится. + ChatGPT и Gemini. Бесплатно. Интерфейс на англ."
+  }
+}

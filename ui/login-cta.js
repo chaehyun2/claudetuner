@@ -27,10 +27,10 @@ export async function renderLoginCta() {
   // fires next to the code that actually shows the bar, and a long inline ternary pushes those two
   // apart until the proof no longer holds.
   function miniCtaMessage(authIsBlocked, scopeBlocked, withheld) {
-    if (authIsBlocked) return t('login_cta_authblocked_mini') || "Log in — this browser's usage is no longer being saved to the server";
-    if (scopeBlocked) return t('login_cta_scope_mini') || 'Log in to unlock plan recommendations & more';
+    if (authIsBlocked) return t('login_cta_authblocked_mini') || "Sign in — this browser's usage is no longer being saved to the server";
+    if (scopeBlocked) return t('login_cta_scope_mini') || 'Sign in to unlock plan recommendations & more';
     if (withheld) return t('login_cta_withheld_mini') || 'Saved on this browser only — verify to sync to the dashboard';
-    return t('login_cta_mini') || 'Log in for multi-device sync & more';
+    return t('login_cta_mini') || 'Sign in for multi-device sync & more';
   }
 
   const widget = document.getElementById('login-cta');
@@ -104,7 +104,7 @@ export async function renderLoginCta() {
     mini.style.display = 'flex';
     document.getElementById('login-cta-mini-msg').textContent = miniCtaMessage(authIsBlocked, scopeBlocked, withheldMini);
     const miniBtn = document.getElementById('login-cta-mini-login');
-    miniBtn.textContent = t('login_cta_mini_btn') || 'Log in';
+    miniBtn.textContent = t('login_cta_mini_btn') || 'Sign in';
     if (!miniBtn.dataset.bound) {
       miniBtn.dataset.bound = '1';
       miniBtn.addEventListener('click', async () => { await chrome.storage.local.set({ loginCtaCollapsed: false }); renderLoginCta(); });
@@ -134,14 +134,14 @@ export async function renderLoginCta() {
   // onboarded and are not missing an extra feature: their server sync has STOPPED, so the copy
   // says that plainly (local usage still renders, which is why nothing looked wrong to them).
   document.getElementById('login-cta-title').textContent = authIsBlocked
-    ? (t('login_cta_authblocked_title') || 'Log in to resume server sync')
+    ? (t('login_cta_authblocked_title') || 'Sign in to resume server sync')
     : scopeBlocked
-      ? (t('login_cta_scope_title') || 'Log in to unlock this feature')
+      ? (t('login_cta_scope_title') || 'Sign in to unlock this feature')
       : notWithheld
-        ? (t('login_cta_account_title') || 'Claim your usage to your account')
+        ? (t('login_cta_account_title') || 'Link your usage to your account')
         : (t('login_cta_title') || 'Turn on server sync');
   document.getElementById('login-cta-msg').textContent = authIsBlocked
-    ? (t('login_cta_authblocked_msg') || 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires a login. One email verification restores it:')
+    ? (t('login_cta_authblocked_msg') || 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires sign-in. One email verification restores it:')
     : scopeBlocked
       ? (t('login_cta_scope_msg') || 'This browser is connected in collect-only mode, so features like plan recommendations are unavailable. One email verification enables them:')
       : notWithheld
@@ -237,7 +237,7 @@ export async function renderLoginCta() {
   const prefill = accountCache?.email || independentAccount?.email || '';
   if (!emailInput.value && prefill) emailInput.value = prefill;
   sendBtn.textContent = t('login_cta_send') || 'Send code';
-  verifyBtn.textContent = t('login_cta_verify') || 'Verify & log in';
+  verifyBtn.textContent = t('login_cta_verify') || 'Verify & sign in';
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
   dismissBtn.textContent = t('login_cta_dismiss') || 'Use locally only';
 

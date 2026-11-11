@@ -89,6 +89,9 @@ const GEMINI_V3P2_POLICY_RE = /v3p2_(\w+)_policy/;
 // names (neon/ultra stop the same day) and carries BOTH Ultra constants, 241,920 and 967,680 — so it is
 // 'ultra' and the 5x/20x sub-tier comes from quota as before. Found by the daily AE watch
 // (worker/src/services/gemini-signal-watch.ts), which alarms on any name not in this table.
+// FOURTH NAME, 2026-11-10 (daily watch): `carbon_multi_ultra_<x>_policy`. AE 48h, each on one constant:
+//   24,192 plus · 48,384 pro · 241,920 neon→ultra (5x) · 967,680 ultra→ultra (20x).
+// 🔴 Again `carbon_multi_ultra_pro_policy` IS AI PRO and `_plus_` IS AI PLUS — "multi_ultra" is not the seat.
 export const GEMINI_POLICY_ALIAS = {
   basic_policy: 'basic',
   brownfield_basic_policy: 'basic',
@@ -108,6 +111,10 @@ export const GEMINI_POLICY_ALIAS = {
   launch_chat_ultra_policy: 'ultra',
   launch_ultra_mode_ultra_policy: 'ultra',
   launch_ultra_mode_no_deepthink_policy: 'ultra',
+  carbon_multi_ultra_plus_policy: 'plus',
+  carbon_multi_ultra_pro_policy: 'pro',     // 🔴 Pro — see above.
+  carbon_multi_ultra_neon_policy: 'ultra',
+  carbon_multi_ultra_ultra_policy: 'ultra',
 };
 
 // Policy strings seen in AE and deliberately left unmapped (see above: ambiguous quota or too few

@@ -401,7 +401,15 @@ export function _updateUICore(status) {
     // isPrimary flag) so both render paths display the SAME stored value — projecting the
     // snapshot again here would be a second source that could disagree with selectOrg's.
     const _primaryOrgEntry = (state.collectedOrgs || []).find(o => o.uuid === s.claude_org_uuid);
-    renderAdditionalLimits(_primaryOrgEntry?.additionalLimits);
+    // The model-pass link (#2938) judges 「is an account window blocked」 from the SAME snapshot the
+    // gauges below show — the org entry can lag it (setStatus is written before collectedOrgs;
+    // Codex R1-B1: a fresh 5h 100% beside a cached 90% offered the Fable link).
+    const _rpOrgView = _primaryOrgEntry && {
+      ..._primaryOrgEntry,
+      h5: s.five_hour?.utilization ?? null, d7: s.seven_day?.utilization ?? null,
+      w5s: s.five_hour?.window_seconds ?? null, w7s: s.seven_day?.window_seconds ?? null,
+    };
+    renderAdditionalLimits(_primaryOrgEntry?.additionalLimits, _rpOrgView);
     renderResetPassChip(_primaryOrgEntry); // #2092 P1-1 — same stored org as the line above
 
     // Reset the headline; the gauge branches below re-show it via
@@ -530,7 +538,7 @@ export function _updateUICore(status) {
           if (!visible) {
             extraTooltip.innerHTML = getLang() === 'ko'
               ? '기본 요금제(Max 20x 등)에 포함된 사용량을 다 쓰면, 충전한 크레딧에서 종량제로 차감됩니다. 추가 과금이 될 수 있으니, 필요하지 않은 경우 추가 사용량 기능을 꺼두세요.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:var(--accent)">Claude.ai에서 설정 →</a>'
-              : 'When you use up your plan\'s included usage (e.g. Max 20x), extra credits are charged pay-as-you-go. Turn off extra usage if you don\'t need it to avoid unexpected charges.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:var(--accent)">Manage in Claude.ai →</a>';
+              : 'When you use up your plan\'s included usage (e.g. Max 20x), further usage is deducted pay-as-you-go from your credits. Turn off extra usage if you don\'t need it to avoid unexpected charges.<br><a href="https://claude.ai/settings/usage" target="_blank" style="color:var(--accent)">Manage in Claude.ai →</a>';
           }
           return;
         }

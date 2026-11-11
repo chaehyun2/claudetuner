@@ -7,7 +7,7 @@ import { applyCollapseState, setCollapseSummary } from './collapsible.js';
 import { drawCharts, _startChartAutoRoll, _stopChartAutoRoll, isChartAutoRoll, isChartRolling } from './charts.js';
 import { state, _filteredHistory, primaryPlanFor } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
-import { renderResetPassChip } from './reset-pass-ui.js';
+import { renderResetPassChip, modelPassGaugeLink } from './reset-pass-ui.js';
 import { _shouldSuppressRec, _renderRecommendation } from './recommend.js';
 import { _authedFetch } from './auth.js';
 import { PROVIDER_LABELS, CAP_DROP_KEY } from '../bg/constants.js';
@@ -126,7 +126,8 @@ function bucketNoteFor(name) {
   return core.bucketNote(name, getLang()) || '';
 }
 
-export function renderAdditionalLimits(additionalLimits) {
+/** `org` (optional) = the collectedOrgs entry the limits belong to — for the model-pass link (#2938). */
+export function renderAdditionalLimits(additionalLimits, org = null) {
   const addlSection = document.getElementById('additional-limits-section');
   const addlBody = document.getElementById('additional-limits-body');
   if (!addlSection || !addlBody) return;
@@ -162,11 +163,18 @@ export function renderAdditionalLimits(additionalLimits) {
     // added to the map must not be able to break out of the attribute.
     const note = bucketNoteFor(lim.name);
     const titleAttr = note ? ' title="' + escHtml(note) + '"' : '';
+    // A model reset pass (Claude 「Fable 초기화」, #2938) that lifts this very limit now.
+    const rp = modelPassGaugeLink(org, lim);
+    const rpLink = rp
+      ? '<div class="gauge-sub" style="margin-top:3px"><a class="rp-note-link rp-model-link" href="' + escHtml(rp.url)
+        + '" target="_blank" rel="noopener noreferrer" title="' + escHtml(rp.title) + '" style="color:inherit;font-weight:700">'
+        + escHtml(rp.text) + '</a></div>'
+      : '';
     return '<div class="gauge-row"' + titleAttr + '>'
       + '<div class="gauge-header"><span class="gauge-label">' + label + '</span>'
       + '<span class="gauge-value" style="color:' + color + '">' + pct + '%</span></div>'
       + '<div class="gauge-bar"><div class="gauge-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
-      + reset + '</div>';
+      + reset + rpLink + '</div>';
   }).join('');
 }
 
@@ -392,7 +400,7 @@ export function selectOrg(orgId, container) {
     }
 
     // === 3b. Additional per-feature limits (ChatGPT Codex weekly, Claude's scoped model) ===
-    renderAdditionalLimits(orgData.additionalLimits);
+    renderAdditionalLimits(orgData.additionalLimits, orgData);
 
     // === 4. Subscription / Pending plan (Claude + ChatGPT) ===
     const pendingRow = document.getElementById('pending-row');

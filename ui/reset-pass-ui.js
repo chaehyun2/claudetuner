@@ -13,7 +13,7 @@ import { _filteredHistory } from './state.js';
 import { formatResetAbsolute, formatDuration } from './util.js';
 import {
   canClearNow, clearNowCall, holdsAny, blockedSlotsOf, resetPassSiteUrl, resetPassHelpUrl, resetPassAdvice, pastWeeklyBlocks,
-  liveResetPasses,
+  liveResetPasses, modelPassClearsNow,
 } from '../bg/reset-pass-model.js';
 
 // The org's passes as of NOW — expired ones taken out (liveResetPasses). Every read below goes
@@ -93,6 +93,28 @@ export function resetPassHeadlineLink(org, blocked, resets5h = null, resets7d = 
   }
   if (providerOf(org) === 'chatgpt' && s.kinds_known !== true) return { text: t('rp_ui_held_link', s.available), url, title };
   return null;
+}
+
+// ── 3. Scoped model gauge (#2938) ─────────────────────────────────────────────────────────────
+/**
+ * The link under a scoped model gauge (e.g. Fable) when a model pass lifts it now, or null —
+ * 「Fable 초기화로 지금 풀 수 있어요 ↗」. When a weekly / full pass is held too, the hover says why
+ * the model pass is the one to spend (it keeps the pass that clears the whole weekly limit).
+ * The account windows come from the org entry, the same values the gauges above it show.
+ */
+export function modelPassGaugeLink(org, limit) {
+  if (!org || providerOf(org) !== 'claude') return null;
+  const s = orgPasses(org);
+  if (!modelPassClearsNow(s, limit, blockedSlotsOf(org))) return null;
+  const url = resetPassLink('claude');
+  if (!url) return null;
+  const k = s.by_kind || {};
+  const weeklyHeld = (Number(k.weekly) || 0) + (Number(k.full) || 0) > 0;
+  return {
+    text: t('rp_ui_model_clear_now', s.model_name),
+    url,
+    title: weeklyHeld ? t('rp_ui_model_clear_tip_save', s.model_name) : t('rp_ui_model_clear_tip'),
+  };
 }
 
 /** Appends the link to the headline element (already filled by setPredictHeadline). */
