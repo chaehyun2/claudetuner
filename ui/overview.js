@@ -259,9 +259,15 @@ const RP_RESET_SVG = '<svg class="ov-rp-i" width="10" height="10" viewBox="0 0 1
   + ' stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
   + '<path d="M13.5 8a5.5 5.5 0 1 1-1.8-4.1"/><path d="M13.5 2.5v3.2h-3.2"/></svg>';
 
+// Same formatter as the popup chip and the sidebars (usage-shared.js rpShortDate): M/D, with 'YY/ in
+// front when the expiry is in another year. Fallback (core not loaded) keeps the old M/D.
 function _rpDate(iso) {
-  const d = new Date(iso);
-  return Number.isFinite(d.getTime()) ? `${d.getMonth() + 1}/${d.getDate()}` : '';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const fmt = globalThis.__ctUsageCore && globalThis.__ctUsageCore.rpShortDate;
+  if (typeof fmt === 'function') return fmt(ms, Date.now());
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function _resetPassIcon(org, sameProviderCount, hist) {

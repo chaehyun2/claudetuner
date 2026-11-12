@@ -1027,8 +1027,7 @@
     const expMs = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
     let warn = false;
     if (Number.isFinite(expMs)) {
-      const d = new Date(expMs);
-      parts.push(rpText(lang, 'rp_ui_chip_expires', { d: `${d.getMonth() + 1}/${d.getDate()}` }));
+      parts.push(rpText(lang, 'rp_ui_chip_expires', { d: rpShortDate(expMs, now) }));
       warn = expMs - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
     }
     // ChatGPT passes clear the Codex / Work limits only — the same meaning as its gauge, but a
@@ -1057,9 +1056,7 @@
     if (s.kinds_known !== false && kindParts.length) lines.push(rpText(lang, 'rp_ui_tip_kinds', { k: kindParts.join(', ') }));
     const expMs = s.next_expires_at ? Date.parse(s.next_expires_at) : NaN;
     if (Number.isFinite(expMs)) {
-      const d = new Date(expMs);
-      lines.push(rpText(lang, 'rp_ui_tip_expires',
-        { d: `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` }));
+      lines.push(rpText(lang, 'rp_ui_tip_expires', { d: rpDateTime(expMs) }));
     }
     if (pv === 'chatgpt') lines.push(rpText(lang, 'rp_ui_tip_cg_scope'));
     lines.push(rpText(lang, 'rp_ui_tip_click'));
@@ -1096,9 +1093,19 @@
   // its contrast on light and dark pages alike (Codex 1R 후속: coloured 10.5px text was ~3:1).
   const RP_SOON_COLOR = '#d97706';
   const RP_SOON_BG = 'rgba(217,119,6,0.22)';
-  function rpDateTime(ms) {
+  // A pass expiry as M/D — with a short year in front ('27/3/9) when it falls in another year than
+  // today, so a pass that runs into next year cannot read as this year's date (user, 2026-11-12:
+  // 「Fable 3/9」 for 2027-03-09). The one formatter every reset-pass surface uses.
+  function rpShortDate(ms, nowMs) {
     const d = new Date(ms);
-    return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    if (!Number.isFinite(d.getTime())) return '';
+    const now = new Date(Number.isFinite(nowMs) ? nowMs : Date.now());
+    const md = `${d.getMonth() + 1}/${d.getDate()}`;
+    return d.getFullYear() === now.getFullYear() ? md : `'${String(d.getFullYear()).slice(-2)}/${md}`;
+  }
+  function rpDateTime(ms, nowMs) {
+    const d = new Date(ms);
+    return `${rpShortDate(ms, nowMs)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   }
   function buildResetPassTicketsHtml(summary, lang, nowMs, provider, url, cls, helpUrl) {
     const s = summary;
@@ -1124,14 +1131,13 @@
       const exp = Date.parse(tk.expires_at);
       const soon = exp - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
       const [fg, bg] = RP_TICKET_COLORS[tk.kind];
-      const d = new Date(exp);
-      const tip = [rpTicketWhat(s, lang, tk.kind), rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(exp) })]
+      const tip = [rpTicketWhat(s, lang, tk.kind), rpText(lang, 'rp_ui_tk_expires', { d: rpDateTime(exp, now) })]
         .concat(soon ? [rpText(lang, 'rp_ui_tk_soon')] : [], [rpText(lang, 'rp_ui_tk_click')]).join('\n');
       chips += link(
         '<span style="padding:2px 6px;font-weight:700;border-left:3px solid ' + fg + ';border-radius:5px 0 0 5px">'
           + escapeHtml(rpText(lang, 'rp_ui_tk_label_' + tk.kind, rpKindVars(s, lang))) + '</span>'
           + '<span style="padding:2px 6px;border-left:1.5px dashed ' + fg + ';font-variant-numeric:tabular-nums'
-          + (soon ? ';font-weight:700;background:' + RP_SOON_BG : '') + '">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span>',
+          + (soon ? ';font-weight:700;background:' + RP_SOON_BG : '') + '">' + escapeHtml(rpShortDate(exp, now)) + '</span>',
         tip,
         // Text takes the page's own colour (readable on any sidebar theme); the kind colour is the
         // tint, the left band and the perforation, amber marks a pass expiring within 3 days.
@@ -1173,8 +1179,7 @@
     const soon = Number.isFinite(first) && first - now <= RESET_PASS_WARN_DAYS * RESET_PASS_DAY_MS;
     let date = '';
     if (Number.isFinite(first)) {
-      const d = new Date(first);
-      date = escapeHtml(rpText(lang, 'rp_ui_chip_expires', { d: `${d.getMonth() + 1}/${d.getDate()}` }));
+      date = escapeHtml(rpText(lang, 'rp_ui_chip_expires', { d: rpShortDate(first, now) }));
       if (soon) date = '<b class="ct-rp-hot" style="font-weight:600">' + date + '</b>';
     }
     const tip = [rpText(lang, 'rp_ui_tk_head', { n: total })]
@@ -1913,6 +1918,7 @@
     // ── Reset pass chip (#2092 P1-1) ──
     resetPassChip,
     buildResetPassChipHtml,
+    rpShortDate,
     buildResetPassLineHtml,
     resetPassDetailTip,
     buildResetPassHelpHtml,

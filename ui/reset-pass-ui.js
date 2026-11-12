@@ -41,10 +41,10 @@ export function resetPassLink(provider) {
 const providerOf = (org) => (org && org.provider) || 'claude';
 
 // ── 1. Holdings chip ─────────────────────────────────────────────────────────────────────────
-// Drawn here but kept HIDDEN: the pass block (chip + advice) shows only when it matters — the user
+// The one-line chip shows whenever the org HOLDS a pass (user, 2026-11-12: the detail tab showed
+// nothing about passes on a calm day). Only the ADVICE line stays quiet until it matters — the user
 // is blocked now, or a pass expires within RP_SHOW_EXPIRY_MS (user, 2026-10-05: three lines of
-// 「초기화 패스 1장 · 전체 10/23 · 아직 아껴두세요」 on every calm day was too much). The overview
-// badge is the always-on hint. renderResetPassAdvice (run after the gauges) makes it visible.
+// 「초기화 패스 1장 · 전체 10/23 · 아직 아껴두세요」 on every calm day was too much).
 export function renderResetPassChip(org) {
   if (typeof document === 'undefined') return;
   const el = document.getElementById('reset-pass-chip');
@@ -57,10 +57,7 @@ export function renderResetPassChip(org) {
   // Compare against what WE wrote, not el.innerHTML (the parser re-serializes): an unchanged chip
   // must not be replaced, or a hovered tooltip disappears on every collection.
   if (el._rpHtml !== html) { el.innerHTML = html; el._rpHtml = html; }
-  // Expiring soon is decidable here; 「blocked」 is not (the gauges render later), so
-  // renderResetPassAdvice re-decides with the blocked windows. Paths that never reach it (usage-based
-  // Enterprise has no 5h/7d) keep this answer (Codex 1R).
-  el.classList.toggle('hidden', !html || !resetPassBlockShown(org, []));
+  el.classList.toggle('hidden', !html || !resetPassChipShown(org));
   // The advice line belongs to this org's gauges: cleared here (every branch of both render paths
   // draws the chip) and redrawn by renderLimitReachedHeadline, which usage-based Enterprise skips.
   const adv = document.getElementById('reset-pass-advice');
@@ -213,7 +210,12 @@ export function resetPassAdviceText(adv, past) {
 const RP_SHOW_EXPIRY_MS = 3 * 24 * 3600000;
 
 
-/** Whether the pass block is worth its space now: blocked, or a held pass expires within 3 days. */
+/** Whether the holdings chip shows: any pass held (and still unexpired) on this org. */
+export function resetPassChipShown(org) {
+  return holdsAny(orgPasses(org));
+}
+
+/** Whether the ADVICE line is worth its space now: blocked, or a held pass expires within 3 days. */
 export function resetPassBlockShown(org, blocked, nowMs = Date.now()) {
   const s = orgPasses(org);
   if (!holdsAny(s)) return false;
@@ -227,7 +229,7 @@ export function renderResetPassAdvice(org, util5h, resets5h, util7d, resets7d, s
   if (typeof document === 'undefined') return;
   const shown = resetPassBlockShown(org, blockedSlots(util5h, util7d, span5h, span7d));
   const chip = document.getElementById('reset-pass-chip');
-  if (chip) chip.classList.toggle('hidden', !shown || !chip._rpHtml);
+  if (chip) chip.classList.toggle('hidden', !chip._rpHtml || !resetPassChipShown(org));
   const el = document.getElementById('reset-pass-advice');
   if (!el) return;
   const adv = shown ? resetPassAdviceFor(org, util5h, resets5h, util7d, resets7d, span5h, span7d) : null;
