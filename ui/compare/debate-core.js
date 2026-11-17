@@ -531,8 +531,11 @@ const DEFAULT_ALIAS_RULES = {
   ],
   gemini: [
     { tokens: ['thinking'], key: 'debate_alias_gemini_thinking', family: 'debate_family_thinking', emoji: '\u{1F9E0}', tier: TIER_REASONING }, // brain
-    { tokens: ['flash', 'lite'], key: 'debate_alias_gemini_flash', family: 'debate_family_flash', emoji: '\u{26A1}', tier: TIER_LIGHT },       // lightning (flash)
-    { tokens: ['pro', 'ultra'], key: 'debate_alias_gemini_pro', family: 'debate_family_pro', emoji: '\u{1F52C}', tier: TIER_HIGH },            // microscope (expert)
+    // Gemini 4 names its models by element (2026-11): Hydrogen is the light Flash lane (the site's own row
+    // code is `Flash4p0`), Carbon and Argon the heavier ones Google ranks above it. 「4 Hydrogen Thinking」
+    // still hits `thinking` first.
+    { tokens: ['flash', 'lite', 'hydrogen'], key: 'debate_alias_gemini_flash', family: 'debate_family_flash', emoji: '\u{26A1}', tier: TIER_LIGHT },       // lightning (flash)
+    { tokens: ['pro', 'ultra', 'argon', 'carbon'], key: 'debate_alias_gemini_pro', family: 'debate_family_pro', emoji: '\u{1F52C}', tier: TIER_HIGH },   // microscope (expert)
     { tokens: null, key: 'debate_alias_gemini', family: null, emoji: '\u{1F39B}\u{FE0F}', tier: null },                                         // gemini sign (twins)
   ],
 };

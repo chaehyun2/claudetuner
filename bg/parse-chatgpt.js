@@ -73,6 +73,19 @@ export function chatgptDisplayPlan(displayName) {
   return CHATGPT_DISPLAY_PLAN_NAMES[displayName.trim().toLowerCase()] || null;
 }
 
+// Every label this module can store for a ChatGPT plan it RECOGNISES — the values of the tables above,
+// plus the Business Premium seat, which is recognised but stored raw (see chatgptWorkspacePlan).
+// The Worker's daily plan watch (worker/src/services/plan-watch.ts) imports it so a known plan that
+// merely returns after a quiet week (one Education (K-12) teacher, 2026-11-16) is not reported as new.
+// A code missing from the tables still reaches storage capitalized and is absent here, so it alarms.
+export const CHATGPT_KNOWN_PLAN_LABELS = new Set([
+  ...Object.values(CHATGPT_PLAN_NAMES),
+  ...Object.values(CHATGPT_SUBSCRIPTION_PLAN_NAMES),
+  ...Object.values(CHATGPT_ACCOUNT_PLAN_TYPE_NAMES),
+  ...Object.values(CHATGPT_DISPLAY_PLAN_NAMES),
+  capitalizeFirst(BUSINESS_PREMIUM_PLAN_TYPE),
+]);
+
 // Derive a workspace's display plan without a per-workspace /wham/usage call:
 // prefer the entitlement's subscription_plan, then the account plan_type, then
 // fall back to the generic tier-code mapping. Returns null when NOTHING was observed.
