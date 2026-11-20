@@ -14,7 +14,7 @@ import { noteUpgradeRequired, isUpgradePostSuppressed, clearUpgradeBlocked } fro
 import { getCadence, isCollectionPaused, applyServerCadence, pruneStreamCadence } from './cadence-config.js';
 import { bgLang, bt } from './i18n.js';
 import { fetchClaudeApi, fetchWithCookies, normalizeResetTime } from './api.js';
-import { updateBadgeForSelectedOrg, getSelectedOrgUsage, updateBadgeError, refreshRecNotice } from './badge.js';
+import { updateBadgeForSelectedOrg, getSelectedOrgUsage, paintClaudeFailureBadge, refreshRecNotice } from './badge.js';
 import { checkCollectFailNotification, checkUsageAlerts, checkPromoPush, logNotification, createCountedNotification } from './notifications.js';
 import {
   detectPlan, refineTeamPlan, planFromSeatTier, hasConsumerOrg, fetchSubscriptionInfo,
@@ -1999,8 +1999,10 @@ async function collectAndSendImpl({ force = false, skipServer = false, userManua
       syncPaused: await isServerSyncPaused(),
     });
 
-    // On collection failure: show error badge + check collect-fail notification
-    updateBadgeError();
+    // On collection failure: show error badge + check collect-fail notification.
+    // 🔴 Through paintClaudeFailureBadge(): `!` unless the user snoozed the panel's soft notice
+    // for this failure, so the badge never alarms next to a panel that says all is fine.
+    await paintClaudeFailureBadge();
     await checkCollectFailNotification(errorMsg);
 
     // 🔴 THE REASON GOES ON THE SHARED `provider_collect_fail` AXIS, not on this event.

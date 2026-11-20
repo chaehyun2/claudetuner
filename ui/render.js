@@ -3,6 +3,7 @@
 // (nothing imports this). i18n `t` is a global from i18n.js (classic script).
 import { planDisplayName, gaugeColor, formatTimeAgo, setRenewalDisplay, showPrivacyRow, hidePrivacyRow, PRIVACY_DISMISS_KEYS, applyGaugeWindowLabels, usageWithheldForDisplay, extraUsageShown, usageWithheldText, appendUsageWithheldTip } from './util.js';
 import { noteSurface } from '../bg/block-state.js';
+import { CLAUDE_NOTICE_DISMISS_KEY, claudeFailureDemoteOrg, isClaudeNoticeSnoozed } from '../bg/claude-notice.js';
 import { renderGaugeReset } from './gauge-facts.js';
 import { state, _filteredHistory, isDetailHidden } from './state.js';
 import { setPredictHeadline, renderGaugePrediction, renderLimitReachedHeadline, renderStatusBanner, renderPeakBanner, _restoreGaugeHTML } from './prediction.js';
@@ -230,11 +231,8 @@ export function _updateUICore(status) {
     // healthy. Gate on provider data presence (not accountCache.email, which
     // persists after a session expires and so can't tell "active" from "former"
     // Claude users). Prefer the pinned primary if it's a non-Claude org.
-    const primaryOrg = (state.collectedOrgs || []).find(o => o.isPrimary);
-    const primaryIsNonClaude = !!(primaryOrg && (primaryOrg.provider || 'claude') !== 'claude');
-    const providerWithData = (state.collectedOrgs || []).find(o =>
-      (o.provider || 'claude') !== 'claude' && (o.h5 != null || o.d7 != null));
-    const demoteOrg = (primaryIsNonClaude ? primaryOrg : null) || providerWithData || null;
+    // Shared with the badge (bg/collect.js) via bg/claude-notice.js so the two cannot disagree.
+    const demoteOrg = claudeFailureDemoteOrg(state.collectedOrgs);
 
     if (demoteOrg) {
       const label = _providerOrgLabel(demoteOrg);
@@ -242,9 +240,10 @@ export function _updateUICore(status) {
       if (onboarding) onboarding.classList.add('hidden');
 
       const dismissBtn = document.getElementById('error-dismiss');
-      // If the user already dismissed this notice, keep the healthy status but
-      // hide the notice (stays dismissed until Claude recovers — see success path).
-      if (state.claudeNoticeDismissed) {
+      // If the user dismissed this notice, keep the healthy status but hide the notice — for
+      // CLAUDE_NOTICE_SNOOZE_MS only. It used to stay hidden until Claude recovered, which for a
+      // broken session meant forever while the badge kept showing `!` (bg/claude-notice.js).
+      if (isClaudeNoticeSnoozed(state.claudeNoticeDismissed)) {
         errorBanner.classList.add('hidden');
         return;
       }
@@ -271,8 +270,10 @@ export function _updateUICore(status) {
           dismissBtn.dataset.bound = '1';
           dismissBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            state.claudeNoticeDismissed = true;
-            chrome.storage.local.set({ claudeNoticeDismissed: true });
+            // A timestamp, not `true`: the snooze expires (bg/claude-notice.js). background.js
+            // watches this key and repaints the badge so the `!` clears at the same moment.
+            state.claudeNoticeDismissed = Date.now();
+            chrome.storage.local.set({ [CLAUDE_NOTICE_DISMISS_KEY]: state.claudeNoticeDismissed });
             errorBanner.classList.add('hidden');
           });
         }
@@ -340,7 +341,7 @@ export function _updateUICore(status) {
   // surfaces the notice again.
   if (state.claudeNoticeDismissed) {
     state.claudeNoticeDismissed = false;
-    chrome.storage.local.remove('claudeNoticeDismissed');
+    chrome.storage.local.remove(CLAUDE_NOTICE_DISMISS_KEY);
   }
   const dismissBtnOk = document.getElementById('error-dismiss');
   if (dismissBtnOk) dismissBtnOk.style.display = 'none';

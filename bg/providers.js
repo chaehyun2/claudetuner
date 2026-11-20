@@ -1,7 +1,15 @@
 // ChatGPT/Gemini: permission check, content-script registration, and org merge.
 // Moved verbatim out of background.js (#1126); only the `export` keywords and these imports are new.
 import { withCollectLock } from './collect-lock.js';
-import { updateBadgeForSelectedOrg } from './badge.js';
+import { updateBadgeForSelectedOrg, paintClaudeFailureBadge } from './badge.js';
+
+// A Claude user whose Claude collect just FAILED has a badge painted from the provider data as it
+// was before this merge (bg/badge.js paintClaudeFailureBadge). Repaint it now that the merge has
+// stored the fresh value; a healthy Claude user's badge is owned by the Claude path, so skip.
+async function repaintAfterProviderMerge() {
+  const { lastStatus } = await chrome.storage.local.get({ lastStatus: null });
+  if (lastStatus?.error) await paintClaudeFailureBadge();
+}
 import { collectChatGPT } from './collect-chatgpt.js';
 import { isChatGPTAccountSwitch } from './parse-chatgpt.js';
 import { collectGemini } from './collect-gemini.js';
@@ -232,6 +240,7 @@ export async function mergeChatGPTOrgs(force = false, userManual = false) {
       // usage, since the Claude path won't run to update it.
       const { accountCache } = await chrome.storage.local.get({ accountCache: null });
       if (!accountCache?.email) await updateBadgeForSelectedOrg(null);
+      else await repaintAfterProviderMerge();
     }
   } catch (e) {
     console.warn('[Claude Tuner] ChatGPT collection skipped:', e.message);
@@ -279,6 +288,7 @@ export async function mergeGeminiOrgs(force = false, userManual = false) {
       // usage, since the Claude path won't run to update it.
       const { accountCache } = await chrome.storage.local.get({ accountCache: null });
       if (!accountCache?.email) await updateBadgeForSelectedOrg(null);
+      else await repaintAfterProviderMerge();
       return true;
     }
     return false;

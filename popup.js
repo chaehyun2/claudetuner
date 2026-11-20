@@ -874,7 +874,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // earlier, so applying it now would replace a newer token with an older one.
       if (!_syncEmailLive) state.syncEmail = extTokenEmail(result.extToken);
       state.onboardOrgName = result.onboardOrgName || null;
-      state.claudeNoticeDismissed = result.claudeNoticeDismissed || false;
+      state.claudeNoticeDismissed = result.claudeNoticeDismissed || false; // dismissal timestamp (bg/claude-notice.js); legacy `true` = expired
       state.lastView = result.lastView || 'overview';
       state.overviewHintDismissed = !!result.overviewHintDismissed;
 

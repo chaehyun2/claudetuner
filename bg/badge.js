@@ -3,6 +3,7 @@ import { REC_SEEN_KEY, REC_NOTICE_KEY, computeRecNotice } from './rec-notice.js'
 import { composeToolbarTitle, formatUsage, pickNotice } from './toolbar-title.js';
 import { bt } from './i18n.js';
 import { planDisplayName } from '../ui/util.js';
+import { CLAUDE_NOTICE_DISMISS_KEY, claudeFailureDemoteOrg, isClaudeNoticeSnoozed } from './claude-notice.js';
 
 // Get usage data for the PINNED (primary) org. The toolbar badge follows the
 // pinned org, NOT the transient popup selection — selecting a chip only changes
@@ -127,6 +128,7 @@ export async function updateBadge(util7d, util5h) {
 
   if (util === null || util === undefined) {
     chrome.action.setBadgeText({ text: '' });
+    await yieldToLateBlock();
     return;
   }
   const pct = Math.round(util);
@@ -141,6 +143,18 @@ export async function updateBadge(util7d, util5h) {
     const showing5h = usageDisplayMode === '5h' || (usageDisplayMode === 'both' && util5h != null && util7d != null && util5h >= util7d);
     chrome.action.setBadgeBackgroundColor({ color: showing5h ? '#06b6d4' : '#7c3aed' });
   }
+  await yieldToLateBlock();
+}
+
+/**
+ * WRITE, THEN VERIFY (deploy-1.56.25 R1-B1). updateBadge() decides "not blocked" and only later,
+ * after several awaits, writes. A 410 handled in between (markAccountDeleted) paints `!`, and the
+ * resumed paint overwrote it with a percentage. Checking again BEFORE the write cannot close that
+ * — the check itself awaits (R2). Checking AFTER can: if the block landed before this read, the
+ * `!` is restored here; if it lands after, its own updateBadgeError() runs after this write.
+ */
+async function yieldToLateBlock() {
+  if (await badgeLockedByAuthBlock()) updateBadgeError();
 }
 
 // The recommendation used to live in the badge text — `45⚠`, then `45↑`/`45↓` (#985). Both were
@@ -200,6 +214,23 @@ async function applyStateIcon() {
     console.warn('[Claude Tuner] rec icon state read failed:', e?.message);
   }
   resetIcon();
+}
+
+/**
+ * Badge for a FAILED CLAUDE COLLECTION. `!`, unless the panel shows this failure as a soft notice
+ * the user has snoozed — then the healthy provider's usage, so badge and panel agree
+ * (bg/claude-notice.js). Reads `collectedOrgs` fresh every call: callers run it again after the
+ * provider merges, or the badge would keep the provider's value from BEFORE this cycle (R1-B1).
+ */
+export async function paintClaudeFailureBadge() {
+  const { collectedOrgs = [], [CLAUDE_NOTICE_DISMISS_KEY]: dismissedAt = null } =
+    await chrome.storage.local.get({ collectedOrgs: [], [CLAUDE_NOTICE_DISMISS_KEY]: null });
+  const softOrg = claudeFailureDemoteOrg(collectedOrgs);
+  if (softOrg && isClaudeNoticeSnoozed(dismissedAt)) {
+    await updateBadge(softOrg.d7 ?? null, softOrg.h5 ?? null);
+    return;
+  }
+  updateBadgeError();
 }
 
 // Error icon + badge on collection failure

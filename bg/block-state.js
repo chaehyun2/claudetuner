@@ -1,3 +1,4 @@
+import { isClaudeNoticeSnoozed } from './claude-notice.js';
 // Single decision point for "why is this install not syncing, and what should the user do about
 // it". Today seven surfaces answer that question independently — the reauth widget, the login
 // CTA, the error banner, the upgrade warning, the email-mismatch warning, the account-deleted
@@ -135,7 +136,7 @@ function errorUiSuppression(raw) {
   if (!hasClaude && hasOther) return 'provider_only';
   // User muted the notice. Unlike the two above this is NOT a statement that nothing is blocking —
   // it is blocked and the user chose not to look. Stage 2 must keep the two apart.
-  if (raw.claudeNoticeDismissed === true) return 'dismissed';
+  if (isClaudeNoticeSnoozed(raw.claudeNoticeDismissed)) return 'dismissed';
   return '';
 }
 

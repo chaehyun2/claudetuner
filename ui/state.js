@@ -14,7 +14,7 @@ export const state = {
   overviewOrder: [], // user's saved overview card order (uuid list, chrome.storage.sync)
   lastView: 'overview', // last-viewed multi-account screen ('overview' | 'detail'), restored on open
   overviewHintDismissed: false, // user dismissed the one-time "click a card for detail" hint
-  claudeNoticeDismissed: false, // user dismissed the demoted Claude-disconnected notice (reset when Claude recovers)
+  claudeNoticeDismissed: false, // ms timestamp the demoted Claude-disconnected notice was dismissed (24h snooze, bg/claude-notice.js; reset when Claude recovers)
   dashNudgeEvaluated: false, // one-time dashboard nudge already evaluated this popup open (avoid rebinding listeners)
   isIndependent: false, // signed in via email (no Claude account) — suppress all Claude-centric status/errors
   independentEmail: '', // independent account email (shown in the footer)

@@ -20,7 +20,8 @@ import { isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory,
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
 import { isGrantable, GRANT_PAGE, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
-import { updateBadgeForSelectedOrg, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
+import { updateBadgeForSelectedOrg, paintClaudeFailureBadge, resetIcon, updateBadgeError, refreshToolbarTip } from './bg/badge.js';
+import { CLAUDE_NOTICE_DISMISS_KEY, isClaudeNoticeSnoozed } from './bg/claude-notice.js';
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { SEND_CODE_REASON, sendCodeReasonFromThrown } from './bg/send-code-error.js';
@@ -2293,6 +2294,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // there is no alarm for it, and it must keep advancing for a user who never opens the popup.
   await checkAuthBlockedLadder();
 })();
+
+// Dismissing the soft "Claude disconnected" notice snoozes it — the badge `!` for the same failure
+// has to clear at the same moment, not at the next collect (bg/claude-notice.js).
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[CLAUDE_NOTICE_DISMISS_KEY]) return;
+  if (!isClaudeNoticeSnoozed(changes[CLAUDE_NOTICE_DISMISS_KEY].newValue)) return;
+  paintClaudeFailureBadge().catch((e) => console.warn('[Claude Tuner] badge repaint after notice dismiss failed:', e?.message));
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.authBlocked) return;
