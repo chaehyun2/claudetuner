@@ -25,7 +25,7 @@ import { CLAUDE_NOTICE_DISMISS_KEY, isClaudeNoticeSnoozed } from './bg/claude-no
 import { REC_SEEN_KEY, REC_NOTICE_KEY, recNoticeKey } from './bg/rec-notice.js';
 import { clearUpgradeBlocked } from './bg/upgrade-gate.js';
 import { SEND_CODE_REASON, sendCodeReasonFromThrown } from './bg/send-code-error.js';
-import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification, checkResetPassNotifications, resetPassNotifUrl } from './bg/notifications.js';
+import { scheduleWeeklyReport, sendWeeklyReport, logNotification, checkPromoPush, notifyAuthBlockedOnce, checkAuthBlockedLadder, maybeOpenAuthBlockedTab, authBlockRecoveryParams, AUTH_TAB_MARKER_KEY, AUTH_LADDER_LAST_STAGE, AUTH_LADDER_KEYS, flushNotifCounters, bumpNotifCounter, notifCategoryFromId, createCountedNotification, checkResetPassNotifications, resetPassNotifUrl } from './bg/notifications.js';
 import {
   detectPlan, refineTeamPlan, executePlanChange, cancelDowngrade, downgradeTo,
   acceptPlanOrder, reportPlanOrderResult, dismissRecommendationServer, muteRecommendationServer,
@@ -958,6 +958,11 @@ chrome.runtime.onStartup.addListener(async () => {
   forgetOwnedAiTabs();
   await setupAlarm();
   checkPromoPush(); // server-signaled push, independent of collection success (best-effort)
+  // #2967: one sign-in tab per auth-block episode, only here at browser start (fences in
+  // bg/notifications.js). Detached + caught: it must never sit in front of the startup work below.
+  maybeOpenAuthBlockedTab()
+    .then((opened) => { if (opened) sendGAEvent('authblock_tab_open', {}); })
+    .catch((e) => console.warn('[Claude Tuner] auth-blocked tab failed:', e?.message));
   // Rides the once-per-browser-start event rather than a new one: it samples EVERY install,
   // unlike the ext_settings channel, which only reports for people engaged enough to open Settings
   // and hit save — the opposite of the population this question is about.
@@ -2332,7 +2337,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
     // Drop the episode marker AND the whole ladder state so a FUTURE block starts from rung one.
     // 🔴 All four keys or none: a surviving `authBlockedStage` would silently skip straight to the
     // last rung of the next episode, and a surviving `authBlockedSince` would make it fire at once.
+    // #2967: GA wants the episode (which nudge preceded the sign-in). Issue the read and the remove
+    // in the SAME tick, read first: chrome.storage serves an area's operations in call order, so the
+    // read sees the old episode and nothing can land between the two. 🔴 Do NOT await the read
+    // before removing — a re-block arriving in that gap stamps a fresh authBlockedSince that the
+    // late remove would then erase, skipping the next episode's stage-1 card (Codex R1-B1).
+    const episode = chrome.storage.local.get([...AUTH_LADDER_KEYS, AUTH_TAB_MARKER_KEY]);
     chrome.storage.local.remove(AUTH_LADDER_KEYS);
+    episode.then((st) => sendGAEvent('authblock_recovered', authBlockRecoveryParams(st))).catch(() => {});
   }
 });
 

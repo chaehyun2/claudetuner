@@ -185,7 +185,8 @@ const TRANSLATIONS = {
     // ①"세션"의 주체가 없어 claude.ai 세션으로 읽힌다 ②claude.ai는 멀쩡히 연결돼 있어 모순으로
     // 보인다 ③🔴 로컬 수집은 멈춘 적이 없으므로 "수집 재개"는 사용자가 눈으로 반박할 수 있는
     // 거짓이다(멈춘 것은 서버 저장이다) ④무엇에 로그인하라는 것인지 말하지 않는다.
-    // login_cta_authblocked_* 와 어휘·문장구조를 일부러 맞췄다 — 사용자 입장에서 같은 상황이다.
+    // 처음엔 login_cta_authblocked_* 와 어휘·문장구조를 맞췄다. #2967에서 authblocked 쪽만 「무엇이 빠지는가」
+    // 중심으로 바꿨다(공유키 일몰 차단 인구 대상) — 이 reauth 문구는 다른 상태(토큰 만료)라 그대로 둔다.
     'reauth_title': '다시 인증하고 서버 동기화 켜기',
     'reauth_msg': '사용량은 이 브라우저에 계속 기록되고 있습니다. 다만 {0}의 Claude Tuner 인증이 만료되어 서버에 저장되지 않고 있고, 여러 기기 통합 분석·플랜 추천도 잠겨 있습니다. 이메일 인증 한 번으로 다시 켜집니다.',
     'reauth_send': '인증 코드 받기',
@@ -273,9 +274,9 @@ const TRANSLATIONS = {
     // Auth-blocked variant: an email-login account cannot authenticate with the shared key, so the
     // server drops its snapshots. Sync has STOPPED (local collection still works) — say that, don't
     // pitch a feature. Copy sits in the same widget as the two variants above.
-    'login_cta_authblocked_title': '인증하고 서버 동기화 다시 켜기',
-    'login_cta_authblocked_msg': '사용량은 이 브라우저에 계속 기록되고 있지만, 서버에는 더 이상 저장되지 않고 있습니다. 이 계정은 이제 로그인이 필요합니다. 이메일 인증 한 번으로 다시 연결됩니다.',
-    'login_cta_authblocked_mini': '🔒 인증 필요 — 지금 이 브라우저의 사용량이 서버에 저장되지 않고 있습니다',
+    'login_cta_authblocked_title': '로그인해야 사용량 기록이 쌓여요',
+    'login_cta_authblocked_msg': '사용량 게이지는 지금처럼 보이지만, 사용량이 더 이상 저장되지 않아 대시보드의 사용량 추이와 팀 대시보드에서 빠지고 있습니다. 이메일 인증 한 번이면 다시 쌓입니다.',
+    'login_cta_authblocked_mini': '🔒 로그인 필요 — 지금 사용량이 저장되지 않고 있습니다',
     // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
     // the email-code flow below stays the fallback and the copy must never imply otherwise.
     'login_cta_google': 'Google로 계속하기',
@@ -1142,9 +1143,9 @@ const TRANSLATIONS = {
     // Auth-blocked variant: an email-login account cannot authenticate with the shared key, so the
     // server drops its snapshots. Sync has STOPPED (local collection still works) — say that, don't
     // pitch a feature. Copy sits in the same widget as the two variants above.
-    'login_cta_authblocked_title': 'Verify to resume server sync',
-    'login_cta_authblocked_msg': 'Your usage is still recorded in this browser, but it is no longer being saved to the server — this account now requires sign-in. One email verification restores it.',
-    'login_cta_authblocked_mini': '🔒 Verification needed — this browser\'s usage is not reaching the server',
+    'login_cta_authblocked_title': 'Sign in to keep your usage history',
+    'login_cta_authblocked_msg': 'The usage gauge still works, but your usage is no longer being saved, so it is missing from the dashboard\'s usage trend and your team dashboard. One email verification fixes it.',
+    'login_cta_authblocked_mini': '🔒 Sign-in needed — your usage is not being saved right now',
     // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
     // the email-code flow below stays the fallback and the copy must never imply otherwise.
     'login_cta_google': 'Continue with Google',

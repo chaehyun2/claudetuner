@@ -613,6 +613,104 @@ export async function checkAuthBlockedLadder(now = Date.now()) {
   // No logNotification() — claimNudgeSlot already wrote this notification's log entry.
 }
 
+// === Auth-blocked: one sign-in TAB per episode, at browser start (#2967) ===
+//
+// WHY a tab on top of the ladder. Measured after the 2026-11-17 shared-key sunset: ~2,000 accounts
+// a day blocked, the stage-1 card reached nearly all of them (3,003 sent) but only 9% clicked, and
+// only ~600 ever opened the popup. A notification is easy to swipe away; a tab is what the user
+// actually looks at. It is also the most intrusive surface we have, so it is fenced hard:
+//   - ONCE per block episode, and at most once per 30 days across episodes. The marker is
+//     deliberately NOT in AUTH_LADDER_KEYS, so recovery does not reset it — a block that keeps
+//     recurring must not reopen a tab every time.
+//   - Only at browser START (caller: chrome.runtime.onStartup). Tabs open then anyway, so it does
+//     not pop up in the middle of work.
+//   - Only after the stage-1 card was already shown and the block is ≥1 day old: the card gets
+//     its chance first; the tab is the escalation, not the opener.
+//   - Same opt-out as the ladder (notifyAuthBlockedFollowup governs the whole feature) and the
+//     same daily nudge budget + quiet hours (claimNudgeSlot), so it never stacks on another
+//     interruption the same day.
+// The tab is popup.html — exactly what the cards' Verify button opens, and it renders the
+// auth-blocked login CTA, whose sign-in clears `authBlocked` directly.
+const AUTH_TAB_MIN_BLOCKED_MS = DAY_MS;
+const AUTH_TAB_COOLDOWN_MS = 30 * DAY_MS;
+export const AUTH_TAB_MARKER_KEY = 'authBlockedTabOpenedAt';
+export const AUTH_TAB_CATEGORY = 'auth-blocked-tab';
+
+export async function maybeOpenAuthBlockedTab(now = Date.now()) {
+  const st = await chrome.storage.local.get({
+    authBlocked: false, extToken: null, authBlockedSince: 0, authBlockedNotifiedAt: 0, [AUTH_TAB_MARKER_KEY]: 0,
+    loginCtaCollapsed: false, authBlockedStage: 1,
+  });
+  // Same predicate as the popup CTA (ui/login-cta.js authIsBlocked): a held token means the
+  // block is not this one, and the CTA the tab would show is not up.
+  if (st.authBlocked !== true || st.extToken) return false;
+  const since = asTime(st.authBlockedSince);
+  if (!since || now - since < AUTH_TAB_MIN_BLOCKED_MS) return false;
+  if (!asTime(st.authBlockedNotifiedAt)) return false;
+  // "Use locally only" on the popup card is an explicit no. The card itself stays reachable as the
+  // collapsed bar; opening a tab over that choice is exactly the nagging this is fenced against.
+  if (st.loginCtaCollapsed === true) return false;
+  // The ladder's last rung PROMISES "we won't remind you again" — a tab after it breaks that
+  // promise, which is worse than any nudge (deploy-1.56.26 R1-B1: 1.56.25 users already at stage 4).
+  if (asStage(st.authBlockedStage) >= AUTH_LADDER_LAST_STAGE) return false;
+  const last = asTime(st[AUTH_TAB_MARKER_KEY]);
+  // Two separate caps: already opened in THIS episode (a long block must not reopen every 30 days),
+  // and once per 30 days across episodes (a recurring block must not reopen every time).
+  if (last && last >= since) return false;
+  if (last && now - last < AUTH_TAB_COOLDOWN_MS) return false;
+
+  const { notifyAuthBlockedFollowup = true } =
+    await chrome.storage.sync.get({ notifyAuthBlockedFollowup: true });
+  if (!notifyAuthBlockedFollowup) return false;
+
+  const slot = await claimNudgeSlot(AUTH_TAB_CATEGORY, now);
+  if (!slot.granted) return false;
+  // Marker BEFORE create: two startup paths racing must not both open a tab. If create fails,
+  // hand back both the marker and the day.
+  // Re-check after the awaits above: a restored dashboard tab can recover the token at startup
+  // (RECOVER_EXT_TOKEN) while we were reading, and a tab opened after that shows no login card at all.
+  const fresh = await chrome.storage.local.get({ authBlocked: false, extToken: null });
+  if (fresh.authBlocked !== true || fresh.extToken) { await releaseNudgeSlot(slot, now); return false; }
+  await chrome.storage.local.set({ [AUTH_TAB_MARKER_KEY]: now });
+  const undo = async () => {
+    await chrome.storage.local.set({ [AUTH_TAB_MARKER_KEY]: last });
+    await releaseNudgeSlot(slot, now);
+  };
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: chrome.runtime.getURL('popup.html'), active: true });
+  } catch {
+    await undo();
+    return false;
+  }
+  // Storage reads and writes are async, so no pre-check can close the window entirely (Codex R2:
+  // recovery can still land during the marker write). Check once more AFTER the tab exists and take
+  // it back: a tab showing no login card, stealing focus after the user is already signed in, is
+  // worse than the extra call.
+  const after = await chrome.storage.local.get({ authBlocked: false, extToken: null });
+  if (after.authBlocked !== true || after.extToken) {
+    try { if (tab?.id != null) await chrome.tabs.remove(tab.id); } catch { /* already closed */ }
+    await undo();
+    return false;
+  }
+  return true;
+}
+
+/**
+ * GA params for the auth-block RECOVERY edge (#2967): did this episode's tab open before the user
+ * signed in, and how far the notification ladder had climbed. Reuses the property's already-
+ * registered custom dimensions `kind` / `reason` (the ones login_cta_shown uses) so the funnel is
+ * queryable without GA admin changes. Must be read BEFORE AUTH_LADDER_KEYS are removed.
+ */
+export function authBlockRecoveryParams(st = {}) {
+  const since = asTime(st.authBlockedSince);
+  const tabAt = asTime(st[AUTH_TAB_MARKER_KEY]);
+  return {
+    kind: since && tabAt >= since ? 'tab' : 'no_tab',
+    reason: `stage${asStage(st.authBlockedStage)}`,
+  };
+}
+
 // === Collection failure notification (3-stage escalation) ===
 export async function checkCollectFailNotification(errorMsg) {
   const { notifyCollectFail = true } = await chrome.storage.sync.get({ notifyCollectFail: true });
