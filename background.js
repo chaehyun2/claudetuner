@@ -998,6 +998,19 @@ function clearWakeRetries() {
 
 chrome.idle.onStateChanged.addListener(async (newState) => {
   if (newState !== 'active') return;
+  // #2967: on macOS the auth-blocked cards wait while the user is away (bg/notifications.js
+  // macUserAway); this edge IS "they are back", so deliver them now. Detached and unthrottled —
+  // both calls are idempotent and cost a storage read when nothing is due.
+  void (async () => {
+    const { authBlocked } = await chrome.storage.local.get('authBlocked');
+    if (authBlocked !== true) return;
+    // Twice on purpose (deploy-1.56.27 R1-B1): the first call may JOIN a wake catch-up that queried
+    // idle just before this edge and came back "away" — a shared, stale result. The second starts a
+    // fresh run now that the user is active; it is a no-op once the marker is set.
+    await notifyAuthBlockedOnce();
+    await notifyAuthBlockedOnce();
+    await checkAuthBlockedLadder();
+  })().catch((e) => console.warn('[Claude Tuner] auth-blocked catch-up on wake failed:', e?.message));
   const now = Date.now();
   if (now - _lastIdleCollect < IDLE_COLLECT_THROTTLE_MS) return;
   _lastIdleCollect = now;

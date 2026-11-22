@@ -409,7 +409,49 @@ export async function releaseNudgeSlot(slot, now = Date.now()) {
  * an edge alone misses installs that were already blocked before this shipped. Both are safe to
  * call repeatedly — the marker below is what enforces "once".
  */
-export async function notifyAuthBlockedOnce() {
+/**
+ * macOS only: is the user away (idle / screen locked) right now? (#2967)
+ *
+ * WHY. On macOS Chrome hands notifications to the system Notification Center, where
+ * `requireInteraction` is ignored unless the user switched Chrome's alert style from the default
+ * "Banners" to "Alerts". So the stage-1 card is a few-second banner there — and collection keeps
+ * running while the screen is locked or the user is away, so the card could fire into an empty room
+ * and never be seen. We cannot change the OS setting; we CAN wait until someone is at the screen.
+ * Callers simply do not post (no marker, no budget spent) and retry on the next wake — including
+ * the idle → active edge in background.js, i.e. the moment the user comes back.
+ *
+ * Elsewhere `requireInteraction` keeps the card up, so other platforms are untouched. Fails OPEN
+ * (returns false = "not away"): a missing API must never silence the notification.
+ */
+const MAC_ACTIVE_WINDOW_S = 60;
+async function isMacPlatform() {
+  try { return (await chrome.runtime.getPlatformInfo())?.os === 'mac'; } catch { return false; }
+}
+export async function macUserAway() {
+  try {
+    if (!(await isMacPlatform())) return false;
+    const state = await chrome.idle.queryState(MAC_ACTIVE_WINDOW_S);
+    return state === 'idle' || state === 'locked';
+  } catch {
+    return false;
+  }
+}
+
+// Single-flight (#2967, Codex R1-B1): on macOS the card is deferred while the user is away, so the
+// moment they come back the service-worker wake catch-up and the idle→active edge both call this.
+// The episode marker is written only after create() confirms, so two overlapping calls would both
+// pass the check and post twice (create() on the same id replaces the card, and logs it twice).
+// Overlapping callers share the one in-flight run instead.
+let _authBlockedNotifyInFlight = null;
+export function notifyAuthBlockedOnce() {
+  if (!_authBlockedNotifyInFlight) {
+    _authBlockedNotifyInFlight = notifyAuthBlockedOnceRun()
+      .finally(() => { _authBlockedNotifyInFlight = null; });
+  }
+  return _authBlockedNotifyInFlight;
+}
+
+async function notifyAuthBlockedOnceRun() {
   // Episode marker, not an edge. onChanged fires only on a CHANGE, so an install that was ALREADY
   // blocked before this build shipped would never be told — and that is exactly the population
   // this exists for (PR #682 set the flag; the notification only shipped after). The marker makes
@@ -437,6 +479,7 @@ export async function notifyAuthBlockedOnce() {
   const { notifyAuthBlockedFollowup = true } =
     await chrome.storage.sync.get({ notifyAuthBlockedFollowup: true });
   if (!notifyAuthBlockedFollowup) return;
+  if (await macUserAway()) return; // mac banner would pass unseen — retried when the user is back
   // 🔴 Mark ONLY after creation is CONFIRMED. Reordering the calls was not enough (first attempt):
   // create() is callback-based, so setting the marker on the next line still records "notified"
   // for a call that may have failed — a revoked notifications permission, an OS-level block. The
@@ -539,6 +582,12 @@ export async function checkAuthBlockedLadder(now = Date.now()) {
   if (now - authBlockedLastNotifiedAt < AUTH_LADDER_MIN_GAP_MS) return;
 
   const stage = authBlockedStage + 1;
+  if (await macUserAway()) return;                  // same as stage 1: no banner into an empty room
+  // On macOS stage 1 can be DEFERRED (macUserAway), so a rung must never overtake it — the user
+  // would get the persuasion before the fault report, then the fault report on top the same day
+  // (stage 1 ignores the budget). Elsewhere stage 1 is never deferred, so the existing rule — a
+  // FAILED stage 1 still starts the ladder — is unchanged (deploy-1.56.27 R1-B1).
+  if (!(await chrome.storage.local.get('authBlockedNotifiedAt')).authBlockedNotifiedAt && (await isMacPlatform())) return;
   const slot = await claimNudgeSlot('auth-blocked-followup', now);
   // Denied = the user already heard from us today, or it is the middle of their night. Return
   // WITHOUT advancing the stage so this exact step retries on a later wake. The ladder slips; it
