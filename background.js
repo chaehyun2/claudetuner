@@ -16,8 +16,8 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
-import { maybeSilentRelogin, SILENT_RECOVERED_KEY } from './bg/silent-relogin.js';
-import { isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenIf, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { maybeSilentRelogin, declinedReason, SILENT_RECOVERED_KEY } from './bg/silent-relogin.js';
+import { serverSyncWithheldReason, isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenIf, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
 import { isGrantable, GRANT_PAGE, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
@@ -162,7 +162,7 @@ async function exchangeGoogleIdToken(idToken, { silent = false } = {}) {
   };
   if (silent) {
     const stored = await setExtTokenIf(data.ext_token,
-      (st) => st.authBlocked === true && !st.extToken && st.account_deleted !== true, persistAccount);
+      (st) => !st.extToken && st.account_deleted !== true && !declinedReason(st), persistAccount);
     return stored ? { ok: true, email: data.email, name: data.name || '' } : { ok: false, error: 'raced' };
   }
   // 🔴 setExtToken, NOT a raw set: it is the choke point that records
@@ -175,21 +175,36 @@ async function exchangeGoogleIdToken(idToken, { silent = false } = {}) {
   return { ok: true, email: data.email, name: data.name || '' };
 }
 
-// #2997: click-free re-login while login-blocked. Invariants live in bg/silent-relogin.js; this
-// only wires the dependencies. Fire-and-forget by design — every caller is a wake path that must
-// not wait on accounts.google.com.
-function trySilentRelogin(trigger) {
+// #2997: click-free re-login for any tokenless install that needs a login (blocked, token lost, or
+// not signed in yet). Invariants live in bg/silent-relogin.js; this only wires the dependencies.
+// Fire-and-forget by design — every caller is a wake path that must not wait on accounts.google.com.
+function trySilentRelogin() {
   maybeSilentRelogin({
     clientId: GOOGLE_CLIENT_ID,
+    state: async () => {
+      const { authBlocked } = await chrome.storage.local.get({ authBlocked: false });
+      if (authBlocked === true) return 'auth_blocked';
+      return serverSyncWithheldReason();   // 'login_first' | 'token_lost' | null
+    },
     // The account this install collects for. There is no token in this state (that is the
     // precondition), so this resolves to the provider profile — the address the server blocked.
     // 🔴 A local Claude alias link OUTRANKS that for Claude posts (bg/storage.js pickIngestIdentity:
     // linkedCanonical first), so with a link naming ANOTHER address the profile is not who this
     // install posts as: a token for it would 403 every Claude snapshot (Codex R1-B2). Step aside;
     // the dashboard recovery (RECOVER_EXT_TOKEN) handles that case with the server's alias check.
-    identity: async () => {
-      const { email } = await resolveSyncIdentity();
-      const { claudeAliasLink = null } = await chrome.storage.local.get({ claudeAliasLink: null });
+    identity: async (state) => {
+      // 🔴 token_lost: back to the account the person was SIGNED IN AS (independentAccount, written
+      // by every login), never the provider profile — Claude as A + Tuner as B would otherwise come
+      // back as A (Codex wide-R1-B1). No record → no guess.
+      const { independentAccount = null, claudeAliasLink = null } =
+        await chrome.storage.local.get({ independentAccount: null, claudeAliasLink: null });
+      // 🔴 Whoever SIGNED IN here before wins (independentAccount, written by every login) for both
+      // withheld states — an install that lost its token can also read as login_first when it was
+      // never grandfathered (deploy-1.56.30 R1-B1). Only a blocked install, which never signed in,
+      // uses the address the server blocked (the provider profile).
+      const email = state === 'auth_blocked'
+        ? (await resolveSyncIdentity()).email
+        : (independentAccount?.email || (state === 'login_first' ? (await resolveSyncIdentity()).email : null));
       const canon = claudeAliasLink?.canonicalEmail;
       if (canon && (!email || String(canon).toLowerCase() !== String(email).toLowerCase())) return { skip: 'alias_link' };
       return email;
@@ -197,7 +212,6 @@ function trySilentRelogin(trigger) {
     exchange: (idToken) => exchangeGoogleIdToken(idToken, { silent: true }),
     decode: decodeJwtPayload,
     ga: (name, params) => { sendGAEvent(name, params); },
-    trigger,
   }).then((outcome) => {
     if (outcome === 'ok') collectAndSend({ force: true }).catch(() => {});
   }).catch(() => {});
@@ -2363,8 +2377,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 (async () => {
   const { authBlocked } = await chrome.storage.local.get('authBlocked');
   if (authBlocked === true) await notifyAuthBlockedOnce();
-  // #2997: and try the click-free Google re-login (throttled to ~1/day inside, a no-op otherwise).
-  if (authBlocked === true) trySilentRelogin('wake');
+  // #2997: the click-free Google re-login, for every login-needing state (the module decides; a
+  // storage read when there is nothing to do, ~1 attempt/day otherwise).
+  trySilentRelogin();
   // Stages 2..4. Runs on every service-worker wake, which is what gives the ladder its clock —
   // there is no alarm for it, and it must keep advancing for a user who never opens the popup.
   await checkAuthBlockedLadder();
@@ -2383,7 +2398,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const { oldValue, newValue } = changes.authBlocked;
   if (newValue === true && oldValue !== true) {
     notifyAuthBlockedOnce();
-    trySilentRelogin('edge'); // #2997 — same throttle as the wake path
+    trySilentRelogin(); // #2997 — same throttle as the wake path
     // Stamp the episode start on the EDGE, where the true start time is known. The wake catch-up
     // also stamps, but only with "now" — for a block that begins while the worker is alive, that
     // would be a later (wrong) date. Written unconditionally because this branch IS the transition.

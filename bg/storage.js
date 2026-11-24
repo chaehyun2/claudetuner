@@ -9,6 +9,7 @@ import { noteUpgradeRequired, isUpgradePostSuppressed, isUpgradeBlocked, clearUp
 // badge in one place — see #994.
 import { updateBadgeError } from './badge.js';
 import { applyServerCadence } from './cadence-config.js';
+import { SILENT_OPT_OUT_KEY } from './silent-relogin.js';
 
 export async function getConfig() {
   return new Promise((resolve) => {
@@ -283,12 +284,15 @@ export function setExtToken(token) {
  * inside the same turn of the chain (so the account record written with it cannot be overtaken by
  * another login's). Resolves true when written.
  * @param {string} token
- * @param {(st: {extToken: any, authBlocked: any, account_deleted: any}) => boolean} predicate
+ * @param {(st: {extToken: any, authBlocked: any, account_deleted: any, authSilentOptOut: any, loginCtaCollapsed: any, serverSyncPaused: any}) => boolean} predicate
  * @param {() => Promise<void>} [afterWrite]
  */
 export function setExtTokenIf(token, predicate, afterWrite) {
   return withTokenWrite(async () => {
-    const st = await chrome.storage.local.get({ extToken: null, authBlocked: false, account_deleted: false });
+    const st = await chrome.storage.local.get({
+      extToken: null, authBlocked: false, account_deleted: false,
+      [SILENT_OPT_OUT_KEY]: false, loginCtaCollapsed: false, serverSyncPaused: false,
+    });
     if (!predicate(st)) return false;
     await writeExtToken(token);
     if (afterWrite) await afterWrite();
@@ -329,7 +333,9 @@ async function writeExtToken(token) {
   // clearing on observation would cancel the retry while the install stayed tokenless (Codex
   // review). This choke point also covers the login paths (verify-code / Google / dashboard
   // recovery), which should end an episode just as much as a TOFU mint does.
-  await chrome.storage.local.remove(TOKEN_RETRY_KEY);
+  // #2997: a stored token is a login, so a sign-out's "do not sign me back in"
+  // (bg/silent-relogin.js SILENT_OPT_OUT_KEY) has done its job; the next sign-out sets it again.
+  await chrome.storage.local.remove([TOKEN_RETRY_KEY, SILENT_OPT_OUT_KEY]);
 }
 
 // Token claim readers live in a leaf module (bg/ext-token-claims.js) so the popup can use

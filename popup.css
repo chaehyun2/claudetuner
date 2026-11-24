@@ -366,6 +366,13 @@
     .sb-orange { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; }
     .sb-darkred { background: #fef2f2; border: 1px solid #f87171; color: #7f1d1d; }
     [data-theme="dark"] .sb-green { background: #052e16; border-color: #166534; color: #86efac; }
+    /* #2997 click-free sign-in notice: the "reconnected" green of .sb-green, so it never reads as
+       one more of the purple tips (pin hint, review nudge) stacked under it. */
+    .silent-login-notice { position: relative; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; border-radius: 8px; padding: 8px 24px 8px 10px; margin-bottom: 8px; font-size: 11.5px; line-height: 1.45; }
+    .silent-login-notice-close { position: absolute; top: 4px; right: 6px; background: none; border: none; color: inherit; opacity: .7; cursor: pointer; font-size: 13px; padding: 0; }
+    .silent-login-notice a { color: #15803d; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; margin-left: 4px; }
+    [data-theme="dark"] .silent-login-notice { background: #052e16; border-color: #166534; color: #86efac; }
+    [data-theme="dark"] .silent-login-notice a { color: #bbf7d0; }
     [data-theme="dark"] .sb-yellow { background: #1a1500; border-color: #854d0e; color: #fde68a; }
     [data-theme="dark"] .sb-orange { background: #1c0f00; border-color: #9a3412; color: #fdba74; }
     [data-theme="dark"] .sb-red { background: #2a0a0a; border-color: #991b1b; color: #fca5a5; }

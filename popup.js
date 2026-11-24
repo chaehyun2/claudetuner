@@ -34,6 +34,7 @@ import { renderLoginCta } from './ui/login-cta.js';
 import { initLoginNudge, renderLoginNudge, renderLoginNudgeSpark, relabelLoginNudge } from './ui/login-nudge.js';
 import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
 import { readCompareEntryVariant, ENTRY_CROSSCHECK, ENTRY_DEBATE, ENTRY_PLACEMENT } from './ui/compare-entry.js';
+import { SILENT_OPT_OUT_KEY, SILENT_NOTICE_KEY } from './bg/silent-relogin.js';
 
 // How long the width has to hold still before the detail charts re-rasterise to it. Long enough
 // that dragging the side panel divider settles into a single redraw, short enough that the
@@ -571,6 +572,9 @@ document.addEventListener('DOMContentLoaded', async () => {
               await chrome.storage.local.set({
                 serverSyncGrandfathered: false,
                 showLoginPrompt: true,
+                // #2997: they signed out on purpose — the click-free re-login must not put the old
+                // account straight back. Cleared by the next stored token (bg/storage.js).
+                [SILENT_OPT_OUT_KEY]: true,
                 ...(lastStatus && typeof lastStatus === 'object'
                   ? { lastStatus: { ...lastStatus, serverWithheld: 'login_first' } } : {}),
               });
@@ -605,6 +609,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  renderSilentLoginNotice();
   renderReauth();
   renderLoginCta();
   // Felt-need login nudge (#2420) — counts this open and renders for a no-account repeat visitor.
@@ -976,8 +981,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       // dragend re-renders from the latest saved order anyway.
       if (isOverviewActive() && !isDragging()) renderOverview();
     }
+    // #2997: the auto sign-in notice follows the account/token/notice wherever they change
+    // (another popup's account switch, a sign-in landing while this view is open).
+    if (area === 'local' && (changes[SILENT_NOTICE_KEY] || changes.independentAccount || changes.extToken || changes.serverSyncPaused)) {
+      renderSilentLoginNotice({ live: true });
+    }
     if (area === 'sync' && changes.lang) {
       setLang(changes.lang.newValue);
+      renderSilentLoginNotice(); // imperative t() text, like the renders below
       // These set text imperatively via t() (not data-i18n), so re-render them on a live lang
       // switch (checkProviderPermissions rebuilds the banner via innerHTML='' — no double-bind).
       renderReauth();
@@ -1830,4 +1841,67 @@ function showSuccess(msg) {
   el.title = '';
 }
 
-
+// #2997: the click-free Google sign-in happened without a click, so the person is told which account
+// it chose, with the account switch right there. Until they dismiss it (×), at most
+// SILENT_NOTICE_TTL_MS after the sign-in.
+// 🔴 It is a STATE rendered from storage, not an event consumed on display (Codex notice-R1): a
+// consume-on-show version showed twice in popup + side panel, lost the notice when the sign-in
+// landed mid-render, stayed up after an account switch elsewhere, and kept the old language. So:
+// every render re-reads the CURRENT account and token, and storage changes / a language switch
+// re-render it (listeners below in this file's init).
+const SILENT_NOTICE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+let _silentNoticeExpiry = null;   // re-render at expiry: a side panel can stay open for days (notice-R2-B1)
+async function renderSilentLoginNotice({ live = false } = {}) {
+  const box = document.getElementById('silent-login-notice');
+  if (!box) return;
+  clearTimeout(_silentNoticeExpiry);
+  _silentNoticeExpiry = null;
+  const { [SILENT_NOTICE_KEY]: notice = null, extToken = null, independentAccount = null, serverSyncPaused = false } =
+    await chrome.storage.local.get({ [SILENT_NOTICE_KEY]: null, extToken: null, independentAccount: null, serverSyncPaused: false });
+  // Paused: "your usage is saved to the dashboard again" would contradict the paused panel right
+  // under it (deploy-1.56.30 R1-B3). Hidden, not dropped — it is true again if they resume.
+  if (serverSyncPaused === true) { box.classList.add('hidden'); return; }
+  const fresh = notice && Number.isFinite(notice.at) && Date.now() - notice.at < SILENT_NOTICE_TTL_MS && notice.at <= Date.now() + 60_000;
+  const same = !!independentAccount?.email && typeof notice?.email === 'string'
+    && notice.email.toLowerCase() === String(independentAccount.email).toLowerCase();
+  if (!notice || !fresh || !same || !extToken) {
+    box.classList.add('hidden');
+    // A notice that can no longer be true (expired, another account, signed out) is dropped. Safe
+    // against the mid-render race: the notice is written AFTER the token and account
+    // (bg/silent-relogin.js), so a present notice with no matching token means it is stale.
+    if (notice) chrome.storage.local.remove(SILENT_NOTICE_KEY).catch(() => {});
+    return;
+  }
+  document.getElementById('silent-login-notice-msg').textContent =
+    t('silent_login_notice', notice.email)
+    || `Signed in automatically with your Google account ${notice.email}. Your usage is saved to the dashboard again.`;
+  // The existing account switch (footer #independent-signout: confirm → sign out → login card).
+  // Hidden when that control is not offered on this install, rather than a link that does nothing.
+  const sw = document.getElementById('silent-login-notice-switch');
+  const footerSwitch = document.getElementById('independent-signout');
+  // The footer switch is set up once, at popup init, from the account state of that moment. A
+  // sign-in that lands while this view is open leaves it unbound, so the link would be hidden
+  // (deploy-1.56.30 R1-B2). Re-initialise the view once — the reload binds it for the new state.
+  // Only for a LIVE change: at init the footer was just set up for this very state, so an unbound
+  // one there is by design (an email-only account has no switch) and must not cost a reload.
+  if (live && footerSwitch && !footerSwitch.dataset.deauthBound && !sessionStorage.getItem('ctSilentNoticeReloaded')) {
+    sessionStorage.setItem('ctSilentNoticeReloaded', '1');
+    location.reload();
+    return;
+  }
+  if (sw) {
+    sw.textContent = t('account_switch_cta') || 'Switch account';
+    sw.classList.toggle('hidden', !footerSwitch || footerSwitch.classList.contains('hidden'));
+    sw.onclick = (e) => { e.preventDefault(); footerSwitch?.click(); };
+  }
+  // setTimeout caps at ~24.8 days; the TTL is 3, so the remaining time always fits.
+  clearTimeout(_silentNoticeExpiry); // overlapping renders: keep only the latest timer (notice-R3 follow-up)
+  _silentNoticeExpiry = setTimeout(renderSilentLoginNotice, Math.max(0, notice.at + SILENT_NOTICE_TTL_MS - Date.now()) + 1000);
+  const close = document.getElementById('silent-login-notice-close');
+  if (close) {
+    close.title = t('silent_login_notice_close') || 'Dismiss';
+    close.setAttribute('aria-label', close.title);
+    close.onclick = () => { chrome.storage.local.remove(SILENT_NOTICE_KEY).catch(() => {}); box.classList.add('hidden'); };
+  }
+  box.classList.remove('hidden');
+}

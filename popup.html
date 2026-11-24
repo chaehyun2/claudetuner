@@ -39,6 +39,12 @@
 
   <!-- #2821: team skills waiting for an update / held for the user — popup.js fills it from the background (never hidden by
        the user: it is where a missed notification still leads). -->
+  <!-- #2997: shown ONCE after a click-free Google sign-in (popup.js renderSilentLoginNotice). -->
+  <div id="silent-login-notice" class="silent-login-notice hidden">
+    <span id="silent-login-notice-msg"></span>
+    <a id="silent-login-notice-switch" href="#" data-i18n="account_switch_cta">Switch account</a>
+    <button id="silent-login-notice-close" type="button" class="silent-login-notice-close" aria-label="Dismiss">×</button>
+  </div>
   <a id="skill-update-line" class="skill-update-line hidden" href="https://claudetuner.com/dashboard/prompts/?from=ext_popup_update#skills" target="_blank" data-ga="skill_update_line"></a>
 
   <div id="pin-hint" style="display:none;background:var(--accent-light);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:var(--accent);text-align:center;position:relative">
