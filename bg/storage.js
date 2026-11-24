@@ -262,7 +262,41 @@ export function isLoginProvenToken(token) {
   return !!token && extTokenScope(token) === 'full' && PROVEN_SRC.has(extTokenSrc(token));
 }
 
-export async function setExtToken(token) {
+// ── One writer at a time (#2997, Codex R1-B1) ────────────────────────────────────────────────
+// Every token persist goes through this chain, so a CONDITIONAL write (setExtTokenIf) can check
+// the state and write in one step that no other login interleaves with. Without it, a click-free
+// re-login whose server reply arrived late overwrote a manual sign-in that finished meanwhile.
+// One service worker = one chain; the popup and dashboard paths all write from the background.
+let _tokenWriteChain = Promise.resolve();
+function withTokenWrite(fn) {
+  const run = _tokenWriteChain.then(fn, fn);
+  _tokenWriteChain = run.catch(() => {});
+  return run;
+}
+
+export function setExtToken(token) {
+  return withTokenWrite(() => writeExtToken(token));
+}
+
+/**
+ * Persist `token` only if `predicate(state)` still holds at write time, then run `afterWrite`
+ * inside the same turn of the chain (so the account record written with it cannot be overtaken by
+ * another login's). Resolves true when written.
+ * @param {string} token
+ * @param {(st: {extToken: any, authBlocked: any, account_deleted: any}) => boolean} predicate
+ * @param {() => Promise<void>} [afterWrite]
+ */
+export function setExtTokenIf(token, predicate, afterWrite) {
+  return withTokenWrite(async () => {
+    const st = await chrome.storage.local.get({ extToken: null, authBlocked: false, account_deleted: false });
+    if (!predicate(st)) return false;
+    await writeExtToken(token);
+    if (afterWrite) await afterWrite();
+    return true;
+  });
+}
+
+async function writeExtToken(token) {
   // 🔴 `everHadProvenToken` means "this install has held a LOGIN-PROVEN token", and the
   // `scope === 'full'` test is the whole point — NOT "has held a token".
   //

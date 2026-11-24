@@ -47,7 +47,10 @@ export const AUTH_BLOCKED_MARKER = 'auth-blocked';
 async function signInWithGoogle() {
   let granted = false;
   try {
-    granted = await chrome.permissions.request({ permissions: ['identity'] });
+    // #2997: `identity` is REQUIRED now, so it is normally already held. Ask only when it is not
+    // (an older build's grant state): permissions.request() on a non-optional permission may reject.
+    granted = await chrome.permissions.contains({ permissions: ['identity'] })
+      || await chrome.permissions.request({ permissions: ['identity'] });
   } catch {
     granted = false;
   }

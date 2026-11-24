@@ -16,7 +16,8 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
-import { isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
+import { maybeSilentRelogin, SILENT_RECOVERED_KEY } from './bg/silent-relogin.js';
+import { isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenIf, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
 import { isGrantable, GRANT_PAGE, providerWanted, PROVIDER_PREF_DEFAULTS } from './bg/grantable.js';
@@ -125,6 +126,82 @@ async function scheduleSkillUpdate() {
 // accepted audience on the server. Public value (it ships in dashboard JS), not a secret.
 // 🔴 Requires `https://<extension-id>.chromiumapp.org/` in the client's authorized redirect URIs.
 const GOOGLE_CLIENT_ID = '1073913781930-7r6v6nim1unn7so8s6jueap2a28eprla.apps.googleusercontent.com';
+
+/**
+ * Google id_token → ext_token('full') and the local state a sign-in leaves behind. ONE writer for
+ * the popup button (GOOGLE_SIGNIN) and the click-free re-login (bg/silent-relogin.js, #2997), so
+ * the two can never disagree about what "signed in" means.
+ * `silent`: nobody clicked. It goes to /ext-google-silent (never creates or resurrects an account —
+ * and a worker without that route 404s, writing nothing: Codex R1-B3), and it stores only if the
+ * install is STILL blocked and tokenless at write time (setExtTokenIf, the single-writer chain), so
+ * a late reply can never overwrite a manual sign-in that finished meanwhile (Codex R1-B1).
+ * @returns {Promise<{ok: true, email: string, name: string} | {ok: false, error: string}>}
+ */
+async function exchangeGoogleIdToken(idToken, { silent = false } = {}) {
+  const config = await getConfig();
+  const resp = await fetch(`${config.serverUrl}/api/auth/${silent ? 'ext-google-silent' : 'ext-google'}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ google_token: idToken }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.ext_token) return { ok: false, error: data.error || (resp.status === 404 ? 'not_found' : 'signin_failed') };
+
+  // Everything a sign-in leaves behind, written in ONE turn of the token chain with the token.
+  const persistAccount = async () => {
+    await chrome.storage.local.set({
+      independentAccount: { email: data.email, name: data.name || '' },
+    });
+    // The debate room's own avatar (bg/profile-photo.js): the photo Google put in this same
+    // id_token, bound to the account the server just confirmed. The server verified the token
+    // (resp.ok above); this only peeks at a display claim.
+    const photo = profilePhotoRecord(data.email, decodeJwtPayload(idToken));
+    if (photo) await chrome.storage.local.set({ [PROFILE_PHOTO_KEY]: photo });
+    else await chrome.storage.local.remove(PROFILE_PHOTO_KEY);
+    await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked', 'account_deleted']);
+  };
+  if (silent) {
+    const stored = await setExtTokenIf(data.ext_token,
+      (st) => st.authBlocked === true && !st.extToken && st.account_deleted !== true, persistAccount);
+    return stored ? { ok: true, email: data.email, name: data.name || '' } : { ok: false, error: 'raced' };
+  }
+  // 🔴 setExtToken, NOT a raw set: it is the choke point that records
+  // `everHadProvenToken` (and ends a token-withheld retry episode). Writing `extToken`
+  // directly here meant a LOGIN-proven token left no trace, so a later token loss fell
+  // back to the shared key silently — for exactly the population this is meant to protect
+  // (Codex DEPLOY-BLOCKER).
+  await setExtToken(data.ext_token);
+  await persistAccount();
+  return { ok: true, email: data.email, name: data.name || '' };
+}
+
+// #2997: click-free re-login while login-blocked. Invariants live in bg/silent-relogin.js; this
+// only wires the dependencies. Fire-and-forget by design — every caller is a wake path that must
+// not wait on accounts.google.com.
+function trySilentRelogin(trigger) {
+  maybeSilentRelogin({
+    clientId: GOOGLE_CLIENT_ID,
+    // The account this install collects for. There is no token in this state (that is the
+    // precondition), so this resolves to the provider profile — the address the server blocked.
+    // 🔴 A local Claude alias link OUTRANKS that for Claude posts (bg/storage.js pickIngestIdentity:
+    // linkedCanonical first), so with a link naming ANOTHER address the profile is not who this
+    // install posts as: a token for it would 403 every Claude snapshot (Codex R1-B2). Step aside;
+    // the dashboard recovery (RECOVER_EXT_TOKEN) handles that case with the server's alias check.
+    identity: async () => {
+      const { email } = await resolveSyncIdentity();
+      const { claudeAliasLink = null } = await chrome.storage.local.get({ claudeAliasLink: null });
+      const canon = claudeAliasLink?.canonicalEmail;
+      if (canon && (!email || String(canon).toLowerCase() !== String(email).toLowerCase())) return { skip: 'alias_link' };
+      return email;
+    },
+    exchange: (idToken) => exchangeGoogleIdToken(idToken, { silent: true }),
+    decode: decodeJwtPayload,
+    ga: (name, params) => { sendGAEvent(name, params); },
+    trigger,
+  }).then((outcome) => {
+    if (outcome === 'ok') collectAndSend({ force: true }).catch(() => {});
+  }).catch(() => {});
+}
 
 
 chrome.permissions.onAdded.addListener((perm) => {
@@ -2157,9 +2234,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // Google sign-in from the popup → ext_token('full'), the one-click twin of VERIFY_MAGIC_CODE.
-  // The `identity` permission is OPTIONAL and requested by the popup (chrome.permissions.request
-  // needs a user gesture, which a message handler does not have) — by the time we get here it is
-  // already granted. Server counterpart: POST /api/auth/ext-google.
+  // `identity` is a REQUIRED permission since #2997 (it carries no install warning, so the update
+  // grants it silently — see test/ext-google-login-guard.mjs [A]); the popup still calls
+  // chrome.permissions.request first, which resolves true at once and keeps older builds working.
+  // Server counterpart: POST /api/auth/ext-google.
   if (message.type === 'GOOGLE_SIGNIN') {
     (async () => {
       try {
@@ -2195,32 +2273,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
 
-        const config = await getConfig();
-        const resp = await fetch(`${config.serverUrl}/api/auth/ext-google`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ google_token: idToken }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) { sendResponse({ success: false, error: data.error || 'signin_failed' }); return; }
-
-        // 🔴 setExtToken, NOT a raw set: it is the choke point that records
-        // `everHadProvenToken` (and ends a token-withheld retry episode). Writing `extToken`
-        // directly here meant a LOGIN-proven token left no trace, so a later token loss fell
-        // back to the shared key silently — for exactly the population this is meant to protect
-        // (Codex DEPLOY-BLOCKER).
-        await setExtToken(data.ext_token);
-        await chrome.storage.local.set({
-          independentAccount: { email: data.email, name: data.name || '' },
-        });
-        // The debate room's own avatar (bg/profile-photo.js): the photo Google put in this same
-        // id_token, bound to the account the server just confirmed. The server verified the token
-        // (resp.ok above); this only peeks at a display claim.
-        const photo = profilePhotoRecord(data.email, decodeJwtPayload(idToken));
-        if (photo) await chrome.storage.local.set({ [PROFILE_PHOTO_KEY]: photo });
-        else await chrome.storage.local.remove(PROFILE_PHOTO_KEY);
-        await chrome.storage.local.remove(['showLoginPrompt', 'needsFullLogin', 'authBlocked', 'account_deleted']);
-        sendResponse({ success: true, email: data.email, name: data.name });
+        const res = await exchangeGoogleIdToken(idToken);
+        if (!res.ok) { sendResponse({ success: false, error: res.error }); return; }
+        sendResponse({ success: true, email: res.email, name: res.name });
       } catch (e) {
         // launchWebAuthFlow rejects when the user closes the window — not an error worth surfacing
         // as a failure message beyond "cancelled".
@@ -2308,6 +2363,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 (async () => {
   const { authBlocked } = await chrome.storage.local.get('authBlocked');
   if (authBlocked === true) await notifyAuthBlockedOnce();
+  // #2997: and try the click-free Google re-login (throttled to ~1/day inside, a no-op otherwise).
+  if (authBlocked === true) trySilentRelogin('wake');
   // Stages 2..4. Runs on every service-worker wake, which is what gives the ladder its clock —
   // there is no alarm for it, and it must keep advancing for a user who never opens the popup.
   await checkAuthBlockedLadder();
@@ -2326,6 +2383,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const { oldValue, newValue } = changes.authBlocked;
   if (newValue === true && oldValue !== true) {
     notifyAuthBlockedOnce();
+    trySilentRelogin('edge'); // #2997 — same throttle as the wake path
     // Stamp the episode start on the EDGE, where the true start time is known. The wake catch-up
     // also stamps, but only with "now" — for a block that begins while the worker is alive, that
     // would be a later (wrong) date. Written unconditionally because this branch IS the transition.
@@ -2355,8 +2413,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
     // read sees the old episode and nothing can land between the two. 🔴 Do NOT await the read
     // before removing — a re-block arriving in that gap stamps a fresh authBlockedSince that the
     // late remove would then erase, skipping the next episode's stage-1 card (Codex R1-B1).
-    const episode = chrome.storage.local.get([...AUTH_LADDER_KEYS, AUTH_TAB_MARKER_KEY]);
-    chrome.storage.local.remove(AUTH_LADDER_KEYS);
+    const episode = chrome.storage.local.get([...AUTH_LADDER_KEYS, AUTH_TAB_MARKER_KEY, SILENT_RECOVERED_KEY]);
+    chrome.storage.local.remove([...AUTH_LADDER_KEYS, SILENT_RECOVERED_KEY]);
     episode.then((st) => sendGAEvent('authblock_recovered', authBlockRecoveryParams(st))).catch(() => {});
   }
 });

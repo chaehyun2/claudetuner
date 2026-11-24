@@ -4,6 +4,7 @@ import { getLastStatus } from './storage.js';
 import { readHistory } from './usage-history-db.js';
 import { blockedSlotsOf, clearNowCall, holdsAny, isPassCount, orgHistory, pastWeeklyBlocks, resetPassLiveView, resetPassSiteUrl, RESET_PASS_TICKETS_MAX } from './reset-pass-model.js';
 import { SITE_ORIGINS } from '../vendor-ai/sites.js';
+import { SILENT_RECOVERED_KEY } from './silent-relogin.js';
 
 /**
  * The services this install actually collects, as "Claude/ChatGPT/Gemini", for the auth-blocked
@@ -754,8 +755,11 @@ export async function maybeOpenAuthBlockedTab(now = Date.now()) {
 export function authBlockRecoveryParams(st = {}) {
   const since = asTime(st.authBlockedSince);
   const tabAt = asTime(st[AUTH_TAB_MARKER_KEY]);
+  // #2997: the click-free Google re-login recovered it — nobody signed in by hand, so neither
+  // 'tab' nor 'no_tab' would be true. Same episode rule as the tab marker.
+  const silentAt = asTime(st[SILENT_RECOVERED_KEY]);
   return {
-    kind: since && tabAt >= since ? 'tab' : 'no_tab',
+    kind: since && silentAt >= since ? 'silent' : since && tabAt >= since ? 'tab' : 'no_tab',
     reason: `stage${asStage(st.authBlockedStage)}`,
   };
 }
