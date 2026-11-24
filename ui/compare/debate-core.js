@@ -532,16 +532,20 @@ const DEFAULT_ALIAS_RULES = {
   gemini: [
     { tokens: ['thinking'], key: 'debate_alias_gemini_thinking', family: 'debate_family_thinking', emoji: '\u{1F9E0}', tier: TIER_REASONING }, // brain
     // Gemini 4 names its models by element (2026-11): Hydrogen is the light Flash lane (the site's own row
-    // code is `Flash4p0`), Carbon and Argon the heavier ones Google ranks above it. 「4 Hydrogen Thinking」
-    // still hits `thinking` first.
+    // code is `Flash4p0`), Carbon and Argon the heavier ones Google ranks above it, and Neon the one that
+    // took the 3.1 Pro lane (2026-11-24, 「Deeper analysis」). 「4 Hydrogen Thinking」 still hits `thinking` first.
+    // 🔴 These names are the FALLBACK: the site localizes them (「4 카본」 on a Korean account, which no
+    // ASCII token reads), so a catalog row's lane `role` is read first — ROLE_RULES.gemini below.
     { tokens: ['flash', 'lite', 'hydrogen'], key: 'debate_alias_gemini_flash', family: 'debate_family_flash', emoji: '\u{26A1}', tier: TIER_LIGHT },       // lightning (flash)
-    { tokens: ['pro', 'ultra', 'argon', 'carbon'], key: 'debate_alias_gemini_pro', family: 'debate_family_pro', emoji: '\u{1F52C}', tier: TIER_HIGH },   // microscope (expert)
+    { tokens: ['pro', 'ultra', 'argon', 'carbon', 'neon'], key: 'debate_alias_gemini_pro', family: 'debate_family_pro', emoji: '\u{1F52C}', tier: TIER_HIGH },   // microscope (expert)
     { tokens: null, key: 'debate_alias_gemini', family: null, emoji: '\u{1F39B}\u{FE0F}', tier: null },                                         // gemini sign (twins)
   ],
 };
 // ROLE FIRST (#2054 E): the catalog's `role` (vendor-ai models.js — the site's own lane, an enum that does not
 // change when a slug is renamed) names the family before any token does; the token rules above are the fallback
-// for a row without a role (Claude / Gemini rows, a static list, a stored model the catalog no longer has).
+// for a row without a role (Claude rows, a Gemini row whose lane has no word yet, a stored model the catalog
+// no longer has). Gemini's role is its menu LANE (vendor-ai v0.52.1 `GEMINI_LANE_ROLES`, read from the row's
+// number): `code` is Carbon's lane, grouped with Pro as Argon / Carbon were (user decision 2026-11-18).
 // `work` names no family (Astra / Sol / Luna / Terra are told apart by their tokens) and is left to them.
 const ruleByKey = (provider, key) => DEFAULT_ALIAS_RULES[provider].find((r) => r.key === key);
 const ROLE_RULES = {
@@ -553,6 +557,12 @@ const ROLE_RULES = {
     thinking_max: ruleByKey('chatgpt', 'debate_alias_chatgpt_thinking'),
     thinking_mini: { ...ruleByKey('chatgpt', 'debate_alias_chatgpt_mini'), tier: TIER_MINI },
     pro: ruleByKey('chatgpt', 'debate_alias_chatgpt_pro'),
+  },
+  gemini: {
+    fast: ruleByKey('gemini', 'debate_alias_gemini_flash'),
+    thinking: ruleByKey('gemini', 'debate_alias_gemini_thinking'),
+    pro: ruleByKey('gemini', 'debate_alias_gemini_pro'),
+    code: ruleByKey('gemini', 'debate_alias_gemini_pro'),
   },
 };
 export const TIER_KEYS = [TIER_HIGH, TIER_REASONING, TIER_MINI, TIER_BALANCED, TIER_LIGHT];

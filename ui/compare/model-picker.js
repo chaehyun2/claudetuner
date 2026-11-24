@@ -7,7 +7,7 @@
 // (attached to ctx); `state.pickerKind` says which list it holds. ctx contract: see ui/compare/history.js.
 
 import { COMPARE_PROVIDERS, colIdOf, parseColId, PROVIDER_META, MODELS_CSV_AUTO, MODELS_CSV_ID_MAX, MODEL_ID_RE, MODEL_AUTO_VALUE } from './constants.js';
-import { CHATGPT_EFFORT_SEPARATOR, chatgptWorkLine, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
+import { CHATGPT_EFFORT_SEPARATOR, GEMINI_ROLE_AUTO, chatgptWorkLine, isChatgptWorkSlug, parseChatgptModelId } from '../../vendor-ai/models.js';
 import { modelOptionText, lockedInCatalog, lockedSuffix } from './helpers.js';
 
 /** Installs the model-picker slice onto `ctx` (ctx contract: ui/compare/history.js header). */
@@ -424,6 +424,12 @@ export function installModelPicker(ctx) {
     }
     clear(sel);
     for (const m of list) {
+      // 🔴 gemini.google.com's own 「Auto mode」 row (vendor-ai v0.52.1 `role: 'auto'`) reads as a second
+      // Auto beside ours (「Auto · 자동 모드」, on a free account the whole menu), so it is DRAWN only in a
+      // column that already sends it — a layout or seed saved while the menu offered it. It stays in
+      // `list` / `known`: with the row gone from the catalog that column fell back to Auto beside an
+      // Auto sibling, one request sent twice (#2992 Codex 1R).
+      if (col.provider === 'gemini' && m.id != null && m.role === GEMINI_ROLE_AUTO && toValue(m.id) !== value) continue;
       const o = el('option', null, modelOptionText(m, t) + (isLocked(m) ? lockedSuffix(m, t) : ''));
       // The site's own one-liner, where it gives one (v0.10.2): 「리서치급 추론 능력」,
       // 「10월 14일 지원 종료」. 🔴 On the TITLE, not in the option text — it is written in the
