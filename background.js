@@ -64,7 +64,7 @@ import { registerPromptsHandler, handlePromptExternal } from './bg/prompts.js';
 import { handleSkillImportExternal, SKILL_APPLY, SKILL_REMOVE } from './bg/skills-import.js';
 import { createSkillUpdater, handleSkillTrackExternal, makeSettingsOpener } from './bg/skill-update.js';
 import { skillUpdateServer } from './bg/skill-update-server.js';
-import { SKILLS_PAGE_URL } from './bg/prompts.js';
+import { SKILLS_PAGE_URL, skillOrgsCached } from './bg/prompts.js';
 import { buildWelcomeUrl, runWhatsNewOnUpdate, reportWhatsNewLogin, accountAppeared, WN_OPTOUT_KEY } from './bg/whats-new.js';
 import { REVIEW_NUDGE_MSG_TYPE, recordReviewNudgeAction } from './bg/review-nudge.js';
 
@@ -75,6 +75,12 @@ const SKILL_NOTIF_DONE = 'skill-upd-done';   // completed: fades by itself (no r
 const SKILL_NOTIF_WAIT = 'skill-upd-wait';   // manual mode: stays until acted on
 const SKILL_NOTIF_NAMES = 2;                 // names spelled out in a 「여러 개」 message
 const SKILL_UPDATES_URL = SKILLS_PAGE_URL.replace('#skills', '?from=ext_skill_update#skills');
+// #3016 required team skills: one card after an add — it stays (the member's chance to remove it), and its 「자세히」
+// opens the team tab's skill (one skill: its detail; several: the list).
+const SKILL_NOTIF_REQ = 'skill-req-added';
+const SKILL_REQ_URL = `${SITE_URL}/dashboard/team/?tab=skills&from=ext_req`;
+const skillReqDetails = (ids) => chrome.tabs.create({ url: ids.length === 1 ? `${SKILL_REQ_URL}#skills/${ids[0]}` : SKILL_REQ_URL });
+const skillReqTrack = (action) => sendGAEvent('skill_req_notif', { action }).catch(() => {});
 
 /** The two cards (plan §15-6). Resolves true when the browser showed it. */
 async function skillUpdateNotify({ kind, items }) {
@@ -82,6 +88,17 @@ async function skillUpdateNotify({ kind, items }) {
   const one = items.length === 1 ? items[0] : null;
   const names = items.slice(0, SKILL_NOTIF_NAMES).map((i) => i.name).join(', ');
   const listed = items.length > SKILL_NOTIF_NAMES ? await bt('sku_more', names, String(items.length - SKILL_NOTIF_NAMES)) : names;
+  if (kind === 'req_added') {
+    // 「<org> 관리자 <who>님의 요청으로 「<name>」 스킬을 claude.ai(<email>)에 추가했어요. <summary>」 (plan §25-2 3)
+    const where = one && one.email ? await bt('skr_where', one.email) : '';
+    const message = !one ? await bt('skr_many', items[0].org_name, String(items.length), listed)
+      : `${one.by ? await bt('skr_one', one.org_name, one.by, one.name, where) : await bt('skr_one_noby', one.org_name, one.name, where)}${one.summary ? ` ${one.summary}` : ''}`;
+    const buttons = one ? [{ title: await bt('skr_remove') }, { title: await bt('skr_details') }] : [{ title: await bt('skr_details') }];
+    return createCountedNotification(SKILL_NOTIF_REQ, {
+      type: 'basic', iconUrl: 'icons/icon128.png', priority: 1, requireInteraction: true,
+      title: await bt('skr_title'), message, buttons,
+    }, 'skill-req-added').then((id) => { if (id) skillReqTrack('shown'); return !!id; });
+  }
   // Not awaited inline (notif-telemetry guard): the dedup write follows the browser's answer through the promise.
   if (kind === 'done') {
     return createCountedNotification(SKILL_NOTIF_DONE, {
@@ -98,8 +115,9 @@ async function skillUpdateNotify({ kind, items }) {
   }, 'skill-upd-wait').then((id) => !!id);
 }
 const skillUpdater = createSkillUpdater({
-  fetchApi: fetchClaudeApi, server: skillUpdateServer, store: chrome.storage.local, notify: skillUpdateNotify,
+  fetchApi: fetchClaudeApi, server: { ...skillUpdateServer, skillOrgs: skillOrgsCached }, store: chrome.storage.local, notify: skillUpdateNotify,
   openSettings: () => openSkillSettings(),
+  track: (name, params) => { sendGAEvent(name, params).catch(() => {}); },   // #3016 skill_req_add / skill_req_remove
 });
 
 // The dashboard's 「⚙ 설정」 (bg/skill-update.js makeSettingsOpener — one options tab, reused). A literal hash:
@@ -1812,7 +1830,12 @@ if (chrome.commands && chrome.commands.onCommand) {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // #2821 the popup's 「팀 스킬 업데이트」 line and the options switch — extension pages only (a content script's sender.url is the site's), never a content script.
   if (message?.type === 'ct_skill_update' && _sender?.id === chrome.runtime.id && String(_sender.url || '').startsWith(chrome.runtime.getURL(''))) {
-    const run = message.op === 'pref' && typeof message.auto === 'boolean' ? skillUpdater.setPref(message.auto) : skillUpdater.state();
+    // #3016: the popup's required-skill line ([삭제] / ×) and the options' 「필수 팀 스킬 자동 추가」.
+    const run = message.op === 'pref' && typeof message.auto === 'boolean' ? skillUpdater.setPref(message.auto)
+      : message.op === 'req_pref' && typeof message.on === 'boolean' ? skillUpdater.setReqPref(message.on)
+      : message.op === 'req_remove' ? skillUpdater.reqRemove(message.team_id, 'popup')
+      : message.op === 'req_dismiss' ? skillUpdater.reqDismiss(message.team_id)
+      : skillUpdater.state();
     run.then(sendResponse, () => sendResponse({ ok: false }));
     return true;
   }
@@ -2445,6 +2468,12 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
     chrome.notifications.clear(notifId);
     return;
   }
+  if (notifId === SKILL_NOTIF_REQ) {   // #3016: the body = 「자세히」
+    skillReqDetails(await skillUpdater.reqNotifIds());
+    skillReqTrack('click');
+    chrome.notifications.clear(notifId);
+    return;
+  }
   // #2181 U4: an auto plan-order toast opens the page that explains the change (plan §6.1).
   if (notifId.startsWith(PLAN_AUTO_NOTIF_PREFIX)) {
     const orderId = Number(notifId.slice(PLAN_AUTO_NOTIF_PREFIX.length));
@@ -2478,6 +2507,14 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
     chrome.notifications.clear(notifId);
     if (btnIdx === 0) skillUpdater.updateWaiting().catch(() => {});
     else chrome.tabs.create({ url: SKILL_UPDATES_URL });
+    return;
+  }
+  // #3016 one added skill: [삭제] [자세히]; several: [자세히]. 「삭제」 removes that tracked copy through the queue.
+  if (notifId === SKILL_NOTIF_REQ) {
+    chrome.notifications.clear(notifId);
+    const ids = await skillUpdater.reqNotifIds();
+    if (ids.length === 1 && btnIdx === 0) { skillReqTrack('remove'); skillUpdater.reqRemove(ids[0], 'notif').catch(() => {}); }
+    else { skillReqTrack('details'); skillReqDetails(ids); }
     return;
   }
   // Promo push (e.g. Product Hunt launch) → open the promo URL

@@ -515,6 +515,10 @@
     /* #2821 team skills waiting / held — a plain link line under the header; before `.hidden` so the class hides it. */
     .skill-update-line { display: block; margin-bottom: 8px; padding: 8px 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--accent); text-decoration: none; }
     .skill-update-line:hover { border-color: var(--accent); }
+    /* #3016 「관리자 요청으로 추가된 팀 스킬」 — the update line's card, with a remove link and a close × */
+    .skill-req-line { position: relative; margin-bottom: 8px; padding: 8px 24px 8px 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; line-height: 1.45; color: var(--text-primary); }
+    .skill-req-line a { color: var(--accent); font-weight: 700; margin-left: 4px; }
+    .skill-req-line-close { position: absolute; top: 4px; right: 6px; background: none; border: none; color: inherit; opacity: .7; cursor: pointer; font-size: 13px; padding: 0; }
     /* AI Cross-Check shortcut row (2026-09-22) — under the gauges, above the extra-usage card.
        Existing tokens only (popup-contrast-guard reads them per theme); sits BEFORE `.hidden` in
        this file so the class can still hide it (same specificity, later rule wins). */

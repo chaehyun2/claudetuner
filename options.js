@@ -629,7 +629,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('chatgpt-input-usage-enabled').addEventListener('change', _syncDotsInputToggle);
   // #2821 team skills auto-update: the background owns the value (it also resets the 「대기」 card state).
   const skuBox = document.getElementById('skill-update-auto');
-  chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => { void chrome.runtime.lastError; if (r && typeof r.auto === 'boolean') skuBox.checked = r.auto; });
+  const skrBox = document.getElementById('skill-required-auto');   // #3016
+  chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => {
+    void chrome.runtime.lastError;
+    if (r && typeof r.auto === 'boolean') skuBox.checked = r.auto;
+    if (r && typeof r.reqAuto === 'boolean' && skrBox) skrBox.checked = r.reqAuto;
+  });
+  if (skrBox) skrBox.addEventListener('change', () => {
+    chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'req_pref', on: skrBox.checked }, () => { void chrome.runtime.lastError; });
+  });
   skuBox.addEventListener('change', () => {
     chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'pref', auto: skuBox.checked }, () => { void chrome.runtime.lastError; });
   });

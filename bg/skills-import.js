@@ -165,6 +165,8 @@ export async function personalSkillsOf(fetchApi, org) {
 // (`err_session_expired`, `err_cloudflare`, `err_rate_limit`) and no cookies at all (never sent). Unknown: `err_server:5xx`,
 // `err_network`, `err_tab_no_result`, `err_fallback_exhausted`, a broken answer (R1-B4).
 const ANSWERED_RE = /^err_(http:4\d\d|auth_failed|session_expired|no_cookies|rate_limit|cloudflare)/;
+/** The 403 shapes of bg/api.js: the tab's `err_auth_failed:403`, `err_http:403[:code]`, the cookie path's `err_cloudflare`. */
+const FORBIDDEN_RE = /^err_(auth_failed:403|http:403|cloudflare)/;
 
 /**
  * Upload a skill zip into one org (overwrite only when `overwrite === true`). Measured 2026-11-03 (plan §15-1): the answer
@@ -184,8 +186,12 @@ export async function uploadSkillZip(fetchApi, orgUuid, b64, overwrite, expectAc
     const m = String((e && e.message) || '');
     if (m === ERR_ACCOUNT_MISMATCH) return { ok: false, reason: 'other_account' };   // checked in the request itself: not sent
     if (m === `err_http:400:${SKILL_EXISTS_CODE}`) return { ok: false, reason: 'exists' };
-    if (/^err_http:4\d\d:/.test(m)) return rejectedResult(m.split(':')[2]);   // claude.ai refused the skill itself
-    if (ANSWERED_RE.test(m)) return { ok: false, reason: failReason(e) };   // 'error' here = answered (a bare 4xx), not written
+    // A 403 (tab, cookie path or with a code): answered, not written. Marked for the required-skill path, which reads it
+    // as the claude.ai org's policy on a Team / Enterprise org (#3016 — not measured yet, plan §25-1). Callers that build
+    // their own answers never pass this flag on.
+    const forbidden = FORBIDDEN_RE.test(m) ? { forbidden: true } : {};
+    if (/^err_http:4\d\d:/.test(m)) return { ...rejectedResult(m.split(':')[2]), ...forbidden };   // claude.ai refused the skill itself
+    if (ANSWERED_RE.test(m)) return { ok: false, reason: failReason(e), ...forbidden };   // 'error' here = answered (a bare 4xx), not written
     return { ok: false, reason: 'unknown' };
   }
   const skill = r && r.skill;
@@ -214,9 +220,20 @@ export function personalPluginOf(body, skillId) {
   return null;
 }
 
-async function removeSkill(message, fetchApi) {
+/** `opts` (from the updater's queue, R2: R1-B2) pins the DELETE to the context the removal started in. */
+async function removeSkill(message, fetchApi, opts) {
   if (message.probe === true) return { ok: true, probe: true };
-  const orgId = message.org_id, skill = message.skill_id;
+  return removePersonalSkill(fetchApi, message.org_id, message.skill_id, opts && opts.expectAccount, opts && opts.stillOurs);
+}
+
+/**
+ * Remove ONE personal skill (its single-skill plugin) from one of this login's chat orgs. `expectAccount` (the extension's
+ * own callers — never a page) pins the DELETE to that claude.ai account, as the upload is pinned (#3016). `stillOurs()`
+ * (optional, async → boolean) runs after the lookups, right before the DELETE: false = the caller's pinned context changed
+ * meanwhile (e.g. another Tuner account) → nothing is sent (R1-B2).
+ * → { ok } | { ok: false, reason: 'invalid' | 'not_found' | 'claude_login' | 'rate_limit' | 'error' | 'other_account' }
+ */
+export async function removePersonalSkill(fetchApi, orgId, skill, expectAccount, stillOurs) {
   if (typeof orgId !== 'string' || !ORG_UUID_RE.test(orgId) || typeof skill !== 'string' || !SKILL_ID_RE.test(skill)) return { ok: false, reason: 'invalid' };
   const got = await chatOrgsOf(fetchApi);
   if (got.reason) return { ok: false, reason: got.reason };
@@ -226,11 +243,13 @@ async function removeSkill(message, fetchApi) {
     plugin = personalPluginOf(await fetchApi(`${CLAUDE_ORGS_PATH}/${orgId}/library/mine?kind=skill&limit=1000`, { quiet: true }), skill);
   } catch (e) { return { ok: false, reason: failReason(e) }; }
   if (!plugin) return { ok: false, reason: 'not_found' };
+  if (stillOurs && !(await stillOurs())) return { ok: false, reason: 'other_account' };
   try {
-    await fetchApi(`${CLAUDE_ORGS_PATH}/${orgId}/plugins/${plugin}`, { method: 'DELETE', quiet: true, errorCode: true });
+    await fetchApi(`${CLAUDE_ORGS_PATH}/${orgId}/plugins/${plugin}`, { method: 'DELETE', quiet: true, errorCode: true, expectAccount: expectAccount || undefined });
   } catch (e) {
     // Gone already (a retry after a cut answer, or removed in another tab): what the user asked for is true.
     if (/^err_http:404/.test(String((e && e.message) || ''))) return { ok: true };
+    if (String((e && e.message) || '') === ERR_ACCOUNT_MISMATCH) return { ok: false, reason: 'other_account' };   // not sent
     return { ok: false, reason: failReason(e) };
   }
   return { ok: true };
@@ -246,7 +265,7 @@ export function handleSkillImportExternal(message, sender, sendResponse, allowed
   if (!message || !SKILL_MESSAGES.includes(message.type)) return false;
   if (!allowed(sender)) { sendResponse({ ok: false, reason: 'origin' }); return false; }
   // `wrap(message, job)` = background.js's hook: the writes run in bg/skill-update.js's queue (#2821).
-  const job = () => RUNNERS[message.type](message, fetchApi);
+  const job = (opts) => RUNNERS[message.type](message, fetchApi, opts);
   const run = wrap ? wrap(message, job) : job();
   run.then(sendResponse, () => sendResponse({ ok: false, reason: 'error' }));
   return true;

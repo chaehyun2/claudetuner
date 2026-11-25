@@ -1,4 +1,5 @@
-import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo, listGeminiAccounts, invalidateGeminiAccounts, geminiAccountAt } from './api-gemini.js';
+import { fetchGeminiRpc, isGeminiLoggedIn, getGeminiUserInfo, listGeminiAccounts, invalidateGeminiAccounts, geminiAccountAt,
+  isGeminiUsageDenied, GEMINI_USAGE_DENIED_CODE } from './api-gemini.js';
 import { platformField } from './platform.js';
 // The plan-policy RPC (`otAQ7b`) — the same call the vendored client reads the model picker from
 // (#2054), so its id is spelled once.
@@ -7,7 +8,7 @@ import { GEMINI_PICKER_RPC_ID } from '../vendor-ai/models.js';
 // (#1315). collectGemini() keeps every await: parse-gemini.js decides from parsed values and only
 // REPORTS which stored state must then be consulted.
 import { parseGeminiWindows, parseGeminiPolicy, resolveGeminiPlan, geminiUltraSubTier,
-  geminiTierFromQuota } from './parse-gemini.js';
+  geminiTierFromQuota, geminiUsageDeniedPlan } from './parse-gemini.js';
 import { geminiUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider } from './drift-store.js';
 import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
@@ -18,6 +19,11 @@ import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
 // The in-band status bg/api-gemini.js attaches as `e.inBandCode` (a number, or `status`), recorded as
 // the drift code `err_gemini_in_band:<it>` (≤28 chars — AE caps a drift code at 32).
 const IN_BAND_CODE_RE = /^(?:\d{1,9}|status)$/;
+// What a Workspace seat's usage answer carried before the 1007 denial (#3015): no windows at all.
+const GEMINI_NO_USAGE = Object.freeze({
+  planId: null, h5: null, d7: null, resetsAt5h: null, resetsAt7d: null,
+  remaining5h: null, remaining7d: null, pct5hRaw: null, pct7dRaw: null, sawRawUsage: false,
+});
 
 /**
  * Collect Gemini usage data via jSf9Qc RPC.
@@ -110,11 +116,23 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
   try {
     // Where THIS answer came from — the identity below must name the same observation (R1-B1).
     const observe = {};
-    const data = await fetchGeminiRpc('jSf9Qc', '[]', authuser, observe);
+    // A Workspace seat may now DENY the usage RPC in-band (1007, #3015). It used to answer with no
+    // usage windows, so the denial is read as that same empty answer — but only provisionally: it is
+    // kept only if the policy RPC below shows a Workspace seat; otherwise the original error is
+    // rethrown there and the cycle fails exactly as before.
+    let data;
+    let deniedError = null;
+    try {
+      data = await fetchGeminiRpc('jSf9Qc', '[]', authuser, observe);
+    } catch (e) {
+      if (!isGeminiUsageDenied(e)) throw e;
+      deniedError = e;
+      data = null;
+    }
     if (statusOnlyIfDefault && Number.isInteger(observe.authuser) && observe.authuser !== 0) quiet = true;
 
     const shape = geminiUsageShape(data);
-    const parsed = parseGeminiWindows(data);
+    const parsed = deniedError ? GEMINI_NO_USAGE : parseGeminiWindows(data);
     if (!parsed) {
       console.warn('[Claude Tuner] Gemini: unexpected jSf9Qc response');
       // Same silent shape #852 is about: no throw, so no code, so nothing to show. The ChatGPT
@@ -132,7 +150,8 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
       });
       return { success: false, orgs: [] };
     }
-    await noteDriftOutcome('gemini', 'success', null);
+    // A denied answer is recorded once its Workspace check below has decided it.
+    if (!deniedError) await noteDriftOutcome('gemini', 'success', null);
 
     const {
       planId, h5, d7, resetsAt5h, resetsAt7d,
@@ -180,7 +199,11 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
       // 🔴 THE SAME ACCOUNT AS THE USAGE (deploy-1.56.8 B3): /u/<n> can move between the two RPCs
       // (an earlier account signs out) — a policy from another account would label this one.
       // Unnamed or different → the policy is not used (planId / quota decide, as for a failed RPC).
-      if (otOk && Number.isInteger(authuser) && googleId) {
+      // 🔴 A DENIED usage answer is checked on every path (#3015 R1-B1): there the policy alone turns
+      // the account into "Work, no limits", so a policy served by the default cookie account (the
+      // single-account path's fallback) must never vouch for the tab's account. Unnamed → not used.
+      if (otOk && deniedError && !googleId) { otResponse = null; otOk = false; }
+      if (otOk && (Number.isInteger(authuser) || deniedError) && googleId) {
         const otWho = await getGeminiUserInfo(otObserve).catch(() => null);
         if (!otWho || otWho.googleId !== googleId) { otResponse = null; otOk = false; }
       }
@@ -191,9 +214,15 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
 
     // The plan LABEL is decided from parsed signals only (bg/parse-gemini.js); the two state
     // lookups it can ask for are performed here, where their awaits are visible.
-    let { plan, noLimits, needsUltraSubTier, needsStickyMetered } =
-      resolveGeminiPlan({ policies, tierWord, planId, otOk,
+    let { plan, noLimits, needsUltraSubTier, needsStickyMetered } = deniedError
+      ? (geminiUsageDeniedPlan({ policies, otOk }) || (() => { throw deniedError; })())
+      : resolveGeminiPlan({ policies, tierWord, planId, otOk,
         quotaTier: geminiTierFromQuota(remaining7d, pct7dRaw, remaining5h, pct5hRaw) });
+    // Counted as a success (a snapshot goes out), with the denial kept as an event so the 1007
+    // population stays visible in drift_obs instead of vanishing into the success count.
+    if (deniedError) {
+      await noteDriftOutcome('gemini', 'success', { stage: 'decorate:usage', code: `err_gemini_in_band:${GEMINI_USAGE_DENIED_CODE}` });
+    }
 
     // Ultra 5x vs 20x share one policy — refine the label by quota so planMultiplier can
     // apply 5x vs 20x (ChatGPT "Pro 5x"/"Pro 20x" pattern). The quota (remaining) signal is
@@ -235,6 +264,9 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
       resetsAt5h,
       resetsAt7d,
       noLimits,
+      // #3015: Google withheld this account's usage (1007). Shown exactly like an unmetered seat
+      // (user decision 2026-11-25: keep the copy); only the data keeps the two apart.
+      usageHidden: !!deniedError,
       spendUsed: null,
       spendLimit: null,
       extraUsage: null,
@@ -402,6 +434,8 @@ async function sendGeminiSnapshot(org, geminiEmail, plan, { identityEmail = null
     },
     // Raw otAQ7b policy string (authoritative tier signal) — collected into AE.
     gemini_policy: org.geminiPolicy || null,
+    // #3015: spread, so a seat whose usage Google did NOT withhold sends no key at all.
+    ...(org.usageHidden ? { gemini_usage_hidden: true } : {}),
     claude_org_uuid: org.uuid,
     provider: 'gemini',
     provider_email: geminiEmail || null,

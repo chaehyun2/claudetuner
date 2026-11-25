@@ -188,6 +188,20 @@ export function parseGeminiPolicy(otResponse, otOk) {
  *                         `noLimits` can be trusted; the caller overrides `noLimits` with it.
  */
 const GEMINI_WORKSPACE_LABEL = /Business|Enterprise|Work/i;
+// Workspace policy names carry the word as a segment (`neon_launch_workspace_aureus_*`, #3006).
+const GEMINI_WORKSPACE_POLICY = /(^|_)workspace(_|$)/;
+
+/**
+ * Plan for an account whose usage RPC was DENIED in-band (1007, #3015) — or `null` to keep the
+ * failure. A plan-only snapshot is sent only for a seat shown to be Workspace: a Workspace policy
+ * name, or a well-formed policy answer with no policy (the classic Workspace signal above). Anything
+ * else stays a failed collection, so a denied CONSUMER account is never relabeled "Work, no limits".
+ */
+export function geminiUsageDeniedPlan({ policies, otOk }) {
+  const workspace = policies.some((p) => GEMINI_WORKSPACE_POLICY.test(p)) || (otOk && policies.length === 0);
+  if (!workspace) return null;
+  return { plan: 'Work', noLimits: true, needsUltraSubTier: false, needsStickyMetered: false };
+}
 
 export function resolveGeminiPlan({ policies, tierWord, planId, otOk, quotaTier = null }) {
   if (policies.length > 0) {

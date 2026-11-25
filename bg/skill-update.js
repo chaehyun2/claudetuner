@@ -19,7 +19,11 @@
 //    the upload can be overwritten.
 //
 // The page never sends a zip or a URL here — team skill ids only. The zip comes from our server (`server.download`).
-import { chatOrgsOf, personalSkillsOf, uploadSkillZip, checkApplyZip, rejectedResult } from './skills-import.js';
+//
+// Required team skills (#3016, plan §25): an org admin marks a skill 「필수」 and this same check adds it right away through
+// the same write path (same queue, same invariants, never an overwrite), says so in one notification the member can act
+// on (remove), never adds back what the member removed (the skip list), and reports what happened to the server.
+import { chatOrgsOf, personalSkillsOf, uploadSkillZip, checkApplyZip, rejectedResult, removePersonalSkill } from './skills-import.js';
 
 export const SKILL_TRACK_PROTO = 'SKILL_TRACK_PROTO';
 export const SKILL_ADD_TRACKED = 'SKILL_ADD_TRACKED';
@@ -37,6 +41,13 @@ export const TRACK_PROTO_VERSION = 2;
 export const TRACK_KEY = 'skillTracked';      // { <team skill id>: record }
 export const PREF_KEY = 'skillUpdateAuto';    // boolean, default true
 export const META_KEY = 'skillUpdateMeta';    // { me, lastCheck, info: { <id>: server row }, doneDay, waitKeys: [] }
+// Required team skills (#3016). Keys of the skip list and of the report are `<tuner>|<cacct>|<team skill id>` (reqKey).
+export const REQ_PREF_KEY = 'skillRequiredAuto';   // boolean, default true — 「관리자가 정한 필수 팀 스킬 자동 추가」
+export const REQ_SKIP_KEY = 'skillReqSkip';        // { <reqKey>: at } — never added automatically again
+/** { at, ids: [team ids seen required], state: { <reqKey>: { state, reason? } }, sent: { <reqKey>: sig },
+ *  retry: { <reqKey>: at }, forbid: { <reqKey>: { org, n } }, recent: [target + { key, name, at }],
+ *  dismissed: { <reqKey>: at }, notif: { targets: [target] } } — target = { tuner, cacct, org, id, sid } (what 「삭제」 may remove) */
+export const REQ_META_KEY = 'skillReqMeta';
 
 const TEAM_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const ORG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -50,6 +61,23 @@ export const TAB_RECHECK_MS = 60 * 60 * 1000;
 /** The dashboard shows the last automatic update (with 「되돌리기」) for this long. */
 export const RECENT_UPDATE_MS = 7 * 24 * 60 * 60 * 1000;
 const ACTIONS = ['update', 'force', 'untrack', 'revert', 'resume', 'retry'];
+/** A required skill claude.ai refused (its org's policy, or the skill itself) is tried again after this long. */
+export const REQ_RETRY_MS = 24 * 60 * 60 * 1000;
+/** The popup's 「관리자 요청으로 추가된 팀 스킬」 line stays this long after the add. */
+export const REQ_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
+/** Team skill ids remembered as 「required once」 (a later removal in claude.ai is then a 「removed」). */
+const REQ_IDS_MAX = 200;
+const REQ_RECENT_MAX = 20;
+/** Bare 403s (no policy code) in a row on the same Team org before a required skill reads as blocked by its policy (R1-B5). */
+export const REQ_FORBID_STOP = 3;
+/** claude.ai Team / Enterprise org capabilities: preferred for a required skill (plan §25-1). */
+const TEAM_ORG_CAPS = ['raven', 'raven_enterprise'];
+/** A refusal code that names a switched-off feature (skills / user-created skills) — read as the org's policy. */
+const POLICY_CODE_RE = /disabled|not_enabled|not_allowed|permission|forbidden|policy/;
+export const reqKey = (tuner, cacct, id) => `${tuner}|${cacct}|${id}`;
+const isTeamOrg = (org) => !!org && Array.isArray(org.capabilities) && org.capabilities.some((c) => TEAM_ORG_CAPS.includes(c));
+/** The one claude.ai org a required skill goes to: a Team / Enterprise chat org first, else the personal one. */
+export const reqTargetOrg = (orgs) => orgs.find(isTeamOrg) || orgs.find((o) => !isTeamOrg(o)) || null;
 /** Why a record is held for the user (plan §15-2 ⑤). */
 export const CHECK = { changed: 'changed', unknown: 'unknown', conflict: 'conflict' };
 
@@ -68,6 +96,8 @@ const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
  */
 export function createSkillUpdater(deps) {
   const { fetchApi, server, store, notify = async () => false, now = Date.now, newId = () => crypto.randomUUID(), openSettings = async () => false } = deps;
+  // GA (#3016): short params only — never a name, an id or an email.
+  const track = (name, params) => { try { if (deps.track) deps.track(name, params); } catch (e) { /* telemetry never breaks a job */ } };
 
   // ── the serial queue (①) ──
   let chain = Promise.resolve();
@@ -79,15 +109,48 @@ export function createSkillUpdater(deps) {
 
   // ── storage ──
   async function load() {
-    const got = await store.get([TRACK_KEY, META_KEY, PREF_KEY]);
+    const got = await store.get([TRACK_KEY, META_KEY, PREF_KEY, REQ_PREF_KEY, REQ_SKIP_KEY, REQ_META_KEY]);
+    const rm = isObj(got[REQ_META_KEY]) ? got[REQ_META_KEY] : {};
+    for (const k of ['state', 'sent', 'retry', 'forbid', 'dismissed']) if (!isObj(rm[k])) rm[k] = {};
+    if (!Array.isArray(rm.ids)) rm.ids = [];
+    if (!Array.isArray(rm.recent)) rm.recent = [];
     return {
       recs: isObj(got[TRACK_KEY]) ? got[TRACK_KEY] : {},
       meta: isObj(got[META_KEY]) ? got[META_KEY] : {},
       auto: got[PREF_KEY] !== false,
+      reqAuto: got[REQ_PREF_KEY] !== false,
+      skip: isObj(got[REQ_SKIP_KEY]) ? got[REQ_SKIP_KEY] : {},
+      req: rm,
     };
   }
   async function saveRecs(recs) { await store.set({ [TRACK_KEY]: recs }); }
   async function saveMeta(meta) { await store.set({ [META_KEY]: meta }); }
+  /** Change the required-skill state: fn(req, skip) edits both in place (inside the queue). */
+  async function mutateReq(fn) {
+    const { req, skip } = await load();
+    fn(req, skip);
+    await store.set({ [REQ_META_KEY]: req, [REQ_SKIP_KEY]: skip });
+  }
+  /** A required skill's copy is gone because the member wanted it gone: never added again, reported 「removed」. */
+  const markRemoved = (req, skip, key, id) => {
+    skip[key] = now();
+    if (req.ids.includes(id)) req.state[key] = { state: 'removed' };
+    req.recent = req.recent.filter((x) => x.key !== key);
+  };
+  /**
+   * A tracked copy ended by the member (removed in claude.ai / the dashboard): ALWAYS skip-listed for its (tuner, cacct,
+   * id), required now or not — a deletion is deliberate, and the list matters only if the skill is (ever) required. A skill
+   * required for the first time in this very run would otherwise be put straight back (batch 1.56.31 B1).
+   */
+  async function noteEnded(id, rec, via) {
+    if (!rec || !rec.tuner || !rec.cacct) return;
+    let was = false;
+    await mutateReq((req, skip) => {
+      was = req.ids.includes(id);
+      markRemoved(req, skip, reqKey(rec.tuner, rec.cacct, id), id);
+    });
+    if (was) track('skill_req_remove', { via });
+  }
   /** Change one record: fn(rec) → the new record, or null to drop it. */
   async function mutate(teamId, fn) {
     const { recs } = await load();
@@ -98,10 +161,14 @@ export function createSkillUpdater(deps) {
   }
 
   // ── context (①) ──
+  let lastAcctEmail = null;   // the claude.ai login's email, read with the uuid — only for the notification text (#3016)
   async function claudeAccount() {
     try {
       const a = await fetchApi(ACCOUNT_PATH, { quiet: true });
-      return a && typeof a.uuid === 'string' && ORG_UUID_RE.test(a.uuid) ? a.uuid : null;
+      const uuid = a && typeof a.uuid === 'string' && ORG_UUID_RE.test(a.uuid) ? a.uuid : null;
+      const em = uuid ? (a.email || a.email_address) : null;
+      lastAcctEmail = typeof em === 'string' && em.includes('@') ? em.slice(0, 120) : null;
+      return uuid;
     } catch (e) { return null; }
   }
   /** { email, cacct, orgs } or { reason }. */
@@ -110,9 +177,10 @@ export function createSkillUpdater(deps) {
     if (!email) return { reason: 'tuner_login' };
     const cacct = await claudeAccount();
     if (!cacct) return { reason: 'claude_login' };
+    const cemail = lastAcctEmail;
     const got = await chatOrgsOf(fetchApi);
     if (got.reason) return { reason: got.reason };
-    return { email, cacct, orgs: got.orgs };
+    return { email, cacct, cemail, orgs: got.orgs };
   }
   /** The pinned context still holds (Tuner token and claude.ai account unchanged). */
   async function sameContext(ctx) {
@@ -164,7 +232,8 @@ export function createSkillUpdater(deps) {
       if ((why === 'removed' || why === 'renamed' || why === 'changed') && !(await sameContext(ctx))) return { ok: false, reason: 'other_account' };
       if (why === 'removed') {
         // The user removed it in claude.ai: stop tracking — never reinstall. A held record stays for the user (④).
-        await mutate(teamId, (r) => (r && !r.inflight && !r.check && (mode !== 'force') ? null : r));
+        const ended = await mutate(teamId, (r) => (r && !r.inflight && !r.check && (mode !== 'force') ? null : r));
+        if (!ended) await noteEnded(teamId, rec, 'claude_ai');
         return { ok: false, reason: 'removed' };
       }
       if (why === 'renamed' || why === 'changed') {
@@ -245,64 +314,71 @@ export function createSkillUpdater(deps) {
    */
   function checkAll() {
     return enqueue(async () => {
-      const { recs, meta, auto } = await load();
-      const ids = Object.keys(recs).filter((id) => TEAM_ID_RE.test(id));
-      if (!ids.length) return { skipped: 'none' };
-      const ctx = await context();
-      if (ctx.reason) return { skipped: ctx.reason };
-      const got = await ask(ids);
-      if (!got) return { skipped: 'server' };
-      const { me, rows, gone } = got;
-      if (!(await sameContext(ctx))) return { skipped: 'other_account' };
-      const done = [];
-      // A copy removed in claude.ai itself ends its record even with no new version to write (batch R1-B4): each org's
-      // list is read once per run; a list we could not read decides nothing.
-      const lists = new Map();
-      const present = async (rec) => {
-        if (!rec.sid) return null;
-        if (!lists.has(rec.org)) {
-          const org = ctx.orgs.find((o) => o.uuid === rec.org);
-          const got = org ? await personalSkillsOf(fetchApi, org) : { reason: 'other_account' };
-          lists.set(rec.org, got.reason ? null : got.rows);
-        }
-        const rows = lists.get(rec.org);
-        return rows ? rows.some((r) => r.skill_id === rec.sid) : null;
-      };
-      for (const id of ids) {
-        const rec = (await load()).recs[id];
-        if (!ownedBy(rec, ctx, me)) continue;   // another account's record: never touched (①)
-        if (rec.inflight) { await mutate(id, settleInflight); continue; }   // no job runs now: a leftover is 'unknown'
-        if (gone.has(id)) {
-          // deleted / left the org / outside the rollout — held ones stay (④), and only under the context we asked with (①)
-          if (!rec.check && (await sameContext(ctx))) await mutate(id, () => null);
-          continue;
-        }
-        if (!rec.check && (await present(rec)) === false && (await sameContext(ctx))) {
-          await mutate(id, (r) => (r && !r.inflight && !r.check ? null : r));
-          continue;
-        }
-        const info = rows.get(id);
-        if (!info || !auto || rec.check || rec.paused || !(info.latest_version > (rec.v || 0))) continue;
-        const r = await runUpdate(id, 'auto', info, ctx, me);
-        if (r.ok) done.push({ id, name: info.name, v: r.v, summary: info.edit_summary || null, by: infoView(info).by });
-      }
-      // 「보유」 (#2915): only this account's records whose copy the claude.ai list just showed — never a guess.
-      if (server.held && (await sameContext(ctx))) {
-        const recsNow = (await load()).recs, held = [];
-        for (const id of ids) {
-          const rec = recsNow[id];
-          if (rec && ownedBy(rec, ctx, me) && !rec.inflight && !gone.has(id) && (await present(rec)) === true) held.push(id);
-        }
-        // Sent only with the token of the account pinned at the start (R2-B1): a switch while the lists were read sends nothing.
-        for (let i = 0; i < held.length && (await sameContext(ctx)); i += UPDATE_IDS_CHUNK) await server.held(held.slice(i, i + UPDATE_IDS_CHUNK), ctx.email).catch(() => null);
-      }
-      const info = {};
-      for (const [id, s] of rows) info[id] = infoView(s);
-      const next = { ...(await load()).meta, me, lastCheck: now(), info };
-      await saveMeta(next);
-      await announce(done, ctx, me);
-      return { done: done.length };
+      const tracked = await trackedPass();
+      // Required skills (#3016) after the tracked ones — the same run, the same queue slot.
+      const req = await requiredPass().catch(() => ({ skipped: 'error' }));
+      return { ...tracked, req };
     });
+  }
+
+  async function trackedPass() {
+    const { recs, meta, auto } = await load();
+    const ids = Object.keys(recs).filter((id) => TEAM_ID_RE.test(id));
+    if (!ids.length) return { skipped: 'none' };
+    const ctx = await context();
+    if (ctx.reason) return { skipped: ctx.reason };
+    const got = await ask(ids);
+    if (!got) return { skipped: 'server' };
+    const { me, rows, gone } = got;
+    if (!(await sameContext(ctx))) return { skipped: 'other_account' };
+    const done = [];
+    // A copy removed in claude.ai itself ends its record even with no new version to write (batch R1-B4): each org's
+    // list is read once per run; a list we could not read decides nothing.
+    const lists = new Map();
+    const present = async (rec) => {
+      if (!rec.sid) return null;
+      if (!lists.has(rec.org)) {
+        const org = ctx.orgs.find((o) => o.uuid === rec.org);
+        const got = org ? await personalSkillsOf(fetchApi, org) : { reason: 'other_account' };
+        lists.set(rec.org, got.reason ? null : got.rows);
+      }
+      const rows = lists.get(rec.org);
+      return rows ? rows.some((r) => r.skill_id === rec.sid) : null;
+    };
+    for (const id of ids) {
+      const rec = (await load()).recs[id];
+      if (!ownedBy(rec, ctx, me)) continue;   // another account's record: never touched (①)
+      if (rec.inflight) { await mutate(id, settleInflight); continue; }   // no job runs now: a leftover is 'unknown'
+      if (gone.has(id)) {
+        // deleted / left the org / outside the rollout — held ones stay (④), and only under the context we asked with (①)
+        if (!rec.check && (await sameContext(ctx))) await mutate(id, () => null);
+        continue;
+      }
+      if (!rec.check && (await present(rec)) === false && (await sameContext(ctx))) {
+        if (!(await mutate(id, (r) => (r && !r.inflight && !r.check ? null : r)))) await noteEnded(id, rec, 'claude_ai');
+        continue;
+      }
+      const info = rows.get(id);
+      if (!info || !auto || rec.check || rec.paused || !(info.latest_version > (rec.v || 0))) continue;
+      const r = await runUpdate(id, 'auto', info, ctx, me);
+      if (r.ok) done.push({ id, name: info.name, v: r.v, summary: info.edit_summary || null, by: infoView(info).by });
+    }
+    // 「보유」 (#2915): only this account's records whose copy the claude.ai list just showed — never a guess.
+    if (server.held && (await sameContext(ctx))) {
+      const recsNow = (await load()).recs, held = [];
+      for (const id of ids) {
+        const rec = recsNow[id];
+        if (rec && ownedBy(rec, ctx, me) && !rec.inflight && !gone.has(id) && (await present(rec)) === true) held.push(id);
+      }
+      // Sent only with the token of the account pinned at the start (R2-B1): a switch while the lists were read sends nothing.
+      for (let i = 0; i < held.length && (await sameContext(ctx)); i += UPDATE_IDS_CHUNK) await server.held(held.slice(i, i + UPDATE_IDS_CHUNK), ctx.email).catch(() => null);
+    }
+    const info = {};
+    for (const [id, s] of rows) info[id] = infoView(s);
+    const next = { ...(await load()).meta, me, lastCheck: now(), info };
+    await saveMeta(next);
+    await announce(done, ctx, me);
+    return { done: done.length };
   }
 
   const localDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; };
@@ -337,12 +413,51 @@ export function createSkillUpdater(deps) {
 
   /** A claude.ai tab opened: check when the last one is old enough. */
   async function maybeCheck() {
-    const { recs, meta } = await load();
-    if (!Object.keys(recs).length || now() - (meta.lastCheck || 0) < TAB_RECHECK_MS) return { skipped: 'recent' };
+    const { recs, meta, req } = await load();
+    // Nothing tracked still checks for required skills (#3016) — throttled by the last required check too.
+    if ((!Object.keys(recs).length && !server.required) || now() - Math.max(meta.lastCheck || 0, req.at || 0) < TAB_RECHECK_MS) return { skipped: 'recent' };
     return checkAll();
   }
 
   // ── 「claude.ai에 바로 추가」 through the extension: the only way a record is born (②) ──
+
+  /**
+   * Write a team skill that is not tracked here yet into `org` and start tracking it — the one write path of a new record,
+   * for the member's 「추가」 and for a required skill alike (inside the queue). `same` = the same-named claude.ai skill the
+   * caller found (only with the user's `overwrite`). `use` = count it as an add (the member pressed it).
+   * → the add answer, plus `forbidden` when claude.ai answered 403 (bg/skills-import.js) — callers pass that on to no page.
+   */
+  async function writeNew(teamId, info, org, same, overwrite, use, ctx, me) {
+    const dl = await server.download(teamId, info.latest_version, use);
+    if (!dl.ok || dl.version !== info.latest_version || checkApplyZip(dl.base64) !== 'ok') return { ok: false, reason: 'error' };
+    if (!(await sameContext(ctx))) return { ok: false, reason: 'other_account' };
+    const lid = newId();
+    // Another account's record this add would replace: put back when the add stops before writing (batch R2-B1).
+    const prev = (await load()).recs[teamId] || null;
+    const restore = () => mutate(teamId, () => prev);
+    // ④ the intent before the write (a fresh record — an explicit 「추가」 replaces another account's old one here).
+    await mutate(teamId, () => ({ lid, tuner: me, cacct: ctx.cacct, org: org.uuid, sid: same ? same.skill_id : null, name: info.name, v: null, head: null, inflight: { v: info.latest_version, mode: 'add', at: now() } }));
+    if (!(await sameContext(ctx))) { await restore(); return { ok: false, reason: 'other_account' }; }   // batch R1-B1
+    const up = await uploadSkillZip(fetchApi, org.uuid, dl.base64, overwrite, ctx.cacct);
+    if (!up.ok) {
+      if (up.reason === 'unknown') { await mutate(teamId, settleInflight); return { ok: false, reason: 'unknown' }; }
+      await restore();   // answered, nothing written: the replaced record stands
+      const forbidden = up.forbidden ? { forbidden: true } : {};
+      if (up.reason === 'exists') return { ok: false, reason: 'exists', org_id: org.uuid };
+      return up.reason === 'rejected' ? { ...rejectedResult(up.code), ...forbidden } : { ok: false, reason: up.reason, ...forbidden };
+    }
+    const clash = (same && up.skill.id !== same.skill_id) || up.skill.owner !== ctx.cacct
+      || Object.entries((await load()).recs).some(([tid, r]) => tid !== teamId && r && r.cacct === ctx.cacct && r.org === org.uuid && r.sid === up.skill.id);
+    if (clash) {
+      await mutate(teamId, (r) => (r ? { ...r, inflight: null, sid: r.sid || up.skill.id, check: { reason: CHECK.conflict, retId: up.skill.id } } : r));
+      return { ok: false, reason: 'conflict' };
+    }
+    // addedAt = when THIS copy was written: a mail removal request older than it is not about it (#3016 R1-B3/B4).
+    await mutate(teamId, (r) => (r ? { ...r, sid: up.skill.id, name: up.skill.name || info.name, v: info.latest_version, head: up.skill.head, inflight: null, addedAt: now() } : r));
+    const meta = (await load()).meta;
+    await saveMeta({ ...meta, me, info: { ...(meta.info || {}), [teamId]: infoView(info) } });
+    return { ok: true, org_id: org.uuid, skill_id: up.skill.id, name: up.skill.name, v: info.latest_version };
+  }
 
   function add(message) {
     const teamId = message && message.team_id;
@@ -395,34 +510,19 @@ export function createSkillUpdater(deps) {
         if (linked) return { ok: false, reason: 'linked_other' };
         if (!overwrite) return { ok: false, reason: 'exists', org_id: org.uuid };
       }
-      const dl = await server.download(teamId, info.latest_version, true);
-      if (!dl.ok || dl.version !== info.latest_version || checkApplyZip(dl.base64) !== 'ok') return { ok: false, reason: 'error' };
-      if (!(await sameContext(ctx))) return { ok: false, reason: 'other_account' };
-      const lid = newId();
-      // Another account's record this add would replace: put back when the add stops before writing (batch R2-B1).
-      const prev = (await load()).recs[teamId] || null;
-      const restore = () => mutate(teamId, () => prev);
-      // ④ the intent before the write (a fresh record — an explicit 「추가」 replaces another account's old one here).
-      await mutate(teamId, () => ({ lid, tuner: me, cacct: ctx.cacct, org: org.uuid, sid: same ? same.skill_id : null, name: info.name, v: null, head: null, inflight: { v: info.latest_version, mode: 'add', at: now() } }));
-      if (!(await sameContext(ctx))) { await restore(); return { ok: false, reason: 'other_account' }; }   // batch R1-B1
-      const up = await uploadSkillZip(fetchApi, org.uuid, dl.base64, overwrite, ctx.cacct);
-      if (!up.ok) {
-        if (up.reason === 'unknown') { await mutate(teamId, settleInflight); return { ok: false, reason: 'unknown' }; }
-        await restore();   // answered, nothing written: the replaced record stands
-        if (up.reason === 'exists') return { ok: false, reason: 'exists', org_id: org.uuid };
-        return up.reason === 'rejected' ? rejectedResult(up.code) : { ok: false, reason: up.reason };
-      }
-      const clash = (same && up.skill.id !== same.skill_id) || up.skill.owner !== ctx.cacct
-        || Object.entries((await load()).recs).some(([tid, r]) => tid !== teamId && r && r.cacct === ctx.cacct && r.org === org.uuid && r.sid === up.skill.id);
-      if (clash) {
-        await mutate(teamId, (r) => (r ? { ...r, inflight: null, sid: r.sid || up.skill.id, check: { reason: CHECK.conflict, retId: up.skill.id } } : r));
-        return { ok: false, reason: 'conflict' };
-      }
-      await mutate(teamId, (r) => (r ? { ...r, sid: up.skill.id, name: up.skill.name || info.name, v: info.latest_version, head: up.skill.head, inflight: null } : r));
-      const meta = (await load()).meta;
-      await saveMeta({ ...meta, me, info: { ...(meta.info || {}), [teamId]: infoView(info) } });
-      return { ok: true, org_id: org.uuid, skill_id: up.skill.id, name: up.skill.name, v: info.latest_version };
+      const { forbidden, ...out } = await writeNew(teamId, info, org, same, overwrite, true, ctx, me);
+      if (out.ok) await manualAdded(teamId, ctx, me);
+      return out;
     });
+  }
+
+  /**
+   * The member added a team skill themselves (#3016): it leaves the skip list. An older mail removal request no longer
+   * applies to this copy by itself — the record's `addedAt` is newer than it (R1-B3/B4: no 「by hand」 signal to the server).
+   */
+  async function manualAdded(teamId, ctx, me) {
+    const key = reqKey(me, ctx.cacct, teamId);
+    await mutateReq((req, skip) => { delete skip[key]; delete req.retry[key]; delete req.forbid[key]; });
   }
 
   /**
@@ -446,10 +546,264 @@ export function createSkillUpdater(deps) {
     return { ok: true, me: r.me, skills: r.skills, tracked, unsure: !cacct };
   }
 
+  // ── required team skills (#3016, plan §25) ──
+
+  const reqSig = (st) => `${st.state}:${st.reason || ''}`;
+
+  /**
+   * Send this account's changed required-skill states (inside the queue). Only records keyed by the pinned context
+   * (`me` + `ctx.cacct`), only with the token pinned at its start (as the 「보유」 report — §19 R2-B1). `installed` goes
+   * again every run, as 「보유」 does (a heartbeat). Never `manual` (R1-B3/B4 — removal requests are judged by time here).
+   * 🔴 `installed` is DERIVED, not remembered (batch 1.56.31 B2, #3025): sent only for keys in `seen` (copies the claude.ai
+   * list showed in this run); a stored `installed` not seen now is dropped, never re-sent (not reported 「removed」 either —
+   * a removal the member made goes through markRemoved). Without `seen` (a removal right after a button) no `installed`
+   * goes and none is dropped.
+   */
+  async function flushReport(ctx, me, seen = null) {
+    if (!server.reqState) return;
+    const prefix = `${me}|${ctx.cacct}|`;
+    if (seen) {
+      await mutateReq((rq) => {
+        for (const [key, st] of Object.entries(rq.state)) {
+          if (key.startsWith(prefix) && isObj(st) && st.state === 'installed' && !seen.has(key)) { delete rq.state[key]; delete rq.sent[key]; }
+        }
+      });
+    }
+    const { req } = await load();
+    const items = [], keys = [];
+    for (const [key, st] of Object.entries(req.state)) {
+      if (!key.startsWith(prefix) || !isObj(st)) continue;
+      const id = key.slice(prefix.length);
+      if (!TEAM_ID_RE.test(id)) continue;
+      const fresh = req.sent[key] !== reqSig(st);
+      if (st.state === 'installed' ? !(seen && seen.has(key)) : !fresh) continue;
+      const it = { id, state: st.state };
+      if (st.state === 'skipped') it.reason = st.reason;
+      items.push(it); keys.push(key);
+    }
+    for (let i = 0; i < items.length && (await sameContext(ctx)); i += UPDATE_IDS_CHUNK) {
+      const r = await server.reqState(items.slice(i, i + UPDATE_IDS_CHUNK), ctx.email).catch(() => null);
+      if (!r || !r.ok) break;
+      const sentKeys = keys.slice(i, i + UPDATE_IDS_CHUNK);
+      await mutateReq((rq) => { for (const k of sentKeys) if (rq.state[k]) rq.sent[k] = reqSig(rq.state[k]); });
+    }
+  }
+
+  /** Set one record's state; true when it changed (a GA event and a report only then). */
+  async function setReqState(key, st) {
+    let changed = false;
+    await mutateReq((req) => {
+      const was = req.state[key];
+      changed = !was || reqSig(was) !== reqSig(st);
+      req.state[key] = st;
+    });
+    return changed;
+  }
+
+  /**
+   * Remove a tracked copy the member (or their mail request) wants gone — the record's own sid only, through this queue
+   * (inside it). → { ok } | { ok: false, reason }
+   */
+  async function removeOne(teamId, rec, ctx, me, via) {
+    const org = ctx.orgs.find((o) => o.uuid === rec.org);
+    if (!org || !rec.sid) return { ok: false, reason: org ? 'not_found' : 'other_account' };
+    if (rec.inflight) await mutate(teamId, settleInflight);
+    if (!(await sameContext(ctx))) return { ok: false, reason: 'other_account' };
+    // The pinned context once more right before the DELETE, after the lookups (R1-B2 — as ①/③ for writes).
+    let r = await removePersonalSkill(fetchApi, org.uuid, rec.sid, ctx.cacct, () => sameContext(ctx));
+    if (!r.ok && r.reason === 'not_found') {
+      // Not a lone personal skill any more: gone already (removed in claude.ai) is what was asked; anything else stays.
+      const there = await rowOf(org, rec.sid);
+      r = !there.reason && !there.row ? { ok: true } : r;
+    }
+    if (!r.ok) return r;
+    await mutate(teamId, (x) => {
+      if (!x) return x;
+      // ④ a write we never heard back from may still land after the removal: keep it visible as 'unknown'.
+      if (x.inflight || (x.check && x.check.reason === CHECK.unknown)) return { ...x, inflight: null, check: { reason: CHECK.unknown } };
+      return null;
+    });
+    await mutateReq((req, skip) => markRemoved(req, skip, reqKey(me, ctx.cacct, teamId), teamId));
+    track('skill_req_remove', { via });
+    return { ok: true };
+  }
+
+  /**
+   * The required-skill part of a check (inside the queue, after the tracked one): mail removal requests first, then adds
+   * of what this account does not have, then the report and one notification for what was added.
+   */
+  async function requiredPass() {
+    if (!server.required) return { skipped: 'unavailable' };
+    if (!(await server.tokenEmail())) return { skipped: 'tuner_login' };
+    await mutateReq((req) => { req.at = now(); });   // throttles maybeCheck, whatever happens next
+    // Only accounts with team skills ask (one cached read — the popup's 「팀 스킬」 entry asks the same).
+    if (server.skillOrgs) {
+      const so = await server.skillOrgs().catch(() => null);
+      if (!so || !so.ok || !Array.isArray(so.orgs) || !so.orgs.length) return { skipped: 'no_orgs' };
+    }
+    const ctx = await context();
+    if (ctx.reason) return { skipped: ctx.reason };
+    const got = await server.required();
+    if (!got || !got.ok || typeof got.me !== 'string') return { skipped: 'server' };
+    if (!(await sameContext(ctx))) return { skipped: 'other_account' };
+    const { me } = got;
+    const key = (id) => reqKey(me, ctx.cacct, id);
+    const reqd = got.skills.filter((x) => x.required_at);
+    await mutateReq((req) => {
+      req.ids = [...new Set([...reqd.map((x) => x.id), ...req.ids])].slice(0, REQ_IDS_MAX);
+      req.recent = req.recent.filter((x) => now() - x.at < REQ_RECENT_MS);
+    });
+    await saveMeta({ ...(await load()).meta, me });
+    const lists = new Map();   // org uuid → personal rows (or null: unreadable) — one read per org per run
+    const listOf = async (org) => {
+      if (!lists.has(org.uuid)) { const l = await personalSkillsOf(fetchApi, org); lists.set(org.uuid, l.reason ? null : l.rows); }
+      return lists.get(org.uuid);
+    };
+    const removed = [];
+    // 1. Removal requests from the mail (§25-2): this account's tracked copy goes (never an add — also when no longer
+    //    required, §25-6 ②). A copy this account does not track only goes on the skip list: another browser may track it,
+    //    and a 「removed」 from here would clear the request it still has to act on.
+    //    Only a request NEWER than this copy (R1-B3/B4): a member who added it back after asking keeps it. The request time
+    //    is the server's clock, `addedAt` this browser's — a skew of a few minutes between them is accepted. No time (an
+    //    older server) or a record from before `addedAt` = honoured.
+    for (const s of got.skills.filter((x) => x.remove_requested)) {
+      const k = key(s.id);
+      const { recs } = await load();
+      const askedAt = Date.parse(s.remove_requested_at || '');
+      if (ownedBy(recs[s.id], ctx, me)) {
+        if (!(Number.isNaN(askedAt) || askedAt > (recs[s.id].addedAt || 0))) continue;   // asked before this copy was added
+        if ((await removeOne(s.id, recs[s.id], ctx, me, 'mail')).ok) removed.push(s.id);
+      } else {
+        await mutateReq((rq, skip) => { if (!skip[k]) skip[k] = now(); });
+      }
+    }
+    // 2. Adds: required, not tracked by this account, not skipped, not asked to be removed.
+    const added = [];
+    const target = reqTargetOrg(ctx.orgs);
+    for (const s of reqd.filter((x) => !x.remove_requested)) {
+      const k = key(s.id);
+      const { recs, skip, req, reqAuto } = await load();
+      if (ownedBy(recs[s.id], ctx, me) || skip[k]) continue;
+      // One record per team skill: another account's record in this browser is never replaced by an automatic add
+      // (only the member's own 「추가」 does that) — that account keeps its tracking.
+      if (recs[s.id]) continue;
+      const skipped = async (reason) => { if (await setReqState(k, { state: 'skipped', reason })) track('skill_req_add', { result: reason }); };
+      if (!reqAuto) { await skipped('off'); continue; }
+      if (req.retry[k] && now() - req.retry[k] < REQ_RETRY_MS) continue;
+      if (!target) continue;
+      const rows = await listOf(target);
+      if (!rows) continue;   // the list could not be read: next run
+      // ⑥ a same-named personal skill — never overwritten (whoever tracks it), the member decides on the card.
+      if (rows.some((r) => r.name === s.name)) { await skipped('name_taken'); continue; }
+      if (!(await sameContext(ctx))) break;
+      if (!(await load()).reqAuto) { await skipped('off'); continue; }   // switched off while this run was under way
+      const info = { name: s.name, latest_version: s.latest_version, versions: [s.latest_version] };
+      const r = await writeNew(s.id, info, target, null, false, false, ctx, me);
+      if (r.ok) {
+        lists.delete(target.uuid);
+        await setReqState(k, { state: 'installed' });
+        const tgt = { tuner: me, cacct: ctx.cacct, org: target.uuid, id: s.id, sid: r.skill_id };
+        await mutateReq((rq) => {
+          delete rq.retry[k];
+          delete rq.forbid[k];
+          rq.recent = [{ ...tgt, key: k, name: s.name, at: now() }, ...rq.recent.filter((x) => x.key !== k)].slice(0, REQ_RECENT_MAX);
+        });
+        added.push({ id: s.id, name: s.name, summary: s.summary, org_name: s.org_name, by: s.required_by_name, email: ctx.cemail, target: tgt });
+        track('skill_req_add', { result: 'added' });
+        continue;
+      }
+      // R3 (R1-B5): any answer that is not a bare 403 breaks a run of them — before every branch below, `exists` included.
+      if (!r.forbidden) await mutateReq((rq) => { delete rq.forbid[k]; });
+      if (r.reason === 'exists') { await skipped('name_taken'); continue; }
+      // R1-B5: only a code that names the policy is the policy at once. A bare 403 (tab / cookie path / a code that says
+      // nothing) may be a passing session or Cloudflare refusal: the next run tries again, and only REQ_FORBID_STOP of them
+      // in a row on the same Team org read as its policy (a day's pause). Any success resets the count.
+      let policy = r.reason === 'rejected' && POLICY_CODE_RE.test(r.code || '');
+      if (!policy && r.forbidden) {
+        let n = 0;
+        if (isTeamOrg(target)) {
+          await mutateReq((rq) => { const f = rq.forbid[k]; n = (f && f.org === target.uuid ? f.n : 0) + 1; rq.forbid[k] = { org: target.uuid, n }; });
+        }
+        if (n < REQ_FORBID_STOP) { track('skill_req_add', { result: 'error' }); continue; }
+        policy = true;
+      }
+      if (policy) {
+        await skipped('org_policy');
+        await mutateReq((rq) => { rq.retry[k] = now(); });
+      } else {
+        // claude.ai refused the skill itself: not again for a day. Anything else (login, network…): the next run.
+        if (r.reason === 'rejected') await mutateReq((rq) => { rq.retry[k] = now(); });
+        track('skill_req_add', { result: 'error' });
+      }
+    }
+    // 3. 「installed」: required, tracked by this account and just seen in claude.ai — only these are sent (B2).
+    const seen = new Set();
+    for (const s of reqd) {
+      const rec = (await load()).recs[s.id];
+      if (!ownedBy(rec, ctx, me) || rec.inflight || !rec.sid) continue;
+      const org = ctx.orgs.find((o) => o.uuid === rec.org);
+      const rows = org ? await listOf(org) : null;
+      if (rows && rows.some((r) => r.skill_id === rec.sid)) { await setReqState(key(s.id), { state: 'installed' }); seen.add(key(s.id)); }
+    }
+    await flushReport(ctx, me, seen);
+    if (added.length && (await sameContext(ctx))) {
+      // The exact copies this notification is about: its 「삭제」 removes only these (R1-B1).
+      if (await notify({ kind: 'req_added', items: added.map(({ target: _t, ...x }) => x) })) await mutateReq((rq) => { rq.notif = { targets: added.map((a) => a.target) }; });
+    }
+    return { added: added.length, removed: removed.length };
+  }
+
+  /**
+   * 「삭제」 on the notification or the popup line: remove the copy THAT notification / line announced — only while the
+   * tracked record is still exactly it (same Tuner account, claude.ai account, org and sid) and it is this account's now
+   * (R1-B1: an old card must not remove a copy added later under another account). Otherwise nothing is removed or listed.
+   */
+  function reqRemove(teamId, via) {
+    if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) return Promise.resolve({ ok: false, reason: 'invalid' });
+    return enqueue(async () => {
+      const { req } = await load();
+      const from = via === 'notif' ? (req.notif && Array.isArray(req.notif.targets) ? req.notif.targets : []) : req.recent;
+      const tgt = from.find((x) => x && x.id === teamId);
+      if (!tgt) return { ok: false, reason: 'not_found' };
+      const ctx = await context();
+      if (ctx.reason) return { ok: false, reason: ctx.reason };
+      const got = server.required ? await server.required() : null;
+      if (!got || !got.ok || typeof got.me !== 'string') return { ok: false, reason: 'error' };
+      if (!(await sameContext(ctx))) return { ok: false, reason: 'other_account' };
+      const rec = (await load()).recs[teamId];
+      if (!ownedBy(rec, ctx, got.me) || rec.tuner !== tgt.tuner || rec.cacct !== tgt.cacct || rec.org !== tgt.org || !rec.sid || rec.sid !== tgt.sid) {
+        return { ok: false, reason: 'other_account' };
+      }
+      const r = await removeOne(teamId, rec, ctx, got.me, via);
+      if (r.ok) await flushReport(ctx, got.me);
+      return r;
+    });
+  }
+
+  /** The popup line's ×: that line is not shown again. */
+  function reqDismiss(teamId) {
+    if (typeof teamId !== 'string' || !TEAM_ID_RE.test(teamId)) return Promise.resolve({ ok: false, reason: 'invalid' });
+    return enqueue(async () => {
+      await mutateReq((req) => { for (const x of req.recent) if (x.id === teamId) req.dismissed[x.key] = now(); });
+      return { ok: true };
+    });
+  }
+
+  async function setReqPref(on) {
+    await store.set({ [REQ_PREF_KEY]: on === true });
+    return { ok: true, reqAuto: on === true };
+  }
+
+  /** The team skill ids of the last 「추가됐어요」 notification (its buttons act on them). */
+  async function reqNotifIds() {
+    const n = (await load()).req.notif;
+    return n && Array.isArray(n.targets) ? n.targets.map((x) => x && x.id).filter((id) => typeof id === 'string' && TEAM_ID_RE.test(id)) : [];
+  }
+
   // ── what the dashboard / popup shows ──
 
   async function state() {
-    const { recs, meta, auto } = await load();
+    const { recs, meta, auto, reqAuto, req: rq } = await load();
     // Another claude.ai account's records are hidden: they say nothing about this one's copies (batch R1-B3). When the
     // account cannot be read now (no claude.ai tab and the cookie path blocked) they all show — hiding them made a tracked
     // copy read 「✓ 있음」 after a new version (2026-11-03 report); a button only asks, and the write checks the account.
@@ -471,7 +825,13 @@ export function createSkillUpdater(deps) {
         unsure: !cacct,
       };
     });
-    return { ok: true, proto: TRACK_PROTO_VERSION, auto, tuner: meta.me || null, lastCheck: meta.lastCheck || null, items };
+    // The popup's 「관리자 요청으로 추가된 팀 스킬」 line (#3016): this account's required adds of the last 7 days, still tracked.
+    const req = rq.recent.filter((x) => {
+      const rec = recs[x.id];
+      return now() - x.at < REQ_RECENT_MS && !rq.dismissed[x.key] && rec && x.key === reqKey(rec.tuner, rec.cacct, x.id)
+        && rec.tuner === meta.me && (!cacct || rec.cacct === cacct);
+    }).map((x) => ({ team_id: x.id, name: x.name, at: x.at }));
+    return { ok: true, proto: TRACK_PROTO_VERSION, auto, reqAuto, tuner: meta.me || null, lastCheck: meta.lastCheck || null, items, req };
   }
 
   async function setPref(autoOn) {
@@ -499,7 +859,15 @@ export function createSkillUpdater(deps) {
       return guarded(async () => { await mutate(teamId, (r) => (r ? { ...r, paused: true } : r)); return { ok: true }; })
         .then((r) => (r.ok ? runOne(teamId, 'revert', message.acct_key) : r));
     }
-    if (act === 'untrack') return guarded(async () => { await mutate(teamId, () => null); return { ok: true }; });
+    if (act === 'untrack') {
+      // 「추적 그만」 also means 「do not add it back」 if an admin requires it (#3016): the record's own account context.
+      return guarded(async () => {
+        const r = (await load()).recs[teamId];
+        await mutate(teamId, () => null);
+        if (r && r.tuner && r.cacct) await mutateReq((req, skip) => { skip[reqKey(r.tuner, r.cacct, teamId)] = now(); });
+        return { ok: true };
+      });
+    }
     if (act === 'resume') return guarded(async () => ({ ok: !!(await mutate(teamId, (r) => (r ? { ...r, paused: false } : r))) }));
     if (act === 'retry') {
       return guarded(async () => { await mutate(teamId, (r) => (r ? { ...r, fail: null } : r)); return { ok: true }; })
@@ -569,10 +937,15 @@ export function createSkillUpdater(deps) {
   /** Run `job` (the SKILL_REMOVE runner) in the queue; a removed copy stops being tracked — unless its last write is unknown. */
   function removeTracked(message, job) {
     return enqueue(async () => {
-      const r = await job();
-      if (r && r.ok && message && typeof message.skill_id === 'string') {
+      // R2 (R1-B2): the dashboard's removal is pinned to the accounts it started with — a Tuner / claude.ai switch during
+      // the lookups sends no DELETE, and no record changes.
+      const email0 = await server.tokenEmail(), cacct0 = await claudeAccount();
+      const still = async () => (await server.tokenEmail()) === email0 && (await claudeAccount()) === cacct0;
+      const r = await job({ expectAccount: cacct0 || undefined, stillOurs: still });
+      if (r && r.ok && message && typeof message.skill_id === 'string' && (await still())) {
         const ids = Object.entries((await load()).recs).filter(([, x]) => x && x.org === message.org_id && x.sid === message.skill_id).map(([id]) => id);
         for (const id of ids) {
+          await noteEnded(id, (await load()).recs[id], 'dashboard');   // #3016: removed on purpose → not added back
           await mutate(id, (x) => {
             if (!x) return x;
             // ④ a write we never heard back from may still land after the removal: keep it visible as 'unknown'.
@@ -585,7 +958,8 @@ export function createSkillUpdater(deps) {
     });
   }
 
-  return { add, listForPicker, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue, openSettings };
+  return { add, listForPicker, checkAll, maybeCheck, state, setPref, action, updateWaiting, legacyApply, removeTracked, enqueue, openSettings,
+    reqRemove, reqDismiss, setReqPref, reqNotifIds };
 }
 
 /**

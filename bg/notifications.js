@@ -176,6 +176,8 @@ export function notifCategoryFromId(notifId) {
   // #2821 team skills auto-update: the fixed ids skill-upd-done / skill-upd-wait (background.js).
   if (id === 'skill-upd-done') return 'skill-upd-done';
   if (id === 'skill-upd-wait') return 'skill-upd-wait';
+  // #3016 required team skills: the fixed id skill-req-added (background.js).
+  if (id === 'skill-req-added') return 'skill-req-added';
   // #2092 P2 reset-pass cards: `rp-<family>-<provider>-<org uuid>` (checkResetPassNotifications).
   if (id.startsWith('rp-expiry-')) return 'rp-expiry';
   if (id.startsWith('rp-limit-')) return 'rp-limit';

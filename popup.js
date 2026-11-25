@@ -414,10 +414,36 @@ function initSkillUpdateLine() {
   });
 }
 
+/** 「관리자 요청으로 추가된 팀 스킬: <이름> · 삭제」 (#3016) — 7 days after a required add, until removed or closed. */
+function initSkillReqLine() {
+  const box = document.getElementById('skill-req-line');
+  if (!box) return;
+  chrome.runtime.sendMessage({ type: 'ct_skill_update', op: 'state' }, (r) => {
+    void chrome.runtime.lastError;
+    const item = r && Array.isArray(r.req) ? r.req[0] : null;
+    if (!item || typeof item.team_id !== 'string') return;
+    document.getElementById('skill-req-line-msg').textContent = t('skr_line', String(item.name || ''));
+    box.classList.remove('hidden');
+    const send = (op) => new Promise((res) => chrome.runtime.sendMessage({ type: 'ct_skill_update', op, team_id: item.team_id }, (x) => { void chrome.runtime.lastError; res(x); }));
+    document.getElementById('skill-req-line-close').addEventListener('click', () => { box.classList.add('hidden'); send('req_dismiss'); });
+    const rm = document.getElementById('skill-req-line-remove');
+    rm.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (rm.dataset.busy) return;
+      rm.dataset.busy = '1';
+      const x = await send('req_remove');
+      if (x && x.ok) { box.classList.add('hidden'); return; }
+      delete rm.dataset.busy;
+      document.getElementById('skill-req-line-msg').textContent = t('skr_line_failed', String(item.name || ''));
+    });
+  });
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   await initI18n();
   initSkillsLink();
   initSkillUpdateLine();
+  initSkillReqLine();
   // Before ANY section renders: the remembered collapse state must be in hand so a collapsed
   // section is painted collapsed, not painted open and then snapped shut on every popup open.
   await loadCollapseState();

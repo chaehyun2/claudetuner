@@ -9,6 +9,17 @@ const USAGE_SOURCE_PATH = '/usage';
 const GEMINI_IN_BAND_QUOTA_CODES = new Set([1037, 1060]);
 // A status row with no number (the queue/pending state) — the observation code's tail.
 const IN_BAND_BARE = 'status';
+// In-band 1007 on the usage RPC (#3015): PERMISSION_DENIED + BardErrorInfo [1007], no payload.
+// Since 2026-11-24 ~03:00 UTC some Workspace seats answer jSf9Qc this way (reproduced 6/6 on a live
+// Workspace account; consumer accounts in the same browser answer normally). Those seats used to get
+// a payload with no usage windows — i.e. "no limits shown" — so the collector treats this code the
+// same way, but only when the account is shown to be a Workspace seat (bg/parse-gemini.js).
+export const GEMINI_USAGE_DENIED_CODE = 1007;
+
+/** Whether `e` is the usage RPC's in-band "permission denied" answer (see GEMINI_USAGE_DENIED_CODE). */
+export function isGeminiUsageDenied(e) {
+  return !!(e && e.inBand && e.inBandCode === GEMINI_USAGE_DENIED_CODE);
+}
 
 // === Gemini batchexecute RPC helper (hybrid: tab-first, SW credentials fallback) ===
 
@@ -182,7 +193,13 @@ export async function fetchGeminiRpc(rpcId, params = '[]', authuser, observe) {
       // its answer, not a failed path: falling back would read the DEFAULT cookie account's usage
       // instead (the mismatch getGeminiUserInfo guards against). Same as before, when that answer
       // came back as `null` and never reached the fallback.
-      if (e && e.inBand) throw e;
+      if (e && e.inBand) {
+        // The caller may still go on to read WHO answered (#3015: a denied usage answer is kept as
+        // a plan-only snapshot), so name the observation exactly as a payload answer would.
+        if (observe) Object.assign(observe, { tabId: tabs[0].id, html: null, authuser: geminiAuthuserOfUrl(tabs[0].url) });
+        _lastFetchTabId = tabs[0].id;
+        throw e;
+      }
       tabError = e;
       console.warn('[Claude Tuner] Gemini tab fetch failed, trying SW fallback:', e.message);
     }

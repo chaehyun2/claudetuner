@@ -92,6 +92,15 @@ const GEMINI_V3P2_POLICY_RE = /v3p2_(\w+)_policy/;
 // FOURTH NAME, 2026-11-10 (daily watch): `carbon_multi_ultra_<x>_policy`. AE 48h, each on one constant:
 //   24,192 plus · 48,384 pro · 241,920 neon→ultra (5x) · 967,680 ultra→ultra (20x).
 // 🔴 Again `carbon_multi_ultra_pro_policy` IS AI PRO and `_plus_` IS AI PLUS — "multi_ultra" is not the seat.
+// FIFTH NAME, 2026-11-18 (daily watch, AE 30 days): `neon_*` and `brownfield_lite_*`, each on one constant:
+//   12,096 basic  brownfield_lite_launch_free · 24,192 plus  brownfield_lite_carbon_multi_ultra_plus
+//   48,384 pro    neon_pro, neon_launch_pro, neon_launch_pro_u18
+//   241,920 / 967,680 ultra  neon_launch_ultra, neon_launch_ultra_mode_quota_ultra (5x and 20x on one name)
+// 🔴 The "neon" prefix is NOT the Ultra seat any more (old `neon_policy` was): `neon_pro_policy` is AI PRO.
+// Left unmapped on purpose (see GEMINI_POLICY_UNMAPPED): `*_signed_out_policy` (mixes 12k/24k/48k) and the
+// Workspace `neon_launch_workspace_aureus_*` names (custom domains, a handful of accounts, and
+// `aureus_pro_o18` sits on the FREE constant 12,096 while `aureus_tier1_o18` sits on Pro 48,384 — the
+// name does not say the seat). They are labelled by quota (#2708) until the data settles.
 export const GEMINI_POLICY_ALIAS = {
   basic_policy: 'basic',
   brownfield_basic_policy: 'basic',
@@ -115,6 +124,13 @@ export const GEMINI_POLICY_ALIAS = {
   carbon_multi_ultra_pro_policy: 'pro',     // 🔴 Pro — see above.
   carbon_multi_ultra_neon_policy: 'ultra',
   carbon_multi_ultra_ultra_policy: 'ultra',
+  brownfield_lite_launch_free_policy: 'basic',
+  brownfield_lite_carbon_multi_ultra_plus_policy: 'plus',
+  neon_pro_policy: 'pro',     // 🔴 Pro, not Ultra — see above.
+  neon_launch_pro_policy: 'pro',
+  neon_launch_pro_u18_policy: 'pro',
+  neon_launch_ultra_policy: 'ultra',
+  neon_launch_ultra_mode_quota_ultra_policy: 'ultra',
 };
 
 // Policy strings seen in AE and deliberately left unmapped (see above: ambiguous quota or too few
@@ -124,6 +140,10 @@ export const GEMINI_POLICY_UNMAPPED = [
   'lite_three_thinking_levels_policy',
   'brownfield_default_policy',
   'default_policy',
+  'carbon_multi_ultra_signed_out_policy',
+  'neon_launch_signed_out_policy',
+  'neon_launch_workspace_aureus_pro_o18_policy',
+  'neon_launch_workspace_aureus_tier1_o18_policy',
 ];
 
 /**
