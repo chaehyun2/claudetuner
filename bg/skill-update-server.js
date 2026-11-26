@@ -48,7 +48,9 @@ export const skillUpdateServer = {
     const skills = (Array.isArray(data.skills) ? data.skills : []).filter((x) => x && TEAM_ID_RE.test(x.id) && typeof x.name === 'string')
       .map((x) => ({ id: x.id, org_id: x.org_id, name: x.name, description: typeof x.description === 'string' ? x.description : '',
         latest_version: Number(x.latest_version) || 0, holders: Number(x.holders) || 0 }));
-    return { ok: true, me: data.me, skills };
+    // #3048: the teams this account reads skills in — null from an older worker (the picker then shows no empty tab).
+    const orgs = Array.isArray(data.orgs) ? data.orgs.filter((o) => Number.isInteger(o) && o > 0) : null;
+    return { ok: true, me: data.me, skills, orgs };
   },
   /** 「these are in my claude.ai now」 (#2915) — best effort; the dashboard's 「보유 N명」 is built from it. */
   async held(ids, email) {

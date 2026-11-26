@@ -83,7 +83,7 @@
       share_btn: '공유', cancel: '취소', team_shared: '{org}에 공유했어요', team_exists: '{org}에 같은 프롬프트가 이미 있어요',
       team_share_failed: '팀에 공유하지 못했어요', team_limit: '팀 프롬프트가 가득 찼어요({n}개)', team_by_gone: '떠난 멤버', team_by_me: '나',
       // Team skills (#2905) — claude.ai only
-      tab_skills: '팀 스킬', skills_empty: '아직 팀 스킬이 없어요.', skill_holders: '{n}명 사용 중',
+      tab_skills: '팀 스킬', skills_empty: '아직 팀 스킬이 없어요. 회의실 예약·회의록 정리 같은 템플릿으로 1분 만에 시작할 수 있어요.', skills_tpl_start: '템플릿으로 시작하기', skill_holders: '{n}명 사용 중',
       skill_add: '+ claude.ai에 추가', skill_adding: '추가하는 중…', skill_have: '✓ 추가됨', skill_stale: '새 판 받기', skill_check: '확인 필요',
       skill_added: 'claude.ai에 추가했어요 — 새 대화부터 Claude가 알아서 써요', skill_already: '이미 claude.ai에 있어요',
       skill_pick_org: '어느 claude.ai 조직에 넣을까요?', skill_exists: '같은 이름의 스킬이 claude.ai에 이미 있어요 — 「팀 스킬 ↗」에서 바꿀 수 있어요',
@@ -92,6 +92,7 @@
       skill_rejected: 'claude.ai가 이 스킬을 받지 않았어요', skill_failed: '추가하지 못했어요 — 잠시 후 다시 눌러 주세요',
       skill_hint: '↑↓ 이동 · Enter 추가',
       nudge_title: '팀 스킬 {n}개가 있어요', nudge_body: '동료가 만든 스킬을 클릭 한 번으로 내 claude.ai에 넣어 보세요.',
+      nudge_empty_title: '팀 스킬을 쓸 수 있어요', nudge_empty_body: '회의실 예약·회의록 정리 같은 스킬을 팀에 올리면 동료 모두가 claude.ai에서 바로 써요.',
     },
     en: {
       title: 'Prompts', tab_mine: 'My prompts', tab_store: 'Recommended', search: 'Search',
@@ -118,7 +119,7 @@
       share_btn: 'Share', cancel: 'Cancel', team_shared: 'Shared with {org}', team_exists: '{org} already has this prompt',
       team_share_failed: 'Could not share with your team', team_limit: 'Your team\'s prompt list is full ({n})', team_by_gone: 'former member', team_by_me: 'you',
       // Team skills (#2905) — claude.ai only
-      tab_skills: 'Team skills', skills_empty: 'No team skills yet.', skill_holders: '{n} using',
+      tab_skills: 'Team skills', skills_empty: 'No team skills yet. Start in a minute from a template such as meeting-room booking or meeting notes.', skills_tpl_start: 'Start from a template', skill_holders: '{n} using',
       skill_add: '+ Add to claude.ai', skill_adding: 'Adding…', skill_have: '✓ Added', skill_stale: 'Get new version', skill_check: 'Needs review',
       skill_added: 'Added to claude.ai — Claude will use it automatically in new chats', skill_already: 'Already in your claude.ai',
       skill_pick_org: 'Which claude.ai organization?', skill_exists: 'A skill with this name is already in your claude.ai — replace it from “Team skills ↗”',
@@ -127,6 +128,7 @@
       skill_rejected: 'claude.ai did not accept this skill', skill_failed: 'Could not add it — try again in a moment',
       skill_hint: '↑↓ move · Enter add',
       nudge_title: 'Your team has {n} skills', nudge_body: 'Add skills your teammates made to your claude.ai in one click.',
+      nudge_empty_title: 'Team skills are here', nudge_empty_body: 'Share a skill such as meeting-room booking or meeting notes, and your whole team can use it in claude.ai.',
     },
   };
 
@@ -294,12 +296,21 @@
         const next = r && r.ok !== false && Array.isArray(r.orgs) ? r.orgs : [];
         const changed = (next.length > 0) !== (skillOrgs.length > 0);
         skillOrgs = next;
+        // R1-B1: left the last team. Only on a real 「no team」 — not while the skills list is still loading (batch R1-B3).
+        if (state.tab === 'skills' && !skillOrgs.length && !skillsTabOn()) { state.tab = 'mine'; autoSkillsTab = false; }   // R3-B1: the list's own orgs win over a late cache
         if (changed && !destroyed && isOpen()) render();
         // For the 팀 스킬 nudge (#2905): the list is needed before the picker is ever opened — only where skills exist.
         if (next.length && !destroyed && state.skillsStatus === 'idle' && !loadingSkills) loadSkills();
       });
     };
     askSkillOrgs();
+    // 「팀 스킬」 is a tab when the list answered and there is something to show: skills, or — for a member of a team that
+    // has none yet — the 「start from a template」 note (#3048). Signed out / no team / an older worker: no tab.
+    let autoSkillsTab = false;   // the open put 「팀 스킬」 first on its own (not the member's choice) — see adoptMine
+    // The empty case stands on the list answer's own `orgs` (the teams I read skills in, batch R1-B2) — never on the
+    // background's 30-minute membership cache, which can outlive leaving the last team. An older worker sends none: no tab.
+    const teamIds = () => (Array.isArray(state.skillsOrgs) ? state.skillsOrgs : []);
+    const skillsTabOn = () => Array.isArray(state.skills) && (state.skills.length > 0 || teamIds().length > 0);
     const track = (event, params) => { try { chrome.runtime.sendMessage({ type: MSG, op: 'track', event, params: { site, ...params } }); } catch { /* context dead */ } };
 
     function el(tag, cls, text) {
@@ -331,6 +342,9 @@
       const pending = (state.mine || []).filter((p) => p.deleted);
       state.mine = pending.concat(created.slice(mark).filter((p) => !ids.has(p.id) && !deletedIds.has(p.id)).reverse(), fetched);
       state.loadedAt = Date.now();
+      // #3048: 「팀 스킬」 was chosen at open only because my prompts were not known yet — they are mine after all.
+      if (autoSkillsTab && state.tab === 'skills' && liveMine().length) state.tab = 'mine';
+      autoSkillsTab = false;
     }
 
     // Each list is applied as soon as it answers — one waiting for the other is what let a late 추천 answer
@@ -378,12 +392,13 @@
         state.skillsUnsure = r.unsure === true;
         state.skillsFresh = gen === openGen;
         state.skillsStatus = 'ready';
+        state.skillsOrgs = Array.isArray(r.orgs) ? r.orgs : null;
         state.skillsLoadedAt = Date.now();
       } else {
         // Signed out, no team skills, an older worker: nothing from an earlier answer stays (an account switch).
-        state.skills = null; state.skillsMe = null; state.skillsTracked = {}; state.skillsStatus = 'idle'; state.skillsFresh = false;
+        state.skills = null; state.skillsMe = null; state.skillsOrgs = null; state.skillsTracked = {}; state.skillsStatus = 'idle'; state.skillsFresh = false;
       }
-      if (state.tab === 'skills' && !(state.skills && state.skills.length)) state.tab = 'mine';
+      if (state.tab === 'skills' && !skillsTabOn()) state.tab = 'mine';
       render();
       maybeNudge();
     }
@@ -856,7 +871,21 @@
     function renderSkills(list) {
       if (!state.skills || !state.skillsFresh) { list.appendChild(el('div', 'pp-msg', t(state.skillsStatus === 'error' ? 'load_failed' : 'loading'))); return; }
       const items = visibleItems();
-      if (!items.length) { list.appendChild(el('div', 'pp-msg', state.skills.length ? t('no_match') : t('skills_empty'))); return; }
+      if (!items.length && state.skills.length) { list.appendChild(el('div', 'pp-msg', t('no_match'))); return; }
+      if (!items.length) {   // #3048: the team has none yet — the dashboard's template cards are one click away
+        const box = el('div', 'pp-msg', t('skills_empty'));
+        const go = el('button', 'pp-skill-btn pp-tpl-start', t('skills_tpl_start'));
+        go.type = 'button';
+        go.addEventListener('mousedown', (e) => e.preventDefault());
+        go.addEventListener('click', (e) => {
+          if (!e.isTrusted) return;   // the page's script cannot open tabs through us
+          track('skills_entry', { src: 'picker_empty' });
+          send({ op: 'open_skills', from: 'picker_empty', ...(teamIds().length ? { org: teamIds()[0] } : {}) }); close();
+        });
+        box.appendChild(el('br')); box.appendChild(go);
+        list.appendChild(box);
+        return;
+      }
       state.active = Math.max(0, Math.min(state.active, items.length - 1));
       const painters = [];
       items.forEach(({ p }, i) => {
@@ -903,6 +932,7 @@
      * browser's claude.ai, starts tracking). One add per row at a time; the outcome stays on the row.
      */
     async function addSkill(p, orgId) {
+      autoSkillsTab = false;   // R1-B2: adding from this tab = the member's choice
       const row = state.skillRows[p.id] || (state.skillRows[p.id] = {});
       if (row.busy || !state.skillsMe || !state.skillsFresh) return;
       row.busy = true; row.note = ''; row.orgs = null;
@@ -1098,7 +1128,7 @@
       const head = el('div', 'pp-head');
       const search = el('input', 'pp-search');
       search.type = 'search'; search.placeholder = t('search'); search.value = state.query;
-      search.addEventListener('input', () => { state.query = search.value; state.active = 0; renderListOnly(); });
+      search.addEventListener('input', () => { autoSkillsTab = false; state.query = search.value; state.active = 0; renderListOnly(); });   // R1-B2: typing = using this tab
       search.addEventListener('keydown', onKey);
       head.appendChild(search);
       const x = el('button', 'pp-x', '×');
@@ -1116,19 +1146,20 @@
         const b = el('button', cls + (on ? ' on' : ''), label);
         b.type = 'button';
         b.addEventListener('mousedown', (e) => e.preventDefault());   // keep the search box focused
-        b.addEventListener('click', () => { pick(); state.active = 0; render(); });
+        b.addEventListener('click', () => { autoSkillsTab = false; pick(); state.active = 0; render(); });   // a chip = the member's choice
         chips.appendChild(b);
         return b;
       };
+      // #3048: a team member sees 「팀 스킬」 first (before 내 것 / 팀 / 추천).
+      if (skillsTabOn()) {
+        const skChip = chip('pp-cat pp-tab', t('tab_skills'), state.tab === 'skills', () => { state.tab = 'skills'; state.category = ''; track('skills_entry', { src: 'picker_chip' }); });
+        if (state.skills.length) skChip.appendChild(el('span', 'pp-n', String(state.skills.length)));
+      }
       const mineChip = chip('pp-cat pp-tab', t('tab_mine'), state.tab === 'mine', () => { state.tab = 'mine'; state.category = ''; });
       if (state.mine && liveMine().length) mineChip.appendChild(el('span', 'pp-n', String(liveMine().length)));
       if (state.teamOrgs.length) {
         const teamChip = chip('pp-cat pp-tab', t('tab_team'), state.tab === 'team', () => { state.tab = 'team'; state.category = ''; });
         if (state.team && state.team.length) teamChip.appendChild(el('span', 'pp-n', String(state.team.length)));
-      }
-      if (state.skills && state.skills.length) {
-        const skChip = chip('pp-cat pp-tab', t('tab_skills'), state.tab === 'skills', () => { state.tab = 'skills'; state.category = ''; track('skills_entry', { src: 'picker_chip' }); });
-        skChip.appendChild(el('span', 'pp-n', String(state.skills.length)));
       }
       chip('pp-cat pp-tab', t('tab_store'), state.tab === 'store' && !state.category, () => { state.tab = 'store'; state.category = ''; });
       if (cats.length > 1) {
@@ -1230,6 +1261,7 @@
     function onKey(e) {
       const items = visibleItems();
       if (e.key === 'Escape') { e.preventDefault(); close(); const ed = opts.getEditor(); if (ed) ed.focus(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter') autoSkillsTab = false;   // R1-B2: working in this tab
       // Clamped at 0 on an empty list too: -1 would leave rows that arrive later unselectable (Codex R1-B2).
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -1260,6 +1292,11 @@
       ensureHost();
       if (!isOpen()) { shadow.appendChild(el('div', 'pp')); }
       state.query = ''; state.active = 0;
+      // #3048: a team member who keeps no prompts of their own opens on 「팀 스킬」 (the chip is first, too).
+      // Before my prompts are known (the first open of a page) it is provisional: adoptMine takes it back if I have some.
+      // R1-B3: still provisional until my list answers — unless this open IS the member's choice (the 팀 스킬 bubble, R2-B1)
+      if (src === 'skills_nudge' || !(autoSkillsTab && !state.mine && state.tab === 'skills')) autoSkillsTab = false;
+      if (src !== 'skills_nudge' && state.tab === 'mine' && skillOrgs.length && !(state.mine && liveMine().length)) { state.tab = 'skills'; autoSkillsTab = !state.mine; }
       openGen++;
       if (site === 'claude') state.skillsFresh = false;   // re-asked below (load) — not shown / acted on until then
       render();
@@ -1351,7 +1388,9 @@
     const NUDGE_KEY = 'claude_skills';
     let nudgePhase = 'idle', nudgeTries = 0, nudgeTimer = null;
     function nudgeWanted() {
-      return site === 'claude' && !destroyed && enabledOpt && !!(state.skills && state.skills.length) && !state.skillsUnsure && !Object.keys(state.skillsTracked).length;
+      if (site !== 'claude' || destroyed || !enabledOpt || !Array.isArray(state.skills)) return false;
+      if (!state.skills.length) return teamIds().length > 0;   // #3048: a team that has none yet (the list's own answer, batch R1-B2)
+      return !state.skillsUnsure && !Object.keys(state.skillsTracked).length;
     }
     function maybeNudge() {
       if (nudgePhase !== 'idle' || !nudgeWanted()) return;
@@ -1374,7 +1413,8 @@
           send({ op: 'intro_release', site: NUDGE_KEY }); nudgePhase = 'waiting'; nudgeTimer = setTimeout(nudgeWait, INTRO_DELAY_MS); return;
         }
         nudgePhase = 'done';
-        showIntro({ title: t('nudge_title', { n: state.skills.length }), body: t('nudge_body'), by: false, event: 'skills_nudge',
+        const none = !state.skills.length;
+        showIntro({ title: none ? t('nudge_empty_title') : t('nudge_title', { n: state.skills.length }), body: t(none ? 'nudge_empty_body' : 'nudge_body'), by: false, event: 'skills_nudge',
           onClick: () => { state.tab = 'skills'; state.category = ''; open('skills_nudge'); } });
       });
     }

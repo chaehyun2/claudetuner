@@ -22,6 +22,7 @@ export const SKILLS_PAGE_URL = PROMPTS_PAGE_URL + '#skills';
 const SKILLS_OPEN_URLS = {   // fixed addresses only — the message picks one by name, never sends a URL
   banner: PROMPTS_PAGE_URL + '?from=ext_banner#skills',
   picker: PROMPTS_PAGE_URL + '?from=ext_picker#skills',
+  picker_empty: PROMPTS_PAGE_URL + '?from=ext_picker_empty#skills',   // #3048 the empty 「팀 스킬」 tab → the template cards
   banner_share: PROMPTS_PAGE_URL + '?from=ext_banner_share#skills/new',
 };
 /** chrome.storage.session { email, at, orgs } — which orgs of the signed-in account have team skills. */
@@ -61,7 +62,7 @@ const TRACK_EVENTS = {
   prompt_delete: ['site'],
   prompt_intro: ['site', 'action'],
   prompt_team_share: ['site', 'result'],
-  skills_entry: ['site', 'src'],   // 「팀 스킬」 entries: src = banner_shown · banner_browse · banner_share · banner_close · picker
+  skills_entry: ['site', 'src'],   // 「팀 스킬」 entries: src = banner_shown · banner_browse · banner_share · banner_close · picker · picker_empty
   skill_add_picker: ['site', 'result'],   // #2905 the picker's 「스킬」 row: added · already · pick_org · exists · <reason>
   skills_nudge: ['site', 'action'],       // #2905 the one-time 「팀 스킬」 bubble: shown · clicked · closed · timeout · typed · opened
 };
@@ -282,8 +283,13 @@ export function registerPromptsHandler(deps = {}) {
     if (message.op === 'track') { track(message); return false; }
     if (message.op === 'open_page') { chrome.tabs.create({ url: PROMPTS_PAGE_URL }).catch(() => {}); return false; }
     if (message.op === 'open_skills' || message.op === 'open_skills_share') {
-      const key = message.op === 'open_skills_share' ? 'banner_share' : message.from === 'picker' ? 'picker' : 'banner';
-      chrome.tabs.create({ url: SKILLS_OPEN_URLS[key] }).catch(() => {});
+      const key = message.op === 'open_skills_share' ? 'banner_share'
+        : message.from === 'picker' || message.from === 'picker_empty' ? message.from : 'banner';
+      // #3048 batch R1-B1: the empty tab names its team — the team dashboard opens THAT team's skills, not the last one
+      // viewed (an integer id only; anything else falls back to the fixed address).
+      const org = key === 'picker_empty' && Number.isInteger(message.org) && message.org > 0 ? message.org : 0;
+      const url = org ? `${PROMPT_PAGE_ORIGIN}/dashboard/team/?org=${org}&tab=skills&from=ext_picker_empty` : SKILLS_OPEN_URLS[key];
+      chrome.tabs.create({ url }).catch(() => {});
       return false;
     }
     if (message.op === 'skill_orgs') { skillOrgsCached().then(sendResponse, () => sendResponse({ ok: false, orgs: [] })); return true; }

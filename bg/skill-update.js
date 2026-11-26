@@ -550,7 +550,7 @@ export function createSkillUpdater(deps) {
       const latest = (r.skills.find((x) => x.id === id) || {}).latest_version || (meta.info && meta.info[id] && meta.info[id].latest_version) || 0;
       tracked[id] = rec.inflight || rec.check ? 'check' : rec.paused ? 'paused' : latest > (rec.v || 0) ? 'stale' : 'have';
     }
-    return { ok: true, me: r.me, skills: r.skills, tracked, unsure: !cacct };
+    return { ok: true, me: r.me, skills: r.skills, orgs: r.orgs ?? null, tracked, unsure: !cacct };
   }
 
   // ── required team skills (#3016, plan §25) ──
