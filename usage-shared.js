@@ -402,7 +402,7 @@
   const AD_STICKY_KEY = '__ct_ad_sticky';        // { [campaign_id]: content_id }
   const AD_CAP_KEY = '__ct_ad_cap';              // { "campaign|placement": {day,count} }
   const AD_COUNTRY_KEY = '_ct_country';          // ISO country piggybacked on POST responses
-  const AD_INQUIRY_URL = 'https://tally.so/r/q4dyQk?source=ad_inquiry'; // advertiser-inquiry Tally form (opened from the "Ad" label)
+  const AD_INQUIRY_URL = 'https://claudetuner.com/ads/?from=ad_label'; // advertiser page with the inquiry form (opened from the "AD" label); &lang= is appended per banner
 
   // ── Ad rotation period (server-tunable) ──
   // How often a sidebar re-runs selectAds and re-renders the slot (a different advertiser
@@ -821,9 +821,9 @@
     // STAYS: it is what reads the mark as a disclosure rather than part of the ad copy.
     // Don't fade it further; an ad label has to remain plainly recognisable.
     // It stays an advertiser-inquiry link: hover discloses it's an ad, click opens the
-    // inquiry form. Each surface's banner click handler ignores clicks inside
+    // advertiser page (/ads/) in the banner's language. Each surface's banner click handler ignores clicks inside
     // .ct-ad-label so the ad URL isn't opened too.
-    h += '<a class="ct-ad-label" href="' + escapeHtml(AD_INQUIRY_URL) + '" target="_blank" rel="noopener noreferrer"'
+    h += '<a class="ct-ad-label" href="' + escapeHtml(AD_INQUIRY_URL + '&lang=' + (lang === 'ko' ? 'ko' : 'en')) + '" target="_blank" rel="noopener noreferrer"'
       + ' title="' + escapeHtml(tooltip) + '"'
       + ' style="position:absolute;top:2px;right:3px;z-index:1;'
       + 'font-size:7.5px;font-weight:600;letter-spacing:0.03em;line-height:11px;padding:0 2px;'

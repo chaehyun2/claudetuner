@@ -191,6 +191,53 @@ export async function recordGeminiMetered(accountId, hasUsageNow) {
   });
 }
 
+// --- Gemini Workspace seat whose usage Google withholds (1007, #3015/#3047) ---
+// A denied usage answer is kept as a plan-only "Work" snapshot only when the policy RPC shows a
+// Workspace seat — which needs a second RPC AND an identity match every cycle, and ~6.6% of cycles
+// lost one of the two (1.56.31). So a seat CONFIRMED Workspace is remembered by its Google id and the
+// memory stands in for a policy read that failed or could not be verified. A verified consumer
+// policy erases it; it also lapses after GEMINI_DENIED_WS_TTL_MS without a fresh confirmation.
+// action: 'lookup' → whether remembered · 'remember' → store/refresh · 'forget' → erase.
+const GEMINI_DENIED_WS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// 🔴 ONE QUEUE for every read-modify-write of this map (#3047 R1-B2): two accounts collected at once
+// would each read the same map and the later write would restore an entry the earlier one erased.
+let geminiDeniedWsQueue = Promise.resolve();
+// 🔴 ORDER BY OBSERVATION, NOT BY ARRIVAL (deploy-1.56.32 R1-B1): two overlapping collections of the
+// same account can finish out of order — an OLDER Workspace answer arriving after a NEWER consumer
+// read would re-store what the consumer read erased. Each remember/forget carries `seq`, taken from
+// geminiObservationSeq() when its policy RPC was SENT; a remember whose seq is not newer than the
+// newest consumer read is dropped. A counter, not the wall clock: a clock that steps back must not
+// reorder observations. In memory only: the race lives inside one worker lifetime, and forget must
+// not write an entry for every consumer account on every cycle. The wall clock is only the TTL.
+let geminiObsSeq = 0;
+export function geminiObservationSeq() { return ++geminiObsSeq; }
+const geminiConsumerSeenSeq = new Map();
+export function rememberGeminiDeniedWorkspace(googleId, action, now = Date.now(), seq = null) {
+  if (!googleId) return Promise.resolve(false);
+  const run = geminiDeniedWsQueue.then(() => geminiDeniedWorkspaceOp(googleId, action, now, seq));
+  geminiDeniedWsQueue = run.catch(() => {});
+  return run;
+}
+function geminiDeniedWorkspaceOp(googleId, action, now, seq) {
+  const consumerSeq = geminiConsumerSeenSeq.get(googleId) || 0;
+  if (action === 'forget' && Number.isFinite(seq)) geminiConsumerSeenSeq.set(googleId, Math.max(consumerSeq, seq));
+  if (action === 'remember' && Number.isFinite(seq) && seq <= consumerSeq) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ geminiDeniedWorkspace: {} }, (result) => {
+      const map = result.geminiDeniedWorkspace || {};
+      if (action === 'lookup') {
+        const at = map[googleId];
+        resolve(Number.isFinite(at) && now - at < GEMINI_DENIED_WS_TTL_MS);
+        return;
+      }
+      if (action === 'remember') map[googleId] = now;
+      else if (action === 'forget') { if (!(googleId in map)) { resolve(false); return; } delete map[googleId]; }
+      else { resolve(false); return; }
+      chrome.storage.local.set({ geminiDeniedWorkspace: map }, () => resolve(action === 'remember'));
+    });
+  });
+}
+
 // --- Gemini Ultra sub-tier stickiness ---
 // AI Ultra 5x and 20x share one policy; the sub-tier is derived from the quota (remaining
 // window value). That quota signal is OPTIONAL and may go away — if it does, we must still

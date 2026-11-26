@@ -203,6 +203,28 @@ export function geminiUsageDeniedPlan({ policies, otOk }) {
   return { plan: 'Work', noLimits: true, needsUltraSubTier: false, needsStickyMetered: false };
 }
 
+/**
+ * The denied-usage decision WITH the remembered Workspace confirmation (#3047). Returns
+ * `{ resolved, memory }`: `resolved` is the plan (as geminiUsageDeniedPlan) or `null` to keep the
+ * failure; `memory` is what the caller must do to the stored confirmation ('remember' | 'forget' |
+ * null). `otOk` here already means "a well-formed policy answer from THIS account" — the collector
+ * drops an unverified answer before calling.
+ *   Workspace shown      → Work, remember (refresh).
+ *   consumer policy read → failure, forget: the seat is no longer shown to be Workspace.
+ *   no usable answer     → the memory decides: Work if this account was confirmed before, else failure.
+ */
+/** A policy answer that names a policy and no Workspace one — a consumer seat (#3047 R1-B1). */
+export function geminiPoliciesShowConsumer(policies) {
+  return policies.length > 0 && !policies.some((p) => GEMINI_WORKSPACE_POLICY.test(p));
+}
+
+export function geminiUsageDeniedDecision({ policies, otOk, remembered }) {
+  const shown = geminiUsageDeniedPlan({ policies, otOk });
+  if (shown) return { resolved: shown, memory: 'remember' };
+  if (otOk && geminiPoliciesShowConsumer(policies)) return { resolved: null, memory: 'forget' };
+  return { resolved: remembered ? geminiUsageDeniedPlan({ policies: [], otOk: true }) : null, memory: null };
+}
+
 export function resolveGeminiPlan({ policies, tierWord, planId, otOk, quotaTier = null }) {
   if (policies.length > 0) {
     // A policy is present → metered consumer account (NEVER Workspace, even if the tier

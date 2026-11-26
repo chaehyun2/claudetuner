@@ -8,10 +8,10 @@ import { GEMINI_PICKER_RPC_ID } from '../vendor-ai/models.js';
 // (#1315). collectGemini() keeps every await: parse-gemini.js decides from parsed values and only
 // REPORTS which stored state must then be consulted.
 import { parseGeminiWindows, parseGeminiPolicy, resolveGeminiPlan, geminiUltraSubTier,
-  geminiTierFromQuota, geminiUsageDeniedPlan } from './parse-gemini.js';
+  geminiTierFromQuota, geminiUsageDeniedDecision, geminiPoliciesShowConsumer } from './parse-gemini.js';
 import { geminiUsageShape, unclassifiedCode } from './drift-obs.js';
 import { noteDriftOutcome, buildDriftRider } from './drift-store.js';
-import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, resolveIngestIdentity } from './storage.js';
+import { getConfig, appendUsageHistory, getUsageHistory, postSnapshot, getOrCreateInstallId, recordGeminiMetered, rememberGeminiUltraTier, rememberGeminiDeniedWorkspace, geminiObservationSeq, resolveIngestIdentity } from './storage.js';
 import { gateProviderSnapshot, shouldForceProviderPost } from './send-gate.js';
 import { noteProviderAttempt, noteProviderSuccess, noteProviderError,
          noteProviderSendError, noteProviderSendOk } from './provider-state.js';
@@ -192,6 +192,9 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
     // policy RPC fails. See docs/DESIGN-gemini-policy-detection.md.
     let otResponse = null;
     let otOk = false;   // true only when otAQ7b returned a well-formed (array) response
+    // Taken when the policy RPC is SENT — orders this cycle's Workspace memory write against
+    // overlapping cycles of the same account (deploy-1.56.32 R1-B1, bg/storage.js).
+    const otSeq = geminiObservationSeq();
     try {
       const otObserve = {};
       otResponse = await fetchGeminiRpc(GEMINI_PICKER_RPC_ID, '[]', authuser, otObserve);
@@ -214,8 +217,22 @@ async function collectGeminiAccount(authuser, { force = false, userManual = fals
 
     // The plan LABEL is decided from parsed signals only (bg/parse-gemini.js); the two state
     // lookups it can ask for are performed here, where their awaits are visible.
+    // A denied answer: a policy read that failed or could not be verified falls back to this
+    // account's remembered Workspace confirmation (#3047) — keyed by the Google id the USAGE answer
+    // named, so no other account's confirmation can stand in. No id → no memory → failure.
+    let denied = null;
+    if (deniedError) {
+      const remembered = await rememberGeminiDeniedWorkspace(googleId, 'lookup');
+      denied = geminiUsageDeniedDecision({ policies, otOk, remembered });
+      if (denied.memory) await rememberGeminiDeniedWorkspace(googleId, denied.memory, Date.now(), otSeq);
+    } else if (geminiPoliciesShowConsumer(policies)) {
+      // #3047 R1-B1: a normal cycle that reads a consumer policy for this account ends any Workspace
+      // memory too — otherwise a later denial + failed policy read would bring "Work" back. Erasing
+      // is the safe direction (worst case: the next denied cycle needs its own confirmation).
+      await rememberGeminiDeniedWorkspace(googleId, 'forget', Date.now(), otSeq);
+    }
     let { plan, noLimits, needsUltraSubTier, needsStickyMetered } = deniedError
-      ? (geminiUsageDeniedPlan({ policies, otOk }) || (() => { throw deniedError; })())
+      ? (denied.resolved || (() => { throw deniedError; })())
       : resolveGeminiPlan({ policies, tierWord, planId, otOk,
         quotaTier: geminiTierFromQuota(remaining7d, pct7dRaw, remaining5h, pct5hRaw) });
     // Counted as a success (a snapshot goes out), with the denial kept as an event so the 1007

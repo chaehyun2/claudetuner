@@ -58,9 +58,14 @@ export const UPDATE_IDS_CHUNK = 50;
 export const FAIL_STOP = 2;
 /** A claude.ai tab opening re-checks when the last check is older than this. */
 export const TAB_RECHECK_MS = 60 * 60 * 1000;
+// With a tracked copy: a teammate's new version should reach my claude.ai the next time I open it, not hours later
+// (2026-11-26 — the 6-hour alarm left a saved v2 unseen). One small GET per claude.ai tab load at most this often.
+export const TAB_RECHECK_TRACKED_MS = 10 * 60 * 1000;
 /** The dashboard shows the last automatic update (with 「되돌리기」) for this long. */
 export const RECENT_UPDATE_MS = 7 * 24 * 60 * 60 * 1000;
-const ACTIONS = ['update', 'force', 'untrack', 'revert', 'resume', 'retry'];
+// 'follow' = the dashboard just saved a new version: do now what the next automatic check would do (auto mode — the
+// switch, a pause, a stopped version are all checked here, never on the page's cached view — 2026-11-26 R1-B1).
+const ACTIONS = ['update', 'force', 'untrack', 'revert', 'resume', 'retry', 'follow'];
 /** A required skill claude.ai refused (its org's policy, or the skill itself) is tried again after this long. */
 export const REQ_RETRY_MS = 24 * 60 * 60 * 1000;
 /** The popup's 「관리자 요청으로 추가된 팀 스킬」 line stays this long after the add. */
@@ -415,7 +420,9 @@ export function createSkillUpdater(deps) {
   async function maybeCheck() {
     const { recs, meta, req } = await load();
     // Nothing tracked still checks for required skills (#3016) — throttled by the last required check too.
-    if ((!Object.keys(recs).length && !server.required) || now() - Math.max(meta.lastCheck || 0, req.at || 0) < TAB_RECHECK_MS) return { skipped: 'recent' };
+    const tracked = Object.keys(recs).length > 0;
+    const gap = tracked ? TAB_RECHECK_TRACKED_MS : TAB_RECHECK_MS;
+    if ((!tracked && !server.required) || now() - Math.max(meta.lastCheck || 0, req.at || 0) < gap) return { skipped: 'recent' };
     return checkAll();
   }
 
@@ -873,6 +880,7 @@ export function createSkillUpdater(deps) {
       return guarded(async () => { await mutate(teamId, (r) => (r ? { ...r, fail: null } : r)); return { ok: true }; })
         .then((r) => (r.ok ? runOne(teamId, 'manual', message.acct_key) : r));
     }
+    if (act === 'follow') return runOne(teamId, 'auto', message.acct_key);
     return runOne(teamId, act === 'force' ? 'force' : 'manual', message.acct_key);
   }
 
