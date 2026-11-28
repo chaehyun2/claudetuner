@@ -5,6 +5,7 @@ import { getProviderState, collectingAccounts } from '../bg/provider-state.js';
 import { sendCodeReasonFromMessage, sendCodeErrorCopy, verifyCodeErrorCopy } from '../bg/send-code-error.js';
 import { serverSyncWithheldReason } from '../bg/storage.js';
 import { noteCtaShown, AUTH_BLOCKED_MARKER, bindCodeInput, mountGoogleButton } from './auth-widgets.js';
+import { SILENT_OFFER_KEY, SILENT_OPT_OUT_KEY, readSilentOffer } from '../bg/silent-relogin.js';
 
 // Same stale-render guard as renderReauthWidget (#791): this is driven by storage.onChanged, so two
 // renders overlap and a superseded one resuming last would HIDE the CTA on state it read before the
@@ -241,7 +242,15 @@ export async function renderLoginCta() {
   codeInput.placeholder = t('reauth_code_placeholder') || '6-digit code';
   dismissBtn.textContent = t('login_cta_dismiss') || 'Use locally only';
 
+  // #3070 「Continue as B」: the Google account this browser answered for (bg/silent-relogin.js
+  // discoverOffer). Read here, not passed in, so every re-render reflects the current offer. Not
+  // after a sign-out (that person asked not to be put back) — the plain button then.
+  const { [SILENT_OFFER_KEY]: offerRaw = null, [SILENT_OPT_OUT_KEY]: optedOut = false } =
+    await chrome.storage.local.get({ [SILENT_OFFER_KEY]: null, [SILENT_OPT_OUT_KEY]: false });
+  if (seq !== _loginCtaRenderSeq) return;
+  const offer = optedOut === true ? null : readSilentOffer(offerRaw);
   mountGoogleButton(document.getElementById('login-cta-google-slot'), {
+    hint: offer?.email || null,
     statusEl: status,
     successKey: 'login_cta_success',
     successFallback: 'Logged in — server sync will start shortly.',

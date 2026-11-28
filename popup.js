@@ -34,7 +34,7 @@ import { renderLoginCta } from './ui/login-cta.js';
 import { initLoginNudge, renderLoginNudge, renderLoginNudgeSpark, relabelLoginNudge } from './ui/login-nudge.js';
 import { readHistory, HISTORY_UPDATED } from './bg/usage-history-db.js';
 import { readCompareEntryVariant, ENTRY_CROSSCHECK, ENTRY_DEBATE, ENTRY_PLACEMENT } from './ui/compare-entry.js';
-import { SILENT_OPT_OUT_KEY, SILENT_NOTICE_KEY } from './bg/silent-relogin.js';
+import { SILENT_OPT_OUT_KEY, SILENT_NOTICE_KEY, SILENT_OFFER_KEY } from './bg/silent-relogin.js';
 
 // How long the width has to hold still before the detail charts re-rasterise to it. Long enough
 // that dragging the side panel divider settles into a single redraw, short enough that the
@@ -653,7 +653,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // /fitness read), so it must re-render too or the CTA waits for the next popup open.
       // authBlocked lands the same way (a 401 from a background collect) and, unlike the others,
       // it can also be CLEARED mid-session by a recovering POST — re-render on both edges.
-      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked)) renderLoginCta();
+      if (area === 'local' && (changes.showLoginPrompt || changes.extToken || changes.needsFullLogin || changes.authBlocked || changes[SILENT_OFFER_KEY])) renderLoginCta();
       // The felt-need nudge (#2420) defers to every one of those flags, so re-render it on the same
       // edges — a login landing mid-session must hide it, and showLoginPrompt flipping (its own CTA
       // hand-off, or a gated collect) must stop it doubling up with #login-cta. No open is counted

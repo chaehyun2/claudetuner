@@ -121,6 +121,25 @@ export async function providerPermState() {
   return out;
 }
 
+/**
+ * How Chrome installed this extension — chrome.management.getSelf().installType, which needs no
+ * permission: 'admin' (enterprise policy force-install, e.g. the Google Admin console or
+ * ExtensionSettings — the /team-install/ guide) | 'normal' (Web Store) | 'development' (unpacked)
+ * | 'sideload' | 'other', or 'unknown' when the probe fails.
+ *
+ * WHY. Whether a Workspace admin actually applied the force-install policy happens on Google's
+ * side, so the site's GA can only see who read the guide. The installs themselves can tell: a
+ * policy install reports 'admin'. Counts only — no org, email or install id rides with it.
+ */
+export async function installTypeState() {
+  try {
+    const self = await chrome.management.getSelf();
+    return typeof self?.installType === 'string' ? self.installType : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export async function sendGAEvent(name, params = {}) {
   try {
     const clientId = await getOrCreateClientId();

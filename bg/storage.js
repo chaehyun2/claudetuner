@@ -9,7 +9,7 @@ import { noteUpgradeRequired, isUpgradePostSuppressed, isUpgradeBlocked, clearUp
 // badge in one place — see #994.
 import { updateBadgeError } from './badge.js';
 import { applyServerCadence } from './cadence-config.js';
-import { SILENT_OPT_OUT_KEY } from './silent-relogin.js';
+import { SILENT_OPT_OUT_KEY, SILENT_OFFER_KEY } from './silent-relogin.js';
 
 export async function getConfig() {
   return new Promise((resolve) => {
@@ -382,7 +382,8 @@ async function writeExtToken(token) {
   // recovery), which should end an episode just as much as a TOFU mint does.
   // #2997: a stored token is a login, so a sign-out's "do not sign me back in"
   // (bg/silent-relogin.js SILENT_OPT_OUT_KEY) has done its job; the next sign-out sets it again.
-  await chrome.storage.local.remove([TOKEN_RETRY_KEY, SILENT_OPT_OUT_KEY]);
+  // …and a 「Continue as B」 offer (#3070) is answered: whoever signed in, it no longer applies.
+  await chrome.storage.local.remove([TOKEN_RETRY_KEY, SILENT_OPT_OUT_KEY, SILENT_OFFER_KEY]);
 }
 
 // Token claim readers live in a leaf module (bg/ext-token-claims.js) so the popup can use

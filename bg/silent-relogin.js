@@ -17,6 +17,7 @@
 //   login_first   a new install that has not signed in yet. Works only for someone who granted the
 //                 client before (dashboard, a previous install); a first-time user gets
 //                 interaction_required and keeps the login card — Google needs that one click.
+//                 With NO known account it only discovers an offer (discoverOffer, #3070).
 //
 // 🔴 Invariants (each one is a way this could hurt somebody):
 //  [1] Only while TOKENLESS in one of those states, never after an account deletion. A working
@@ -50,6 +51,19 @@ const SILENT_NO_HINT_KEY = 'authSilentNoHintAt';
 // were signed in as, with a way to switch (popup.js renderSilentLoginNotice). Nobody clicked, so
 // they must be able to find out — and to undo it (user decision 2026-11-25).
 export const SILENT_NOTICE_KEY = 'authSilentNotice';
+// #3070: a NEW install (login_first) with no known account asks Google once per interval, without
+// a login_hint, which Google account this browser is signed in to. Google only answers for an
+// account that already granted our client (a returning dashboard/extension user); a first-time
+// account gets interaction_required and nothing changes. The answer is only an OFFER — the login
+// card's Google button then reads 「Continue as B」 and one click signs in (background.js
+// GOOGLE_SIGNIN with `hint`). 🔴 Never a sign-in on its own: with no collecting identity to compare
+// against, a silent mint would file whatever provider account later appears here under the
+// browser's Google account — on a shared machine, someone else's (user decision 2026-11-28).
+// Its own stamp, so a failed hintless try never spends the hinted attempt a profile may enable soon.
+export const SILENT_OFFER_KEY = 'authSilentOffer';
+const SILENT_HINTLESS_KEY = 'authSilentHintlessAt';
+// An offer older than this is not shown: the browser's Google session may have changed since.
+export const SILENT_OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 // OAuth errors Google returns for prompt=none (OpenID Connect Core §3.1.2.6). Anything else is
@@ -58,7 +72,7 @@ const KNOWN_OAUTH_ERRORS = new Set([
   'interaction_required', 'login_required', 'consent_required', 'account_selection_required', 'access_denied',
 ]);
 
-export function buildSilentAuthUrl({ clientId, redirectUri, nonce, hint }) {
+export function buildSilentAuthUrl({ clientId, redirectUri, nonce, hint = null }) {
   return GOOGLE_AUTH_URL
     + `?client_id=${encodeURIComponent(clientId)}`
     + '&response_type=id_token'
@@ -66,7 +80,15 @@ export function buildSilentAuthUrl({ clientId, redirectUri, nonce, hint }) {
     + `&scope=${encodeURIComponent('openid email profile')}`
     + `&nonce=${encodeURIComponent(nonce)}`
     + '&prompt=none'
-    + `&login_hint=${encodeURIComponent(hint)}`;
+    + (hint ? `&login_hint=${encodeURIComponent(hint)}` : '');
+}
+
+/** A fresh, well-formed offer from storage, or null (expired, from the future, malformed). */
+export function readSilentOffer(offer, now = Date.now()) {
+  if (!offer || typeof offer.email !== 'string' || !offer.email.includes('@')) return null;
+  const at = Number(offer.at);
+  if (!Number.isFinite(at) || at > now + 60_000 || now - at >= SILENT_OFFER_TTL_MS) return null;
+  return { email: offer.email, at };
 }
 
 /** The id_token or the OAuth error from the redirect URL's fragment (implicit flow). */
@@ -118,7 +140,7 @@ const sameEmail = (a, b) => typeof a === 'string' && typeof b === 'string'
 export async function runSilentRelogin(deps) {
   const now = (deps.now || Date.now)();
   const st = await chrome.storage.local.get({
-    extToken: null, account_deleted: false, [SILENT_RELOGIN_LAST_KEY]: 0, [SILENT_NO_HINT_KEY]: 0,
+    extToken: null, account_deleted: false, [SILENT_RELOGIN_LAST_KEY]: 0, [SILENT_NO_HINT_KEY]: 0, [SILENT_HINTLESS_KEY]: 0,
     [SILENT_OPT_OUT_KEY]: false, loginCtaCollapsed: false, serverSyncPaused: false,
   });
   // [1] — nothing reported: these are the overwhelming majority of wakes.
@@ -143,6 +165,12 @@ export async function runSilentRelogin(deps) {
   }
   const hint = id;
   if (!hint || typeof hint !== 'string' || !hint.includes('@')) {
+    // #3070: a new install asks which Google account this browser has — an offer, never a sign-in.
+    if (state === 'login_first') {
+      if (recent(SILENT_HINTLESS_KEY)) return 'no_hint';
+      await chrome.storage.local.set({ [SILENT_HINTLESS_KEY]: now });   // [3] before asking Google
+      return report(await discoverOffer(deps, now));
+    }
     if (recent(SILENT_NO_HINT_KEY)) return 'no_hint';
     await chrome.storage.local.set({ [SILENT_NO_HINT_KEY]: now });
     return report('no_hint');
@@ -190,6 +218,37 @@ export async function runSilentRelogin(deps) {
   // The server's answer names the account the token is for (an alias resolves to its primary).
   await chrome.storage.local.set({ [SILENT_NOTICE_KEY]: { email: String(res.email || claims.email), at: now } });
   return report('ok');
+}
+
+/**
+ * The hintless half (#3070): which Google account answers prompt=none here. Stores an offer, never
+ * a token. Every outcome is `hintless_*` or `offer` so GA keeps it apart from the hinted attempt.
+ */
+async function discoverOffer(deps, now) {
+  const nonce = crypto.randomUUID();
+  const url = buildSilentAuthUrl({ clientId: deps.clientId, redirectUri: chrome.identity.getRedirectURL(), nonce });
+  let redirect;
+  try {
+    redirect = await chrome.identity.launchWebAuthFlow({ url, interactive: false });   // [4]
+  } catch (e) {
+    return /interaction/i.test(String(e?.message || e)) ? 'hintless_interaction_required' : 'hintless_flow_failed';
+  }
+  if (!redirect) return 'hintless_flow_failed';
+  const parsed = parseSilentRedirect(redirect);
+  if (!parsed.idToken) return `hintless_${parsed.error}`;
+  const claims = deps.decode(parsed.idToken);
+  if (!claims || claims.nonce !== nonce) return 'hintless_nonce_mismatch';
+  const email = typeof claims.email === 'string' ? claims.email.trim() : '';
+  // Same rule as the server (verifyGoogleIdToken): an unverified address is not offered.
+  if (!email.includes('@') || claims.email_verified === false) return 'hintless_no_email';
+  // The person may have signed in, signed out or chosen local-only while Google was answering.
+  const again = await chrome.storage.local.get({
+    extToken: null, account_deleted: false, [SILENT_OPT_OUT_KEY]: false, loginCtaCollapsed: false, serverSyncPaused: false,
+  });
+  if (again.extToken || again.account_deleted === true || declinedReason(again)) return 'raced';
+  // The id_token itself is NOT kept: it is a credential, and the click mints a fresh one.
+  await chrome.storage.local.set({ [SILENT_OFFER_KEY]: { email, at: now } });
+  return 'offer';
 }
 
 let inFlight = null;

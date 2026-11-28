@@ -288,6 +288,8 @@ const TRANSLATIONS = {
     // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
     // the email-code flow below stays the fallback and the copy must never imply otherwise.
     'login_cta_google': 'Google로 계속하기',
+    'login_cta_google_as': '{0}(으)로 계속하기',
+    'login_cta_google_other': '다른 Google 계정으로',
     'login_cta_or': '또는 이메일 코드로 로그인',
     'login_cta_google_perm': 'Google 로그인에는 권한 허용이 필요합니다. 아래 이메일 코드로도 로그인할 수 있습니다.',
     'login_cta_google_err': 'Google 로그인에 실패했습니다. 아래 이메일 코드로 시도해 주세요.',
@@ -1164,6 +1166,8 @@ const TRANSLATIONS = {
     // One-click sign-in. `identity` is an OPTIONAL permission, so this can be declined —
     // the email-code flow below stays the fallback and the copy must never imply otherwise.
     'login_cta_google': 'Continue with Google',
+    'login_cta_google_as': 'Continue as {0}',
+    'login_cta_google_other': 'Use another Google account',
     'login_cta_or': 'or sign in with an email code',
     'login_cta_google_perm': 'Google sign-in needs permission. You can also sign in with an email code below.',
     'login_cta_google_err': 'Google sign-in failed. Try the email code below.',

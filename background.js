@@ -1,6 +1,6 @@
 // === ES Module Imports ===
 import { accountDeletedLifted } from './bg/block-state.js';
-import { sendGAEvent, pinnedState, authState, providerPermState, sidebarFoldTransitions } from './bg/analytics.js';
+import { sendGAEvent, pinnedState, authState, providerPermState, installTypeState, sidebarFoldTransitions } from './bg/analytics.js';
 import {
   ALARM_NAME, ALARM_EXPIRE_PREFIX, RESET_ALARM_KEYS, ALARM_BOOST, ALARM_WEEKLY_REPORT, ALARM_REC,
   DEFAULT_INTERVAL_MINUTES, FREE_PLAN_INTERVAL_MINUTES,
@@ -16,7 +16,7 @@ import { getActivityState, setActivityState, ACTIVITY_STATES } from './bg/activi
 import { bt } from './bg/i18n.js';
 import { extTokenEmail, extTokenSrc, mayReplaceStoredToken, decodeJwtPayload } from './bg/ext-token-claims.js';
 import { PROFILE_PHOTO_KEY, profilePhotoRecord } from './bg/profile-photo.js';
-import { maybeSilentRelogin, declinedReason, SILENT_RECOVERED_KEY } from './bg/silent-relogin.js';
+import { maybeSilentRelogin, declinedReason, buildSilentAuthUrl, SILENT_RECOVERED_KEY, SILENT_GA_EVENT } from './bg/silent-relogin.js';
 import { serverSyncWithheldReason, isAccountDeleted, getConfig, getLastStatus, setStatus, getUsageHistory, authedFetch, getExtToken, setExtToken, setExtTokenIf, setExtTokenNoDowngrade, markProvenIfStored, getOrCreateInstallId, isServerSyncPaused, TOKEN_RETRY_ALARM } from './bg/storage.js';
 import { fetchClaudeApi } from './bg/api.js';
 import { CWS_EXT_ID } from './ui/compare/constants.js';
@@ -496,7 +496,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // day or two of a release, so this gives the provider-permission baseline without waiting for
   // browser restarts (extension_loaded in onStartup only samples installs that restarted).
   // Detached: a permissions probe that never settles must not hold up the startup work below.
-  void providerPermState().then((perm) => sendGAEvent('extension_installed', { reason: details.reason, ...perm }));
+  void Promise.all([providerPermState(), installTypeState()])
+    .then(([perm, install]) => sendGAEvent('extension_installed', { reason: details.reason, install, ...perm }));
   await restoreSidePanelPreference();
 
   // Re-inject content scripts into existing Claude.ai tabs (dev reload / extension update)
@@ -1083,7 +1084,7 @@ chrome.runtime.onStartup.addListener(async () => {
     // proven token the install is holding right now — onInstalled('update') fires once, this fires
     // on every browser start, so together they close the transition window.
     await markProvenIfStored();
-    sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState(), ...(await providerPermState()) });
+    sendGAEvent('extension_loaded', { pinned: await pinnedState(), auth: await authState(), install: await installTypeState(), ...(await providerPermState()) });
   })();
   await restoreSidePanelPreference();
   // Re-register dynamic ChatGPT/Gemini scripts on browser restart (registrations
@@ -2286,14 +2287,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // never sees this value). A guard that exists only in a comment is worse than none — the
         // next reader stops looking.
         const nonce = crypto.randomUUID();
+        // #3070 「Continue as B」: the login card names the Google account the hintless probe found
+        // (bg/silent-relogin.js discoverOffer). The person clicked a button that NAMED B, so one
+        // prompt=none round trip for exactly B — no window — and the account Google returns must
+        // be B. Anything else (B's session gone, another account) falls through to the ordinary
+        // chooser below, pre-selected on B, where the person picks with their own eyes.
+        const hint = typeof message.hint === 'string' && message.hint.includes('@') ? message.hint : null;
+        let redirect = null;
+        if (hint) {
+          try {
+            const r = await chrome.identity.launchWebAuthFlow({
+              url: buildSilentAuthUrl({ clientId: GOOGLE_CLIENT_ID, redirectUri, nonce, hint }), interactive: false,
+            });
+            const tok = r ? new URLSearchParams(new URL(r).hash.slice(1)).get('id_token') : null;
+            const claims = tok ? decodeJwtPayload(tok) : null;
+            if (claims?.nonce === nonce && String(claims.email || '').toLowerCase() === hint.toLowerCase()) redirect = r;
+          } catch { /* no session for B any more → the chooser */ }
+        }
         const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
           + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
           + '&response_type=id_token'
           + `&redirect_uri=${encodeURIComponent(redirectUri)}`
           + `&scope=${encodeURIComponent('openid email profile')}`
           + `&nonce=${encodeURIComponent(nonce)}`
-          + '&prompt=select_account';
-        const redirect = await chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true });
+          + '&prompt=select_account'
+          + (hint ? `&login_hint=${encodeURIComponent(hint)}` : '');
+        if (!redirect) redirect = await chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true });
         if (!redirect) { sendResponse({ success: false, error: 'cancelled' }); return; }
         // id_token comes back in the URL FRAGMENT (implicit flow), never the query string.
         const idToken = new URLSearchParams(new URL(redirect).hash.slice(1)).get('id_token');
@@ -2312,6 +2331,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         const res = await exchangeGoogleIdToken(idToken);
         if (!res.ok) { sendResponse({ success: false, error: res.error }); return; }
+        // #3070: did the offer turn into a sign-in, and as the offered account?
+        if (hint) sendGAEvent(SILENT_GA_EVENT, { kind: res.email?.toLowerCase() === hint.toLowerCase() ? 'offer_accept' : 'offer_other', reason: 'login_first' }).catch(() => {});
         sendResponse({ success: true, email: res.email, name: res.name });
       } catch (e) {
         // launchWebAuthFlow rejects when the user closes the window — not an error worth surfacing

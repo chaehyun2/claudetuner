@@ -44,7 +44,7 @@ export const AUTH_BLOCKED_MARKER = 'auth-blocked';
  * the Google window takes focus. That is also why a lost sendMessage reply is not treated as
  * failure: storage.onChanged re-renders the CTA when the background stores the token.
  */
-async function signInWithGoogle() {
+async function signInWithGoogle(hint = null) {
   let granted = false;
   try {
     // #2997: `identity` is REQUIRED now, so it is normally already held. Ask only when it is not
@@ -58,7 +58,7 @@ async function signInWithGoogle() {
 
   let res;
   try {
-    res = await chrome.runtime.sendMessage({ type: 'GOOGLE_SIGNIN' });
+    res = await chrome.runtime.sendMessage(hint ? { type: 'GOOGLE_SIGNIN', hint } : { type: 'GOOGLE_SIGNIN' });
   } catch {
     // Popup closed mid-flow → the reply never arrived. The background may well have succeeded;
     // do not claim failure.
@@ -141,7 +141,11 @@ export function bindCodeInput(input, doVerify) {
  * language switch, so the label is refreshed on each call while the clone and the click listener
  * are installed exactly once.
  */
-export function mountGoogleButton(slot, { statusEl, successKey, successFallback }) {
+// `hint` (#3070): the Google account to offer — the button then reads 「Continue as B」 and a click
+// signs in as B without a chooser when Google still has B's session. A small 「Use another Google
+// account」 link under it keeps the ordinary chooser one click away. Stored on the slot, not
+// captured, because the listener is bound once and the offer changes between renders.
+export function mountGoogleButton(slot, { statusEl, successKey, successFallback, hint = null }) {
   if (!slot) return;
   if (!slot.dataset.mounted) {
     const tpl = document.getElementById('google-btn-tpl');
@@ -152,13 +156,27 @@ export function mountGoogleButton(slot, { statusEl, successKey, successFallback 
   const btn = slot.querySelector('.google-btn');
   const label = slot.querySelector('.google-btn-label');
   if (!btn || !label) return;
-  label.textContent = t('login_cta_google') || 'Continue with Google';
+  slot.dataset.hint = hint || '';
+  label.textContent = hint ? t('login_cta_google_as', hint) : (t('login_cta_google') || 'Continue with Google');
+  let other = slot.querySelector('.google-btn-other');
+  if (hint && !other) {
+    other = document.createElement('a');
+    other.href = '#';
+    other.className = 'google-btn-other';
+    other.style.cssText = 'text-align:center;font-size:10.5px;margin:-3px 0 7px;opacity:.8';
+    slot.appendChild(other);
+  }
+  if (other) {
+    other.textContent = t('login_cta_google_other');
+    // style.display, not `.hidden`: an inline display would outrank the class (Codex R1-B1).
+    other.style.display = hint ? 'block' : 'none';
+  }
   if (btn.dataset.bound) return;
   btn.dataset.bound = '1';
-  btn.addEventListener('click', async () => {
+  const run = async (useHint) => {
     btn.disabled = true; statusEl.textContent = '';
     try {
-      const res = await signInWithGoogle();
+      const res = await signInWithGoogle(useHint ? (slot.dataset.hint || null) : null);
       if (res.ok) {
         // We hold a full Bearer token now and the gate just opened, so kick a POST immediately
         // instead of waiting for the next alarm, then re-render off fresh storage.
@@ -172,5 +190,12 @@ export function mountGoogleButton(slot, { statusEl, successKey, successFallback 
     } finally {
       btn.disabled = false;
     }
+  };
+  btn.addEventListener('click', () => run(true));
+  // Delegated on the slot: the link is created lazily by a later render, after this one-time bind.
+  slot.addEventListener('click', (e) => {
+    if (!e.target.closest?.('.google-btn-other')) return;
+    e.preventDefault();
+    if (!btn.disabled && slot.dataset.hint) run(false);
   });
 }
